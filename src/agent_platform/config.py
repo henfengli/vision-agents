@@ -1,6 +1,7 @@
 """配置：环境 YAML → Settings。三环境（prod/test/dev）同代码不同配置。
 
-优先级：env/{ENV}.yaml > base/domains.yaml 合并；${VAR} 从环境变量插值。
+优先级：env/{ENV}.yaml 深合并覆盖 base/common.yaml（dict 递归，其余整体替换）；
+${VAR} 从环境变量插值。
 """
 
 from __future__ import annotations
@@ -94,9 +95,25 @@ def _interpolate(node):
     return node
 
 
+def _merge(base: dict, overlay: dict) -> dict:
+    """深合并：两边都是 dict 则递归，否则 overlay 整体替换。
+
+    环境文件只写差异（如 approvals.enabled: true），共享默认（如
+    danger_patterns）留在 common.yaml，避免三环境各抄一份后漂移。
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_settings(env: str | None = None) -> Settings:
     env = env or os.environ.get("AGENT_ENV", "dev")
-    base = yaml.safe_load((_CONF_ROOT / "base/domains.yaml").read_text()) or {}
+    base = yaml.safe_load((_CONF_ROOT / "base/common.yaml").read_text()) or {}
     overlay = yaml.safe_load((_CONF_ROOT / f"env/{env}.yaml").read_text()) or {}
-    merged = {**base, **overlay, "env": env}
+    merged = _merge(base, overlay)
+    merged["env"] = env
     return Settings.model_validate(_interpolate(merged))

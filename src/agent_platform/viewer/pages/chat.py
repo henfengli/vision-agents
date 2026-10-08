@@ -10,9 +10,7 @@ from .base import page
 _CHAT_HTML = """
 <h2>Agent 对话</h2>
 <div class="card">
-  <select id="server"><option value="board">board</option>
-    <option value="dagster">dagster</option>
-    <option value="config-center">config-center</option></select>
+  <select id="server">__SERVER_OPTIONS__</select>
   <input id="role" value="data_searcher" placeholder="角色">
   <input id="session" placeholder="session_id（留空自动新建）">
 </div>
@@ -62,11 +60,13 @@ document.getElementById("q").addEventListener("keydown", async (e) => {
 """
 
 
-def make_router() -> APIRouter:
+def make_router(domains: list[str] | None = None) -> APIRouter:
+    """domains 来自配置（settings.domains），业务域不在页面里硬编码。"""
     router = APIRouter()
+    options = "".join(f'<option value="{d}">{d}</option>' for d in (domains or []))
 
     @router.get("/chat", response_class=HTMLResponse)
     async def chat_page():
-        return page("对话", _CHAT_HTML)
+        return page("对话", _CHAT_HTML.replace("__SERVER_OPTIONS__", options))
 
     return router

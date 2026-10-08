@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -28,6 +30,9 @@ def make_router(env: str) -> APIRouter:
             f' 👍{i["feedback_score"]}</td>'
             f'<td><button onclick="editEntry({i["id"]})">编辑</button></td></tr>'
             for i in items)
+        entries_json = json.dumps(
+            {i["id"]: i["content"] for i in items},
+            ensure_ascii=False).replace("</", "<\\/")  # 防内容里的 </script> 提前闭合
         body = f"""
         <h2>记忆管理</h2>
         <div class="card">
@@ -43,11 +48,14 @@ def make_router(env: str) -> APIRouter:
           <button onclick="saveEntry()">保存（重新生效）</button>
           <span id="edit-msg" class="meta"></span></div>
         <script>
+        // id → 当前内容，点"编辑"时回填 textarea，避免凭记忆重写
+        const ENTRIES = {entries_json};
         let editId = null;
         function editEntry(id) {{
           editId = id;
           document.getElementById("edit-card").style.display = "block";
           document.getElementById("edit-id").textContent = "#" + id;
+          document.getElementById("edit-content").value = ENTRIES[id] || "";
         }}
         async function saveEntry() {{
           const resp = await fetch(`/memory/${{editId}}`, {{

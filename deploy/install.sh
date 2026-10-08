@@ -12,7 +12,8 @@ id agent-svc &>/dev/null || useradd -r -s /usr/sbin/nologin agent-svc
 mkdir -p /opt/agent-platform
 cp -r "$PKG_DIR"/src "$PKG_DIR"/conf "$PKG_DIR"/pyproject.toml /opt/agent-platform/
 mkdir -p /var/lib/agent-platform/scratch /var/log/agent-platform /etc/agent-platform
-chown -R agent-svc:agent-svc /var/lib/agent-platform /var/log/agent-platform
+mkdir -p /var/lib/temporal                       # temporal-server.service 的 SQLite 目录
+chown -R agent-svc:agent-svc /var/lib/agent-platform /var/log/agent-platform /var/lib/temporal
 chown -R root:root /opt/agent-platform          # 代码包 root 所有，agent-svc 只读
 
 # 3. 依赖
@@ -24,9 +25,11 @@ python3 -m venv /opt/agent-platform/venv
     echo "!! 请先创建 /etc/agent-platform/secrets.env（MODEL_TOKEN_A/AGENT_DB_PASSWORD/DINGTALK_ACCESS_TOKEN/AGENT_BEARER_TOKEN）"
 }
 
-# 5. systemd
-cp "$PKG_DIR/deploy/agent-platform.service" /etc/systemd/system/
+# 5. systemd（temporal-server 仅需在 temporal 未独立部署的主机上启用）
+cp "$PKG_DIR/deploy/agent-platform.service" "$PKG_DIR/deploy/temporal-server.service" \
+   /etc/systemd/system/
 sed -i "s/AGENT_ENV=prod/AGENT_ENV=${ENV}/" /etc/systemd/system/agent-platform.service
 systemctl daemon-reload
+systemctl enable --now temporal-server
 systemctl enable --now agent-platform
 systemctl status agent-platform --no-pager

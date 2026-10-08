@@ -2,22 +2,34 @@
 
 页面实现见 pages/ 包（一页一文件）；本文件只做组合。
 钉钉只做"通知 + 链接"，交互闭环全在这里。
+
+鉴权：给了 token 就启用 cookie 登录——/login、/logout、静态文件公开，
+其余页面统一 307 跳 /login；没给 token（测试/纯内网）则全部公开。
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..api.auth import make_viewer_auth_dependency
 from .pages import admin, approvals, base, chat, memory, runs
 
 
 def make_viewer_router(submitter, defs_store, env: str, engine=None,
-                       langfuse=None) -> APIRouter:
+                       langfuse=None, token: str | None = None,
+                       domains: list[str] | None = None) -> APIRouter:
     router = APIRouter()
     router.include_router(base.make_static_router())
-    router.include_router(runs.make_router(env, engine=engine, langfuse=langfuse))
-    router.include_router(approvals.make_router())
-    router.include_router(chat.make_router())
-    router.include_router(admin.make_router(defs_store, env, langfuse=langfuse))
-    router.include_router(memory.make_router(env))
+
+    pages = APIRouter(
+        dependencies=[Depends(make_viewer_auth_dependency(token))] if token else [])
+    pages.include_router(runs.make_router(env, engine=engine, langfuse=langfuse))
+    pages.include_router(approvals.make_router())
+    pages.include_router(chat.make_router(domains or []))
+    pages.include_router(admin.make_router(defs_store, env, langfuse=langfuse))
+    pages.include_router(memory.make_router(env))
+    router.include_router(pages)
+
+    if token:
+        router.include_router(base.make_login_router(token))
     return router

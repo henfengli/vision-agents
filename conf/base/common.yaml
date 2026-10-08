@@ -1,0 +1,36 @@
+# 三环境共享的默认配置；env/{ENV}.yaml 只写与这里的差异（深合并，dict 递归覆盖）。
+# 业务域：只声明代码/配置所在目录（静态拓扑，随部署走）。
+# DB 连接串等由 agent 直接读业务配置文件获取，此处不重复声明。
+host: 127.0.0.1
+port: 8100
+
+model:
+  url: https://internal-llm/v1
+  name: internal-model-v3
+  max_concurrency: 10
+
+dingtalk_relay_url: "https://alert-notification.ipa.zs/robot/send"
+scratch_dir: /var/lib/agent-platform/scratch
+
+approvals:
+  enabled: false
+  danger_patterns: ['\brm\s+-[rf]', '\bdrop\b', '\btruncate\b', '\bkill\b', '\bsystemctl\b']
+
+temporal:
+  address: 127.0.0.1:7233
+  namespace: default
+  task_queue: agent-platform
+
+langfuse:
+  enabled: false                   # 默认关闭：角色读 PG，trace 不发送
+  host: http://127.0.0.1:3000
+  public_key: ""
+  secret_key: ""
+
+domains:
+  board:
+    code_paths: ["/srv/board"]
+  dagster:
+    code_paths: ["/srv/dagster"]
+  config-center:
+    code_paths: ["/srv/config-center"]

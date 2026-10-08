@@ -9,12 +9,15 @@ AgentRunWorkflow：prepare → run_agent → finalize，每步一个 activity，
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from .spec import RunSpec
+
+log = logging.getLogger(__name__)
 
 with workflow.unsafe.imports_passed_through():
     from .activities import finalize_run, mark_failed, prepare_run, run_agent
@@ -80,8 +83,8 @@ async def sync_schedules(client, tasks: list, task_queue: str) -> int:
     for sid in existing - {prefix + n for n in wanted}:  # 删多余的
         try:
             await client.get_schedule_handle(sid).delete()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — 单个失败不阻塞整体同步，但必须留痕
+            log.exception("删除多余 Schedule %s 失败", sid)
 
     count = 0
     for name, task in wanted.items():
@@ -106,8 +109,8 @@ async def sync_schedules(client, tasks: list, task_queue: str) -> int:
             else:
                 await client.create_schedule(sid, schedule)
             count += 1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — 同上：留痕后继续同步其余
+            log.exception("同步 Schedule %s 失败", sid)
     return count
 
 

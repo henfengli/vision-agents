@@ -13,15 +13,17 @@ class TestConfig(unittest.TestCase):
     def _write_conf(self, root: Path):
         (root / "base").mkdir(parents=True)
         (root / "env").mkdir(parents=True)
-        (root / "base/domains.yaml").write_text(
-            "domains:\n  board:\n    code_paths: [/srv/board]\n")
+        (root / "base/common.yaml").write_text(
+            "domains:\n  board:\n    code_paths: [/srv/board]\n"
+            "approvals: {enabled: false, danger_patterns: ['rm -rf']}\n")
         (root / "env/dev.yaml").write_text(
             "db_dsn: postgresql://x\n"
             "model: {url: http://m/v1, name: m, tokens: ['${TOKEN_A}']}\n"
             "dingtalk_relay_url: http://relay\n"
             "dingtalk_token: t\n"
             "bearer_token: b\n"
-            "viewer_base_url: http://viewer\n")
+            "viewer_base_url: http://viewer\n"
+            "approvals: {enabled: true}\n")  # 深合并：只覆盖 enabled，patterns 继承
 
     def test_load_and_interpolate(self):
         from agent_platform import config
@@ -36,6 +38,9 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(s.model.tokens, ["secret"])
                 self.assertIn("board", s.domains)
                 self.assertEqual(s.port, 8100)  # 默认值
+                # 深合并：env 覆盖 enabled，common 的 patterns 保留
+                self.assertTrue(s.approvals.enabled)
+                self.assertEqual(s.approvals.danger_patterns, ["rm -rf"])
             finally:
                 config._CONF_ROOT = old_root
                 if old_env:
@@ -156,6 +161,58 @@ class TestRunCode(unittest.IsolatedAsyncioTestCase):
             out = await execute_code(
                 "import time; time.sleep(10)", {}, scratch, timeout=1)
             self.assertIn("超时", out)
+
+    async def test_stderr_flood_no_deadlock(self):
+        """P1 回归：stderr 超 64KB 管道缓冲也不死锁（并发消费 + 上限截断）。"""
+        from agent_platform.agent.tools.run_code import execute_code
+        with tempfile.TemporaryDirectory() as scratch:
+            out = await execute_code(
+                "import sys\nsys.stderr.write('x' * 200_000)\nprint('ok')",
+                {}, scratch, timeout=30)
+            self.assertIn("ok", out)
+            self.assertIn("stderr", out)
+
+
+class TestReviewHook(unittest.IsolatedAsyncioTestCase):
+    async def test_hook_awaits_in_running_loop(self):
+        """P0 回归：审批 hook 是 async 的，在运行中的事件循环里被直接 await。
+
+        旧实现用 asyncio.run 包同步流程，工具在 loop 里调用即 RuntimeError；
+        这里不打补丁地还原调用场景（registry 的 await review(...)）。
+        """
+        from agent_platform.agent import approvals
+
+        calls = []
+
+        async def fake_request(run_id, text):
+            calls.append(("request", run_id, text))
+            return 7
+
+        async def fake_notify(run_id, text):
+            calls.append(("notify", run_id))
+
+        async def fake_wait(approval_id):
+            calls.append(("wait", approval_id))
+
+        saved = (approvals.request_approval, approvals.wait_decision)
+        approvals.request_approval, approvals.wait_decision = fake_request, fake_wait
+        try:
+            hook = approvals.make_review_hook([r"rm\s+-rf"], fake_notify)
+            token = approvals.current_run_id.set("run-1")
+            try:
+                await hook("rm -rf /data")  # 直接 await：旧实现此处必炸 RuntimeError
+            finally:
+                approvals.current_run_id.reset(token)
+        finally:
+            approvals.request_approval, approvals.wait_decision = saved
+        self.assertEqual(calls, [("request", "run-1", "rm -rf /data"),
+                                 ("notify", "run-1"), ("wait", 7)])
+
+    async def test_hook_passes_safe_command(self):
+        """未命中危险模式：直接返回，不碰 DB/通知。"""
+        from agent_platform.agent import approvals
+        hook = approvals.make_review_hook([r"rm\s+-rf"], None)
+        await hook("ls -la")  # 无异常即通过
 
 
 class TestRegistry(unittest.IsolatedAsyncioTestCase):

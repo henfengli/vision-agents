@@ -15,6 +15,7 @@ import uuid
 
 from pydantic import BaseModel
 
+from ..orchestration.tasks import DEFAULT_CHAT_TASK
 from ..store import runs
 
 _SSE_TIMEOUT_S = 300
@@ -28,16 +29,16 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
-def make_router(submitter):
-    from fastapi import APIRouter
+def make_router(submitter, auth=None):
+    from fastapi import APIRouter, Depends
 
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(auth)] if auth else [])
 
     @router.post("/v1/chat")
     async def chat(req: ChatRequest):
         session_id = req.session_id or uuid.uuid4().hex[:12]
         result = await submitter.run_sync(
-            "data-qa",
+            DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
             trigger_source="cli", session_id=session_id, role=req.role)
         return {**result, "session_id": session_id}
@@ -48,7 +49,7 @@ def make_router(submitter):
 
         session_id = req.session_id or uuid.uuid4().hex[:12]
         submitted = await submitter.submit(
-            "data-qa",
+            DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
             trigger_source="web_chat", session_id=session_id, role=req.role)
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from agent_platform.store import db
+from . import db
 
 
 async def create(run_id: str, task_type: str, role: str, domain: str | None,
@@ -89,6 +89,13 @@ async def get_events(run_id: str) -> list[dict]:
         rows = await cur.fetchall()
     return [{"seq": r[0], "kind": r[1], "payload": r[2],
              "created_at": r[3].isoformat()} for r in rows]
+
+
+async def trace_id_of(run_id: str) -> str:
+    """从台账事件取 Langfuse trace_id（未启用观测时为空串）。"""
+    events = await get_events(run_id)
+    return next((e["payload"].get("trace_id") for e in events
+                 if e["kind"] == "trace" and isinstance(e["payload"], dict)), "")
 
 
 def _row_to_dict(cur, row) -> dict:

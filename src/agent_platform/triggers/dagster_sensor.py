@@ -41,10 +41,11 @@ def session_id_for(asset_key: str, error: str, day: str | None = None) -> str:
     return f"dagster:{safe_asset}:{error_class(error)}:{episode}"
 
 
-def make_router(submitter, notifier):
-    from fastapi import APIRouter
+def make_router(submitter, notifier, auth=None):
+    from fastapi import APIRouter, Depends
 
-    router = APIRouter()
+    # auth：与 /v1 API 同一 bearer 依赖；webhook 也是服务间调用，不能裸奔
+    router = APIRouter(dependencies=[Depends(auth)] if auth else [])
 
     @router.post("/v1/hooks/dagster")
     async def dagster_hook(payload: dict):

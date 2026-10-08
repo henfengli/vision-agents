@@ -11,13 +11,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Awaitable, Callable
 
 from . import bash as bash_mod
 from . import run_code as run_code_mod
 from . import sql as sql_mod
 
-ReviewFn = Callable[[str], None]  # 命中危险模式时由它决定阻断/等待审批
+log = logging.getLogger(__name__)
+
+ReviewFn = Callable[[str], Awaitable[None]]  # 命中危险模式时由它决定阻断/等待审批
+
+# DeepAgents 内置文件系统中间件提供的工具名：不注册、不告警
+_BUILTIN_TOOLS = {"read_file", "write_file", "grep", "ls", "edit_file"}
 
 
 class ToolRegistry:
@@ -51,7 +57,7 @@ class ToolRegistry:
         async def bash(command: str, timeout: int = 60) -> str:
             """在受控沙箱执行 shell 命令（bwrap：全盘只读、仅 scratch 可写、默认断网）。"""
             if review is not None:
-                review(command)
+                await review(command)
             r = await asyncio.to_thread(bash_mod.run_command, command, timeout, scratch)
             return bash_mod.format_result(r)
         return bash
@@ -105,7 +111,7 @@ class ToolRegistry:
             （bash/sql_query/dingtalk_send/update_asset_profile/MCP 工具），可循环/
             分支/并发；中间数据不进上下文，只有 print 输出返回。代码在沙箱内执行。"""
             if review is not None:
-                review(code)
+                await review(code)
             return await run_code_mod.execute_code(
                 code, registry.host_tools(allowed), scratch, timeout=timeout)
         return run_code
@@ -131,6 +137,10 @@ class ToolRegistry:
                 tools.append(tool(self._build_run_code(names)))
             elif name in self._catalog:
                 tools.append(tool(self._catalog[name]()))
+            elif name not in _BUILTIN_TOOLS and name not in {
+                    t.name for t in self._extra_tools}:
+                # 配置 typo 不静默忽略：跳过但记警告（启动/装配日志可见）
+                log.warning("角色配置了未注册的工具 %s，已跳过", name)
         extra = {t.name: t for t in self._extra_tools}
         tools += [extra[n] for n in names if n in extra]
         # read_file/grep 等由 DeepAgents 内置文件系统中间件提供，无需注册

@@ -21,10 +21,10 @@ async def readiness_probe(base_url: str, timeout: float = 5.0,
     return False
 
 
-def make_router(submitter):
-    from fastapi import APIRouter
+def make_router(submitter, auth=None):
+    from fastapi import APIRouter, Depends
 
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(auth)] if auth else [])
 
     @router.post("/v1/hooks/gitlab")
     async def gitlab_hook(payload: dict):

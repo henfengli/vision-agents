@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field
 
 from ..store.definitions import DefinitionStore
 
+# 对话入口（/v1/ask、/v1/chat*）默认路由到的任务类型；
+# 与 main.SEED_TASKS 中的种子任务同名，改名需同步。
+DEFAULT_CHAT_TASK = "data-qa"
+
 
 class TaskDef(BaseModel):
     name: str

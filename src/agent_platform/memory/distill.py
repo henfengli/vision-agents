@@ -7,6 +7,7 @@ session 交接摘要用四节模板（Compaction Cliff 的教训——散文摘�
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from ..model import ModelPool
@@ -66,9 +67,11 @@ async def distill(pool: ModelPool, env: str, domain: str | None, run_id: str,
         if item.get("kind") == "knowledge" and domain:
             code_ref = None
             if item.get("code_path"):
-                code_ref = {"path": item["code_path"],
-                            "commit": knowledge_store.current_commit(code_paths[0])
-                            if code_paths else None}
+                # current_commit 跑 git subprocess，to_thread 避免阻塞事件循环
+                commit = (await asyncio.to_thread(
+                    knowledge_store.current_commit, code_paths[0])
+                    if code_paths else None)
+                code_ref = {"path": item["code_path"], "commit": commit}
             await knowledge_store.upsert(env, domain, item["key"], item["content"],
                                          source_run=run_id, code_ref=code_ref,
                                          embedder=embedder)

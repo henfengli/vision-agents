@@ -1,11 +1,14 @@
-"""页面共享基础设施：HTML 骨架、转义、静态文件。"""
+"""页面共享基础设施：HTML 骨架、转义、静态文件、登录页。"""
 
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+
+from ...api.auth import COOKIE_NAME
 
 STATIC = Path(__file__).parents[1] / "static"
 
@@ -59,5 +62,45 @@ def make_static_router() -> APIRouter:
         if filename not in ("dagre.min.js", "graph.js"):
             raise HTTPException(404)
         return FileResponse(STATIC / filename)
+
+    return router
+
+
+_LOGIN_BODY = """
+<h2>登录</h2>
+<div class="card">
+  <form method="post" action="/login">
+    <input type="password" name="token" placeholder="访问令牌" autofocus>
+    <button type="submit">进入</button>
+  </form>
+  {hint}
+</div>
+"""
+
+
+def make_login_router(expected_token: str) -> APIRouter:
+    """登录/登出：校验令牌写 httponly cookie。此路由自身不挂页面鉴权。"""
+    router = APIRouter()
+
+    @router.get("/login", response_class=HTMLResponse)
+    async def login_page():
+        return page("登录", _LOGIN_BODY.format(hint=""))
+
+    @router.post("/login")
+    async def login(request: Request):
+        form = await request.form()
+        token = str(form.get("token", ""))
+        if not hmac.compare_digest(token, expected_token):
+            return page("登录", _LOGIN_BODY.format(
+                hint='<span class="meta" style="color:#cf222e">令牌不正确</span>'))
+        resp = RedirectResponse("/graph", status_code=303)
+        resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax")
+        return resp
+
+    @router.get("/logout")
+    async def logout():
+        resp = RedirectResponse("/login", status_code=303)
+        resp.delete_cookie(COOKIE_NAME)
+        return resp
 
     return router

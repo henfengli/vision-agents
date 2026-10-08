@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from ..agent import approvals
 from ..agent.roles import RoleDef
 from ..orchestration.submitter import OverloadedError, Submitter, TaskRejected
-from ..orchestration.tasks import TaskDef, TaskRegistry
+from ..orchestration.tasks import DEFAULT_CHAT_TASK, TaskDef, TaskRegistry
 from ..store import feedback as feedback_store
 from ..store import runs
 from ..store.definitions import DefinitionStore
@@ -45,7 +45,7 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.post("/v1/ask")
     async def ask(req: AskRequest):
         return await submitter.run_sync(
-            "data-qa",
+            DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
             trigger_source="sdk", session_id=req.session_id, role=req.role)
 
@@ -83,7 +83,7 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         await feedback_store.add(run_id, req.score, req.comment)
         await feedback_store.propagate_to_memory(settings.env, run_id, req.score)
         if langfuse is not None and langfuse.enabled:
-            tid = await _trace_id_of(run_id)
+            tid = await runs.trace_id_of(run_id)
             await langfuse.score(tid, "user_feedback",
                                  1.0 if req.score > 0 else 0.0,
                                  comment=req.comment or "")
@@ -161,9 +161,3 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         return await tasks.list()
 
     return router
-
-
-async def _trace_id_of(run_id: str) -> str:
-    events = await runs.get_events(run_id)
-    return next((e["payload"].get("trace_id") for e in events
-                 if e["kind"] == "trace" and isinstance(e["payload"], dict)), "")

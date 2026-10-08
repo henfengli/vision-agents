@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from ..store import cases as cases_store
 from ..store import knowledge as knowledge_store
 
@@ -40,7 +42,10 @@ async def recall_block(env: str, domain: str | None, query: str,
         entries = await knowledge_store.search(env, domain, query, embedder=embedder)
         fresh = []
         for e in entries:
-            if knowledge_store.is_entry_fresh(e["code_ref"], domain_code_paths or []):
+            # is_entry_fresh 里跑 git subprocess，to_thread 避免阻塞事件循环
+            if await asyncio.to_thread(
+                    knowledge_store.is_entry_fresh, e["code_ref"],
+                    domain_code_paths or []):
                 fresh.append(e)
             else:
                 await knowledge_store.mark_expired(e["id"])

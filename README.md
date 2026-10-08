@@ -7,7 +7,7 @@
 
 ```
 触发层    Dagster sensor / GitLab webhook / chat(CLI+Web SSE) / Temporal Schedule / SDK
-接入层    FastAPI /v1（固定 bearer token）
+接入层    FastAPI /v1 + webhook（统一 bearer）/ Viewer（cookie 登录）
 编排层    Temporal：AgentRunWorkflow = prepare → run_agent → finalize
 agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工具层（tools）
 记忆层    recall（运行前召回）/ distill（运行后沉淀）
@@ -46,7 +46,7 @@ Temporal server 见 `deploy/temporal-server.service`。
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 49 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 54 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）
@@ -63,7 +63,7 @@ CLI：`agent-chat --server board --role data_searcher`
 
 ```
 src/agent_platform/   服务源码（分层见包注释）
-conf/                 base/domains.yaml + env/{dev,test,prod}.yaml
+conf/                 base/common.yaml（共享默认）+ env/{dev,test,prod}.yaml（只写差异，深合并）
 deploy/               systemd unit + install.sh + Dagster MCP 参考实现
 sdk/agent_client/     业务方客户端 + agent-chat CLI
 tests/                单测 + PG 集成测试

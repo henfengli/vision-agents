@@ -22,6 +22,7 @@ from .agent.engine import Engine
 from .agent.tools.mcp_bridge import load_mcp_tools
 from .agent.tools.registry import ToolRegistry
 from .api import create_app, make_api_router
+from .api.auth import make_auth_dependency
 from .config import Settings, load_settings
 from .langfuse import LangfuseClient, setup_observability
 from .model import ModelPool
@@ -74,6 +75,12 @@ SEED_TASKS = [
     {"name": "daily-inspection", "role": "ops_analyst",
      "triggers": ["schedule"], "input_schema": {"scope": "str"},
      "output_channel": "dingtalk", "timeout_s": 900},
+    # gitlab_webhook 部署事件提交的前端冒烟：种子缺失会被 TaskRegistry 拒收
+    {"name": "frontend-smoke", "role": "ops_analyst",
+     "triggers": ["webhook"],
+     "input_schema": {"service": "str", "version": "str", "env": "str"},
+     "output_channel": "dingtalk", "dedup_key": "service+version",
+     "dedup_window_s": 1800, "timeout_s": 600},
 ]
 
 
@@ -194,18 +201,20 @@ def build_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         rt = await assemble_runtime(settings)
-        auth_routers = [
+        # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
+        auth = make_auth_dependency(settings.bearer_token)
+        for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse),
-            dagster_sensor.make_router(rt.submitter, rt.relay),
-            gitlab_webhook.make_router(rt.submitter),
-        ]
-        for r in auth_routers:
+            dagster_sensor.make_router(rt.submitter, rt.relay, auth=auth),
+            gitlab_webhook.make_router(rt.submitter, auth=auth),
+            chat_trigger.make_router(rt.submitter, auth=auth),
+        ):
             app.include_router(r)
-        app.include_router(chat_trigger.make_router(rt.submitter))
-        app.include_router(make_viewer_router(rt.submitter, rt.defs,
-                                              settings.env, engine=rt.engine,
-                                              langfuse=rt.langfuse))
+        app.include_router(make_viewer_router(
+            rt.submitter, rt.defs, settings.env, engine=rt.engine,
+            langfuse=rt.langfuse, token=settings.bearer_token,
+            domains=list(settings.domains)))
         try:
             yield
         finally:

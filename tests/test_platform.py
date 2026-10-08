@@ -221,6 +221,54 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             resp = client.get(path)
             self.assertEqual(resp.status_code, 200, path)
 
+    async def test_viewer_auth_login_flow(self):
+        """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(
+            self.submitter, self.defs, "test", token="test-token",
+            domains=["board", "dagster"]))
+        client = TestClient(app, follow_redirects=False)
+
+        resp = client.get("/chat")
+        self.assertEqual(resp.status_code, 307)
+        self.assertEqual(resp.headers["location"], "/login")
+
+        resp = client.post("/login", data={"token": "wrong"})
+        self.assertIn("令牌不正确", resp.text)
+
+        resp = client.post("/login", data={"token": "test-token"})
+        self.assertEqual(resp.status_code, 303)
+        resp = client.get("/chat")   # TestClient 保留 cookie
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("board", resp.text)  # 业务域从配置注入，不再硬编码
+
+    async def test_hooks_require_auth(self):
+        """P1 回归：webhook 端点与 /v1 API 一样要 bearer。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.api.auth import make_auth_dependency
+        from agent_platform.triggers import dagster_sensor, gitlab_webhook
+        app = create_app(self.settings)
+        auth = make_auth_dependency(self.settings.bearer_token)
+        app.include_router(dagster_sensor.make_router(
+            self.submitter, None, auth=auth))
+        app.include_router(gitlab_webhook.make_router(self.submitter, auth=auth))
+        client = TestClient(app)
+
+        self.assertEqual(
+            client.post("/v1/hooks/dagster", json={}).status_code, 401)
+        self.assertEqual(
+            client.post("/v1/hooks/gitlab", json={}).status_code, 401)
+        resp = client.post("/v1/hooks/gitlab", json={"object_kind": "push"},
+                           headers={"Authorization": "Bearer test-token"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "ignored")
+
     # ---- Dagster 触发端 ----
 
     async def test_dagster_hook_rule_hit(self):

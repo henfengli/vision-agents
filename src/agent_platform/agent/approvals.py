@@ -86,7 +86,7 @@ async def wait_decision(approval_id: int, timeout_s: int = 1800,
                         poll_s: float = 15.0) -> None:
     """LISTEN/NOTIFY 毫秒级唤醒 + 轮询兜底（notify 只是提示，DB 行才是事实源）。
 
-    用独立连接 LISTEN：连接池绑定其创建 loop，review hook 可能跑在别的 loop。
+    用独立连接 LISTEN：连接池绑定其创建 loop，须保证与当前 loop 一致。
     审批中断（进程重启）时 approvals 行仍在，重跑会重新发起审批，不会漏。
     """
     import psycopg
@@ -141,22 +141,19 @@ async def wait_decision(approval_id: int, timeout_s: int = 1800,
     raise ApprovalTimeout(f"审批超时（{timeout_s}s），命令未执行")
 
 
-def make_review_hook(patterns: list[str], send_notification) -> "callable":
+def make_review_hook(patterns: list[str], send_notification):
     """生成工具层的审查回调（registry 的 review 参数）。run_id 从 contextvar 取。
 
-    工具是同步执行的，审批等待跑在独立事件循环里，不阻塞主循环。
+    hook 是 async 的：工具函数本就运行在事件循环里（registry 中 await 调用），
+    审批等待直接挂起当前协程，不另开循环。
     """
-    def review(text: str) -> None:
+    async def review(text: str) -> None:
         if match_danger(text, patterns) is None:
             return
         run_id = current_run_id.get()
-
-        async def _flow() -> None:
-            approval_id = await request_approval(run_id, text)
-            if send_notification is not None:
-                await send_notification(run_id, text)  # 钉钉 actionCard → 审批页
-            await wait_decision(approval_id)
-
-        asyncio.run(_flow())
+        approval_id = await request_approval(run_id, text)
+        if send_notification is not None:
+            await send_notification(run_id, text)  # 钉钉 actionCard → 审批页
+        await wait_decision(approval_id)
 
     return review
