@@ -14,8 +14,7 @@
 - triggers       触发层（dagster sensor / gitlab webhook / chat）
 - viewer         Run Viewer 自托管观测站点
 - main           装配与启动入口
-- envrun         按需环境启动器（bwrap 隔离配置，会话结束自动停止）
-- serve          沙箱内服务入口（host/port 从 Settings 读）
+- svcrun         通用服务纳管启动器（同机业务服务按需起停，bwrap 隔离环境配置）
 """
 
-__version__ = "4.2.0"
+__version__ = "4.3.0"

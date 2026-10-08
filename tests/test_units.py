@@ -503,80 +503,74 @@ class TestDomainPack(unittest.TestCase):
                 config._CONF_ROOT = old_root
 
 
-class TestEnvRun(unittest.TestCase):
-    """按需环境启动器：bwrap 命令行构造与 secrets 解析（纯逻辑）。"""
+class TestSvcRun(unittest.TestCase):
+    """通用服务纳管启动器：注册表校验与 bwrap 命令行构造（纯逻辑）。"""
 
-    def _layout(self, root: Path):
-        (root / "conf/env").mkdir(parents=True)
-        for e in ("prod", "test", "dev"):
-            (root / f"conf/env/{e}.yaml").write_text(f"port: 810{e == 'test'}\n")
-        (root / "secrets").mkdir()
-        for e in ("prod", "test"):
-            (root / f"secrets/secrets.{e}.env").write_text(
-                f"TOKEN_{e.upper()}=t-{e}\n")
+    def _registry(self):
+        return {
+            "envs": ["prod", "test", "dev"],
+            "services": {
+                "board": {
+                    "workdir": "/srv/board",
+                    "cmd": ["node", "server.js", "--port", "{port}"],
+                    "ports": {"prod": 8080, "test": 8081},
+                    "env_vars": {"APP_ENV": "{env}"},
+                    "configs": [{
+                        "canonical": "/srv/board/.env",
+                        "template": "/srv/board/conf/.env.{env}",
+                    }],
+                },
+            },
+        }
 
-    def test_build_argv_isolation(self):
-        from agent_platform import envrun
+    def test_bind_selected_mask_others(self):
+        from agent_platform import svcrun
+        existing = {"/srv/board/conf/.env.prod", "/srv/board/conf/.env.test"}
+        argv = svcrun.build_argv(self._registry(), "board", "test",
+                                 path_exists=lambda p: p in existing)
+        # 选中环境 bind 到服务读的固定路径
+        i = argv.index("--ro-bind")
+        self.assertEqual(argv[i + 1:i + 3],
+                         ["/srv/board/conf/.env.test", "/srv/board/.env"])
+        # 其他环境已存在的配置文件被 /dev/null 遮蔽；dev 的文件不存在则跳过
+        masks = [argv[j + 2] for j, a in enumerate(argv)
+                 if a == "--ro-bind" and argv[j + 1] == "/dev/null"]
+        self.assertEqual(masks, ["/srv/board/conf/.env.prod"])
+        self.assertIn("--die-with-parent", argv)
+        self.assertEqual(argv[argv.index("--chdir") + 1], "/srv/board")
+        # {port}/{env} 占位渲染 + env_vars 注入
+        self.assertEqual(argv[-2:], ["--port", "8081"])
+        setenvs = {argv[j + 1]: argv[j + 2] for j, a in enumerate(argv)
+                   if a == "--setenv"}
+        self.assertEqual(setenvs["APP_ENV"], "test")
+        self.assertEqual(setenvs["SVCRUN_ENV"], "test")
+
+    def test_unknown_service_and_env(self):
+        from agent_platform import svcrun
+        with self.assertRaises(ValueError):
+            svcrun.build_argv(self._registry(), "ghost", "test")
+        with self.assertRaises(ValueError):
+            svcrun.build_argv(self._registry(), "board", "staging")
+
+    def test_missing_selected_config_raises(self):
+        from agent_platform import svcrun
+        with self.assertRaises(FileNotFoundError):
+            svcrun.build_argv(self._registry(), "board", "test",
+                              path_exists=lambda p: False)
+
+    def test_registry_validation(self):
+        from agent_platform import svcrun
         with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            self._layout(root)
-            argv = envrun.build_argv("test", root / "conf", root / "secrets",
-                                     python="/usr/bin/python3")
-            self.assertIn("--die-with-parent", argv)   # 会话结束 = 服务结束
-            # 其他环境的 env yaml 与 secrets 全部被 /dev/null 遮蔽
-            masks = [argv[i + 2] for i, a in enumerate(argv)
-                     if a == "--ro-bind" and argv[i + 1] == "/dev/null"]
-            self.assertIn(str(root / "conf/env/prod.yaml"), masks)
-            self.assertIn(str(root / "conf/env/dev.yaml"), masks)
-            self.assertIn(str(root / "secrets/secrets.prod.env"), masks)
-            self.assertNotIn(str(root / "conf/env/test.yaml"), masks)
-            self.assertNotIn(str(root / "secrets/secrets.test.env"), masks)
-            # 本环境 secrets 以环境变量注入；exec 目标是 serve 模块
-            setenvs = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv)
-                       if a == "--setenv"}
-            self.assertEqual(setenvs["AGENT_ENV"], "test")
-            self.assertEqual(setenvs["TOKEN_TEST"], "t-test")
-            self.assertEqual(argv[-3:], ["/usr/bin/python3", "-m",
-                                         "agent_platform.serve"])
-
-    def test_parse_secrets_variants(self):
-        from agent_platform import envrun
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "s.env"
-            p.write_text("# 注释\nexport A=1\nB=\"two\"\nC='three'\n空行\n\n")
-            out = envrun.parse_secrets(p)
-            self.assertEqual(out, {"A": "1", "B": "two", "C": "three"})
-
-    def test_legacy_secrets_fallback_and_masking(self):
-        from agent_platform import envrun
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            self._layout(root)
-            legacy = root / "secrets/secrets.env"
-            legacy.write_text("TOKEN=t\n")
-            # dev 没有 secrets.dev.env → 回退 legacy；两份 per-env 被遮蔽
-            argv = envrun.build_argv("dev", root / "conf", root / "secrets")
-            masks = [argv[i + 2] for i, a in enumerate(argv)
-                     if a == "--ro-bind" and argv[i + 1] == "/dev/null"]
-            self.assertIn(str(root / "secrets/secrets.prod.env"), masks)
-            self.assertNotIn(str(legacy), masks)
-            setenvs = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv)
-                       if a == "--setenv"}
-            self.assertEqual(setenvs["TOKEN"], "t")
-            # test 有自己的 secrets.test.env → legacy 反而是别环境，遮蔽
-            argv = envrun.build_argv("test", root / "conf", root / "secrets")
-            masks = [argv[i + 2] for i, a in enumerate(argv)
-                     if a == "--ro-bind" and argv[i + 1] == "/dev/null"]
-            self.assertIn(str(legacy), masks)
-
-    def test_missing_secrets_raises(self):
-        from agent_platform import envrun
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            self._layout(root)
-            (root / "secrets/secrets.prod.env").unlink()
-            with self.assertRaises(FileNotFoundError):
-                envrun.build_argv("prod", root / "conf", root / "secrets")
+            p = Path(d) / "services.yaml"
+            p.write_text("envs: [prod]\nservices:\n  bad:\n    workdir: /x\n")
+            with self.assertRaises(ValueError):  # 缺 cmd
+                svcrun.load_registry(p)
+            p.write_text("services: {}\n")
+            with self.assertRaises(ValueError):  # 缺顶层 envs
+                svcrun.load_registry(p)
+            p.write_text("envs: [prod, test]\nservices:\n  s:\n"
+                         "    cmd: [run]\n")
+            self.assertEqual(svcrun.load_registry(p)["envs"], ["prod", "test"])
 
 
 if __name__ == "__main__":

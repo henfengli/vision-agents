@@ -1,8 +1,7 @@
 # agent-platform
 
 内网平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程。
-三套环境（prod/test/dev）同代码不同配置，主机部署（无容器）；
-环境是启动参数而非部署单元——一套代码按需起停（bwrap 隔离配置）。
+三套环境（prod/test/dev）同代码不同配置，主机 + systemd 部署（无容器）。
 
 ## 架构一览
 
@@ -45,18 +44,29 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 
 ```bash
 pip install -e .            # 依赖见 pyproject.toml
-python3 -m agent_platform.envrun dev      # 按需启动 dev：bwrap 隔离配置，前台运行
-python3 -m agent_platform.envrun dev --print   # 只打印将执行的 bwrap 命令
+export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_BEARER_TOKEN=...
+AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 ```
-
-secrets 约定：`/etc/agent-platform/secrets.<env>.env`（KEY=VALUE 行；
-本地开发可用 `--secrets-dir` 指向别处）。启动它的会话结束，服务自动结束
-（`--die-with-parent`），不留孤儿进程。
 
 Run Viewer：`http://127.0.0.1:8100/runs/{run_id}`；管理页 `/admin`；对话页 `/chat`。
 
-部署：`deploy/install.sh`（装一份代码 + Temporal 共享基建）；
-常驻 prod 是可选项，见 `deploy/agent-platform.service`（systemd 收口）。
+生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
+Temporal server 见 `deploy/temporal-server.service`。
+
+## 同机业务服务：按需启动（svcrun）
+
+与 agent 同机的业务服务（Dagster、board、配置中心…）几乎只有配置文件不同，
+不必按环境各常驻一套。注册进 `conf/services.yaml` 后按需起停：
+
+```bash
+python3 -m agent_platform.svcrun --list                 # 看注册表
+python3 -m agent_platform.svcrun dagster-webserver test # 前台起 test 环境
+python3 -m agent_platform.svcrun board test --print     # 只打印将执行的命令
+```
+
+bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径（服务零改动，
+不可能拿错环境），其他环境的配置文件遮蔽为 `/dev/null`；
+`--die-with-parent` 保证启动它的会话结束，服务自动结束。
 
 ## 测试
 

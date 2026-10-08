@@ -1,0 +1,47 @@
+# svcrun 服务注册表：同机业务服务的按需启动声明（python3 -m agent_platform.svcrun）
+#
+# 新服务纳管 = 在 services 下加一段：
+#   cmd      启动命令，可用 {env}/{port} 占位
+#   workdir  工作目录（可选）
+#   ports    每环境端口（可选，配合 {port} 占位避免多套同起时撞端口）
+#   configs  配置文件映射（可选，可多条）：
+#              canonical  服务读的固定路径
+#              template   每环境一份的真实文件，含 {env} 占位
+#   env_vars 额外环境变量（可选，值可用 {env}/{port} 占位）
+#
+# 以下是按本仓库业务域约定的示例，路径按实际部署调整。
+
+envs: [prod, test, dev]
+
+services:
+  dagster-webserver:
+    workdir: /srv/dagster
+    cmd: ["/srv/dagster/venv/bin/dagster-webserver", "-w", workspace.yaml,
+          "-p", "{port}"]
+    ports: {prod: 3000, test: 3001, dev: 3002}
+    configs:
+      - canonical: /srv/dagster/dagster.yaml      # Dagster 读固定路径
+        template: /srv/dagster/conf/dagster.{env}.yaml
+
+  dagster-daemon:
+    workdir: /srv/dagster
+    cmd: ["/srv/dagster/venv/bin/dagster-daemon", "run", "-w", workspace.yaml]
+    configs:
+      - canonical: /srv/dagster/dagster.yaml
+        template: /srv/dagster/conf/dagster.{env}.yaml
+
+  board:
+    workdir: /srv/board
+    cmd: ["node", "server.js"]
+    ports: {prod: 8080, test: 8081, dev: 8082}
+    configs:
+      - canonical: /srv/board/.env
+        template: /srv/board/conf/.env.{env}
+
+  config-center:
+    workdir: /srv/config-center
+    cmd: ["./bin/config-center", "--port", "{port}"]
+    ports: {prod: 9080, test: 9081, dev: 9082}
+    configs:
+      - canonical: /srv/config-center/application.yaml
+        template: /srv/config-center/conf/application.{env}.yaml
