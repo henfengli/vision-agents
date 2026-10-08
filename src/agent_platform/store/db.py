@@ -2,7 +2,8 @@
 
 表结构一眼看全：
 - runs / run_events   执行台账（审计与排障的事实源）
-- definitions         角色/任务的版本化定义（写后即时生效，历史全留）
+- artifacts           资产化任务图的产物（血缘 + 输入指纹 + 重跑复用）
+- definitions         角色/任务/策略的版本化定义（写后即时生效，历史全留）
 - knowledge           知识库（时序化：valid_from/to + superseded_by）
 - cases               案例库（报错指纹归一化）
 - feedback            反馈（rating=打分 / correction=纠正）
@@ -46,6 +47,19 @@ CREATE TABLE IF NOT EXISTS run_events (
     payload    JSONB,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    run_id      TEXT REFERENCES runs(run_id),
+    task_type   TEXT NOT NULL,
+    name        TEXT NOT NULL,               -- 产物节点名
+    content     JSONB,                       -- 产物内容（skipped/rejected 为 NULL）
+    input_hash  TEXT,                        -- 输入指纹：重跑复用的判定依据
+    status      TEXT NOT NULL,               -- materialized/reused/skipped/rejected
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (run_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_reuse
+    ON artifacts(task_type, name, input_hash, created_at);
 
 CREATE TABLE IF NOT EXISTS definitions (
     kind       TEXT NOT NULL,                -- role / task

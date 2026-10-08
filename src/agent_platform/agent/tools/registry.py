@@ -40,7 +40,10 @@ class ToolRegistry:
         self._extra_tools = extra_tools or []  # MCP 等外部加载的 LangChain 工具
 
         # 工具目录：名字 → 工厂。每个工具的唯一定义点。
-        self._catalog: dict[str, Callable[[], Callable]] = {"bash": self._build_bash}
+        self._catalog: dict[str, Callable[[], Callable]] = {
+            "bash": self._build_bash,
+            "read_artifact": self._build_read_artifact,
+        }
         if sql_dsn is not None:
             self._catalog["sql_query"] = self._build_sql_query
         if relay is not None:
@@ -61,6 +64,23 @@ class ToolRegistry:
             r = await asyncio.to_thread(bash_mod.run_command, command, timeout, scratch)
             return bash_mod.format_result(r)
         return bash
+
+    def _build_read_artifact(self) -> Callable:
+        async def read_artifact(name: str) -> str:
+            """读取本 run 资产图任务的某个产物完整内容（资产图节点间
+            大产物传递的通道：prompt 只注入清单，完整内容按需读取）。"""
+            import json as _json
+            from ...store import artifacts as artifacts_store
+            from ..approvals import current_run_id
+            run_id = current_run_id.get()
+            if not run_id:
+                return "[不可用] 无 run 上下文"
+            artifact = await artifacts_store.get(run_id, name)
+            if artifact is None or artifact["content"] is None:
+                return f"[不存在] 产物 {name}（可能未物化或被跳过）"
+            return _json.dumps(artifact["content"], ensure_ascii=False,
+                               indent=2, default=str)
+        return read_artifact
 
     def _build_sql_query(self) -> Callable:
         resolver = self._sql_dsn

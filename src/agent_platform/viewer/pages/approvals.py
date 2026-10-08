@@ -6,10 +6,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from ...agent import approvals
+from ...orchestration import policies
 from .base import esc, page
 
 
-def make_router() -> APIRouter:
+def make_router(submitter=None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/approvals/{run_id}", response_class=HTMLResponse)
@@ -31,10 +32,15 @@ def make_router() -> APIRouter:
     @router.post("/approvals/{run_id}/decide")
     async def approval_decide(run_id: str, request: Request):
         form = await request.form()
-        await approvals.decide(int(form["approval_id"]),
-                               form["decision"] == "approved",
+        approved = form["decision"] == "approved"
+        await approvals.decide(int(form["approval_id"]), approved,
                                decided_by="viewer")
-        verb = "放行" if form["decision"] == "approved" else "拒绝"
-        return page("审批", f"<p>已{verb}。</p>")
+        verb = "放行" if approved else "拒绝"
+        extra = ""
+        if submitter is not None:
+            # 任务级提交闸门：放行即启动 workflow；拒绝则 run 置失败
+            if await policies.settle_submit_gate(run_id, approved, submitter):
+                extra = "任务已开始执行。" if approved else "任务已终止。"
+        return page("审批", f"<p>已{verb}。{extra}</p>")
 
     return router

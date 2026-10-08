@@ -244,18 +244,36 @@ class TestCasesFingerprint(unittest.TestCase):
 
 
 class TestDagsterSensor(unittest.TestCase):
+    # 规则已迁入域包（conf/domains/dagster/rules.yaml）；测试自带规则
+    _RULES = [{"pattern": r"connection.*(refused|timeout|reset)",
+               "category": "infra", "conclusion": "连接失败"}]
+
     def test_rule_classify(self):
         from agent_platform.triggers.dagster_sensor import rule_classify
-        self.assertEqual(rule_classify("connection refused by db")["category"], "infra")
-        self.assertIsNone(rule_classify("weird bespoke failure xyz"))
+        self.assertEqual(rule_classify("connection refused by db",
+                                       self._RULES)["category"], "infra")
+        self.assertIsNone(rule_classify("weird bespoke failure xyz",
+                                        self._RULES))
+        self.assertIsNone(rule_classify("connection refused", []))  # 无规则→交 agent
 
     def test_session_id_stable_within_day(self):
         from agent_platform.triggers.dagster_sensor import session_id_for
-        a = session_id_for("my.asset", "connection refused", day="2026-10-08")
-        b = session_id_for("my.asset", "connection refused again", day="2026-10-08")
+        a = session_id_for("my.asset", "connection refused", self._RULES,
+                           day="2026-10-08")
+        b = session_id_for("my.asset", "connection refused again", self._RULES,
+                           day="2026-10-08")
         self.assertEqual(a, b)
-        c = session_id_for("my.asset", "bespoke weird failure", day="2026-10-08")
+        c = session_id_for("my.asset", "bespoke weird failure", self._RULES,
+                           day="2026-10-08")
         self.assertNotEqual(a, c)  # 跨故障类开新线
+
+    def test_session_template_from_pack(self):
+        """episode 命名模板来自域包，可整体改写。"""
+        from agent_platform.triggers.dagster_sensor import session_id_for
+        sid = session_id_for("my.asset", "connection refused", self._RULES,
+                             template="dc-{asset}-{date}",
+                             day="2026-10-08")
+        self.assertEqual(sid, "dc-my.asset-2026-10-08")
 
 
 class TestSpec(unittest.TestCase):
@@ -303,6 +321,186 @@ class TestModelPool(unittest.IsolatedAsyncioTestCase):
         from agent_platform.model.pool import ModelPool
         pool = ModelPool("http://x", "m", ["t"], client_factory=lambda t: None)
         self.assertIsNone(await pool.embed(["text"]))
+
+
+class TestArtGraph(unittest.TestCase):
+    """资产化任务图的纯逻辑面：声明校验 / 拓扑分层 / 闸门求值。"""
+
+    def test_node_def_exactly_one_materializer(self):
+        from agent_platform.orchestration.artgraph import NodeDef
+        with self.assertRaises(ValueError):
+            NodeDef()                                  # 三种物化方式都没有
+        with self.assertRaises(ValueError):
+            NodeDef(code="a", agent={"role": "r"})     # 多选不允许
+        with self.assertRaises(ValueError):
+            NodeDef(route={"choices": ["x"]}, map="up")  # route 不支持 map
+        self.assertEqual(NodeDef(code="a").code, "a")  # 恰一个：合法
+
+    def test_topo_layers(self):
+        from agent_platform.orchestration.artgraph import NodeDef, topo_layers
+        nodes = {
+            "c": NodeDef(code="c", deps=["a", "b"]),
+            "a": NodeDef(code="a"),
+            "b": NodeDef(code="b", deps=["a"]),
+        }
+        self.assertEqual(topo_layers(nodes), [["a"], ["b"], ["c"]])
+
+    def test_topo_cycle_and_dangling_rejected(self):
+        from agent_platform.orchestration.artgraph import NodeDef, topo_layers
+        with self.assertRaises(ValueError):  # 环
+            topo_layers({"a": NodeDef(code="x", deps=["b"]),
+                         "b": NodeDef(code="x", deps=["a"])})
+        with self.assertRaises(ValueError):  # 悬空依赖
+            topo_layers({"a": NodeDef(code="x", deps=["ghost"])})
+
+    def test_gate_holds(self):
+        from agent_platform.orchestration.artgraph import SKIPPED, gate_holds
+        self.assertTrue(gate_holds('verdict == "ok"', {"verdict": "ok"}))
+        self.assertFalse(gate_holds('verdict == "ok"', {"verdict": "escalate"}))
+        self.assertTrue(gate_holds('verdict != "ok"', {"verdict": "escalate"}))
+        # 上游缺失/跳过按空串处理：!= 成立、== 不成立
+        self.assertTrue(gate_holds('verdict != "ok"', {"verdict": SKIPPED}))
+        self.assertFalse(gate_holds('verdict == "ok"', {}))
+        with self.assertRaises(ValueError):  # 只接受受限语法
+            gate_holds("x > 1", {})
+
+    def test_terminal_nodes(self):
+        from agent_platform.orchestration.artgraph import (
+            NodeDef, terminal_nodes)
+        nodes = {"a": NodeDef(code="a"), "b": NodeDef(code="b", deps=["a"]),
+                 "c": NodeDef(code="c")}
+        self.assertEqual(terminal_nodes(nodes), ["b", "c"])
+
+
+class TestRunGraph(unittest.IsolatedAsyncioTestCase):
+    """解释器 run_graph：IO 全部走注入的 call，这里用内存桩验证编排语义。"""
+
+    @staticmethod
+    def _spec():
+        return {"run_id": "r1", "task_type": "t", "input": {}, "artifacts": {
+            "extract": {"code": "c.extract"},
+            "per": {"agent": {"role": "r"}, "map": "extract",
+                    "deps": ["extract"]},
+            "verdict": {"route": {"choices": ["ok", "escalate"]},
+                        "deps": ["per"]},
+            "report": {"agent": {"role": "r"}, "deps": ["verdict"],
+                       "gate": {"when": 'verdict == "escalate"'}},
+            "summary": {"code": "c.summary", "deps": ["per"]},
+        }}
+
+    async def test_skip_propagation_and_terminals(self):
+        from agent_platform.orchestration import activities
+        from agent_platform.orchestration.artgraph import run_graph
+        marks, gates = [], []
+
+        async def call(fn, *args):  # prod 里这是 workflow.execute_activity
+            if fn is activities.art_mark:
+                marks.append(args)
+                return None
+            if fn is activities.art_gate:
+                gates.append(args)
+                return True
+            if fn is activities.art_materialize:
+                _, name, node_def, payload = args
+                if name == "extract":
+                    return {"content": ["a", "b"]}
+                if payload.get("item") is not None:
+                    return {"content": f"item:{payload['item']}"}
+                if node_def.get("route"):
+                    return {"content": "ok"}
+                return {"content": f"made:{name}"}
+            raise AssertionError(f"未预期的 activity：{fn}")
+
+        out = await run_graph(self._spec(), call)
+        # verdict 被 report 依赖 = 中间产物，不进终末；gate 不命中 →
+        # report 跳过且不审批；终末只有 summary
+        self.assertEqual(out, {"summary": "made:summary"})
+        self.assertEqual(gates, [])
+        skipped = [m for m in marks if m[-1] == "skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0][2], "report")
+
+    async def test_gate_holds_triggers_approval(self):
+        from agent_platform.orchestration import activities
+        from agent_platform.orchestration.artgraph import run_graph
+        gates = []
+
+        async def call(fn, *args):
+            if fn is activities.art_mark:
+                return None
+            if fn is activities.art_gate:
+                gates.append(args)
+                return True                     # 审批通过 → 继续物化
+            if fn is activities.art_materialize:
+                _, name, node_def, payload = args
+                if name == "extract":
+                    return {"content": ["a"]}
+                if payload.get("item") is not None:
+                    return {"content": f"item:{payload['item']}"}
+                if node_def.get("route"):
+                    return {"content": "escalate"}
+                return {"content": f"made:{name}"}
+            raise AssertionError(fn)
+
+        out = await run_graph(self._spec(), call)
+        self.assertEqual(len(gates), 1)          # 条件命中 → 过一次人工门
+        self.assertEqual(out["report"], "made:report")
+
+    async def test_empty_graph_rejected(self):
+        from agent_platform.orchestration.artgraph import run_graph
+
+        async def call(fn, *args):
+            raise AssertionError("不应有 IO")
+
+        with self.assertRaises(ValueError):
+            await run_graph({"run_id": "r", "task_type": "t"}, call)
+
+
+class TestDomainPack(unittest.TestCase):
+    """域包加载：conf/domains/<name>/ 与 base/common.yaml 内联域深合并。"""
+
+    def _write_conf(self, root: Path):
+        (root / "base").mkdir(parents=True)
+        (root / "env").mkdir(parents=True)
+        (root / "base/common.yaml").write_text(
+            "domains:\n  board:\n    code_paths: [/srv/board]\n"
+            "  dagster:\n    code_paths: [/srv/dagster-override]\n")
+        (root / "env/dev.yaml").write_text(
+            "db_dsn: postgresql://x\n"
+            "model: {url: http://m/v1, name: m, tokens: [t]}\n"
+            "dingtalk_relay_url: http://relay\n"
+            "dingtalk_token: t\n"
+            "bearer_token: b\n"
+            "viewer_base_url: http://viewer\n")
+        pack = root / "domains" / "dagster"
+        pack.mkdir(parents=True)
+        (pack / "domain.yaml").write_text("code_paths: [/srv/dagster]\n")
+        (pack / "rules.yaml").write_text(
+            "rules:\n  - {pattern: 'timeout', category: infra,"
+            " conclusion: 查服务}\n")
+        (pack / "session.yaml").write_text(
+            "template: 'dagster:{asset}:{error_class}:{date}'\n")
+        (pack / "tasks.yaml").write_text(
+            "tasks:\n  - {name: failure-analysis, role: ops_analyst}\n")
+
+    def test_pack_loading_and_merge(self):
+        from agent_platform import config
+        with tempfile.TemporaryDirectory() as d:
+            self._write_conf(Path(d))
+            old_root = config._CONF_ROOT
+            config._CONF_ROOT = Path(d)
+            try:
+                s = config.load_settings("dev")
+                dag = s.domains["dagster"]
+                # 内联覆盖优先于域包（叶值替换），域包独有的字段保留
+                self.assertEqual(dag.code_paths, ["/srv/dagster-override"])
+                self.assertEqual(dag.rules[0]["category"], "infra")
+                self.assertEqual(dag.session_template,
+                                 "dagster:{asset}:{error_class}:{date}")
+                self.assertEqual(dag.seed_tasks[0]["name"], "failure-analysis")
+                self.assertIn("board", s.domains)  # 纯内联域不受影响
+            finally:
+                config._CONF_ROOT = old_root
 
 
 if __name__ == "__main__":

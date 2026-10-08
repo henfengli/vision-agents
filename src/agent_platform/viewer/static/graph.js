@@ -48,7 +48,7 @@ function renderGraph(container, graph, nodeStatus) {
 
 /* —— 步骤时间线 —— */
 function renderSteps(container, events) {
-  container.innerHTML = events.map(e => {
+  container.innerHTML = events.filter(e => e.kind !== "graph").map(e => {
     const label = STEP_LABELS[e.kind] || e.kind;
     const tool = e.tool ? ` <b>${esc(e.tool)}</b>` : "";
     return `<div class="step step-${e.kind}" data-step-node="${esc(e.node || "")}" id="seq-${e.seq}">
@@ -82,8 +82,13 @@ async function watchRun(runId) {
          · 耗时 ${s.run.duration_ms || "-"}ms · ${s.created_at}</div>`;
     if (s.graph && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";
-      renderGraph(document.getElementById("graph"), s.graph,
-                  nodeStatusOf(s.events, s.run.status));
+      // 资产图 run 的节点状态由 artifacts 表直给；普通 run 从事件推导
+      const statuses = s.graph.statuses
+        ? Object.fromEntries(Object.entries(s.graph.statuses).map(([k, v]) =>
+            [k, v === "materialized" || v === "reused" ? "executed"
+              : v === "rejected" ? "failed" : ""]))
+        : nodeStatusOf(s.events, s.run.status);
+      renderGraph(document.getElementById("graph"), s.graph, statuses);
     }
     renderSteps(document.getElementById("steps"), s.events);
     document.getElementById("output").textContent = JSON.stringify(s.run.output);

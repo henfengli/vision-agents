@@ -9,9 +9,10 @@ Worker 启动时 configure() 注入 Deps，activity 体内禁止访问未注入�
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from temporalio import activity
 
@@ -50,10 +51,12 @@ def _d() -> Deps:
 
 @activity.defn
 async def prepare_run(raw: dict) -> dict:
-    """步骤 1：建/更新台账行 + 角色解析 + 记忆召回 + 拼 prompt。
+    """步骤 1：建/更新台账行 + 谱系固定 + 角色解析 + 记忆召回 + 拼 prompt。
 
     API 触发时 run 行已由 Submitter 建好；调度触发（run_id 为空）时
     在这里现场生成 run_id 并建行——activities 允许非确定性。
+    资产图任务（spec.artifacts 非空）不做单角色解析与召回：角色/产物
+    在节点物化时逐个解析；这里只固定任务版本、落图拓扑事件（Viewer 血缘图）。
     """
     d = _d()
     spec = RunSpec.from_dict(raw)
@@ -70,9 +73,19 @@ async def prepare_run(raw: dict) -> dict:
     # prompt"靠它，而不是靠猜。版本取 prepare 这一刻的生效版本（直读库）。
     task_version = await definitions_store.active_version(
         "task", d.settings.env, spec.task_type)
-    role_version = await definitions_store.active_version(
-        "role", d.settings.env, spec.role)
+    role_version = (await definitions_store.active_version(
+        "role", d.settings.env, spec.role)) if spec.role else None
     await runs.set_def_versions(spec.run_id, task_version, role_version)
+
+    if spec.artifacts is not None:
+        from .artgraph import NodeDef, topo_layers
+        nodes = {n: NodeDef.model_validate(nd) for n, nd in spec.artifacts.items()}
+        topo_layers(nodes)  # 声明期校验：环/悬空依赖在 prepare 即失败
+        await runs.log_event(spec.run_id, "graph", {
+            "nodes": [{"id": n, "label": n} for n in nodes],
+            "edges": [{"source": dep, "target": n}
+                      for n, node in nodes.items() for dep in node.deps]})
+        return spec.to_dict()
 
     role = resolve(spec.role, await d.engine.roles())
     spec.domain = spec.domain or (role.domains[0] if role.domains else None)
@@ -224,3 +237,188 @@ def _extract_final_text(result: dict) -> str:
     last = messages[-1]
     content = getattr(last, "content", None) or last.get("content", "")
     return content if isinstance(content, str) else str(content)
+
+
+# ==================== 资产化任务图 activities ====================
+# 解释器（纯逻辑）在 artgraph.py；这里是它的全部 IO 落点。
+# 节点产物经 artifacts 表流转；执行细节落 run_events 台账（Viewer 可见）。
+
+from ..store import artifacts as artifacts_store  # noqa: E402
+
+# code 节点的确定性函数注册表：内核代码登记（要 code review 的逻辑本就该在代码里），
+# 域包/任务定义只引用名字。用法：@code_node("inspection.collect_scope")
+CODE_NODES: dict[str, Callable[..., Any]] = {}
+
+
+def code_node(name: str):
+    def deco(fn):
+        CODE_NODES[name] = fn
+        return fn
+    return deco
+
+
+def _summarize(content: Any, limit: int = 500) -> str:
+    text = content if isinstance(content, str) else json.dumps(
+        content, ensure_ascii=False, default=str)
+    return text if len(text) <= limit else text[:limit] + "…[截断，完整内容用 read_artifact 读取]"
+
+
+@activity.defn
+async def art_materialize(raw: dict, name: str, node_def: dict,
+                          payload: dict) -> dict:
+    """物化一个产物节点：输入指纹未变直接复用旧产物，否则按类型执行。
+
+    payload: {"deps": {名: 内容}} 或 map 扇出时的 {"item", "index", "deps"}。
+    """
+    d = _d()
+    spec = RunSpec.from_dict(raw)
+    hash_ = artifacts_store.input_hash(
+        {"name": name, "node": node_def}, payload)
+
+    reused = await artifacts_store.find_reusable(
+        spec.task_type, name, hash_, prefer_run=spec.run_id)
+    if reused is not None:
+        await artifacts_store.put(spec.run_id, spec.task_type, name,
+                                  reused["content"], hash_, status="reused")
+        await runs.log_event(spec.run_id, "note",
+                             {"stage": "artifact", "node": name,
+                              "status": "reused", "reason": "输入指纹未变"})
+        return {"content": reused["content"], "reused": True}
+
+    await runs.log_event(spec.run_id, "note",
+                         {"stage": "artifact", "node": name, "status": "start"})
+    content = await _execute_node(d, spec, name, node_def, payload)
+    await artifacts_store.put(spec.run_id, spec.task_type, name, content, hash_)
+    await runs.log_event(spec.run_id, "note",
+                         {"stage": "artifact", "node": name,
+                          "status": "materialized",
+                          "content": _summarize(content)})
+    return {"content": content, "reused": False}
+
+
+async def _execute_node(d: Deps, spec: RunSpec, name: str, node_def: dict,
+                        payload: dict) -> Any:
+    deps = payload.get("deps") or {}
+    if node_def.get("code"):
+        fn = CODE_NODES.get(node_def["code"])
+        if fn is None:
+            raise ValueError(f"code 节点 {node_def['code']} 未在 CODE_NODES 注册")
+        result = fn(payload)
+        return await result if hasattr(result, "__await__") else result
+
+    if node_def.get("route"):
+        route = node_def["route"]
+        choices = route["choices"]
+        deps_text = "\n".join(f"- {k}: {_summarize(v)}" for k, v in deps.items())
+        resp = await d.model_pool.chat([
+            {"role": "system",
+             "content": f"你是分诊器（{route.get('by', 'router')}）。"
+                        f"只能回复以下枚举之一，不要任何其他字符：{choices}"},
+            {"role": "user",
+             "content": f"任务：{spec.task_type}\n输入：{_summarize(spec.input)}\n"
+                        f"依赖产物：\n{deps_text}"}])
+        choice = (resp.choices[0].message.content or "").strip().strip('"')
+        if choice not in choices:
+            raise ValueError(f"route 节点 {name} 返回枚举外取值：{choice!r}")
+        return choice
+
+    # agent 节点：角色 + 契约 + 依赖产物清单（大产物由 agent 用工具按需读）
+    agent_cfg = node_def["agent"]
+    role_name = agent_cfg["role"]
+    deps_text = "\n".join(f"- {k}: {_summarize(v)}" for k, v in deps.items()) or "（无）"
+    item = payload.get("item")
+    question = (
+        f"你是 {role_name}。本次是资产图任务的节点 {name}。\n"
+        f"产出契约：{agent_cfg.get('contract', '按角色职责产出')}\n"
+        f"任务输入：{_summarize(spec.input)}\n"
+        + (f"本次处理对象（第 {payload.get('index', 0) + 1} 项）："
+           f"{_summarize(item, 1000)}\n" if payload.get("item") is not None else "")
+        + f"依赖产物（摘要；完整内容用 read_artifact 工具按名字读取）：\n{deps_text}\n"
+          f"要求：只输出本节点产物的 JSON 内容本身，不要解释。")
+    agent = await d.engine.agent()
+    config = {"configurable": {"thread_id": f"{spec.run_id}:{name}"}}
+    result = await _invoke_streaming(agent, {"messages": [
+        {"role": "user", "content": question}]}, config, spec.run_id)
+    text = _extract_final_text(result)
+    try:  # 契约产物尽量结构化；模型多说话就保留原文
+        return json.loads(text.strip().removeprefix("```json")
+                          .removesuffix("```").strip())
+    except (json.JSONDecodeError, AttributeError):
+        return text
+
+
+@activity.defn
+async def art_gate(run_id: str, node: str, summary: str) -> bool:
+    """产物闸门：人工审批通过才物化。拒绝/超时 = 节点记 rejected（跳过）。"""
+    from ..agent import approvals
+    d = _d()
+    approval_id = await approvals.request_approval(
+        run_id, f"产物门禁｜节点 {node}\n{summary}")
+    if d.notifier is not None:
+        await d.notifier.send_action_card(
+            "产物待审批", f"run `{run_id}` 的节点 `{node}`：\n{summary}",
+            "去审批", f"{d.settings.viewer_base_url}/approvals/{run_id}")
+    try:
+        await approvals.wait_decision(approval_id)
+        return True
+    except Exception:  # 拒绝或超时：安全侧默认，不物化
+        spec_task = ""
+        run = await runs.get(run_id)
+        if run:
+            spec_task = run["task_type"]
+        await artifacts_store.mark(run_id, spec_task, node, "rejected")
+        return False
+
+
+@activity.defn
+async def art_mark(run_id: str, task_type: str, name: str, status: str) -> None:
+    """记录节点跳过/拒绝状态（Viewer 血缘图染色的数据源）。"""
+    await artifacts_store.mark(run_id, task_type, name, status)
+    await runs.log_event(run_id, "note",
+                         {"stage": "artifact", "node": name, "status": status})
+
+
+# ==================== 内建任务处理器（#5 园丁等的口子） ====================
+
+
+@activity.defn
+async def run_builtin_task(raw: dict) -> dict:
+    """内建任务：不过模型的确定性维护作业（如 memory-gardener）。
+
+    单 activity 完成 建行→执行→落终态：维护作业允许整体重试，
+    无需拆步骤。新增内建任务 = 在 HANDLERS 登记一个 async 函数。
+    """
+    d = _d()
+    spec = RunSpec.from_dict(raw)
+    if not spec.run_id:
+        spec.run_id = uuid.uuid4().hex[:16]
+        spec.session_id = spec.run_id
+        await runs.create(spec.run_id, spec.task_type, spec.role, domain=None,
+                          trigger_source=spec.trigger or "schedule", caller="",
+                          input_data=spec.input, session_id=spec.session_id)
+    await runs.set_status(spec.run_id, "running")
+    task_version = await definitions_store.active_version(
+        "task", d.settings.env, spec.task_type)
+    await runs.set_def_versions(spec.run_id, task_version, None)
+
+    handler = HANDLERS.get(spec.handler or "")
+    if handler is None:
+        raise ValueError(f"未知内建任务处理器：{spec.handler}")
+    try:
+        output = await handler(d)
+    except Exception as e:
+        await runs.set_status(spec.run_id, "failed",
+                              output={"error": str(e)[:4000]})
+        raise
+    await runs.set_status(spec.run_id, "success", output=output)
+    return output
+
+
+async def _gardener_handler(d: Deps) -> dict:
+    from ..memory.gardener import run_gardener
+    return await run_gardener(d.settings.env, d.settings.domains)
+
+
+HANDLERS: dict[str, Callable[[Deps], Awaitable[dict]]] = {
+    "memory-gardener": _gardener_handler,
+}

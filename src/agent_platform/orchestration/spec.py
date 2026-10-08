@@ -22,6 +22,9 @@ class RunSpec:
     trigger: str = "sdk"
     correction: bool = False        # 纠正式反馈触发的重判
     resume: bool = False            # 断点续跑（空输入从 checkpoint 继续）
+    # —— 任务形态（三选一，空 = 单 agent 问答） ——
+    artifacts: dict | None = None   # 资产化任务图快照（提交时从任务定义固化）
+    handler: str | None = None      # 内建任务处理器（如 memory-gardener）
     # —— prepare_run 回填 ——
     prompt: str = ""                # 召回块 + question 拼好的最终 prompt
     domain: str | None = None

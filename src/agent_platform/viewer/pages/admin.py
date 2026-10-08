@@ -25,8 +25,14 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
         task_opts = "".join(
             f'<option value="{esc(t["name"])}">{esc(t["name"])}</option>'
             for t in tasks)
+        policies = await defs_store.list_active("policy", env)
+        policy_opts = "".join(
+            f'<option value="{esc(p["name"])}">{esc(p["name"])}</option>'
+            for p in policies)
         role_defs = json.dumps({r["name"]: r for r in roles}, ensure_ascii=False)
         task_defs = json.dumps({t["name"]: t for t in tasks}, ensure_ascii=False)
+        policy_defs = json.dumps({p["name"]: p for p in policies},
+                                 ensure_ascii=False)
 
         esc_html = ""
         escalations = await feedback_store.correction_counts(min_count=3)
@@ -62,12 +68,23 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
           <input id="task-a" type="number" min="1" style="width:70px" placeholder="v?">
           <input id="task-b" type="number" min="1" style="width:70px" placeholder="v?">
           <button onclick="diffDef('task')">diff</button></div>
+        <div class="card"><b>提交策略（闸门链）</b><br>
+          <span class="meta">正则命中 任务名/输入/question 即按 action 处理；
+            order 小的先判；action = deny | require_approval</span>
+          <select id="policy-sel" onchange="loadDef('policy')"><option value="">新建…</option>{policy_opts}</select>
+          <input id="policy-name" placeholder="策略名">
+          <textarea id="policy-def" rows="6" style="width:100%"
+            placeholder='{{"match_regex": "drop\\s+table", "action": "deny", "message": "禁止删表"}}'></textarea>
+          <button onclick="saveDef('policy')">保存</button>
+          <span id="policy-msg" class="meta"></span></div>
         <div class="card"><b><a href="/memory">记忆管理 →</a></b></div>
         <script>
-        const ROLES = {role_defs}, TASKS = {task_defs};
+        const ROLES = {role_defs}, TASKS = {task_defs}, POLICIES = {policy_defs};
+        const ADMIN_URL = {{role: "/v1/admin/roles", task: "/v1/admin/tasks",
+                            policy: "/v1/admin/policies"}};
         function loadDef(kind) {{
           const name = document.getElementById(kind+"-sel").value;
-          const src = kind === "role" ? ROLES : TASKS;
+          const src = {{role: ROLES, task: TASKS, policy: POLICIES}}[kind];
           document.getElementById(kind+"-name").value = name;
           const d = src[name] || {{}};
           const {{name, ...rest}} = d;
@@ -78,7 +95,7 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
           const msg = document.getElementById(kind+"-msg");
           try {{
             const definition = JSON.parse(document.getElementById(kind+"-def").value);
-            const resp = await fetch(`/v1/admin/${{kind}}s`, {{
+            const resp = await fetch(ADMIN_URL[kind], {{
               method: "POST", headers: {{"Content-Type": "application/json"}},
               body: JSON.stringify({{name, definition, updated_by: "viewer"}})}});
             const data = await resp.json();

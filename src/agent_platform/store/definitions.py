@@ -12,7 +12,7 @@ from typing import Literal
 
 from .db import pool
 
-Kind = Literal["role", "task"]
+Kind = Literal["role", "task", "policy"]
 
 _CACHE_TTL_S = 5.0  # 缓存短 TTL + 写时主动失效，双保险
 

@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 
 from ..agent import approvals
 from ..agent.roles import RoleDef
+from ..orchestration import policies
+from ..orchestration.policies import PolicyDef
 from ..orchestration.submitter import OverloadedError, Submitter, TaskRejected
 from ..orchestration.tasks import DEFAULT_CHAT_TASK, TaskDef, TaskRegistry
 from ..store import definitions as definitions_store
@@ -25,7 +27,7 @@ from .schemas import (ApprovalRequest, AskRequest, DefinitionPutRequest,
 
 
 def create_app(settings, lifespan=None) -> FastAPI:
-    app = FastAPI(title="agent-platform", version="4.0.0", lifespan=lifespan)
+    app = FastAPI(title="agent-platform", version="4.1.0", lifespan=lifespan)
 
     @app.exception_handler(OverloadedError)
     async def _overloaded(_req, exc):
@@ -76,6 +78,8 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         if pending is None:
             raise HTTPException(404, "该 run 没有待审批项")
         await approvals.decide(pending["id"], req.approved, req.decided_by)
+        # 任务级提交闸门：放行即启动 workflow；拒绝则 run 置失败
+        await policies.settle_submit_gate(run_id, req.approved, submitter)
         return {"status": "approved" if req.approved else "rejected"}
 
     @router.post("/v1/feedback/{run_id}")
@@ -170,5 +174,21 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.get("/v1/admin/tasks")
     async def list_tasks():
         return await tasks.list()
+
+    # —— Admin：提交策略（闸门链，policies.py） ——
+
+    @router.post("/v1/admin/policies")
+    async def put_policy(req: DefinitionPutRequest):
+        try:
+            PolicyDef.model_validate({"name": req.name, **req.definition})
+        except Exception as e:
+            raise HTTPException(422, f"策略定义不合法：{e}")
+        version = await defs.put("policy", settings.env, req.name,
+                                 req.definition, req.updated_by)
+        return {"name": req.name, "version": version}
+
+    @router.get("/v1/admin/policies")
+    async def list_policies():
+        return await defs.list_active("policy", settings.env)
 
     return router

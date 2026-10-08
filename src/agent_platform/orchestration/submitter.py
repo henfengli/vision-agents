@@ -18,9 +18,12 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from ..store import runs
+from ..store.definitions import DefinitionStore
+from . import policies
 from .spec import RunSpec
 from .tasks import TaskDef, TaskRegistry
-from .workflows import AgentRunWorkflow
+from .workflows import (AgentRunWorkflow, ArtifactRunWorkflow,
+                        BuiltinTaskWorkflow)
 
 
 class TaskRejected(ValueError):
@@ -33,13 +36,17 @@ class OverloadedError(RuntimeError):
 
 class Submitter:
     def __init__(self, client: Client, tasks: TaskRegistry, task_queue: str,
-                 env: str, max_inflight_sync: int = 50):
+                 env: str, max_inflight_sync: int = 50,
+                 defs: DefinitionStore | None = None,
+                 approval_notifier=None):
         self._client = client
         self._tasks = tasks
         self._tq = task_queue
         self._env = env
         self._max_inflight = max_inflight_sync
         self._inflight = 0
+        self._defs = defs                       # 策略链（policies.py）的定义源
+        self._approval_notifier = approval_notifier  # 任务级闸门钉钉通知
 
     # —— 内部 ——
 
@@ -56,37 +63,95 @@ class Submitter:
     async def _start(self, task: TaskDef, input_data: dict, trigger_source: str,
                      caller: str | None, session_id: str | None,
                      correction: bool, run_id: str | None = None,
-                     resume: bool = False, domain: str | None = None) -> dict:
+                     resume: bool = False, row_exists: bool = False,
+                     domain: str | None = None) -> dict:
         run_id = run_id or uuid.uuid4().hex[:16]
         session_id = session_id or run_id
-        if not resume:
+        if not resume and not row_exists:
             dedup_key = task.compute_dedup_key(input_data)
             if dedup_key:
                 existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
                 if existing:
                     return {"run_id": existing["run_id"], "status": "dedup_hit",
                             "dedup_hit": True}
-            await runs.create(
-                run_id, task.name, task.role,
-                domain=domain or str(input_data.get("server")
-                                     or input_data.get("domain") or "") or None,
-                trigger_source=trigger_source, caller=caller or "",
-                input_data=input_data, dedup_key=dedup_key,
-                session_id=session_id)
+            await self._create_row(run_id, task, input_data, trigger_source,
+                                   caller, session_id, domain, dedup_key)
         spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
                        question=_to_question(task, input_data),
                        input=input_data, error_text=input_data.get("error"),
                        session_id=session_id, timeout_s=task.timeout_s,
                        trigger=trigger_source, correction=correction,
-                       resume=resume).to_dict()
+                       resume=resume,
+                       artifacts=({k: v.model_dump() for k, v in
+                                   task.artifacts.items()}
+                                  if task.artifacts else None),
+                       handler=task.handler).to_dict()
+        # 任务形态分发：资产图 / 内建处理器 / 单 agent（默认）
+        wf = (BuiltinTaskWorkflow.run if task.handler else
+              ArtifactRunWorkflow.run if task.artifacts else
+              AgentRunWorkflow.run)
         kw = {}
         if resume:
             kw["id_reuse_policy"] = (
                 WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY)
         await self._client.start_workflow(
-            AgentRunWorkflow.run, spec, id=run_id, task_queue=self._tq, **kw)
+            wf, spec, id=run_id, task_queue=self._tq, **kw)
         return {"run_id": run_id, "session_id": session_id,
                 "status": "queued", "dedup_hit": False}
+
+    @staticmethod
+    async def _create_row(run_id: str, task: TaskDef, input_data: dict,
+                          trigger_source: str, caller: str | None,
+                          session_id: str, domain: str | None,
+                          dedup_key: str) -> None:
+        await runs.create(
+            run_id, task.name, task.role,
+            domain=domain or str(input_data.get("server")
+                                 or input_data.get("domain") or "") or None,
+            trigger_source=trigger_source, caller=caller or "",
+            input_data=input_data, dedup_key=dedup_key,
+            session_id=session_id)
+
+    async def _gate(self, task: TaskDef, input_data: dict, trigger_source: str,
+                    caller: str | None, session_id: str | None,
+                    verdict: policies.Verdict) -> dict:
+        """任务级闸门：建行 + 审批单 + 钉钉通知，workflow 等放行后才启动。"""
+        from ..agent import approvals as approval_store
+
+        dedup_key = task.compute_dedup_key(input_data)
+        if dedup_key:
+            existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
+            if existing:
+                return {"run_id": existing["run_id"], "status": "dedup_hit",
+                        "dedup_hit": True}
+        run_id = uuid.uuid4().hex[:16]
+        session_id = session_id or run_id
+        await self._create_row(run_id, task, input_data, trigger_source,
+                               caller, session_id, None, dedup_key)
+        summary = policies.gate_summary(task.name, verdict)
+        approval_id = await approval_store.request_approval(run_id, summary)
+        await runs.log_event(run_id, "note",
+                             {"stage": "submit_gate", "policy": verdict.policy,
+                              "approval_id": approval_id})
+        if self._approval_notifier is not None:
+            await self._approval_notifier(run_id, summary)
+        return {"run_id": run_id, "session_id": session_id,
+                "status": "awaiting_approval", "approval_id": approval_id,
+                "dedup_hit": False}
+
+    async def approve_start(self, run_id: str) -> dict:
+        """提交闸门放行后的启动：workflow 此刻才第一次 start。"""
+        run = await runs.get(run_id)
+        if run is None:
+            raise TaskRejected(f"run {run_id} 不存在")
+        task = await self._resolve_task(run["task_type"], run["role"] or None)
+        # 闸门挂起的 run 从未启动过 workflow：不是 resume（没有可续的
+        # LangGraph thread），而是首次启动——只跳过建行/去重
+        return await self._start(task, run.get("input") or {},
+                                 run["trigger_source"], run.get("caller"),
+                                 run.get("session_id"), correction=False,
+                                 run_id=run_id, row_exists=True,
+                                 domain=run.get("domain"))
 
     # —— 对外 ——
 
@@ -95,6 +160,16 @@ class Submitter:
                      session_id: str | None = None, role: str | None = None,
                      correction: bool = False) -> dict:
         task = await self._resolve_task(task_name, role)
+        # 提交闸门链（policies.py）：env_gate 之外的 DB 声明策略都在这里过
+        if self._defs is not None and not correction:
+            verdict = await policies.evaluate_submit(
+                task, self._env, input_data, _to_question(task, input_data),
+                self._defs)
+            if verdict.action == "deny":
+                raise TaskRejected(verdict.message)
+            if verdict.action == "require_approval":
+                return await self._gate(task, input_data, trigger_source,
+                                        caller, session_id, verdict)
         return await self._start(task, input_data, trigger_source, caller,
                                  session_id, correction)
 
@@ -127,6 +202,11 @@ class Submitter:
                 run = await runs.get(submitted["run_id"])
                 return {"run_id": submitted["run_id"],
                         "output": (run or {}).get("output")}
+            if submitted.get("status") == "awaiting_approval":
+                # 提交闸门挂起：workflow 尚未启动，没有可等的 handle
+                return {"run_id": submitted["run_id"], "output": None,
+                        "note": "任务待提交审批，批准后自动开始执行",
+                        "approval_id": submitted.get("approval_id")}
             run_id = submitted["run_id"]
             task = await self._tasks.get(task_name)
             timeout = min(task.timeout_s if task else 300, 300)

@@ -88,9 +88,10 @@ async def list_all(env: str, domain: str | None = None,
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, domain, key, content, expired, valid_to IS NOT NULL,"
-            " feedback_score, created_at FROM knowledge " + where +
+            " feedback_score, code_ref, created_at FROM knowledge " + where +
             " ORDER BY domain, key LIMIT 500", tuple(params))
         rows = await cur.fetchall()
     return [{"id": r[0], "domain": r[1], "key": r[2], "content": r[3],
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],
-             "created_at": r[7].isoformat()} for r in rows]
+             "code_ref": r[7],  # JSONB 已被 psycopg3 解析成 dict/None
+             "created_at": r[8].isoformat()} for r in rows]

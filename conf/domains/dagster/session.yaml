@@ -1,0 +1,2 @@
+# episode 会话命名模板：同类故障历史连续，跨类/跨天自动开新线
+template: "dagster:{asset}:{error_class}:{date}"

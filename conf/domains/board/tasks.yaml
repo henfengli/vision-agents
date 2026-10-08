@@ -1,0 +1,10 @@
+tasks:
+  # gitlab_webhook 部署事件提交的前端冒烟
+  - name: frontend-smoke
+    role: ops_analyst
+    triggers: ["webhook"]
+    input_schema: {"service": "str", "version": "str", "env": "str"}
+    output_channel: dingtalk
+    dedup_key: service+version
+    dedup_window_s: 1800
+    timeout_s: 600

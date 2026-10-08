@@ -8,6 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from ..store.definitions import DefinitionStore
+from .artgraph import NodeDef
 
 # 对话入口（/v1/ask、/v1/chat*）默认路由到的任务类型；
 # 与 main.SEED_TASKS 中的种子任务同名，改名需同步。
@@ -16,7 +17,7 @@ DEFAULT_CHAT_TASK = "data-qa"
 
 class TaskDef(BaseModel):
     name: str
-    role: str
+    role: str = ""                     # 单 agent 任务的角色；artifacts/handler 任务可空
     triggers: list[str] = Field(default_factory=list)
     input_schema: dict[str, str] = Field(default_factory=dict)
     output_channel: str = "caller"           # caller/dingtalk/http
@@ -27,6 +28,9 @@ class TaskDef(BaseModel):
     schedule_input: dict = Field(default_factory=dict)  # 定时触发时的固定输入
     timeout_s: int = 300
     env_gate: list[str] = Field(default_factory=list)  # 空 = 所有环境启用
+    # —— 任务形态（三选一，都空 = 单 agent 问答） ——
+    artifacts: dict[str, NodeDef] | None = None  # 资产化任务图（见 artgraph.py）
+    handler: str | None = None                 # 内建处理器名（如 memory-gardener）
 
     def enabled_in(self, env: str) -> bool:
         return not self.env_gate or env in self.env_gate

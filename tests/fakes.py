@@ -32,6 +32,8 @@ class FakePool:
 class FakeAgent:
     async def ainvoke(self, payload, config):
         from langchain_core.messages import AIMessage
+        if payload is None:  # resume：真实 LangGraph 续 thread，桩给个续跑答案
+            return {"messages": [AIMessage(content="answer: resumed")]}
         q = payload["messages"][-1]["content"]
         return {"messages": [AIMessage(content=f"answer: {q[:60]}")]}
 
@@ -76,14 +78,38 @@ class FakeTemporalClient:
             self._handles[id] = handle
             return handle
         from agent_platform.orchestration import activities
-        prepared = await activities.prepare_run(dict(spec))
-        merged = {**spec, **prepared}
+        from agent_platform.orchestration.artgraph import run_graph
+
+        async def call(fn, *args):  # prod 里是 workflow.execute_activity
+            return await fn(*args)
+
         try:
-            output = await activities.run_agent(merged)
-            output = await activities.finalize_run(merged, output)
-            handle = FakeHandle(output)
+            if spec.get("handler"):
+                # 内建任务：单 activity 完成整个作业
+                handle = FakeHandle(
+                    await activities.run_builtin_task(dict(spec)))
+            elif spec.get("artifacts"):
+                # 资产图：prepare → 解释执行（层内并行）→ finalize
+                prepared = await activities.prepare_run(dict(spec))
+                merged = {**spec, **prepared}
+                try:
+                    output = await run_graph(merged, call)
+                    output = await activities.finalize_run(merged, output)
+                    handle = FakeHandle(output)
+                except Exception as e:
+                    await activities.mark_failed(merged, str(e))
+                    handle = FakeHandle(error=e)
+            else:
+                prepared = await activities.prepare_run(dict(spec))
+                merged = {**spec, **prepared}
+                try:
+                    output = await activities.run_agent(merged)
+                    output = await activities.finalize_run(merged, output)
+                    handle = FakeHandle(output)
+                except Exception as e:
+                    await activities.mark_failed(merged, str(e))
+                    handle = FakeHandle(error=e)
         except Exception as e:
-            await activities.mark_failed(merged, str(e))
             handle = FakeHandle(error=e)
         self._handles[id] = handle
         return handle

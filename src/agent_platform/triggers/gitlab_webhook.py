@@ -21,7 +21,7 @@ async def readiness_probe(base_url: str, timeout: float = 5.0,
     return False
 
 
-def make_router(submitter, auth=None):
+def make_router(submitter, auth=None, smoke_task: str = "frontend-smoke"):
     from fastapi import APIRouter, Depends
 
     router = APIRouter(dependencies=[Depends(auth)] if auth else [])
@@ -38,8 +38,9 @@ def make_router(submitter, auth=None):
         health_url = payload.get("health_url")
         if health_url and not await readiness_probe(health_url):
             return {"status": "readiness_failed", "note": "健康检查未通过，未触发测试"}
+        # 冒烟任务名是域知识（种子在 board 域包 tasks.yaml），由装配侧注入
         return await submitter.submit(
-            "frontend-smoke",
+            smoke_task,
             {"service": service, "version": version, "env": env},
             trigger_source="webhook", caller=service)
 

@@ -20,7 +20,9 @@ from .spec import RunSpec
 log = logging.getLogger(__name__)
 
 with workflow.unsafe.imports_passed_through():
-    from .activities import finalize_run, mark_failed, prepare_run, run_agent
+    from .activities import (finalize_run, mark_failed, prepare_run,
+                             run_agent, run_builtin_task)
+    from .artgraph import run_graph
 
 # agent 步骤不自动重试：模型/工具错误由人工或恢复路径处理；
 # prepare/finalize 是轻量 DB 操作，允许自动重试
@@ -118,3 +120,55 @@ def _schedule_question(task) -> str:
     lines = [f"任务类型：{task.name}"]
     lines += [f"{k}: {v}" for k, v in (task.schedule_input or {}).items()]
     return "\n".join(lines)
+
+
+@workflow.defn
+class ArtifactRunWorkflow:
+    """资产化任务图：prepare → 解释执行资产图（artgraph.run_graph）→ finalize。
+
+    每个节点物化 = 一个 activity（重试/超时/恢复照旧白嫖 Temporal）；
+    层内并行由依赖关系推论而来；审批闸门在 art_gate 内心跳等待。
+    """
+
+    @workflow.run
+    async def run(self, spec: dict) -> dict:
+        timeout_s = min(int(spec.get("timeout_s") or 1800), 7200)
+
+        async def call(fn, *args):
+            return await workflow.execute_activity(
+                fn, *args,
+                start_to_close_timeout=timedelta(seconds=timeout_s),
+                heartbeat_timeout=timedelta(seconds=120),
+                retry_policy=_RETRY_NONE)
+
+        try:
+            prepared = await workflow.execute_activity(
+                prepare_run, spec,
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=_RETRY_LIGHT)
+            spec = {**spec, **prepared}
+            output = await run_graph(spec, call)
+            return await workflow.execute_activity(
+                finalize_run, args=[spec, output],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=_RETRY_LIGHT)
+        except Exception as e:
+            if spec.get("run_id"):
+                await workflow.execute_activity(
+                    mark_failed, args=[spec, str(e)],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=_RETRY_LIGHT)
+            raise
+
+
+@workflow.defn
+class BuiltinTaskWorkflow:
+    """内建维护任务（不过模型）：单 activity 完成整个作业。"""
+
+    @workflow.run
+    async def run(self, spec: dict) -> dict:
+        timeout_s = min(int(spec.get("timeout_s") or 1800), 7200)
+        return await workflow.execute_activity(
+            run_builtin_task, spec,
+            start_to_close_timeout=timedelta(seconds=timeout_s),
+            retry_policy=_RETRY_LIGHT)

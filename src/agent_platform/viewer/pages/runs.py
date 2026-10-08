@@ -28,7 +28,17 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
             "events": [_event_summary(e) for e in events],
             "graph": None,
         }
-        if engine is not None:
+        # 资产图 run：拓扑与节点状态来自台账 graph 事件 + artifacts 表
+        graph_event = next((e["payload"] for e in reversed(events)
+                            if e["kind"] == "graph"
+                            and isinstance(e["payload"], dict)), None)
+        if graph_event is not None:
+            from ...store import artifacts as artifacts_store
+            arts = await artifacts_store.list_by_run(run_id)
+            state["graph"] = {**graph_event,
+                              "statuses": {a["name"]: a["status"]
+                                           for a in arts}}
+        elif engine is not None:
             try:
                 state["graph"] = await engine.graph_json()
             except Exception:  # noqa: BLE001 —— 图失败不影响步骤时间线

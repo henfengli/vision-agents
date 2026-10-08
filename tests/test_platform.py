@@ -60,14 +60,30 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         async with db.pool().connection() as conn:
             await conn.execute(
                 "TRUNCATE run_events, feedback, approvals, knowledge,"
-                " cases, definitions, runs CASCADE")
+                " cases, definitions, artifacts, runs CASCADE")
 
         self.defs = DefinitionStore()
-        await seed_if_empty(self.defs, "test")
+        from agent_platform.config import DomainConfig
+        dagster_pack = DomainConfig(
+            code_paths=["/tmp/dagster"],
+            rules=[{"pattern": r"connection.*(refused|timeout|reset)",
+                    "category": "infra",
+                    "conclusion": "连接失败，检查服务存活"}],
+            seed_tasks=[{"name": "failure-analysis", "role": "ops_analyst",
+                         "triggers": ["dagster_sensor"],
+                         "input_schema": {"run_id": "str", "asset_key": "str",
+                                          "error": "str"},
+                         "output_channel": "dingtalk", "dedup_key": "run_id",
+                         "dedup_window_s": 600, "timeout_s": 300,
+                         "env_gate": ["prod", "test"]}])
+        await seed_if_empty(self.defs, "test",
+                            domains={"dagster": dagster_pack})
         configure_fake_deps(self.settings, self.defs)
         self.tasks = TaskRegistry(self.defs, "test")
         self.temporal = FakeTemporalClient(execute=True)
-        self.submitter = Submitter(self.temporal, self.tasks, "tq", "test")
+        self.submitter = Submitter(self.temporal, self.tasks, "tq", "test",
+                                   defs=self.defs)
+        self.dagster_rules = dagster_pack.rules
 
     async def asyncTearDown(self):
         from agent_platform.store import db
@@ -327,7 +343,8 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             async def send_alert_card(self, title, content, *, dedup_hash):
                 self.sent.append(title)
 
-        router = dagster_sensor.make_router(self.submitter, _Notifier())
+        router = dagster_sensor.make_router(self.submitter, _Notifier(),
+                                            rules=self.dagster_rules)
         route = next(r for r in router.routes if r.path == "/v1/hooks/dagster")
         resp = await route.endpoint(
             {"run_id": "x", "asset_key": "a", "error": "connection refused"})
@@ -335,12 +352,286 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
 
     async def test_dagster_hook_agent_path(self):
         from agent_platform.triggers import dagster_sensor
-        router = dagster_sensor.make_router(self.submitter, None)
+        router = dagster_sensor.make_router(self.submitter, None,
+                                            rules=self.dagster_rules)
         route = next(r for r in router.routes if r.path == "/v1/hooks/dagster")
         resp = await route.endpoint(
             {"run_id": "x", "asset_key": "orders_daily", "error": "bespoke xyz"})
         self.assertEqual(resp["status"], "queued")
         self.assertTrue(resp["session_id"].startswith("dagster:orders_daily:"))
+
+    # ---- 提交策略链（#2） ----
+
+    async def test_policy_deny(self):
+        from agent_platform.orchestration.submitter import TaskRejected
+        await self.defs.put("policy", "test", "no-drop", {
+            "match_regex": r"drop\s+table", "action": "deny",
+            "message": "禁止删表类请求"})
+        with self.assertRaises(TaskRejected):
+            await self.submitter.submit(
+                "data-qa", {"server": "board", "question": "帮我 drop table x"},
+                "sdk")
+        # 未命中正常放行
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "总量口径"}, "sdk")
+        self.assertEqual(r["status"], "queued")
+
+    async def test_policy_order_and_applies_to(self):
+        from agent_platform.orchestration.submitter import TaskRejected
+        # order 小的先判：deny(10) 在 require_approval(200) 之前短路
+        await self.defs.put("policy", "test", "late-approval", {
+            "order": 200, "match_regex": "foo", "action": "require_approval"})
+        await self.defs.put("policy", "test", "early-deny", {
+            "order": 10, "match_regex": "foo", "action": "deny"})
+        with self.assertRaises(TaskRejected):
+            await self.submitter.submit(
+                "data-qa", {"server": "board", "question": "foo"}, "sdk")
+        # applies_to 不匹配 → 跳过该策略
+        await self.defs.put("policy", "test", "scoped", {
+            "order": 1, "applies_to": ["other-task"],
+            "match_regex": "bar", "action": "deny"})
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "bar"}, "sdk")
+        self.assertEqual(r["status"], "queued")
+
+    async def test_policy_require_approval_flow(self):
+        from agent_platform.orchestration import policies
+        from agent_platform.store import runs
+        await self.defs.put("policy", "test", "delete-gate", {
+            "match_regex": "delete", "action": "require_approval",
+            "message": "删除类操作需审批"})
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "delete 一批数据"},
+            "sdk")
+        self.assertEqual(r["status"], "awaiting_approval")
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "queued")
+        self.assertEqual(self.temporal.started, [])  # workflow 尚未启动
+
+        ok = await policies.settle_submit_gate(r["run_id"], True,
+                                               self.submitter)
+        self.assertTrue(ok)
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "success")
+        self.assertEqual(self.temporal.started[-1][0], r["run_id"])
+        # 已终结的 run 再次 settle 幂等返回 False（不再是闸门挂起状态）
+        self.assertFalse(await policies.settle_submit_gate(
+            r["run_id"], True, self.submitter))
+
+    async def test_policy_reject_fails_run(self):
+        from agent_platform.orchestration import policies
+        from agent_platform.store import runs
+        await self.defs.put("policy", "test", "delete-gate", {
+            "match_regex": "delete", "action": "require_approval"})
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "delete 数据"}, "sdk")
+        ok = await policies.settle_submit_gate(r["run_id"], False,
+                                               self.submitter)
+        self.assertTrue(ok)
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("拒绝", run["output"]["error"])
+        self.assertEqual(self.temporal.started, [])  # 拒绝 = 从未启动
+
+    async def test_run_sync_awaiting_approval_returns_immediately(self):
+        await self.defs.put("policy", "test", "delete-gate", {
+            "match_regex": "delete", "action": "require_approval"})
+        r = await self.submitter.run_sync(
+            "data-qa", {"server": "board", "question": "delete x"}, "sdk")
+        self.assertIsNone(r["output"])
+        self.assertIn("approval_id", r)
+
+    async def test_admin_policies_endpoints(self):
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app, make_api_router
+        from agent_platform.orchestration.submitter import TaskRejected
+        app = create_app(self.settings)
+        app.include_router(make_api_router(self.settings, self.submitter,
+                                           self.tasks, self.defs))
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer test-token"}
+
+        resp = client.post("/v1/admin/policies", headers=headers,
+                           json={"name": "bad",
+                                 "definition": {"action": "deny"}})
+        self.assertEqual(resp.status_code, 422)  # 缺 match_regex
+        resp = client.post("/v1/admin/policies", headers=headers, json={
+            "name": "p1",
+            "definition": {"match_regex": "drop", "action": "deny"}})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["version"], 1)
+        names = [p["name"] for p in client.get(
+            "/v1/admin/policies", headers=headers).json()]
+        self.assertIn("p1", names)
+        # 写后即时生效
+        with self.assertRaises(TaskRejected):
+            await self.submitter.submit(
+                "data-qa", {"server": "board", "question": "drop it"}, "sdk")
+
+    # ---- 资产化任务图（#1） ----
+
+    async def _register_etl_task(self):
+        from agent_platform.orchestration import activities
+
+        @activities.code_node("test_etl.extract")
+        def _extract(payload):
+            return ["a", "b"]
+
+        @activities.code_node("test_etl.summary")
+        def _summary(payload):
+            items = payload["deps"]["per"]
+            return {"count": len(items), "items": items}
+
+        await self.defs.put("task", "test", "asset-etl", {
+            "triggers": ["sdk"],
+            "input_schema": {"topic": "str"},
+            "artifacts": {
+                "extract": {"code": "test_etl.extract"},
+                "per": {"agent": {"role": "data_searcher"},
+                        "map": "extract", "deps": ["extract"]},
+                "verdict": {"route": {"choices": ["ok", "escalate"],
+                                      "by": "ops_analyst"},
+                            "deps": ["per"]},
+                "report": {"agent": {"role": "ops_analyst"},
+                           "deps": ["verdict"],
+                           "gate": {"when": 'verdict == "escalate"'}},
+                "summary": {"code": "test_etl.summary", "deps": ["per"]},
+            }})
+
+    async def test_artifact_graph_end_to_end(self):
+        from agent_platform.store import artifacts as artifacts_store
+        from agent_platform.store import runs
+        await self._register_etl_task()
+        configure_fake_deps(self.settings, self.defs, model_content='"ok"')
+        r = await self.submitter.submit("asset-etl", {"topic": "t"}, "sdk")
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "success")
+        # 终末产出 = 没有被依赖的节点；verdict 是中间产物，report 被 gate 跳过
+        self.assertEqual(list(run["output"]), ["summary"])
+        self.assertEqual(run["output"]["summary"]["count"], 2)  # map 扇出 2 项
+        rows = {a["name"]: a
+                for a in await artifacts_store.list_by_run(r["run_id"])}
+        self.assertEqual(rows["extract"]["status"], "materialized")
+        self.assertEqual(rows["report"]["status"], "skipped")
+        events = await runs.get_events(r["run_id"])
+        self.assertTrue(any(e["kind"] == "graph" for e in events))
+        # 资产图任务不解析单角色：role_version 为空、task_version 固定
+        self.assertIsNone(run["role_version"])
+        self.assertGreaterEqual(run["task_version"], 1)
+
+    async def test_artifact_reuse_across_runs(self):
+        from agent_platform.store import artifacts as artifacts_store
+        await self._register_etl_task()
+        configure_fake_deps(self.settings, self.defs, model_content='"ok"')
+        r1 = await self.submitter.submit("asset-etl", {"topic": "t"}, "sdk")
+        r2 = await self.submitter.submit("asset-etl", {"topic": "t"}, "sdk")
+        self.assertNotEqual(r1["run_id"], r2["run_id"])
+        rows = {a["name"]: a
+                for a in await artifacts_store.list_by_run(r2["run_id"])}
+        # 输入指纹未变：第二跑节点全部复用（零模型调用）
+        self.assertEqual(rows["extract"]["status"], "reused")
+        self.assertEqual(rows["summary"]["status"], "reused")
+        # 输入变了 → 根节点指纹变 → 重新物化
+        r3 = await self.submitter.submit("asset-etl", {"topic": "t3"}, "sdk")
+        rows3 = {a["name"]: a
+                 for a in await artifacts_store.list_by_run(r3["run_id"])}
+        self.assertEqual(rows3["extract"]["status"], "materialized")
+
+    async def test_artifact_gate_approval_paths(self):
+        from unittest.mock import patch
+
+        from agent_platform.agent import approvals as approval_store
+        from agent_platform.store import artifacts as artifacts_store
+        from agent_platform.store import runs
+        await self._register_etl_task()
+        configure_fake_deps(self.settings, self.defs,
+                            model_content='"escalate"')
+
+        async def _approved(approval_id, timeout_s=1800):
+            return None
+
+        with patch.object(approval_store, "wait_decision", _approved):
+            r = await self.submitter.submit("asset-etl", {"topic": "t"}, "sdk")
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "success")
+        self.assertIn("report", run["output"])      # 审批通过 → 物化
+        rows = {a["name"]: a
+                for a in await artifacts_store.list_by_run(r["run_id"])}
+        self.assertEqual(rows["report"]["status"], "materialized")
+
+        async def _rejected(approval_id, timeout_s=1800):
+            raise TimeoutError("审批超时")
+
+        with patch.object(approval_store, "wait_decision", _rejected):
+            r2 = await self.submitter.submit("asset-etl", {"topic": "t2"},
+                                             "sdk")
+        run2 = await runs.get(r2["run_id"])
+        # 拒绝 = 节点跳过（安全侧默认），不是整个 run 失败
+        self.assertEqual(run2["status"], "success")
+        self.assertNotIn("report", run2["output"])
+        rows2 = {a["name"]: a
+                 for a in await artifacts_store.list_by_run(r2["run_id"])}
+        self.assertEqual(rows2["report"]["status"], "rejected")
+
+    # ---- 记忆园丁（#5 口子） ----
+
+    async def test_gardener_drift_sweep(self):
+        import subprocess
+
+        from agent_platform.config import DomainConfig
+        from agent_platform.memory.gardener import run_gardener
+        from agent_platform.store import knowledge
+
+        repo = tempfile.mkdtemp()
+
+        def git(*args):
+            subprocess.run(["git", "-C", repo, *args], check=True,
+                           capture_output=True)
+
+        def head():
+            return subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip()
+
+        git("init")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        Path(repo, "a.py").write_text("v1")
+        git("add", ".")
+        git("commit", "-m", "c1")
+        stale_commit = head()
+        Path(repo, "a.py").write_text("v2")
+        git("commit", "-am", "c2")
+
+        await knowledge.upsert("test", "dagster", "k_stale", "旧结论",
+                               code_ref={"path": f"{repo}/a.py",
+                                         "commit": stale_commit})
+        await knowledge.upsert("test", "dagster", "k_fresh", "新结论",
+                               code_ref={"path": f"{repo}/a.py",
+                                         "commit": head()})
+        await knowledge.upsert("test", "dagster", "k_plain", "无代码引用")
+
+        result = await run_gardener(
+            "test", {"dagster": DomainConfig(code_paths=[repo])})
+        self.assertEqual(result["drift_expired"], 1)
+        self.assertIsNone(result["decay"])       # 口子占位：夜间衰减
+        self.assertIsNone(result["conflicts"])   # 口子占位：矛盾仲裁
+
+        rows = {r["key"]: r
+                for r in await knowledge.list_all("test",
+                                                  include_inactive=True)}
+        self.assertTrue(rows["k_stale"]["expired"])    # commit 漂移 → 过期
+        self.assertFalse(rows["k_fresh"]["expired"])   # 与 HEAD 一致 → 保留
+        self.assertFalse(rows["k_plain"]["expired"])   # 无 code_ref → 不动
+
+    async def test_builtin_gardener_task(self):
+        from agent_platform.store import runs
+        r = await self.submitter.submit("memory-gardener", {}, "sdk")
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["status"], "success")
+        self.assertEqual(run["output"]["drift_expired"], 0)
+        self.assertIsNone(run["output"]["decay"])
 
 
 if __name__ == "__main__":

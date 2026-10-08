@@ -1,0 +1,14 @@
+# 规则先行分类器：命中即直接回结论，只有未命中的疑难报错才建 run 交给 agent
+rules:
+  - pattern: 'connection.*(refused|timeout|reset)'
+    category: infra
+    conclusion: 数据库/服务连接失败，检查目标服务存活与网络
+  - pattern: 'duplicate key|唯一约束|unique constraint'
+    category: data
+    conclusion: 数据主键冲突：上游重复投递或任务重复跑
+  - pattern: 'out of memory|oom|memoryerror'
+    category: infra
+    conclusion: 内存不足：检查资源配额或拆分任务粒度
+  - pattern: 'upstream.*fail|上游.*失败'
+    category: upstream
+    conclusion: 上游 asset 失败级联，根因在上游

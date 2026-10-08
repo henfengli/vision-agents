@@ -17,10 +17,20 @@ _CONF_ROOT = Path(os.environ.get("AGENT_CONF", "conf"))
 
 
 class DomainConfig(BaseModel):
-    """业务域：代码目录（读口径/排障用）+ 可选只读库。"""
+    """业务域：代码目录（读口径/排障用）+ 可选只读库 + 域包声明。
+
+    域知识从内核搬进 conf/domains/<name>/ 域包：
+    - rules.yaml        规则分类器（dagster_sensor 的规则先行）
+    - session.yaml      episode 命名模板
+    - tasks.yaml        域自带种子任务（如 failure-analysis 住 dagster 包）
+    协作边界：平台团队维护内核，业务团队 PR 自己的域包。
+    """
 
     code_paths: list[str] = []
     readonly_dsn: str | None = None
+    rules: list[dict] = []                    # [{pattern, category, conclusion}]
+    session_template: str | None = None       # 含 {asset}/{error_class}/{date}
+    seed_tasks: list[dict] = []               # 域自带种子任务定义
 
 
 class ModelConfig(BaseModel):
@@ -110,10 +120,43 @@ def _merge(base: dict, overlay: dict) -> dict:
     return merged
 
 
+def _load_domain_packs(root: Path) -> dict[str, dict]:
+    """读取 conf/domains/<name>/ 域包，返回 {域名: DomainConfig 片段}。"""
+    packs_dir = root / "domains"
+    packs: dict[str, dict] = {}
+    if not packs_dir.is_dir():
+        return packs
+    for pack in sorted(packs_dir.iterdir()):
+        if not pack.is_dir():
+            continue
+        cfg: dict = {}
+        domain_yaml = pack / "domain.yaml"
+        if domain_yaml.exists():
+            cfg = yaml.safe_load(domain_yaml.read_text()) or {}
+        rules_yaml = pack / "rules.yaml"
+        if rules_yaml.exists():
+            cfg["rules"] = (yaml.safe_load(rules_yaml.read_text())
+                            or {}).get("rules", [])
+        session_yaml = pack / "session.yaml"
+        if session_yaml.exists():
+            cfg["session_template"] = (yaml.safe_load(
+                session_yaml.read_text()) or {}).get("template")
+        tasks_yaml = pack / "tasks.yaml"
+        if tasks_yaml.exists():
+            cfg["seed_tasks"] = (yaml.safe_load(tasks_yaml.read_text())
+                                 or {}).get("tasks", [])
+        packs[pack.name] = cfg
+    return packs
+
+
 def load_settings(env: str | None = None) -> Settings:
     env = env or os.environ.get("AGENT_ENV", "dev")
     base = yaml.safe_load((_CONF_ROOT / "base/common.yaml").read_text()) or {}
     overlay = yaml.safe_load((_CONF_ROOT / f"env/{env}.yaml").read_text()) or {}
     merged = _merge(base, overlay)
+    # 域包深合并进 domains：common.yaml < 域包 < env 覆盖 之外的补充来源
+    packs = _load_domain_packs(_CONF_ROOT)
+    if packs:
+        merged["domains"] = _merge(packs, merged.get("domains") or {})
     merged["env"] = env
     return Settings.model_validate(_interpolate(merged))

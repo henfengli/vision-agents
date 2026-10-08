@@ -1,6 +1,6 @@
 [project]
 name = "agent-platform"
-version = "4.0.2"
+version = "4.1.0"
 description = "平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程"
 requires-python = ">=3.11"
 dependencies = [

@@ -1,0 +1,11 @@
+# 域自带种子任务：随域包走，不再散落在内核种子里
+tasks:
+  - name: failure-analysis
+    role: ops_analyst
+    triggers: ["dagster_sensor"]
+    input_schema: {"run_id": "str", "asset_key": "str", "error": "str"}
+    output_channel: dingtalk
+    dedup_key: run_id
+    dedup_window_s: 600
+    timeout_s: 300
+    env_gate: ["prod", "test"]

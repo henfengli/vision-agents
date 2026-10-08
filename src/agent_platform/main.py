@@ -63,11 +63,6 @@ SEED_ROLES = [
 ]
 
 SEED_TASKS = [
-    {"name": "failure-analysis", "role": "ops_analyst",
-     "triggers": ["dagster_sensor"],
-     "input_schema": {"run_id": "str", "asset_key": "str", "error": "str"},
-     "output_channel": "dingtalk", "dedup_key": "run_id",
-     "dedup_window_s": 600, "timeout_s": 300, "env_gate": ["prod", "test"]},
     {"name": "data-qa", "role": "data_searcher",
      "triggers": ["sdk", "cli", "web_chat"],
      "input_schema": {"question": "str"},
@@ -75,13 +70,14 @@ SEED_TASKS = [
     {"name": "daily-inspection", "role": "ops_analyst",
      "triggers": ["schedule"], "input_schema": {"scope": "str"},
      "output_channel": "dingtalk", "timeout_s": 900},
-    # gitlab_webhook 部署事件提交的前端冒烟：种子缺失会被 TaskRegistry 拒收
-    {"name": "frontend-smoke", "role": "ops_analyst",
-     "triggers": ["webhook"],
-     "input_schema": {"service": "str", "version": "str", "env": "str"},
-     "output_channel": "dingtalk", "dedup_key": "service+version",
-     "dedup_window_s": 1800, "timeout_s": 600},
+    # 记忆园丁（#5 口子）：内建处理器，默认不带 schedule 不自动跑；
+    # 要开夜间整理：Admin 给它加 schedule: "0 3 * * *"
+    {"name": "memory-gardener", "handler": "memory-gardener",
+     "triggers": ["sdk", "schedule"], "output_channel": "dingtalk",
+     "timeout_s": 1800},
 ]
+# 域级种子任务住在域包里：failure-analysis → conf/domains/dagster/tasks.yaml
+#                        frontend-smoke  → conf/domains/board/tasks.yaml
 
 
 @dataclass
@@ -113,7 +109,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     await db.open_db(settings.db_dsn)
 
     defs = DefinitionStore()
-    await seed_if_empty(defs, settings.env)
+    await seed_if_empty(defs, settings.env, domains=settings.domains)
     tasks = TaskRegistry(defs, settings.env)
     langfuse = LangfuseClient(settings.langfuse)
     relay = DingTalkRelay(settings.dingtalk_relay_url, settings.dingtalk_token)
@@ -159,8 +155,16 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     from temporalio.client import Client
     temporal_client = await Client.connect(
         settings.temporal.address, namespace=settings.temporal.namespace)
+
+    # 任务级提交闸门（policies.py）的钉钉通知：与工具级审批同一通道
+    async def submit_gate_notify(run_id: str, summary: str) -> None:
+        await relay.send_action_card(
+            "任务提交待审批", f"run `{run_id}`：\n{summary}",
+            "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
+
     submitter = Submitter(temporal_client, tasks,
-                          settings.temporal.task_queue, settings.env)
+                          settings.temporal.task_queue, settings.env,
+                          defs=defs, approval_notifier=submit_gate_notify)
 
     worker = await create_worker(
         temporal_client,
@@ -182,14 +186,18 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     return rt
 
 
-async def seed_if_empty(defs: DefinitionStore, env: str) -> None:
+async def seed_if_empty(defs: DefinitionStore, env: str,
+                        domains: dict | None = None) -> None:
     if await defs.list_active("role", env):
         return
     for role in SEED_ROLES:
         await defs.put("role", env, role["name"],
                        {k: v for k, v in role.items() if k != "name"},
                        updated_by="seed")
-    for task in SEED_TASKS:
+    tasks = list(SEED_TASKS)
+    for dom in (domains or {}).values():  # 域包自带种子任务（域知识随域走）
+        tasks.extend(getattr(dom, "seed_tasks", None) or [])
+    for task in tasks:
         await defs.put("task", env, task["name"],
                        {k: v for k, v in task.items() if k != "name"},
                        updated_by="seed")
@@ -203,10 +211,15 @@ def build_app(settings: Settings | None = None):
         rt = await assemble_runtime(settings)
         # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
         auth = make_auth_dependency(settings.bearer_token)
+        dagster_pack = settings.domains.get("dagster")
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse),
-            dagster_sensor.make_router(rt.submitter, rt.relay, auth=auth),
+            dagster_sensor.make_router(
+                rt.submitter, rt.relay, auth=auth,
+                rules=dagster_pack.rules if dagster_pack else [],
+                session_template=(dagster_pack.session_template
+                                  if dagster_pack else None)),
             gitlab_webhook.make_router(rt.submitter, auth=auth),
             chat_trigger.make_router(rt.submitter, auth=auth),
         ):

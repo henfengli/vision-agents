@@ -29,7 +29,9 @@ def is_entry_fresh(code_ref: dict | None, domain_code_paths: list[str]) -> bool:
         return True
     for base in domain_code_paths:
         if str(code_ref["path"]).startswith(base):
-            return current_commit(base) == recorded
+            head = current_commit(base)
+            # 非 git 仓库（head 为 None）无法校验，按新鲜处理——不退化
+            return head is None or head == recorded
     return True
 
 
