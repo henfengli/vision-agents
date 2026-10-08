@@ -19,6 +19,8 @@ class FakeCompletions:
 
 
 class FakePool:
+    embed = None  # 与 ModelPool 接口对齐：未配置嵌入模型时为 None
+
     def __init__(self):
         self.chat = FakeCompletions().create
 

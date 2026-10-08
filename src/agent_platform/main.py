@@ -135,7 +135,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         await knowledge_store.upsert(
             settings.env, dom, f"asset:{asset_key}:profile", content,
             source_run="agent-tool",
-            embedder=getattr(model_pool, "embed", None))
+            embedder=model_pool.embed)
 
     from .tools.mcp_bridge import load_mcp_tools
     extra_tools = await load_mcp_tools(settings.mcp_servers)

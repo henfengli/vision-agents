@@ -14,50 +14,10 @@ import sys
 from typing import Any, Awaitable, Callable
 
 from .bash import truncate
+from .driver import DRIVER
 from .sandbox import wrap_argv
 
 RPC_PREFIX = "\x00RPC "
-
-# 子进程驱动脚本：注入桩函数 + RPC 客户端；agent 代码由 __main__ 段读文件执行
-_DRIVER = r'''
-import asyncio, json, sys
-
-RPC_PREFIX = "\x00RPC "
-_req_id = 0
-
-def _call(name, *args, **kwargs):
-    """桩函数统一入口：向 host 发 RPC，同步等待结果。"""
-    global _req_id
-    _req_id += 1
-    sys.stdout.write(RPC_PREFIX + json.dumps(
-        {"id": _req_id, "call": name,
-         "args": list(args), "kwargs": kwargs}) + "\n")
-    sys.stdout.flush()
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            raise RuntimeError("host 连接中断")
-        resp = json.loads(line)
-        if resp.get("id") == _req_id:
-            if "error" in resp:
-                raise RuntimeError(f"{name}: {resp['error']}")
-            return resp.get("result")
-
-def _make_stub(name):
-    def stub(*args, **kwargs):
-        return _call(name, *args, **kwargs)
-    stub.__name__ = name
-    stub.__doc__ = "host 工具桩：%s" % name
-    return stub
-
-for _name in json.loads(sys.argv[2]):
-    globals()[_name] = _make_stub(_name)
-
-with open(sys.argv[1], encoding="utf-8") as _f:
-    _code = _f.read()
-exec(compile(_code, "<agent>", "exec"), globals())
-'''
-
 
 async def execute_code(
     code: str,
@@ -78,7 +38,7 @@ async def execute_code(
         code_path = f.name
 
     argv = wrap_argv(
-        [sys.executable, "-c", _DRIVER, code_path, json.dumps(list(tools))],
+        [sys.executable, "-c", DRIVER, code_path, json.dumps(list(tools))],
         scratch_dir, allow_net=allow_net)
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

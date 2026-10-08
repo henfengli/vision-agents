@@ -18,6 +18,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from ..store import ledger
+from .spec import RunSpec
 from .workflows import AgentRunWorkflow
 
 
@@ -72,13 +73,12 @@ class Submitter:
                 trigger_source=trigger_source, caller=caller,
                 input_data=input_data, dedup_key=dedup_key,
                 session_id=session_id)
-        spec = {"run_id": run_id, "task_type": task.name, "role": task.role,
-                "question": _to_question(task, input_data),
-                "input": input_data,
-                "error_text": input_data.get("error"),
-                "session_id": session_id,
-                "timeout_s": task.timeout_s, "trigger": trigger_source,
-                "correction": correction, "resume": resume}
+        spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
+                       question=_to_question(task, input_data),
+                       input=input_data, error_text=input_data.get("error"),
+                       session_id=session_id, timeout_s=task.timeout_s,
+                       trigger=trigger_source, correction=correction,
+                       resume=resume).to_dict()
         kw = {}
         if resume:
             kw["id_reuse_policy"] = (

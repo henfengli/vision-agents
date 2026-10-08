@@ -28,7 +28,7 @@ _DISTILL_PROMPT = """以下是 agent 刚完成的一次任务记录。判断是�
 async def distill(pool: ModelPool, env: str, domain: str | None, run_id: str,
                   task_type: str, run_input: dict, run_output: dict,
                   code_paths: list[str], session_id: str | None = None) -> None:
-    embedder = getattr(pool, "embed", None)
+    embedder = pool.embed  # ModelPool.embed：未配置嵌入模型时为 None
     resp = await pool.chat(messages=[{
         "role": "user",
         "content": _DISTILL_PROMPT.format(

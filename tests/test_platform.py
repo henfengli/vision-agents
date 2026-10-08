@@ -469,6 +469,8 @@ class TestMemoryContinuity(unittest.TestCase):
         from agent_platform.store import knowledge
 
         class _Pool:  # 第一次返回提炼 JSON，第二次返回四节摘要
+            embed = None
+
             def __init__(self):
                 self._responses = ["[]", "## 结论\n修好了\n\n## 被否方案\n无"]
 

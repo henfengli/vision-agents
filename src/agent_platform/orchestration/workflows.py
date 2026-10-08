@@ -15,6 +15,8 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from .spec import RunSpec
+
 with workflow.unsafe.imports_passed_through():
     from .activities import (finalize_run, mark_failed, prepare_run, run_agent)
 
@@ -84,12 +86,11 @@ async def sync_schedules(client, tasks: list, task_queue: str) -> int:
 
     count = 0
     for name, task in wanted.items():
-        spec = {"run_id": "",                  # 触发时由 prepare_run 生成
-                "task_type": task.name, "role": task.role,
-                "question": _schedule_question(task),
-                "input": dict(task.schedule_input or {}),
-                "session_id": None,
-                "timeout_s": task.timeout_s, "trigger": "schedule"}
+        spec = RunSpec(  # run_id 空 = 触发时由 prepare_run 生成
+            task_type=task.name, role=task.role,
+            question=_schedule_question(task),
+            input=dict(task.schedule_input or {}),
+            timeout_s=task.timeout_s, trigger="schedule").to_dict()
         action = ScheduleActionStartWorkflow(
             AgentRunWorkflow.run, spec,
             id=f"sched-{name}",
