@@ -1,4 +1,6 @@
 # /etc/systemd/system/agent-platform.service
+# 可选常驻模式：一般只有 prod 需要 7×24；test/dev 用 envrun 按需启动
+# （python3 -m agent_platform.envrun <env>，bwrap 隔离配置 + 随会话结束）。
 # 权限收口：低权限用户 + 全盘只读 + 仅 scratch 可写，bash 工具继承此进程权限
 [Unit]
 Description=agent-platform

@@ -1,7 +1,8 @@
 # agent-platform
 
 内网平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程。
-三套环境（prod/test/dev）同代码不同配置，主机 + systemd 部署（无容器）。
+三套环境（prod/test/dev）同代码不同配置，主机部署（无容器）；
+环境是启动参数而非部署单元——一套代码按需起停（bwrap 隔离配置）。
 
 ## 架构一览
 
@@ -44,14 +45,18 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 
 ```bash
 pip install -e .            # 依赖见 pyproject.toml
-export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_BEARER_TOKEN=...
-AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
+python3 -m agent_platform.envrun dev      # 按需启动 dev：bwrap 隔离配置，前台运行
+python3 -m agent_platform.envrun dev --print   # 只打印将执行的 bwrap 命令
 ```
+
+secrets 约定：`/etc/agent-platform/secrets.<env>.env`（KEY=VALUE 行；
+本地开发可用 `--secrets-dir` 指向别处）。启动它的会话结束，服务自动结束
+（`--die-with-parent`），不留孤儿进程。
 
 Run Viewer：`http://127.0.0.1:8100/runs/{run_id}`；管理页 `/admin`；对话页 `/chat`。
 
-生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
-Temporal server 见 `deploy/temporal-server.service`。
+部署：`deploy/install.sh`（装一份代码 + Temporal 共享基建）；
+常驻 prod 是可选项，见 `deploy/agent-platform.service`（systemd 收口）。
 
 ## 测试
 
