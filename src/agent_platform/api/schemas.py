@@ -10,12 +10,14 @@ class AskRequest(BaseModel):
     question: str
     role: str | None = None          # 可选：覆盖任务默认角色
     session_id: str | None = None
+    env: str | None = None           # 目标业务环境（缺省 = 实例默认）
 
 
 class TaskSubmitRequest(BaseModel):
     task_type: str
     input: dict
     caller: str | None = None
+    env: str | None = None           # 目标业务环境（缺省 = 实例默认）
 
 
 class ApprovalRequest(BaseModel):

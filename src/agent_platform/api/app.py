@@ -27,7 +27,7 @@ from .schemas import (ApprovalRequest, AskRequest, DefinitionPutRequest,
 
 
 def create_app(settings, lifespan=None) -> FastAPI:
-    app = FastAPI(title="agent-platform", version="4.3.0", lifespan=lifespan)
+    app = FastAPI(title="agent-platform", version="4.4.0", lifespan=lifespan)
 
     @app.exception_handler(OverloadedError)
     async def _overloaded(_req, exc):
@@ -35,7 +35,8 @@ def create_app(settings, lifespan=None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "env": settings.env}
+        return {"status": "ok", "env": settings.env,
+                "target_envs": settings.target_envs or [settings.env]}
 
     return app
 
@@ -50,12 +51,14 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         return await submitter.run_sync(
             DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
-            trigger_source="sdk", session_id=req.session_id, role=req.role)
+            trigger_source="sdk", session_id=req.session_id, role=req.role,
+            target_env=req.env)
 
     @router.post("/v1/tasks")
     async def submit_task(req: TaskSubmitRequest):
         return await submitter.submit(req.task_type, req.input,
-                                      trigger_source="sdk", caller=req.caller)
+                                      trigger_source="sdk", caller=req.caller,
+                                      target_env=req.env)
 
     @router.get("/v1/tasks/{run_id}")
     async def get_task(run_id: str):
@@ -63,6 +66,11 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         if run is None:
             raise HTTPException(404, "run 不存在")
         return run
+
+    @router.get("/v1/runs")
+    async def list_runs(env: str | None = None, limit: int = 100):
+        """run 列表；env 按目标业务环境过滤。"""
+        return await runs.list_recent(target_env=env, limit=min(limit, 500))
 
     @router.post("/v1/runs/{run_id}/resume")
     async def resume_run(run_id: str):

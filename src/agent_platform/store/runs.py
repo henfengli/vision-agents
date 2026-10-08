@@ -12,13 +12,14 @@ from . import db
 
 async def create(run_id: str, task_type: str, role: str, domain: str | None,
                  trigger_source: str, caller: str, input_data: dict,
-                 dedup_key: str = "", session_id: str | None = None) -> None:
+                 dedup_key: str = "", session_id: str | None = None,
+                 target_env: str = "") -> None:
     async with db.pool().connection() as conn:
         await conn.execute(
             "INSERT INTO runs (run_id, session_id, task_type, role, domain,"
-            " trigger_source, caller, input, status, dedup_key)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)",
-            (run_id, session_id or run_id, task_type, role, domain,
+            " target_env, trigger_source, caller, input, status, dedup_key)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)",
+            (run_id, session_id or run_id, task_type, role, domain, target_env,
              trigger_source, caller, json.dumps(input_data), dedup_key))
 
 
@@ -52,17 +53,34 @@ async def find_by_dedup(dedup_key: str, window_s: int) -> dict | None:
 
 
 async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
-    """会话最近一个 run 的概要（correction 继承 task_type/role/domain 用）。"""
+    """会话最近一个 run 的概要（correction 继承 task_type/role/domain/env 用）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id, task_type, role, domain, input FROM runs"
+            "SELECT run_id, task_type, role, domain, input, target_env FROM runs"
             " WHERE session_id = %s AND run_id <> %s"
             " ORDER BY created_at DESC LIMIT 1", (session_id, exclude))
         row = await cur.fetchone()
     if not row:
         return None
     return {"run_id": row[0], "task_type": row[1], "role": row[2],
-            "domain": row[3], "input": row[4]}
+            "domain": row[3], "input": row[4], "target_env": row[5]}
+
+
+async def list_recent(target_env: str | None = None, limit: int = 100) -> list[dict]:
+    """run 列表（Viewer 列表页）；可按目标环境过滤。"""
+    where, params = "", []
+    if target_env:
+        where, params = " WHERE target_env=%s", [target_env]
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id, session_id, task_type, role, domain, target_env,"
+            " status, trigger_source, created_at FROM runs" + where +
+            " ORDER BY created_at DESC LIMIT %s", (*params, limit))
+        rows = await cur.fetchall()
+    return [{"run_id": r[0], "session_id": r[1], "task_type": r[2],
+             "role": r[3], "domain": r[4], "target_env": r[5], "status": r[6],
+             "trigger_source": r[7], "created_at": r[8].isoformat()}
+            for r in rows]
 
 
 async def session_exists(session_id: str) -> bool:

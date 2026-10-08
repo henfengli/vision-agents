@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -16,13 +16,23 @@ class MemoryUpdateRequest(BaseModel):
     content: str
 
 
-def make_router(env: str) -> APIRouter:
+def make_router(env: str, target_envs: list[str] | None = None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/memory", response_class=HTMLResponse)
-    async def memory_page(domain: str = "", include_inactive: bool = False):
+    async def memory_page(request: Request, domain: str = "",
+                          include_inactive: bool = False):
+        # 记忆按目标环境分区：?env=xxx 切换查看；缺省看实例默认环境
+        view_env = request.query_params.get("env") or env
         items = await knowledge_store.list_all(
-            env, domain or None, include_inactive=include_inactive)
+            view_env, domain or None, include_inactive=include_inactive)
+        env_opts = ""
+        if target_envs:
+            env_opts = ('<select name="env" style="width:auto">'
+                        + "".join(
+                            f'<option value="{esc(e)}"'
+                            f'{" selected" if e == view_env else ""}>{esc(e)}</option>'
+                            for e in target_envs) + "</select>")
         rows = "".join(
             f'<tr><td>{esc(i["domain"])}</td><td>{esc(i["key"])}</td>'
             f'<td><pre style="max-width:500px;white-space:pre-wrap">{esc(i["content"][:500])}</pre></td>'
@@ -36,7 +46,8 @@ def make_router(env: str) -> APIRouter:
         body = f"""
         <h2>记忆管理</h2>
         <div class="card">
-          <form method="get"><input name="domain" value="{esc(domain)}" placeholder="域过滤">
+          <form method="get">{env_opts}<input name="domain" value="{esc(domain)}"
+            placeholder="域过滤" style="width:auto">
           <label><input type="checkbox" name="include_inactive" value="true"
             {"checked" if include_inactive else ""}> 含失效</label>
           <button>筛选</button></form></div>

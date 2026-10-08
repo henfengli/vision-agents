@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS runs (
     task_version  INT,                       -- 执行时生效的任务定义版本（谱系固定）
     role_version  INT,                       -- 执行时生效的角色定义版本
     domain        TEXT,
+    target_env    TEXT NOT NULL DEFAULT '',  -- 目标业务环境（prod/test/dev…）：本 run 操作哪套环境的服务
     trigger_source TEXT NOT NULL,            -- sdk/cli/web/sensor/webhook/schedule/feedback/resume
     caller        TEXT,
     input         JSONB,
@@ -136,6 +137,7 @@ MIGRATIONS = [
     # 已有库的增量列（新库由 SCHEMA 一步到位）
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS task_version INT",
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS role_version INT",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS target_env TEXT NOT NULL DEFAULT ''",
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "

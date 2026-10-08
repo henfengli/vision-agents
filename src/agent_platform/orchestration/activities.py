@@ -89,13 +89,16 @@ async def prepare_run(raw: dict) -> dict:
 
     role = resolve(spec.role, await d.engine.roles())
     spec.domain = spec.domain or (role.domains[0] if role.domains else None)
+    # 目标环境：run 操作哪套业务环境——域连接信息（code_paths/只读库）与
+    # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）
+    t_env = spec.target_env or d.settings.env
     if spec.domain and spec.domain in d.settings.domains:
-        spec.code_paths = d.settings.domains[spec.domain].code_paths
+        spec.code_paths = d.settings.domains[spec.domain].for_env(t_env).code_paths
 
     spec.prompt = spec.question
     if not spec.resume:
         recalled = await recall_block(
-            d.settings.env, spec.domain, spec.question,
+            t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
             embedder=d.model_pool.embed, session_id=spec.session_id)
         if recalled:
@@ -147,13 +150,14 @@ async def finalize_run(raw: dict, output: dict) -> dict:
     await runs.set_status(spec.run_id, "success", output=output)
     # 纠正式反馈：新结论沉淀前，把本 session 最近一次 run 沉淀的记忆标记为被取代。
     # 只杀最近的判断——纠正针对的是上一次结论，不误伤 session 里沉淀正确的历史知识。
+    t_env = spec.target_env or d.settings.env   # 记忆按目标环境分区
     if spec.correction and spec.session_id:
         last = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
         old_ids = [last["run_id"]] if last else []
-        await knowledge_store.supersede_by_runs(d.settings.env, old_ids, spec.run_id)
-        await cases_store.supersede_by_runs(d.settings.env, old_ids, spec.run_id)
+        await knowledge_store.supersede_by_runs(t_env, old_ids, spec.run_id)
+        await cases_store.supersede_by_runs(t_env, old_ids, spec.run_id)
     try:
-        await distill(d.model_pool, d.settings.env, spec.domain,
+        await distill(d.model_pool, t_env, spec.domain,
                       spec.run_id, spec.task_type,
                       {"question": spec.question, "error": spec.error_text},
                       output, spec.code_paths, session_id=spec.session_id)
@@ -193,6 +197,7 @@ def _run_span(d: Deps, spec: RunSpec):
                     "agent.task_type": spec.task_type,
                     "agent.role": spec.role,
                     "agent.env": d.settings.env,
+                    "agent.target_env": spec.target_env or d.settings.env,
                     "agent.session_id": spec.session_id or ""})
 
 
@@ -415,8 +420,14 @@ async def run_builtin_task(raw: dict) -> dict:
 
 
 async def _gardener_handler(d: Deps) -> dict:
+    """园丁按目标环境逐个巡检：记忆分区与域连接信息都按目标环境解析。"""
     from ..memory.gardener import run_gardener
-    return await run_gardener(d.settings.env, d.settings.domains)
+    report = {}
+    for env in d.settings.target_envs or [d.settings.env]:
+        doms = {name: dom.for_env(env)
+                for name, dom in d.settings.domains.items()}
+        report[env] = await run_gardener(env, doms)
+    return report
 
 
 HANDLERS: dict[str, Callable[[Deps], Awaitable[dict]]] = {

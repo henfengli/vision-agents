@@ -10,8 +10,43 @@ from ...store import runs
 from .base import esc, page
 
 
-def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
+def make_router(env: str, engine=None, langfuse=None,
+                target_envs: list[str] | None = None) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/runs", response_class=HTMLResponse)
+    async def runs_list(request: Request):
+        # 目标环境过滤：?env=xxx；单环境部署（无 target_envs）不出过滤器
+        qenv = request.query_params.get("env") or None
+        rows = await runs.list_recent(target_env=qenv, limit=100)
+        filt = ""
+        if target_envs:
+            opts = ['<option value="">全部环境</option>'] + [
+                f'<option value="{esc(e)}"'
+                f'{" selected" if e == qenv else ""}>{esc(e)}</option>'
+                for e in target_envs]
+            filt = (f'<form method="get" action="/runs" style="margin:0 0 8px">'
+                    f'<select name="env" onchange="this.form.submit()" '
+                    f'style="width:auto">{"".join(opts)}</select></form>')
+        body_rows = "".join(
+            f'<tr><td><a href="/runs/{r["run_id"]}">{r["run_id"][:8]}</a></td>'
+            f'<td>{esc(r["task_type"])}</td><td>{esc(r["role"])}</td>'
+            f'<td>{esc(r["target_env"] or "-")}</td>'
+            f'<td class="status-{r["status"]}">{r["status"]}</td>'
+            f'<td>{esc(r["trigger_source"])}</td>'
+            f'<td class="meta">{r["created_at"]}</td></tr>'
+            for r in rows)
+        return page("Runs", f"""
+        <h2>最近 Runs</h2>
+        {filt}
+        <div class="card"><table style="width:100%;border-collapse:collapse">
+          <tr class="meta" style="text-align:left">
+            <th>run</th><th>任务</th><th>角色</th><th>目标环境</th>
+            <th>状态</th><th>来源</th><th>时间</th></tr>
+          {body_rows or '<tr><td colspan="7" class="meta">暂无</td></tr>'}
+        </table></div>
+        <style>td, th {{ padding:4px 8px; border-bottom:1px solid #eee;
+                 font-size:13px; text-align:left }}</style>""")
 
     @router.get("/runs/{run_id}/state.json")
     async def run_state(run_id: str):
@@ -23,7 +58,7 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
             "run": {k: run.get(k) for k in
                     ("run_id", "task_type", "task_version", "role",
                      "role_version", "status", "trigger_source",
-                     "duration_ms", "output")},
+                     "target_env", "duration_ms", "output")},
             "created_at": str(run["created_at"]),
             "events": [_event_summary(e) for e in events],
             "graph": None,
@@ -86,7 +121,10 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
         form = await request.form()
         score = int(form["score"])
         await feedback_store.add(run_id, score, str(form.get("comment", "")))
-        await feedback_store.propagate_to_memory(env, run_id, score)
+        # 记忆按目标环境分区：反馈传播到该 run 实际操作的环境
+        run = await runs.get(run_id)
+        await feedback_store.propagate_to_memory(
+            (run or {}).get("target_env") or env, run_id, score)
         return page("反馈", "<p>已记录，感谢。</p>"
                            "<p><a href='javascript:history.back()'>返回</a></p>")
 

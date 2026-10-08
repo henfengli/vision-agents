@@ -38,6 +38,7 @@ class PolicyDef(BaseModel):
     name: str
     order: int = 100                       # 链内执行顺序，小的先判
     applies_to: list[str] = Field(default_factory=list)  # 空 = 所有任务
+    envs: list[str] = Field(default_factory=list)        # 空 = 所有目标环境
     match_regex: str                       # 作用于 任务名+输入+question 的正则
     action: PolicyAction = "deny"
     message: str = ""                      # 给调用方/审批人看的理由
@@ -51,21 +52,28 @@ class Verdict:
     message: str = ""
 
 
-async def evaluate_submit(task: TaskDef, env: str, input_data: dict,
-                          question: str, defs: DefinitionStore) -> Verdict:
-    """提交前过闸门链；任一环节命中即短路返回。"""
-    if not task.enabled_in(env):
+async def evaluate_submit(task: TaskDef, target_env: str, instance_env: str,
+                          input_data: dict, question: str,
+                          defs: DefinitionStore) -> Verdict:
+    """提交前过闸门链；任一环节命中即短路返回。
+
+    target_env 是 run 操作的业务环境（env_gate 与策略 envs 都按它判）；
+    instance_env 是本部署实例标签（策略定义按它存取——一套部署一套定义）。
+    """
+    if not task.enabled_in(target_env):
         return Verdict("deny", "env_gate",
-                       f"任务 {task.name} 未在当前环境（{env}）启用")
+                       f"任务 {task.name} 未在目标环境（{target_env}）启用")
 
     text = "\n".join([task.name, question,
                       json.dumps(input_data, ensure_ascii=False, default=str)])
-    rows = await defs.list_active("policy", env)
+    rows = await defs.list_active("policy", instance_env)
     policies = sorted(
         (PolicyDef.model_validate(r) for r in rows if r.get("enabled", True)),
         key=lambda p: p.order)
     for p in policies:
         if p.applies_to and task.name not in p.applies_to:
+            continue
+        if p.envs and target_env not in p.envs:
             continue
         if re.search(p.match_regex, text, re.IGNORECASE | re.DOTALL):
             return Verdict(p.action, p.name,

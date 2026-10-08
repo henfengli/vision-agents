@@ -11,6 +11,7 @@ _CHAT_HTML = """
 <h2>Agent 对话</h2>
 <div class="card">
   <select id="server">__SERVER_OPTIONS__</select>
+  __ENV_SELECT__
   <input id="role" value="data_searcher" placeholder="角色">
   <input id="session" placeholder="session_id（留空自动新建）">
 </div>
@@ -33,6 +34,7 @@ document.getElementById("q").addEventListener("keydown", async (e) => {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({server: document.getElementById("server").value,
       role: document.getElementById("role").value, question: q,
+      env: (document.getElementById("env") || {}).value || null,
       session_id: sessionId || null})});
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -60,13 +62,26 @@ document.getElementById("q").addEventListener("keydown", async (e) => {
 """
 
 
-def make_router(domains: list[str] | None = None) -> APIRouter:
-    """domains 来自配置（settings.domains），业务域不在页面里硬编码。"""
+def make_router(domains: list[str] | None = None,
+                target_envs: list[str] | None = None) -> APIRouter:
+    """domains/target_envs 来自配置，业务域与目标环境不在页面里硬编码。
+
+    单部署多目标环境：配置了 target_envs 时给出环境选择器（留空 = 默认环境），
+    选择随请求体 env 字段上送；未配置则页面不出现选择器（单环境部署无感知）。
+    """
     router = APIRouter()
     options = "".join(f'<option value="{d}">{d}</option>' for d in (domains or []))
+    env_select = ""
+    if target_envs:
+        opts = ('<option value="">目标环境：默认</option>'
+                + "".join(f'<option value="{e}">{e}</option>'
+                          for e in target_envs))
+        env_select = f'<select id="env">{opts}</select>'
 
     @router.get("/chat", response_class=HTMLResponse)
     async def chat_page():
-        return page("对话", _CHAT_HTML.replace("__SERVER_OPTIONS__", options))
+        return page("对话", _CHAT_HTML
+                    .replace("__SERVER_OPTIONS__", options)
+                    .replace("__ENV_SELECT__", env_select))
 
     return router

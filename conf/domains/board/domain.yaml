@@ -1,1 +1,8 @@
 code_paths: ["/srv/board"]
+
+# 按目标环境覆盖域连接信息（可选）：基座写任一环境的值，差异放 envs。
+# envs:
+#   prod:
+#     readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@prod-db:5432/board"
+#   test:
+#     readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@test-db:5432/board"

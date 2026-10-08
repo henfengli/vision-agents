@@ -31,6 +31,17 @@ class DomainConfig(BaseModel):
     rules: list[dict] = []                    # [{pattern, category, conclusion}]
     session_template: str | None = None       # 含 {asset}/{error_class}/{date}
     seed_tasks: list[dict] = []               # 域自带种子任务定义
+    # 按目标环境覆盖连接信息：{env: {readonly_dsn/code_paths/...}}——
+    # 一套 agent 部署操作多套业务环境时，差异只在这里
+    envs: dict[str, dict] = Field(default_factory=dict)
+
+    def for_env(self, target_env: str) -> "DomainConfig":
+        """基座 + 目标环境覆盖（深合并）；无覆盖时原样返回。"""
+        overlay = self.envs.get(target_env)
+        if not overlay:
+            return self
+        return DomainConfig.model_validate(
+            _merge(self.model_dump(exclude={"envs"}), overlay))
 
 
 class ModelConfig(BaseModel):
@@ -68,7 +79,9 @@ class ApprovalsConfig(BaseModel):
 
 
 class Settings(BaseModel):
-    env: str
+    env: str                               # 实例标签：本套部署自己是谁（定义/种子按它存取）
+    target_envs: list[str] = Field(default_factory=list)  # 可操作的业务环境；空=单环境(=env)
+    default_target_env: str | None = None  # 缺省目标环境（缺省=target_envs[0] 或 env）
     host: str = "127.0.0.1"
     port: int = 8100
     db_dsn: str
@@ -84,6 +97,20 @@ class Settings(BaseModel):
     approvals: ApprovalsConfig = ApprovalsConfig()
     # 内部 MCP 服务器：{名字: langchain-mcp-adapters 连接配置}
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
+
+    def resolve_target_env(self, env: str | None) -> str:
+        """请求级目标环境：缺省给默认；配了 target_envs 则必须在列表里。
+
+        一套 agent 部署服务多套业务环境（prod/test/dev 的 Dagster/board…），
+        run/记忆/闸门都按这个维度区分；不配 target_envs 时退化为实例标签本身。
+        """
+        if not env:
+            return self.default_target_env or (self.target_envs[0]
+                                               if self.target_envs else self.env)
+        if self.target_envs and env not in self.target_envs:
+            raise ValueError(
+                f"未知目标环境 {env}（本实例可操作：{self.target_envs}）")
+        return env
 
 
 _ENV_VAR = re.compile(r"\$\{(\w+)\}")

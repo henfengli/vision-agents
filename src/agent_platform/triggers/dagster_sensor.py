@@ -53,7 +53,11 @@ def make_router(submitter, notifier, auth=None,
 
     @router.post("/v1/hooks/dagster")
     async def dagster_hook(payload: dict):
-        """Dagster run_failure_sensor 回调：{run_id, asset_key, error}。"""
+        """Dagster run_failure_sensor 回调：{run_id, asset_key, error, env?}。
+
+        env 是目标业务环境：多套 Dagster 环境共用一个 agent 实例时，
+        sensor 侧按自己的环境标识上送（缺省 = 实例默认环境）。
+        """
         error = str(payload.get("error", ""))
         hit = rule_classify(error, rules)
         if hit and notifier is not None:
@@ -66,6 +70,7 @@ def make_router(submitter, notifier, auth=None,
         return await submitter.submit(
             "failure-analysis", payload, trigger_source="sensor",
             session_id=session_id_for(str(payload.get("asset_key", "")),
-                                      error, rules, session_template))
+                                      error, rules, session_template),
+            target_env=payload.get("env") or None)
 
     return router

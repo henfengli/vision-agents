@@ -1,6 +1,12 @@
 # 生产环境：危险操作强制人工审批 + Langfuse 观测与 prompt 源头（继承 common.yaml，只写差异）
 host: 0.0.0.0
 
+# 单部署多目标环境：一套 agent 服务操作多套业务环境（请求级 env 字段区分，
+# API/网页/触发器都带 env；run、记忆、提交闸门按它分区）。
+# 不配这两行 = 单环境部署，一切照旧（目标环境=实例标签）。
+target_envs: [prod, test, dev]
+default_target_env: test             # 缺省打到测试环境：生产操作必须显式指定 env
+
 model:
   tokens: ["${MODEL_TOKEN_A}", "${MODEL_TOKEN_B}"]
 

@@ -18,6 +18,7 @@ class RunSpec:
     input: dict = field(default_factory=dict)
     error_text: str | None = None
     session_id: str | None = None   # 会话标识；无会话时 = run_id
+    target_env: str = ""            # 目标业务环境：本 run 操作哪套环境的服务
     timeout_s: int = 300
     trigger: str = "sdk"
     correction: bool = False        # 纠正式反馈触发的重判

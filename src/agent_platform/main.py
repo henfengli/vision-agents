@@ -164,7 +164,9 @@ async def assemble_runtime(settings: Settings) -> Runtime:
 
     submitter = Submitter(temporal_client, tasks,
                           settings.temporal.task_queue, settings.env,
-                          defs=defs, approval_notifier=submit_gate_notify)
+                          defs=defs, approval_notifier=submit_gate_notify,
+                          target_envs=settings.target_envs,
+                          default_target_env=settings.default_target_env)
 
     worker = await create_worker(
         temporal_client,
@@ -227,7 +229,8 @@ def build_app(settings: Settings | None = None):
         app.include_router(make_viewer_router(
             rt.submitter, rt.defs, settings.env, engine=rt.engine,
             langfuse=rt.langfuse, token=settings.bearer_token,
-            domains=list(settings.domains)))
+            domains=list(settings.domains),
+            target_envs=settings.target_envs or None))
         try:
             yield
         finally:

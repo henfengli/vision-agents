@@ -25,9 +25,10 @@ class AgentError(RuntimeError):
 class AgentClient:
     def __init__(self, server: str, role: str,
                  base_url: str | None = None, token: str | None = None,
-                 timeout: float = 300.0):
+                 env: str | None = None, timeout: float = 300.0):
         self.server = server
         self.role = role
+        self.env = env                 # 目标业务环境；None = 服务端默认
         self.session_id: str | None = None
         self._base = (base_url or os.environ.get("AGENT_BASE_URL", "")).rstrip("/")
         self._token = token or os.environ.get("AGENT_TOKEN", "")
@@ -45,6 +46,7 @@ class AgentClient:
         data = self._post("/v1/chat", {
             "server": self.server, "role": self.role,
             "question": question, "session_id": self.session_id,
+            "env": self.env,
         })
         self.session_id = data.get("session_id", self.session_id)
         output = data.get("output") or {}
@@ -54,7 +56,8 @@ class AgentClient:
 
     def submit(self, task_type: str, input_data: dict[str, Any]) -> dict:
         """异步任务：立即返回 run_id，用 get_task 轮询或走任务的输出通道。"""
-        return self._post("/v1/tasks", {"task_type": task_type, "input": input_data})
+        return self._post("/v1/tasks", {"task_type": task_type,
+                                        "input": input_data, "env": self.env})
 
     def get_task(self, run_id: str) -> dict:
         with self._client() as c:

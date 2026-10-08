@@ -1,7 +1,8 @@
 # agent-platform
 
 内网平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程。
-三套环境（prod/test/dev）同代码不同配置，主机 + systemd 部署（无容器）。
+**单部署多目标环境**：一套服务操作 prod/test/dev 多套业务环境（请求级 `env`
+字段区分），主机 + systemd 部署（无容器）。
 
 ## 架构一览
 
@@ -22,6 +23,10 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 
 ## 核心设计（一句话版）
 
+- **目标环境维度**：`settings.env` 只是实例标签（定义/种子按它存取）；run 操作的
+  业务环境由请求 `env` 决定——run 记录、记忆分区、env_gate 与策略 `envs` 过滤、
+  域连接信息（`DomainConfig.envs` 覆盖）全部按它走。不配 `target_envs` 即单环境，
+  一切照旧。
 - **一切需求归一为任务声明**：新增需求 = Admin API 写一条任务定义，即时生效。
   任务三种形态：单 agent 问答（默认）/ 资产化任务图（artifacts）/ 内建处理器（handler）。
 - **资产化任务图**：节点是产物、边是依赖（数据流不是控制流）；动态性只收进
@@ -48,7 +53,8 @@ export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_B
 AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 ```
 
-Run Viewer：`http://127.0.0.1:8100/runs/{run_id}`；管理页 `/admin`；对话页 `/chat`。
+Run Viewer：列表页 `/runs`（可按目标环境过滤）、详情页 `/runs/{run_id}`；
+管理页 `/admin`；对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
 
 生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
 Temporal server 见 `deploy/temporal-server.service`。
@@ -71,7 +77,7 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 77 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 89 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）

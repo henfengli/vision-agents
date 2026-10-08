@@ -260,9 +260,33 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.settings)
         app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
         client = TestClient(app)
-        for path in ("/admin", "/memory", "/chat"):
+        for path in ("/admin", "/memory", "/chat", "/runs"):
             resp = client.get(path)
             self.assertEqual(resp.status_code, 200, path)
+        # 未配 target_envs：页面不出现环境选择器（单环境部署无感知）
+        self.assertNotIn('id="env"', client.get("/chat").text)
+
+    async def test_viewer_env_selectors(self):
+        """配置了 target_envs：对话页/列表页/记忆页带环境选择器与过滤。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        sub = self._multi_env_submitter()
+        await sub.submit("data-qa", {"server": "board", "question": "q"},
+                         "sdk", target_env="prod")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(
+            sub, self.defs, "test", target_envs=["prod", "test"]))
+        client = TestClient(app)
+
+        self.assertIn('id="env"', client.get("/chat").text)
+        listed = client.get("/runs", params={"env": "prod"})
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn("prod", listed.text)
+        mem = client.get("/memory", params={"env": "prod"})
+        self.assertEqual(mem.status_code, 200)
+        self.assertIn('name="env"', mem.text)
 
     async def test_admin_diff_page(self):
         """定义版本对比页：渲染 diff，缺版本 404。"""
@@ -469,6 +493,112 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             await self.submitter.submit(
                 "data-qa", {"server": "board", "question": "drop it"}, "sdk")
 
+    # ---- 目标环境（单部署多环境） ----
+
+    def _multi_env_submitter(self):
+        from agent_platform.orchestration.submitter import Submitter
+        return Submitter(self.temporal, self.tasks, "tq", "test",
+                         defs=self.defs,
+                         target_envs=["prod", "test"],
+                         default_target_env="test")
+
+    async def test_target_env_recorded_on_run(self):
+        from agent_platform.store import runs
+        sub = self._multi_env_submitter()
+        r = await sub.submit("data-qa",
+                             {"server": "board", "question": "q"}, "sdk",
+                             target_env="prod")
+        self.assertEqual(r["target_env"], "prod")
+        run = await runs.get(r["run_id"])
+        self.assertEqual(run["target_env"], "prod")
+        # 缺省 → default_target_env
+        r2 = await sub.submit("data-qa",
+                              {"server": "board", "question": "q2"}, "sdk")
+        run2 = await runs.get(r2["run_id"])
+        self.assertEqual(run2["target_env"], "test")
+
+    async def test_unknown_target_env_rejected(self):
+        from agent_platform.orchestration.submitter import TaskRejected
+        sub = self._multi_env_submitter()
+        with self.assertRaises(TaskRejected):
+            await sub.submit("data-qa",
+                             {"server": "board", "question": "q"}, "sdk",
+                             target_env="staging")
+
+    async def test_env_gate_uses_target_env(self):
+        """env_gate 按目标环境判，不是按实例标签。"""
+        from agent_platform.orchestration.submitter import TaskRejected
+        await self.defs.put("task", "test", "prod-only", {
+            "role": "data_searcher", "triggers": ["sdk"],
+            "input_schema": {"question": "str"}, "output_channel": "caller",
+            "env_gate": ["prod"]})
+        sub = self._multi_env_submitter()
+        with self.assertRaises(TaskRejected):
+            await sub.submit("prod-only", {"question": "q"}, "sdk",
+                             target_env="test")   # 实例标签是 test 也不行
+        r = await sub.submit("prod-only", {"question": "q"}, "sdk",
+                             target_env="prod")
+        self.assertEqual(r["status"], "queued")
+
+    async def test_policy_envs_filter_by_target_env(self):
+        """PolicyDef.envs 限定策略生效的目标环境。"""
+        from agent_platform.orchestration.submitter import TaskRejected
+        await self.defs.put("policy", "test", "prod-no-drop", {
+            "match_regex": r"drop\s+table", "action": "deny",
+            "envs": ["prod"], "message": "生产禁删表"})
+        sub = self._multi_env_submitter()
+        with self.assertRaises(TaskRejected):
+            await sub.submit(
+                "data-qa", {"server": "board", "question": "drop table x"},
+                "sdk", target_env="prod")
+        # 同一问题打到 test：策略不生效，放行
+        r = await sub.submit(
+            "data-qa", {"server": "board", "question": "drop table x"},
+            "sdk", target_env="test")
+        self.assertEqual(r["status"], "queued")
+
+    async def test_memory_partitioned_by_target_env(self):
+        """沉淀按目标环境分区：prod 的知识在 test 分区查不到。"""
+        from agent_platform.store import knowledge
+        sub = self._multi_env_submitter()
+        configure_fake_deps(self.settings, self.defs,
+                            model_content='[{"kind":"knowledge","key":"k_prod",'
+                                          '"content":"生产口径"}]')
+        try:
+            r = await sub.run_sync(
+                "data-qa", {"server": "board", "question": "q"}, "sdk",
+                target_env="prod")
+            self.assertIsNotNone(r["output"])
+        finally:
+            configure_fake_deps(self.settings, self.defs)  # 还原空产出
+        prod_keys = {i["key"] for i in await knowledge.list_all("prod")}
+        test_keys = {i["key"] for i in await knowledge.list_all("test")}
+        self.assertIn("k_prod", prod_keys)
+        self.assertNotIn("k_prod", test_keys)
+
+    async def test_list_runs_api_filters_by_env(self):
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app, make_api_router
+        sub = self._multi_env_submitter()
+        settings = _settings(db_dsn=self._pg.get_uri(),
+                             target_envs=["prod", "test"],
+                             default_target_env="test")
+        app = create_app(settings)
+        app.include_router(make_api_router(settings, sub, self.tasks,
+                                           self.defs))
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer test-token"}
+        await sub.submit("data-qa", {"server": "board", "question": "q"},
+                         "sdk", target_env="prod")
+        await sub.submit("data-qa", {"server": "board", "question": "q2"},
+                         "sdk", target_env="test")
+        all_runs = client.get("/v1/runs", headers=headers).json()
+        self.assertEqual(len(all_runs), 2)
+        prod_runs = client.get("/v1/runs?env=prod", headers=headers).json()
+        self.assertEqual(len(prod_runs), 1)
+        self.assertEqual(prod_runs[0]["target_env"], "prod")
+
     # ---- 资产化任务图（#1） ----
 
     async def _register_etl_task(self):
@@ -630,8 +760,9 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         r = await self.submitter.submit("memory-gardener", {}, "sdk")
         run = await runs.get(r["run_id"])
         self.assertEqual(run["status"], "success")
-        self.assertEqual(run["output"]["drift_expired"], 0)
-        self.assertIsNone(run["output"]["decay"])
+        # 多目标环境：园丁逐环境巡检，输出按环境分组；单环境实例只有实例标签一档
+        self.assertEqual(run["output"]["test"]["drift_expired"], 0)
+        self.assertIsNone(run["output"]["test"]["decay"])
 
 
 if __name__ == "__main__":

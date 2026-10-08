@@ -59,6 +59,37 @@ class TestConfig(unittest.TestCase):
             finally:
                 config._CONF_ROOT = old_root
 
+    def test_resolve_target_env(self):
+        from agent_platform.config import Settings
+        s = Settings(db_dsn="x", model={"url": "u", "name": "m", "tokens": ["t"]},
+                     dingtalk_relay_url="r", dingtalk_token="t",
+                     bearer_token="b", viewer_base_url="v",
+                     env="deploy", target_envs=["prod", "test"])
+        self.assertEqual(s.resolve_target_env(None), "prod")   # 默认第一档
+        self.assertEqual(s.resolve_target_env("test"), "test")
+        with self.assertRaises(ValueError):
+            s.resolve_target_env("staging")                    # 未纳管的环境
+        # 显式默认目标环境优先
+        s2 = s.model_copy(update={"default_target_env": "test"})
+        self.assertEqual(s2.resolve_target_env(None), "test")
+        # 未配置 target_envs：单环境部署，退化为实例标签，任意请求透传
+        s3 = s.model_copy(update={"target_envs": []})
+        self.assertEqual(s3.resolve_target_env(None), "deploy")
+
+    def test_domain_for_env(self):
+        from agent_platform.config import DomainConfig
+        d = DomainConfig(
+            code_paths=["/srv/board"], readonly_dsn="postgres://prod_ro",
+            envs={"test": {"readonly_dsn": "postgres://test_ro"}})
+        prod = d.for_env("prod")          # 无覆盖 → 原样返回
+        self.assertIs(prod, d)
+        test = d.for_env("test")          # 目标环境覆盖
+        self.assertEqual(test.readonly_dsn, "postgres://test_ro")
+        self.assertEqual(test.code_paths, ["/srv/board"])  # 未覆盖字段继承基座
+        self.assertEqual(test.envs, {})   # 覆盖表不泄漏进解析结果
+        # for_env 不改动原对象
+        self.assertEqual(d.readonly_dsn, "postgres://prod_ro")
+
 
 class TestRoles(unittest.TestCase):
     def test_inheritance_intersection(self):

@@ -38,10 +38,13 @@ def make_router(submitter, auth=None, smoke_task: str = "frontend-smoke"):
         health_url = payload.get("health_url")
         if health_url and not await readiness_probe(health_url):
             return {"status": "readiness_failed", "note": "健康检查未通过，未触发测试"}
-        # 冒烟任务名是域知识（种子在 board 域包 tasks.yaml），由装配侧注入
+        # 冒烟任务名是域知识（种子在 board 域包 tasks.yaml），由装配侧注入；
+        # GitLab deployment 的 environment 即目标业务环境（命名需与
+        # target_envs 一致，如 prod/test/dev）
         return await submitter.submit(
             smoke_task,
             {"service": service, "version": version, "env": env},
-            trigger_source="webhook", caller=service)
+            trigger_source="webhook", caller=service,
+            target_env=env or None)
 
     return router
