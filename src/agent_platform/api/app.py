@@ -14,6 +14,7 @@ from ..agent import approvals
 from ..agent.roles import RoleDef
 from ..orchestration.submitter import OverloadedError, Submitter, TaskRejected
 from ..orchestration.tasks import DEFAULT_CHAT_TASK, TaskDef, TaskRegistry
+from ..store import definitions as definitions_store
 from ..store import feedback as feedback_store
 from ..store import runs
 from ..store.definitions import DefinitionStore
@@ -106,6 +107,16 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
 
     # —— Admin：角色/任务 CRUD ——
 
+    async def usage_hint(kind: str, name: str) -> dict | None:
+        """保存后的影响面提示：上一版本在近 24h 被多少 run 使用。"""
+        version = await definitions_store.active_version(kind, settings.env, name)
+        if not version or version < 2:
+            return {"version": version} if version else None
+        prev = version - 1
+        count = await runs.count_recent_with_version(kind, name, prev)
+        return {"version": version, "previous_version": prev,
+                "recent_runs_on_previous": count}
+
     @router.post("/v1/admin/roles")
     async def put_role(req: DefinitionPutRequest):
         """角色定义：Langfuse 启用时写 Langfuse（新版本+label），同步写穿 PG 缓存；
@@ -121,7 +132,7 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             except Exception as e:
                 raise HTTPException(502, f"Langfuse 写入失败：{e}")
         await defs.cache_put("role", settings.env, req.name, req.definition)
-        return {"name": req.name}
+        return {"name": req.name, **(await usage_hint("role", req.name) or {})}
 
     @router.get("/v1/admin/roles")
     async def list_roles():
@@ -152,9 +163,9 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             TaskDef.model_validate({"name": req.name, **req.definition})
         except Exception as e:
             raise HTTPException(422, f"任务定义不合法：{e}")
-        version = await defs.put("task", settings.env, req.name,
-                                 req.definition, req.updated_by)
-        return {"name": req.name, "version": version}
+        await defs.put("task", settings.env, req.name,
+                       req.definition, req.updated_by)
+        return {"name": req.name, **(await usage_hint("task", req.name) or {})}
 
     @router.get("/v1/admin/tasks")
     async def list_tasks():

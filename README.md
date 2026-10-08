@@ -11,7 +11,7 @@
 编排层    Temporal：AgentRunWorkflow = prepare → run_agent → finalize
 agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工具层（tools）
 记忆层    recall（运行前召回）/ distill（运行后沉淀）
-存储层    Postgres：runs/run_events/definitions/knowledge/cases/feedback/approvals
+存储层    Postgres：runs(含定义版本谱系)/run_events/definitions/knowledge/cases/feedback/approvals
 观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ Run Viewer（自托管页面）
 通知      钉钉中继（单向只发）
 ```
@@ -46,7 +46,7 @@ Temporal server 见 `deploy/temporal-server.service`。
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 54 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 56 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）

@@ -21,8 +21,9 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
         events = await runs.get_events(run_id)
         state = {
             "run": {k: run.get(k) for k in
-                    ("run_id", "task_type", "role", "status",
-                     "trigger_source", "duration_ms", "output")},
+                    ("run_id", "task_type", "task_version", "role",
+                     "role_version", "status", "trigger_source",
+                     "duration_ms", "output")},
             "created_at": str(run["created_at"]),
             "events": [_event_summary(e) for e in events],
             "graph": None,
@@ -41,10 +42,7 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
             raise HTTPException(404, "run 不存在")
         trace_link = ""
         if langfuse is not None and langfuse.enabled:
-            events = await runs.get_events(run_id)
-            tid = next((e["payload"].get("trace_id") for e in events
-                        if e["kind"] == "trace"
-                        and isinstance(e["payload"], dict)), None)
+            tid = await runs.trace_id_of(run_id)
             if tid:
                 trace_link = (f'<p class="meta">🔍 深度 trace：'
                               f'<a href="{langfuse.host}" target="_blank">Langfuse</a>'

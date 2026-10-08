@@ -74,9 +74,11 @@ function nodeStatusOf(events, status) {
 async function watchRun(runId) {
   while (true) {
     const s = await (await fetch(`/runs/${runId}/state.json`)).json();
+    const v = (name, ver) => ver == null ? name : `${name} <span class="tag">v${ver}</span>`;
     document.getElementById("run-head").innerHTML =
       `<h2>Run ${s.run.run_id} <span class="status-${s.run.status}">[${s.run.status}]</span></h2>
-       <div class="meta">任务 ${s.run.task_type} · 角色 ${s.run.role} · 来源 ${s.run.trigger_source}
+       <div class="meta">任务 ${v(s.run.task_type, s.run.task_version)}
+         · 角色 ${v(s.run.role, s.run.role_version)} · 来源 ${s.run.trigger_source}
          · 耗时 ${s.run.duration_ms || "-"}ms · ${s.created_at}</div>`;
     if (s.graph && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";

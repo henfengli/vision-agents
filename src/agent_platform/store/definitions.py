@@ -101,3 +101,16 @@ class DefinitionStore:
 
 def _as_dict(raw) -> dict:
     return json.loads(raw) if isinstance(raw, str) else raw
+
+
+async def active_version(kind: Kind, env: str, name: str) -> int | None:
+    """生效版本号（= 最新版本号）；定义不存在返回 None。
+
+    run 谱系固定用：不走缓存、直读库，保证记录的就是执行那一刻的真实版本。
+    """
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT MAX(version) FROM definitions"
+            " WHERE kind=%s AND env=%s AND name=%s", (kind, env, name))
+        row = await cur.fetchone()
+    return row[0] if row and row[0] is not None else None

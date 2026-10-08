@@ -91,6 +91,28 @@ async def get_events(run_id: str) -> list[dict]:
              "created_at": r[3].isoformat()} for r in rows]
 
 
+async def set_def_versions(run_id: str, task_version: int | None,
+                           role_version: int | None) -> None:
+    """固定谱系：run 实际使用的任务/角色定义版本（prepare_run 时写入一次）。"""
+    async with db.pool().connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET task_version=%s, role_version=%s WHERE run_id=%s",
+            (task_version, role_version, run_id))
+
+
+async def count_recent_with_version(kind: str, name: str, version: int,
+                                    hours: int = 24) -> int:
+    """近 N 小时使用某定义版本的 run 数——Admin 保存新版本时的影响面提示。"""
+    column, ver_column = (("role", "role_version") if kind == "role"
+                          else ("task_type", "task_version"))
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT count(*) FROM runs WHERE {column}=%s AND {ver_column}=%s"
+            f" AND created_at > now() - make_interval(hours => %s)",
+            (name, version, hours))
+        return (await cur.fetchone())[0]
+
+
 async def trace_id_of(run_id: str) -> str:
     """从台账事件取 Langfuse trace_id（未启用观测时为空串）。"""
     events = await get_events(run_id)

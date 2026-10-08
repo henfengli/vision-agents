@@ -19,6 +19,7 @@ from ..agent.approvals import current_run_id
 from ..agent.roles import resolve
 from ..memory import distill, recall_block
 from ..store import cases as cases_store
+from ..store import definitions as definitions_store
 from ..store import knowledge as knowledge_store
 from ..store import runs
 from .spec import RunSpec
@@ -64,6 +65,14 @@ async def prepare_run(raw: dict) -> dict:
                           input_data=spec.input, session_id=spec.session_id)
     await runs.set_status(spec.run_id, "running")
     current_run_id.set(spec.run_id)
+
+    # 谱系固定：记录本 run 实际使用的定义版本——事后排查"当时用的是哪版
+    # prompt"靠它，而不是靠猜。版本取 prepare 这一刻的生效版本（直读库）。
+    task_version = await definitions_store.active_version(
+        "task", d.settings.env, spec.task_type)
+    role_version = await definitions_store.active_version(
+        "role", d.settings.env, spec.role)
+    await runs.set_def_versions(spec.run_id, task_version, role_version)
 
     role = resolve(spec.role, await d.engine.roles())
     spec.domain = spec.domain or (role.domains[0] if role.domains else None)

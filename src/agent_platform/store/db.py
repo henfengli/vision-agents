@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS runs (
     session_id    TEXT NOT NULL,             -- 会话标识；无会话时 = run_id
     task_type     TEXT NOT NULL,
     role          TEXT NOT NULL,
+    task_version  INT,                       -- 执行时生效的任务定义版本（谱系固定）
+    role_version  INT,                       -- 执行时生效的角色定义版本
     domain        TEXT,
     trigger_source TEXT NOT NULL,            -- sdk/cli/web/sensor/webhook/schedule/feedback/resume
     caller        TEXT,
@@ -117,6 +119,9 @@ EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 # 列级迁移：老库升级用（幂等）。vector 扩展缺失时静默跳过，向量检索自动退化。
 MIGRATIONS = [
+    # 已有库的增量列（新库由 SCHEMA 一步到位）
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS task_version INT",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS role_version INT",
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "

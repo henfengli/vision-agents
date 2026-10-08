@@ -85,6 +85,24 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         events = await runs.get_events(result["run_id"])
         self.assertTrue(any(e["kind"] == "llm" for e in events))
 
+    async def test_run_pins_definition_versions(self):
+        """谱系固定：run 记录执行时刻的定义版本，历史 run 不被新版本改写。"""
+        from agent_platform.store import runs
+        r1 = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q1"}, "sdk")
+        run1 = await runs.get(r1["run_id"])
+        self.assertEqual((run1["task_version"], run1["role_version"]), (1, 1))
+
+        await self.defs.put("role", "test", "data_searcher",
+                            {"description": "v2", "domains": ["board"],
+                             "tools": ["bash"], "prompt": "p2"})
+        r2 = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q2"}, "sdk")
+        run2 = await runs.get(r2["run_id"])
+        self.assertEqual(run2["role_version"], 2)
+        run1 = await runs.get(r1["run_id"])
+        self.assertEqual(run1["role_version"], 1)  # 历史 run 的版本不被改写
+
     async def test_dedup(self):
         payload = {"run_id": "dr1", "asset_key": "a", "error": "weird failure"}
         r1 = await self.submitter.submit("failure-analysis", payload, "sensor")
@@ -204,6 +222,15 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                  client.get("/v1/admin/tasks", headers=headers).json()]
         self.assertIn("nightly", names)
 
+        # 再保存产生 v2：响应带上一版本号与近 24h 影响面字段
+        resp = client.post("/v1/admin/tasks", headers=headers, json={
+            "name": "nightly",
+            "definition": {"role": "ops_analyst", "timeout_s": 600}})
+        data = resp.json()
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["previous_version"], 1)
+        self.assertIn("recent_runs_on_previous", data)
+
         # session 纠正：未知 session 404
         resp = client.post("/v1/sessions/nope/feedback", headers=headers,
                            json={"correction": "x"})
@@ -220,6 +247,26 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         for path in ("/admin", "/memory", "/chat"):
             resp = client.get(path)
             self.assertEqual(resp.status_code, 200, path)
+
+    async def test_admin_diff_page(self):
+        """定义版本对比页：渲染 diff，缺版本 404。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        await self.defs.put("task", "test", "nightly", {"role": "ops_analyst"})
+        await self.defs.put("task", "test", "nightly",
+                            {"role": "ops_analyst", "timeout_s": 900})
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        resp = client.get("/admin/diff", params={
+            "kind": "task", "name": "nightly", "a": 1, "b": 2})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("timeout_s", resp.text)
+        self.assertEqual(client.get("/admin/diff", params={
+            "kind": "task", "name": "nightly", "a": 1, "b": 9}).status_code, 404)
 
     async def test_viewer_auth_login_flow(self):
         """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""
