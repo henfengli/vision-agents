@@ -20,13 +20,13 @@ async def upsert(env: str, domain: str, key: str, content: str,
         vecs = await embedder([f"{key} {content}"])
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
-    sql = ("INSERT INTO knowledge (env, domain, key, content, source_run, code_ref{vec_col}) "
-           "VALUES (%s,%s,%s,%s,%s,%s{vec_val}) "
-           "ON CONFLICT (env, domain, key) DO UPDATE SET "
-           "content=EXCLUDED.content, source_run=EXCLUDED.source_run, "
-           "code_ref=EXCLUDED.code_ref, "
-           "valid_from=now(), valid_to=NULL, superseded_by=NULL, "
-           "expired=false, created_at=now(){vec_upd}")
+    sql = ("INSERT INTO knowledge (env, domain, key, content, source_run, code_ref{vec_col})"
+           " VALUES (%s,%s,%s,%s,%s,%s{vec_val})"
+           " ON CONFLICT (env, domain, key) DO UPDATE SET"
+           " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
+           " code_ref=EXCLUDED.code_ref,"
+           " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
+           " expired=false, created_at=now(){vec_upd}")
     params = [env, domain, key, content, source_run,
               json.dumps(code_ref) if code_ref else None]
     if vec is not None:
@@ -48,8 +48,8 @@ async def upsert(env: str, domain: str, key: str, content: str,
 async def get_entry(entry_id: int) -> dict | None:
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, env, domain, key, content, expired, valid_to "
-            "FROM knowledge WHERE id=%s", (entry_id,))
+            "SELECT id, env, domain, key, content, expired, valid_to"
+            " FROM knowledge WHERE id=%s", (entry_id,))
         row = await cur.fetchone()
     if not row:
         return None
@@ -62,16 +62,15 @@ async def update_content(entry_id: int, content: str) -> None:
     """网页编辑：改内容并刷新有效期（视为人工纠正，重新生效）。"""
     async with pool().connection() as conn:
         await conn.execute(
-            "UPDATE knowledge SET content=%s, valid_from=now(), valid_to=NULL, "
-            "expired=false, created_at=now() WHERE id=%s", (content, entry_id))
+            "UPDATE knowledge SET content=%s, valid_from=now(), valid_to=NULL,"
+            " expired=false, created_at=now() WHERE id=%s", (content, entry_id))
 
 
 async def list_by_domain(env: str, domain: str) -> list[dict]:
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, key, content, expired FROM knowledge "
-            "WHERE env=%s AND domain=%s ORDER BY key", (env, domain),
-        )
+            "SELECT id, key, content, expired FROM knowledge"
+            " WHERE env=%s AND domain=%s ORDER BY key", (env, domain))
         rows = await cur.fetchall()
     return [{"id": i, "key": k, "content": c, "expired": e} for i, k, c, e in rows]
 
@@ -88,9 +87,9 @@ async def list_all(env: str, domain: str | None = None,
         where += " AND expired=false AND valid_to IS NULL"
     async with pool().connection() as conn:
         cur = await conn.execute(
-            f"SELECT id, domain, key, content, expired, valid_to IS NOT NULL, "
-            f"feedback_score, created_at FROM knowledge {where} "
-            f"ORDER BY domain, key LIMIT 500", tuple(params))
+            "SELECT id, domain, key, content, expired, valid_to IS NOT NULL,"
+            " feedback_score, created_at FROM knowledge " + where +
+            " ORDER BY domain, key LIMIT 500", tuple(params))
         rows = await cur.fetchall()
     return [{"id": r[0], "domain": r[1], "key": r[2], "content": r[3],
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],

@@ -33,9 +33,8 @@ async def recall_block(env: str, domain: str | None, query: str,
         prefix = session_id.rsplit(":", 1)[0]  # 去掉 episode 段
         summaries = await knowledge_store.latest_session_summaries(env, prefix)
         if summaries:
-            sections.append(
-                "[前序会话交接摘要]\n" + "\n\n".join(
-                    s["content"] for s in summaries))
+            sections.append("[前序会话交接摘要]\n" + "\n\n".join(
+                s["content"] for s in summaries))
 
     if domain:
         entries = await knowledge_store.search(env, domain, query, embedder=embedder)

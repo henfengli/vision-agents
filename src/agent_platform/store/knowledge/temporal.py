@@ -12,8 +12,8 @@ async def supersede_by_runs(env: str, run_ids: list[str],
         return 0
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "UPDATE knowledge SET valid_to=now(), superseded_by=%s "
-            "WHERE env=%s AND source_run = ANY(%s) AND valid_to IS NULL",
+            "UPDATE knowledge SET valid_to=now(), superseded_by=%s"
+            " WHERE env=%s AND source_run = ANY(%s) AND valid_to IS NULL",
             (superseded_by, env, run_ids))
         return cur.rowcount
 
@@ -24,8 +24,8 @@ async def supersede_keys(env: str, domain: str, keys: list[str],
         return 0
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "UPDATE knowledge SET valid_to=now(), superseded_by=%s "
-            "WHERE env=%s AND domain=%s AND key = ANY(%s) AND valid_to IS NULL",
+            "UPDATE knowledge SET valid_to=now(), superseded_by=%s"
+            " WHERE env=%s AND domain=%s AND key = ANY(%s) AND valid_to IS NULL",
             (superseded_by, env, domain, keys))
         return cur.rowcount
 
@@ -33,4 +33,5 @@ async def supersede_keys(env: str, domain: str, keys: list[str],
 async def mark_expired(entry_id: int) -> None:
     """code_ref 校验失败：标记过期（commit 漂移，结论可能已失效）。"""
     async with pool().connection() as conn:
-        await conn.execute("UPDATE knowledge SET expired=true WHERE id=%s", (entry_id,))
+        await conn.execute("UPDATE knowledge SET expired=true WHERE id=%s",
+                           (entry_id,))

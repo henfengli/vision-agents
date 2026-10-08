@@ -1,8 +1,6 @@
-env: prod
-
-server:
-  host: 0.0.0.0
-  port: 8100
+# 生产环境：危险操作强制人工审批 + Langfuse 观测与 prompt 源头
+host: 0.0.0.0
+port: 8100
 
 model:
   url: https://internal-llm/v1
@@ -10,22 +8,18 @@ model:
   tokens: ["${MODEL_TOKEN_A}", "${MODEL_TOKEN_B}"]
   max_concurrency: 10
 
-db:
-  dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
+db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
 
+dingtalk_relay_url: "https://alert-notification.ipa.zs/robot/send"
+dingtalk_token: "${DINGTALK_ACCESS_TOKEN}"
 
-dingtalk:
-  relay_url: "https://alert-notification.ipa.zs/robot/send"
-  access_token: "${DINGTALK_ACCESS_TOKEN}"
-
+bearer_token: "${AGENT_BEARER_TOKEN}"
 viewer_base_url: "https://agent-viewer.prod.internal"
+scratch_dir: /var/lib/agent-platform/scratch
 
 approvals:
   enabled: true                      # 生产：危险操作强制人工审批
   danger_patterns: ['\brm\s+-[rf]', '\bdrop\b', '\btruncate\b', '\bkill\b', '\bsystemctl\b']
-
-scratch_dir: /var/lib/agent-platform/scratch
-bearer_token: "${AGENT_BEARER_TOKEN}"
 
 temporal:
   address: 127.0.0.1:7233          # Temporal server（同机 systemd 部署）
@@ -39,4 +33,9 @@ langfuse:
   secret_key: "${LANGFUSE_SECRET_KEY}"
   prompt_label: production         # 角色定义拉取的 label
   prompt_cache_ttl_s: 10
-  record_content: true             # false=trace 只带长度（脱敏）
+
+# 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}
+# mcp_servers:
+#   dagster:
+#     transport: streamable_http
+#     url: http://127.0.0.1:8200/mcp

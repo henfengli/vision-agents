@@ -29,7 +29,7 @@ class RunSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunSpec":
-        known = {f for f in cls.__dataclass_fields__}
+        known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in d.items() if k in known})
 
     def to_dict(self) -> dict:

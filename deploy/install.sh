@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-platform 安装脚本（主机 + systemd 部署，与现有服务方式一致）
+# agent-platform 安装脚本（主机 + systemd 部署，无容器）
 set -euo pipefail
 
 ENV="${1:?用法: install.sh <prod|test|dev>}"
@@ -20,7 +20,6 @@ python3 -m venv /opt/agent-platform/venv
 /opt/agent-platform/venv/bin/pip install /opt/agent-platform
 
 # 4. 环境配置（secrets.env 需提前手工放置，权限 640 root:agent-svc）
-ln -sf "/opt/agent-platform/conf/env/${ENV}.yaml" /etc/agent-platform/env.yaml
 [ -f /etc/agent-platform/secrets.env ] || {
     echo "!! 请先创建 /etc/agent-platform/secrets.env（MODEL_TOKEN_A/AGENT_DB_PASSWORD/DINGTALK_ACCESS_TOKEN/AGENT_BEARER_TOKEN）"
 }

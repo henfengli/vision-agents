@@ -73,7 +73,7 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
               method: "POST", headers: {{"Content-Type": "application/json"}},
               body: JSON.stringify({{name, definition, updated_by: "viewer"}})}});
             const data = await resp.json();
-            msg.textContent = resp.ok ? `已保存 v${{data.version ?? ""}}` : (data.detail || "失败");
+            msg.textContent = resp.ok ? "已保存" : (data.detail || "失败");
             if (resp.ok) setTimeout(() => location.reload(), 800);
           }} catch (e) {{ msg.textContent = "JSON 不合法：" + e; }}
         }}

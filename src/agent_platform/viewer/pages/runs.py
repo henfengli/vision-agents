@@ -5,7 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from ...store import ledger
+from ...store import feedback as feedback_store
+from ...store import runs
 from .base import esc, page
 
 
@@ -14,10 +15,10 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
 
     @router.get("/runs/{run_id}/state.json")
     async def run_state(run_id: str):
-        run = await ledger.get_run(run_id)
+        run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        events = await ledger.get_events(run_id)
+        events = await runs.get_events(run_id)
         state = {
             "run": {k: run.get(k) for k in
                     ("run_id", "task_type", "role", "status",
@@ -35,12 +36,12 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
 
     @router.get("/runs/{run_id}", response_class=HTMLResponse)
     async def run_detail(run_id: str):
-        run = await ledger.get_run(run_id)
+        run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
         trace_link = ""
         if langfuse is not None and langfuse.enabled:
-            events = await ledger.get_events(run_id)
+            events = await runs.get_events(run_id)
             tid = next((e["payload"].get("trace_id") for e in events
                         if e["kind"] == "trace"
                         and isinstance(e["payload"], dict)), None)
@@ -74,7 +75,6 @@ def make_router(env: str, engine=None, langfuse=None) -> APIRouter:
 
     @router.post("/runs/{run_id}/feedback")
     async def run_feedback(run_id: str, request: Request):
-        from ...store import feedback as feedback_store
         form = await request.form()
         score = int(form["score"])
         await feedback_store.add(run_id, score, str(form.get("comment", "")))

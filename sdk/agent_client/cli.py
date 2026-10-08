@@ -3,7 +3,7 @@
     agent-chat --server board --role data_searcher
     agent-chat --server board --role data_searcher --resume board-fee-a1b2
 
-会话自动持久化在服务端（session_id 即 thread_id），跨天、跨机器可续。
+会话自动持久化在服务端（session_id 即 LangGraph thread），跨天、跨机器可续。
 """
 
 from __future__ import annotations

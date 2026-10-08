@@ -102,5 +102,3 @@ class DingTalkRelay:
                 "btns": [{"title": btn_title, "actionURL": btn_url}],
             },
         })
-
-

@@ -1,8 +1,7 @@
 """Temporal Workflow 与调度。
 
 AgentRunWorkflow：prepare → run_agent → finalize，每步一个 activity，
-事件历史即执行记录。崩溃恢复、重试、超时、跨机执行全部由 Temporal 接管
-（v1 的 dispatcher 队列 / zombie recovery / pg_cron 全部删除）。
+事件历史即执行记录。崩溃恢复、重试、超时、跨机执行全部由 Temporal 接管。
 
 审批等待在 run_agent 内（DB+NOTIFY+heartbeat）；续跑 = 同 workflow id
 重新 start（ID 复用策略只允许失败/终止的执行被顶替）。
@@ -18,7 +17,7 @@ from temporalio.common import RetryPolicy
 from .spec import RunSpec
 
 with workflow.unsafe.imports_passed_through():
-    from .activities import (finalize_run, mark_failed, prepare_run, run_agent)
+    from .activities import finalize_run, mark_failed, prepare_run, run_agent
 
 # agent 步骤不自动重试：模型/工具错误由人工或恢复路径处理；
 # prepare/finalize 是轻量 DB 操作，允许自动重试
@@ -58,7 +57,7 @@ class AgentRunWorkflow:
             raise
 
 
-# ==================== 调度（Temporal Schedules，替代 pg_cron） ====================
+# ==================== 调度（Temporal Schedules） ====================
 
 
 async def sync_schedules(client, tasks: list, task_queue: str) -> int:
@@ -103,8 +102,7 @@ async def sync_schedules(client, tasks: list, task_queue: str) -> int:
         sid = prefix + name
         try:
             if sid in existing:
-                await client.get_schedule_handle(sid).update(
-                    lambda _cur: schedule)
+                await client.get_schedule_handle(sid).update(lambda _cur: schedule)
             else:
                 await client.create_schedule(sid, schedule)
             count += 1

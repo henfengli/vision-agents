@@ -8,6 +8,7 @@ After=network.target
 User=agent-svc
 Group=agent-svc
 Environment=AGENT_ENV=prod
+Environment=AGENT_CONF=/opt/agent-platform/conf
 EnvironmentFile=/etc/agent-platform/secrets.env
 ExecStart=/opt/agent-platform/venv/bin/uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 Restart=on-failure

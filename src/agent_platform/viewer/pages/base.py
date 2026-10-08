@@ -17,8 +17,8 @@ body {{ font-family: -apple-system, "PingFang SC", monospace; max-width: 1100px;
 .card {{ border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 12px 0; }}
 pre {{ background: #f6f8fa; padding: 12px; border-radius: 6px;
       overflow-x: auto; white-space: pre-wrap; word-break: break-all; }}
-.status-done {{ color: #1a7f37; }} .status-failed {{ color: #cf222e; }}
-.status-running, .status-queued, .status-interrupted {{ color: #9a6700; }}
+.status-success {{ color: #1a7f37; }} .status-failed {{ color: #cf222e; }}
+.status-running, .status-queued {{ color: #9a6700; }}
 button {{ padding: 6px 16px; margin-right: 8px; cursor: pointer; }}
 input, textarea, select {{ padding: 6px; margin: 4px 0; width: 100%; box-sizing: border-box; }}
 .meta {{ color: #666; font-size: 13px; }}

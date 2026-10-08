@@ -17,23 +17,24 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
-from .gateway import create_app, make_gateway_router
-from .langfuse_client import LangfuseClient, setup_observability
+from .agent.approvals import make_review_hook
+from .agent.engine import Engine
+from .agent.tools.mcp_bridge import load_mcp_tools
+from .agent.tools.registry import ToolRegistry
+from .api import create_app, make_api_router
+from .config import Settings, load_settings
+from .langfuse import LangfuseClient, setup_observability
 from .model import ModelPool
 from .notify import DingTalkRelay
 from .orchestration import activities
 from .orchestration.submitter import Submitter
+from .orchestration.tasks import TaskRegistry
 from .orchestration.worker import create_worker
 from .orchestration.workflows import sync_schedules
-from .runtime.approvals import make_approval_hook
-from .runtime.engine import Engine
-from .settings import Settings, get_settings
-from .store import close_pool, open_and_migrate
+from .store import db
 from .store.definitions import DefinitionStore
-from .tasks import TaskRegistry
-from .tasks.triggers import chat as chat_trigger
-from .tasks.triggers import dagster_sensor, gitlab_webhook
-from .tools import ToolRegistry
+from .triggers import chat as chat_trigger
+from .triggers import dagster_sensor, gitlab_webhook
 from .viewer import make_viewer_router
 
 log = logging.getLogger(__name__)
@@ -96,25 +97,24 @@ class Runtime:
         if self._worker_task is not None:
             self._worker_task.cancel()
         await self.engine.close()
-        await close_pool()
+        await db.close_db()
 
 
 async def assemble_runtime(settings: Settings) -> Runtime:
     """全部真实装配。必须在目标事件循环内调用（lifespan 或测试的 loop）。"""
     setup_observability(settings.langfuse)  # Langfuse OTEL（空操作可关）
-    await open_and_migrate(settings.db.dsn)
+    await db.open_db(settings.db_dsn)
 
     defs = DefinitionStore()
     await seed_if_empty(defs, settings.env)
     tasks = TaskRegistry(defs, settings.env)
     langfuse = LangfuseClient(settings.langfuse)
-    relay = DingTalkRelay(settings.dingtalk.relay_url,
-                          settings.dingtalk.access_token)
+    relay = DingTalkRelay(settings.dingtalk_relay_url, settings.dingtalk_token)
     model_pool = ModelPool(settings.model.url, settings.model.name,
                            settings.model.tokens, settings.model.max_concurrency,
                            embedding_name=settings.model.embedding_name)
 
-    # 审批通知：bash 命中危险模式 → 钉钉 actionCard → Viewer 审批页
+    # 审批通知：工具命中危险模式 → 钉钉 actionCard → Viewer 审批页
     approval_notify = None
     if settings.approvals.enabled:
         async def approval_notify(run_id: str, command: str) -> None:
@@ -122,9 +122,9 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                 "危险操作待审批", f"run `{run_id}` 请求执行：\n```\n{command}\n```",
                 "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
 
-    approval_hook = (make_approval_hook(settings.approvals.danger_patterns,
-                                        approval_notify)
-                     if settings.approvals.enabled else None)
+    review_hook = (make_review_hook(settings.approvals.danger_patterns,
+                                    approval_notify)
+                   if settings.approvals.enabled else None)
 
     async def write_asset_profile(asset_key: str, content: str,
                                   domain: str | None = None) -> None:
@@ -134,10 +134,8 @@ async def assemble_runtime(settings: Settings) -> Runtime:
             raise ValueError("无可用 domain，请显式指定")
         await knowledge_store.upsert(
             settings.env, dom, f"asset:{asset_key}:profile", content,
-            source_run="agent-tool",
-            embedder=model_pool.embed)
+            source_run="agent-tool", embedder=model_pool.embed)
 
-    from .tools.mcp_bridge import load_mcp_tools
     extra_tools = await load_mcp_tools(settings.mcp_servers)
 
     def sql_dsn(domain: str | None) -> str | None:
@@ -146,7 +144,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         return cfg.readonly_dsn if cfg else None
 
     tool_registry = ToolRegistry(settings.scratch_dir, relay=relay,
-                                 review=approval_hook,
+                                 review=review_hook,
                                  profile_writer=write_asset_profile,
                                  sql_dsn=sql_dsn, extra_tools=extra_tools)
     engine = Engine(settings, defs, tool_registry, langfuse=langfuse)
@@ -191,14 +189,14 @@ async def seed_if_empty(defs: DefinitionStore, env: str) -> None:
 
 
 def build_app(settings: Settings | None = None):
-    settings = settings or get_settings()
+    settings = settings or load_settings()
 
     @asynccontextmanager
     async def lifespan(app):
         rt = await assemble_runtime(settings)
         auth_routers = [
-            make_gateway_router(settings, rt.submitter, rt.tasks, rt.defs,
-                                langfuse=rt.langfuse),
+            make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
+                            langfuse=rt.langfuse),
             dagster_sensor.make_router(rt.submitter, rt.relay),
             gitlab_webhook.make_router(rt.submitter),
         ]

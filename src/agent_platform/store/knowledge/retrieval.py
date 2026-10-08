@@ -84,27 +84,28 @@ async def _search_vector(env, domain, vec: list[float], limit):
     try:
         async with pool().connection() as conn:
             cur = await conn.execute(
-                "SELECT id, key, content, code_ref, source_run, "
-                "1 - (embedding <=> %s::vector) AS sim FROM knowledge "
-                "WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL "
-                "AND embedding IS NOT NULL "
-                "ORDER BY embedding <=> %s::vector LIMIT %s",
+                "SELECT id, key, content, code_ref, source_run,"
+                " 1 - (embedding <=> %s::vector) AS sim FROM knowledge"
+                " WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
+                " AND embedding IS NOT NULL"
+                " ORDER BY embedding <=> %s::vector LIMIT %s",
                 (lit, env, domain, lit, limit))
             return await cur.fetchall()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 —— pgvector 缺失时退化
         return []
 
 
 async def _search_trgm(env, domain, terms, limit):
-    """word_similarity(term, 文本)：查询词片段在长文本中的最佳匹配度。"""
+    """word_similarity(term, 文本)：查询词片段在长文本中的最佳匹配度。
+    返回 None 表示 pg_trgm 不可用，调用方退化 ILIKE。"""
     sim_expr = "GREATEST(" + ", ".join(
         ["word_similarity(%s, key || ' ' || content)"] * len(terms)) + ")"
     like_expr = " OR ".join(["key ILIKE %s OR content ILIKE %s"] * len(terms))
-    sql = (f"SELECT id, key, content, code_ref, source_run, {sim_expr} AS sim "
-           f"FROM knowledge "
-           f"WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL "
-           f"AND ({sim_expr} > 0.08 OR {like_expr}) "
-           f"ORDER BY sim DESC, feedback_score DESC, created_at DESC LIMIT %s")
+    sql = (f"SELECT id, key, content, code_ref, source_run, {sim_expr} AS sim"
+           f" FROM knowledge"
+           f" WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
+           f" AND ({sim_expr} > 0.08 OR {like_expr})"
+           f" ORDER BY sim DESC, feedback_score DESC, created_at DESC LIMIT %s")
     params = (list(terms)
               + [env, domain]
               + list(terms)
@@ -119,15 +120,15 @@ async def _search_trgm(env, domain, terms, limit):
 
 
 async def _search_ilike(env, domain, terms, limit):
-    where = " OR ".join(["key ILIKE %s OR content ILIKE %s" for _ in terms])
+    where = " OR ".join(["key ILIKE %s OR content ILIKE %s"] * len(terms))
     params: list = [env, domain]
     for t in terms:
         params += [f"%{t}%", f"%{t}%"]
     async with pool().connection() as conn:
         cur = await conn.execute(
-            f"SELECT id, key, content, code_ref, source_run FROM knowledge "
-            f"WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL AND ({where}) "
-            f"ORDER BY feedback_score DESC, created_at DESC LIMIT %s",
-            (*params, limit),
-        )
+            f"SELECT id, key, content, code_ref, source_run FROM knowledge"
+            f" WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
+            f" AND ({where})"
+            f" ORDER BY feedback_score DESC, created_at DESC LIMIT %s",
+            (*params, limit))
         return await cur.fetchall()

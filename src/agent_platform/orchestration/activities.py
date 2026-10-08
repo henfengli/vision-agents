@@ -15,9 +15,12 @@ from typing import Any
 
 from temporalio import activity
 
+from ..agent.approvals import current_run_id
+from ..agent.roles import resolve
 from ..memory import distill, recall_block
-from ..roles import resolve
-from ..store import ledger
+from ..store import cases as cases_store
+from ..store import knowledge as knowledge_store
+from ..store import runs
 from .spec import RunSpec
 
 
@@ -44,12 +47,6 @@ def _d() -> Deps:
     return _deps
 
 
-async def log_event(run_id: str, kind: str, payload: dict) -> None:
-    """记一条台账事件（seq 由 DB 取 max+1，activity 重试安全）。"""
-    seq = await ledger.max_seq(run_id)
-    await ledger.append_event(run_id, seq + 1, kind, payload)
-
-
 @activity.defn
 async def prepare_run(raw: dict) -> dict:
     """步骤 1：建/更新台账行 + 角色解析 + 记忆召回 + 拼 prompt。
@@ -62,12 +59,10 @@ async def prepare_run(raw: dict) -> dict:
     if not spec.run_id:
         spec.run_id = uuid.uuid4().hex[:16]
         spec.session_id = spec.run_id
-        await ledger.create_run(
-            spec.run_id, spec.task_type, spec.role, domain=None,
-            trigger_source=spec.trigger or "schedule", caller=None,
-            input_data=spec.input, dedup_key=None, session_id=spec.session_id)
-    await ledger.set_status(spec.run_id, "running")
-    from ..runtime.approvals import current_run_id
+        await runs.create(spec.run_id, spec.task_type, spec.role, domain=None,
+                          trigger_source=spec.trigger or "schedule", caller="",
+                          input_data=spec.input, session_id=spec.session_id)
+    await runs.set_status(spec.run_id, "running")
     current_run_id.set(spec.run_id)
 
     role = resolve(spec.role, await d.engine.roles())
@@ -83,8 +78,8 @@ async def prepare_run(raw: dict) -> dict:
             embedder=d.model_pool.embed, session_id=spec.session_id)
         if recalled:
             spec.prompt = f"{recalled}\n\n{spec.question}"
-            await log_event(spec.run_id, "note",
-                            {"stage": "recall", "content": recalled})
+            await runs.log_event(spec.run_id, "note",
+                                 {"stage": "recall", "content": recalled})
     return spec.to_dict()
 
 
@@ -104,12 +99,12 @@ async def run_agent(raw: dict) -> dict:
     with _run_span(d, spec) as span:
         if span is not None:
             ctx = span.get_span_context()
-            await log_event(spec.run_id, "trace",
-                            {"trace_id": format(ctx.trace_id, "032x"),
-                             "span_id": format(ctx.span_id, "016x")})
+            await runs.log_event(spec.run_id, "trace",
+                                 {"trace_id": format(ctx.trace_id, "032x"),
+                                  "span_id": format(ctx.span_id, "016x")})
         if spec.resume:
-            await log_event(spec.run_id, "note",
-                            {"stage": "resume", "session_id": spec.session_id})
+            await runs.log_event(spec.run_id, "note",
+                                 {"stage": "resume", "session_id": spec.session_id})
             result = await _invoke_streaming(agent, None, config, spec.run_id)
         else:
             result = await _invoke_streaming(
@@ -117,7 +112,8 @@ async def run_agent(raw: dict) -> dict:
                 config, spec.run_id)
 
     output_text = _extract_final_text(result)
-    await log_event(spec.run_id, "llm", {"stage": "final", "content": output_text})
+    await runs.log_event(spec.run_id, "llm",
+                         {"stage": "final", "content": output_text})
     return {"answer": output_text}
 
 
@@ -126,19 +122,14 @@ async def finalize_run(raw: dict, output: dict) -> dict:
     """步骤 3：状态落库 + 记忆沉淀（含纠正反馈的旧记忆取代）。"""
     d = _d()
     spec = RunSpec.from_dict(raw)
-    await ledger.set_status(spec.run_id, "done", output=output, duration_ms=0)
+    await runs.set_status(spec.run_id, "success", output=output)
     # 纠正式反馈：新结论沉淀前，把本 session 最近一次 run 沉淀的记忆标记为被取代。
     # 只杀最近的判断——纠正针对的是上一次结论，不误伤 session 里沉淀正确的历史知识。
-    if spec.correction:
-        from ..store import cases as cases_store
-        from ..store import knowledge as knowledge_store
-        last = await ledger.runs_by_session(spec.session_id,
-                                            exclude=spec.run_id, limit=1)
-        old_ids = [r["run_id"] for r in last]
-        await knowledge_store.supersede_by_runs(d.settings.env, old_ids,
-                                                spec.run_id)
-        await cases_store.supersede_by_runs(d.settings.env, old_ids,
-                                            spec.run_id)
+    if spec.correction and spec.session_id:
+        last = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
+        old_ids = [last["run_id"]] if last else []
+        await knowledge_store.supersede_by_runs(d.settings.env, old_ids, spec.run_id)
+        await cases_store.supersede_by_runs(d.settings.env, old_ids, spec.run_id)
     try:
         await distill(d.model_pool, d.settings.env, spec.domain,
                       spec.run_id, spec.task_type,
@@ -152,22 +143,25 @@ async def finalize_run(raw: dict, output: dict) -> dict:
 @activity.defn
 async def mark_failed(raw: dict, error: str) -> None:
     spec = RunSpec.from_dict(raw)
-    await ledger.append_event(spec.run_id, 9999, "note",
-                              {"stage": "error", "error": error[:2000]})
-    await ledger.set_status(spec.run_id, "failed",
-                            output={"error": error[:4000]}, duration_ms=0)
+    await runs.log_event(spec.run_id, "note",
+                         {"stage": "error", "error": error[:2000]})
+    await runs.set_status(spec.run_id, "failed",
+                          output={"error": error[:4000]})
 
 
 # ==================== 内部工具 ====================
 
 class _NullSpan:
-    def __enter__(self): return None
-    def __exit__(self, *a): return False
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
 
 
 def _run_span(d: Deps, spec: RunSpec):
     """Langfuse run span：挂业务属性；未启用观测时是空上下文。"""
-    from ..langfuse_client import tracer
+    from ..langfuse import tracer
     t = tracer()
     if t is None:
         return _NullSpan()
@@ -191,17 +185,19 @@ async def _invoke_streaming(agent: Any, payload: Any, config: dict,
         name = ev.get("name", "")
         kind, data = ev.get("event", ""), ev.get("data") or {}
         if kind == "on_tool_start":
-            await log_event(run_id, "tool_call", {"node": node, "tool": name,
-                                                  "args": _clip(data.get("input"))})
+            await runs.log_event(run_id, "tool_call",
+                                 {"node": node, "tool": name,
+                                  "args": _clip(data.get("input"))})
         elif kind == "on_tool_end":
-            await log_event(run_id, "tool_result", {"node": node, "tool": name,
-                                                    "output": _clip(data.get("output"))})
+            await runs.log_event(run_id, "tool_result",
+                                 {"node": node, "tool": name,
+                                  "output": _clip(data.get("output"))})
         elif kind == "on_chat_model_end":
             msg = data.get("output")
             content = getattr(msg, "content", "") if msg is not None else ""
             if content:
-                await log_event(run_id, "thought",
-                                {"node": node, "content": _clip(content)})
+                await runs.log_event(run_id, "thought",
+                                     {"node": node, "content": _clip(content)})
 
     snap = await agent.aget_state(config)
     return {"messages": (snap.values.get("messages") if snap else []) or []}

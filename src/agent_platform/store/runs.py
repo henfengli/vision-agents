@@ -1,0 +1,95 @@
+"""runs / run_events：执行台账。
+
+session_id 是会话唯一标识（LangGraph thread 是它的实现细节，不出 engine 层）。
+run 状态机：queued → running → success / failed。
+"""
+from __future__ import annotations
+
+import json
+
+from agent_platform.store import db
+
+
+async def create(run_id: str, task_type: str, role: str, domain: str | None,
+                 trigger_source: str, caller: str, input_data: dict,
+                 dedup_key: str = "", session_id: str | None = None) -> None:
+    async with db.pool().connection() as conn:
+        await conn.execute(
+            "INSERT INTO runs (run_id, session_id, task_type, role, domain,"
+            " trigger_source, caller, input, status, dedup_key)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)",
+            (run_id, session_id or run_id, task_type, role, domain,
+             trigger_source, caller, json.dumps(input_data), dedup_key))
+
+
+async def get(run_id: str) -> dict | None:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT * FROM runs WHERE run_id = %s", (run_id,))
+        row = await cur.fetchone()
+    return _row_to_dict(cur, row) if row else None
+
+
+async def set_status(run_id: str, status: str, output: dict | None = None,
+                     tokens: int = 0, duration_ms: int = 0) -> None:
+    async with db.pool().connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET status=%s, output=%s, tokens=%s, duration_ms=%s"
+            " WHERE run_id=%s",
+            (status, json.dumps(output or {}), tokens, duration_ms, run_id))
+
+
+async def find_by_dedup(dedup_key: str, window_s: int) -> dict | None:
+    """时间窗内同 dedup_key 的成功 run（重复触发直接去重）。"""
+    if not dedup_key:
+        return None
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT * FROM runs WHERE dedup_key = %s AND status = 'success'"
+            " AND created_at > now() - make_interval(secs => %s)"
+            " ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
+        row = await cur.fetchone()
+    return _row_to_dict(cur, row) if row else None
+
+
+async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
+    """会话最近一个 run 的概要（correction 继承 task_type/role/domain 用）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id, task_type, role, domain, input FROM runs"
+            " WHERE session_id = %s AND run_id <> %s"
+            " ORDER BY created_at DESC LIMIT 1", (session_id, exclude))
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {"run_id": row[0], "task_type": row[1], "role": row[2],
+            "domain": row[3], "input": row[4]}
+
+
+async def session_exists(session_id: str) -> bool:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM runs WHERE session_id = %s LIMIT 1", (session_id,))
+        return await cur.fetchone() is not None
+
+
+async def log_event(run_id: str, kind: str, payload: dict) -> None:
+    """追加事件；seq = 当前 max+1，单连接一条 SQL 完成，重试安全。"""
+    async with db.pool().connection() as conn:
+        await conn.execute(
+            "INSERT INTO run_events (run_id, seq, kind, payload) VALUES ("
+            "%s, COALESCE((SELECT max(seq) FROM run_events WHERE run_id=%s), 0) + 1,"
+            " %s, %s)", (run_id, run_id, kind, json.dumps(payload)))
+
+
+async def get_events(run_id: str) -> list[dict]:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT seq, kind, payload, created_at FROM run_events"
+            " WHERE run_id = %s ORDER BY seq", (run_id,))
+        rows = await cur.fetchall()
+    return [{"seq": r[0], "kind": r[1], "payload": r[2],
+             "created_at": r[3].isoformat()} for r in rows]
+
+
+def _row_to_dict(cur, row) -> dict:
+    return {d.name: v for d, v in zip(cur.description, row)}

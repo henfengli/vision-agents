@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from ...agent import approvals
 from .base import esc, page
 
 
@@ -13,7 +14,6 @@ def make_router() -> APIRouter:
 
     @router.get("/approvals/{run_id}", response_class=HTMLResponse)
     async def approval_page(run_id: str):
-        from ...runtime import approvals
         pending = await approvals.find_pending(run_id)
         if pending is None:
             return page("审批", "<p>没有待审批项（可能已被处理）。</p>")
@@ -30,7 +30,6 @@ def make_router() -> APIRouter:
 
     @router.post("/approvals/{run_id}/decide")
     async def approval_decide(run_id: str, request: Request):
-        from ...runtime import approvals
         form = await request.form()
         await approvals.decide(int(form["approval_id"]),
                                form["decision"] == "approved",

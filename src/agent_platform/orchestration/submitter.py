@@ -1,8 +1,8 @@
-"""Temporal 提交端：gateway/triggers 的统一入口。
+"""Temporal 提交端：api/triggers 的统一入口。
 
 - submit：建台账行 + start_workflow（id=run_id，重复 id 拒绝）
 - run_sync：start + 等待结果（超时转异步轮询）
-- resume：同 id 重新 start，ID 复用策略只允许顶替已失败/已终止的执行
+- resume_run：同 id 重新 start，ID 复用策略只允许顶替已失败/已终止的执行
 - correct：纠正式反馈——从 session 最近 run 继承 task_type/role/domain，
   不调用方传、不写死任务类型
 
@@ -17,8 +17,9 @@ import uuid
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
-from ..store import ledger
+from ..store import runs
 from .spec import RunSpec
+from .tasks import TaskDef, TaskRegistry
 from .workflows import AgentRunWorkflow
 
 
@@ -31,10 +32,10 @@ class OverloadedError(RuntimeError):
 
 
 class Submitter:
-    def __init__(self, client: Client, task_registry, task_queue: str,
+    def __init__(self, client: Client, tasks: TaskRegistry, task_queue: str,
                  env: str, max_inflight_sync: int = 50):
         self._client = client
-        self._tasks = task_registry
+        self._tasks = tasks
         self._tq = task_queue
         self._env = env
         self._max_inflight = max_inflight_sync
@@ -42,7 +43,7 @@ class Submitter:
 
     # —— 内部 ——
 
-    async def _resolve_task(self, task_name: str, role: str | None):
+    async def _resolve_task(self, task_name: str, role: str | None) -> TaskDef:
         task = await self._tasks.get(task_name)
         if task is None:
             raise TaskRejected(f"未知任务类型：{task_name}")
@@ -52,7 +53,7 @@ class Submitter:
             task = task.model_copy(update={"role": role})
         return task
 
-    async def _start(self, task, input_data: dict, trigger_source: str,
+    async def _start(self, task: TaskDef, input_data: dict, trigger_source: str,
                      caller: str | None, session_id: str | None,
                      correction: bool, run_id: str | None = None,
                      resume: bool = False, domain: str | None = None) -> dict:
@@ -61,16 +62,15 @@ class Submitter:
         if not resume:
             dedup_key = task.compute_dedup_key(input_data)
             if dedup_key:
-                existing = await ledger.find_recent_by_dedup(
-                    dedup_key, task.dedup_window_s)
+                existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
                 if existing:
-                    return {"run_id": existing, "status": "dedup_hit",
+                    return {"run_id": existing["run_id"], "status": "dedup_hit",
                             "dedup_hit": True}
-            await ledger.create_run(
+            await runs.create(
                 run_id, task.name, task.role,
                 domain=domain or str(input_data.get("server")
                                      or input_data.get("domain") or "") or None,
-                trigger_source=trigger_source, caller=caller,
+                trigger_source=trigger_source, caller=caller or "",
                 input_data=input_data, dedup_key=dedup_key,
                 session_id=session_id)
         spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
@@ -101,10 +101,9 @@ class Submitter:
     async def correct(self, session_id: str, correction_text: str,
                       by: str = "") -> dict:
         """纠正式反馈：从 session 最近一次 run 继承任务上下文重判。"""
-        history = await ledger.runs_by_session(session_id, limit=1)
-        if not history:
+        last = await runs.latest_of_session(session_id)
+        if last is None:
             raise TaskRejected(f"session {session_id} 不存在或无历史 run")
-        last = history[0]
         task = await self._resolve_task(last["task_type"], last["role"])
         input_data = dict(last.get("input") or {})
         input_data["correction"] = correction_text
@@ -125,7 +124,7 @@ class Submitter:
                                           trigger_source,
                                           session_id=session_id, role=role)
             if submitted["dedup_hit"]:
-                run = await ledger.get_run(submitted["run_id"])
+                run = await runs.get(submitted["run_id"])
                 return {"run_id": submitted["run_id"],
                         "output": (run or {}).get("output")}
             run_id = submitted["run_id"]
@@ -143,10 +142,10 @@ class Submitter:
 
     async def resume_run(self, run_id: str) -> dict:
         """续跑失败/中断的 run：同 id 重新 start（只允许顶替终态执行）。"""
-        run = await ledger.get_run(run_id)
+        run = await runs.get(run_id)
         if run is None:
             raise TaskRejected(f"run {run_id} 不存在")
-        if run["status"] == "done":
+        if run["status"] == "success":
             raise TaskRejected("run 已完成，无需续跑")
         task = await self._resolve_task(run["task_type"], run["role"])
         return await self._start(task, run.get("input") or {}, "resume",
@@ -155,7 +154,7 @@ class Submitter:
                                  domain=run.get("domain"))
 
 
-def _to_question(task, input_data: dict) -> str:
+def _to_question(task: TaskDef, input_data: dict) -> str:
     lines = [f"任务类型：{task.name}"]
     lines += [f"{k}: {v}" for k, v in input_data.items()]
     return "\n".join(lines)
