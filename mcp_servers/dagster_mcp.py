@@ -1,9 +1,9 @@
 """参考实现：Dagster 内部 MCP server（FastMCP，stdio）。
 
 把 Dagster GraphQL 包成带 schema 的类型化工具，agent 不再靠 curl 猜接口。
-运行：fastmcp run deploy/dagster_mcp_server.py  （或 python deploy/dagster_mcp_server.py）
+运行：python mcp_servers/dagster_mcp.py
 配置：agent-platform 的 settings.mcp_servers = {"dagster": {"transport": "stdio",
-      "command": "python", "args": ["deploy/dagster_mcp_server.py"]}}
+      "command": "python", "args": ["mcp_servers/dagster_mcp.py"]}}
 """
 
 import os

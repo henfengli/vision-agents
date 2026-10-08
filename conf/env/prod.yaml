@@ -27,7 +27,18 @@ langfuse:
   prompt_cache_ttl_s: 10
 
 # 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}
+# 仓库自带三个 stdio server（mcp_servers/）：dagster 报错分析、browser 网页
+# 冒烟、datahub 元数据/血缘；server 端依赖见 pyproject 的 browser/datahub extras
 # mcp_servers:
 #   dagster:
-#     transport: streamable_http
-#     url: http://127.0.0.1:8200/mcp
+#     transport: stdio
+#     command: python
+#     args: ["mcp_servers/dagster_mcp.py"]
+#   browser:
+#     transport: stdio
+#     command: python
+#     args: ["mcp_servers/browser_mcp.py"]
+#   datahub:
+#     transport: stdio
+#     command: python
+#     args: ["mcp_servers/datahub_mcp.py"]
