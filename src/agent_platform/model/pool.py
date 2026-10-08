@@ -9,9 +9,30 @@ import asyncio
 import itertools
 from typing import Any, Awaitable, Callable
 
+import httpx
+
 
 class ModelPoolError(RuntimeError):
     pass
+
+
+class RotatingTokenAuth(httpx.Auth):
+    """每请求轮换 bearer token——多 token 轮询语义推广到单次 HTTP 请求粒度。
+
+    用于主 agent 的 LangChain httpx 客户端（ModelPool.chat 走不到那里）：
+    限流（429）时 SDK 的指数退避重试每次都是新请求，自然换到下一个 token。
+    """
+
+    def __init__(self, tokens: list[str]):
+        if not tokens:
+            raise ModelPoolError("至少配置一个模型 token")
+        self._tokens = tokens
+        self._rr = itertools.count()
+
+    def auth_flow(self, request):
+        token = self._tokens[next(self._rr) % len(self._tokens)]
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
 
 
 def _default_factory(url: str):

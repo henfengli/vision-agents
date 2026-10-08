@@ -329,6 +329,21 @@ class TestSpec(unittest.TestCase):
 
 
 class TestModelPool(unittest.IsolatedAsyncioTestCase):
+    def test_rotating_token_auth_per_request(self):
+        """主 agent 的 httpx 客户端：每个请求换下一个 token（含 429 重试）。"""
+        import httpx
+
+        from agent_platform.model.pool import RotatingTokenAuth
+        auth = RotatingTokenAuth(["t1", "t2"])
+        seen = []
+        for _ in range(3):
+            req = httpx.Request("POST", "http://x/v1/chat/completions")
+            list(auth.auth_flow(req))     # 同步驱动生成器
+            seen.append(req.headers["Authorization"])
+        self.assertEqual(seen, ["Bearer t1", "Bearer t2", "Bearer t1"])
+        with self.assertRaises(Exception):
+            RotatingTokenAuth([])         # 空 token 配置期暴露
+
     async def test_token_rotation_on_retryable(self):
         from agent_platform.model.pool import ModelPool
 

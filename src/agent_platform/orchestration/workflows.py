@@ -16,6 +16,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from .spec import RunSpec
+from .tasks import question_text
 
 log = logging.getLogger(__name__)
 
@@ -117,9 +118,8 @@ async def sync_schedules(client, tasks: list, task_queue: str) -> int:
 
 
 def _schedule_question(task) -> str:
-    lines = [f"任务类型：{task.name}"]
-    lines += [f"{k}: {v}" for k, v in (task.schedule_input or {}).items()]
-    return "\n".join(lines)
+    # 实现唯一出处：tasks.question_text（与提交端同一份拼接逻辑）
+    return question_text(task, dict(task.schedule_input or {}))
 
 
 @workflow.defn

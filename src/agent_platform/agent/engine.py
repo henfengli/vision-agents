@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from .tools.registry import ToolRegistry
 
 AGENT_REBUILD_TTL_S = 5.0  # 与 DefinitionStore 缓存 TTL 对齐：角色改后数秒内生效
+# 成本取舍（刻意）：重建是 TTL 触发而非变更触发——持续有流量时每 5s 重建
+# 一次 agent，create_deep_agent 的装配成本白付。变更 hash 比对更省，但要把
+# ResolvedRole 列表做成可哈希快照，复杂度换省电；当前流量下重建成本可忽略，
+# 保持简单。若未来 profile 显示重建可见，再换 hash 方案。
 
 
 def create_agent(roles: list, tool_registry: "ToolRegistry",
@@ -57,12 +61,16 @@ class Engine:
         self._lock = asyncio.Lock()
         self._checkpointer_cm: Any = None  # AsyncPostgresSaver 的异步上下文管理器
         self._saver: Any = None
+        self._model_http: Any = None       # 主 agent 模型的 httpx 客户端（轮换 auth）
 
     async def close(self) -> None:
-        """释放 checkpointer 连接。服务 shutdown 时调用。"""
+        """释放 checkpointer 与模型 http 连接。服务 shutdown 时调用。"""
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
             self._checkpointer_cm = None
+        if self._model_http is not None:
+            await self._model_http.aclose()
+            self._model_http = None
 
     async def graph_json(self) -> dict:
         """图拓扑（节点 + 边），供前端 dagre 布局渲染。"""
@@ -140,10 +148,22 @@ class Engine:
         return self._saver
 
     def _make_model(self) -> Any:
-        """LangChain 模型实例：OpenAI 兼容协议指到内部统一模型 API。"""
+        """LangChain 模型实例：OpenAI 兼容协议指到内部统一模型 API。
+
+        多 token 轮询（与 ModelPool 同一配置语义）：RotatingTokenAuth 逐请求
+        轮换 Authorization——主 agent 是流量大头，限流时 SDK 重试自动换 token。
+        http client 生命周期归 Engine（close 时释放）；api_key 仅作占位，
+        实际鉴权头每请求被 auth 覆盖。
+        """
+        import httpx
         from langchain.chat_models import init_chat_model
+
+        from ..model.pool import RotatingTokenAuth
+        self._model_http = httpx.AsyncClient(
+            auth=RotatingTokenAuth(self._settings.model.tokens))
         return init_chat_model(
             f"openai:{self._settings.model.name}",
             base_url=self._settings.model.url,
             api_key=self._settings.model.tokens[0],
+            http_async_client=self._model_http,
         )

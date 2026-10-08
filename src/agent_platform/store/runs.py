@@ -91,8 +91,15 @@ async def session_exists(session_id: str) -> bool:
 
 
 async def log_event(run_id: str, kind: str, payload: dict) -> None:
-    """追加事件；seq = 当前 max+1，单连接一条 SQL 完成，重试安全。"""
+    """追加事件；seq = 当前 max+1。
+
+    并发安全：同一 run 的并行写入（资产图层内并行节点同时落事件）先取
+    pg_advisory_xact_lock 按 run_id 串行化，max(seq)+1 不会撞号——SSE 按
+    seq 增量拉取，重复 seq 会丢事件。连接上下文整体一个事务，锁随事务释放。
+    另有 (run_id, seq) 唯一索引兜底（db.py MIGRATIONS）。
+    """
     async with db.pool().connection() as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (run_id,))
         await conn.execute(
             "INSERT INTO run_events (run_id, seq, kind, payload) VALUES ("
             "%s, COALESCE((SELECT max(seq) FROM run_events WHERE run_id=%s), 0) + 1,"

@@ -27,7 +27,8 @@ from .schemas import (ApprovalRequest, AskRequest, DefinitionPutRequest,
 
 
 def create_app(settings, lifespan=None) -> FastAPI:
-    app = FastAPI(title="agent-platform", version="4.4.2", lifespan=lifespan)
+    from .. import __version__
+    app = FastAPI(title="agent-platform", version=__version__, lifespan=lifespan)
 
     @app.exception_handler(OverloadedError)
     async def _overloaded(_req, exc):

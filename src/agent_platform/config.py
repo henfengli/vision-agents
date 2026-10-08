@@ -103,6 +103,8 @@ class Settings(BaseModel):
 
         一套 agent 部署服务多套业务环境（prod/test/dev 的 Dagster/board…），
         run/记忆/闸门都按这个维度区分；不配 target_envs 时退化为实例标签本身。
+        与 orchestration.submitter.Submitter._resolve_target_env 同一逻辑、
+        两处实现（那边从构造参数取值，不依赖 Settings），语义变更时两边同步改。
         """
         if not env:
             return self.default_target_env or (self.target_envs[0]

@@ -91,6 +91,19 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
 
     # ---- 全链路 ----
 
+    async def test_log_event_seq_unique_under_concurrency(self):
+        """资产图层内并行的多节点同时写事件：seq 不得撞号（SSE 按 seq 增量拉取）。"""
+        import asyncio
+
+        from agent_platform.store import runs
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        await asyncio.gather(*(runs.log_event(
+            r["run_id"], "note", {"stage": "race", "i": i}) for i in range(10)))
+        seqs = [e["seq"] for e in await runs.get_events(r["run_id"])]
+        self.assertEqual(len(seqs), len(set(seqs)))  # 无重复
+        self.assertEqual(seqs, sorted(seqs))
+
     async def test_submit_runs_to_success(self):
         from agent_platform.store import runs
         result = await self.submitter.submit(

@@ -19,6 +19,7 @@ from temporalio import activity
 from ..agent.approvals import current_run_id
 from ..agent.roles import resolve
 from ..memory import distill, recall_block
+from ..store import artifacts as artifacts_store
 from ..store import cases as cases_store
 from ..store import definitions as definitions_store
 from ..store import knowledge as knowledge_store
@@ -247,8 +248,6 @@ def _extract_final_text(result: dict) -> str:
 # ==================== 资产化任务图 activities ====================
 # 解释器（纯逻辑）在 artgraph.py；这里是它的全部 IO 落点。
 # 节点产物经 artifacts 表流转；执行细节落 run_events 台账（Viewer 可见）。
-
-from ..store import artifacts as artifacts_store  # noqa: E402
 
 # code 节点的确定性函数注册表：内核代码登记（要 code review 的逻辑本就该在代码里），
 # 域包/任务定义只引用名字。用法：@code_node("inspection.collect_scope")

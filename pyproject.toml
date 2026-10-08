@@ -1,6 +1,7 @@
 [project]
 name = "agent-platform"
-version = "4.4.2"
+# 版本唯一出处是 src/agent_platform/__init__.py 的 __version__（发版只改那一处）
+dynamic = ["version"]
 description = "平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程"
 requires-python = ">=3.11"
 dependencies = [
@@ -29,6 +30,9 @@ mcp = ["langchain-mcp-adapters>=0.1"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "agent_platform.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

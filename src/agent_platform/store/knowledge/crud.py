@@ -10,6 +10,25 @@ import json
 
 from ..db import pool
 
+# upsert 的两种形态写成两个具名常量，不用 format 拼（全库只此两处，
+# 读一遍即可懂）：差别仅是有无 embedding 一列。
+_SQL_UPSERT = (
+    "INSERT INTO knowledge (env, domain, key, content, source_run, code_ref)"
+    " VALUES (%s,%s,%s,%s,%s,%s)"
+    " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
+    " code_ref=EXCLUDED.code_ref,"
+    " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
+    " expired=false, created_at=now()")
+_SQL_UPSERT_WITH_VEC = (
+    "INSERT INTO knowledge (env, domain, key, content, source_run, code_ref,"
+    " embedding) VALUES (%s,%s,%s,%s,%s,%s,%s::vector)"
+    " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
+    " code_ref=EXCLUDED.code_ref,"
+    " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
+    " expired=false, created_at=now(), embedding=EXCLUDED.embedding")
+
 
 async def upsert(env: str, domain: str, key: str, content: str,
                  source_run: str | None = None, code_ref: dict | None = None,
@@ -20,29 +39,18 @@ async def upsert(env: str, domain: str, key: str, content: str,
         vecs = await embedder([f"{key} {content}"])
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
-    sql = ("INSERT INTO knowledge (env, domain, key, content, source_run, code_ref{vec_col})"
-           " VALUES (%s,%s,%s,%s,%s,%s{vec_val})"
-           " ON CONFLICT (env, domain, key) DO UPDATE SET"
-           " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
-           " code_ref=EXCLUDED.code_ref,"
-           " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
-           " expired=false, created_at=now(){vec_upd}")
-    params = [env, domain, key, content, source_run,
-              json.dumps(code_ref) if code_ref else None]
+    params = (env, domain, key, content, source_run,
+              json.dumps(code_ref) if code_ref else None)
     if vec is not None:
         try:
             # 独立连接：失败后 PG 事务中止，不能在同一连接上继续
             async with pool().connection() as conn:
-                await conn.execute(
-                    sql.format(vec_col=", embedding", vec_val=",%s::vector",
-                               vec_upd=", embedding=EXCLUDED.embedding"),
-                    (*params, vec))
+                await conn.execute(_SQL_UPSERT_WITH_VEC, (*params, vec))
             return
         except Exception:  # noqa: BLE001 —— 无 pgvector 时退化为纯文本写
             pass
     async with pool().connection() as conn:
-        await conn.execute(sql.format(vec_col="", vec_val="", vec_upd=""),
-                           tuple(params))
+        await conn.execute(_SQL_UPSERT, params)
 
 
 async def get_entry(entry_id: int) -> dict | None:

@@ -143,6 +143,9 @@ MIGRATIONS = [
     " TEXT NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_reuse_env"
     " ON artifacts(target_env, task_type, name, input_hash, created_at)",
+    # seq 撞号兜底（存量库若有历史重复则索引创建失败，advisory lock 仍保未来）
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run_seq"
+    " ON run_events(run_id, seq)",
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "

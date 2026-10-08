@@ -61,3 +61,10 @@ class TaskRegistry:
         return await self._store.put("task", self._env, task.name,
                                      task.model_dump(exclude={"name"}),
                                      updated_by=updated_by)
+
+
+def question_text(task: TaskDef, input_data: dict) -> str:
+    """任务输入 → 给 agent 的 question 文本（提交端与调度端共用，只此一份）。"""
+    lines = [f"任务类型：{task.name}"]
+    lines += [f"{k}: {v}" for k, v in input_data.items()]
+    return "\n".join(lines)

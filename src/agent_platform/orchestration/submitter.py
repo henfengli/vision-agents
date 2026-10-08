@@ -21,7 +21,7 @@ from ..store import runs
 from ..store.definitions import DefinitionStore
 from . import policies
 from .spec import RunSpec
-from .tasks import TaskDef, TaskRegistry
+from .tasks import TaskDef, TaskRegistry, question_text
 from .workflows import (AgentRunWorkflow, ArtifactRunWorkflow,
                         BuiltinTaskWorkflow)
 
@@ -55,7 +55,12 @@ class Submitter:
     # —— 内部 ——
 
     def _resolve_target_env(self, env: str | None) -> str:
-        """目标业务环境：缺省给默认；配了列表则必须在列表里。"""
+        """目标业务环境：缺省给默认；配了列表则必须在列表里。
+
+        与 config.Settings.resolve_target_env 同一逻辑、两处实现：
+        这里从构造参数取值（Submitter 不依赖 Settings 便于独立测试），
+        语义变更时两边同步改。
+        """
         if not env:
             return self._default_target or (self._target_envs[0]
                                             if self._target_envs else self._env)
@@ -267,6 +272,4 @@ class Submitter:
 
 
 def _to_question(task: TaskDef, input_data: dict) -> str:
-    lines = [f"任务类型：{task.name}"]
-    lines += [f"{k}: {v}" for k, v in input_data.items()]
-    return "\n".join(lines)
+    return question_text(task, input_data)  # 实现唯一出处：tasks.question_text
