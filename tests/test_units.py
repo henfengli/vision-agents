@@ -447,7 +447,7 @@ class TestRunGraph(unittest.IsolatedAsyncioTestCase):
         # report 跳过且不审批；终末只有 summary
         self.assertEqual(out, {"summary": "made:summary"})
         self.assertEqual(gates, [])
-        skipped = [m for m in marks if m[-1] == "skipped"]
+        skipped = [m for m in marks if m[3] == "skipped"]
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0][2], "report")
 

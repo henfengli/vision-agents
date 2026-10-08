@@ -277,14 +277,17 @@ async def art_materialize(raw: dict, name: str, node_def: dict,
     """
     d = _d()
     spec = RunSpec.from_dict(raw)
+    t_env = spec.target_env or d.settings.env   # 产物复用按目标环境分区
     hash_ = artifacts_store.input_hash(
         {"name": name, "node": node_def}, payload)
 
     reused = await artifacts_store.find_reusable(
-        spec.task_type, name, hash_, prefer_run=spec.run_id)
+        spec.task_type, name, hash_, prefer_run=spec.run_id,
+        target_env=t_env)
     if reused is not None:
         await artifacts_store.put(spec.run_id, spec.task_type, name,
-                                  reused["content"], hash_, status="reused")
+                                  reused["content"], hash_, status="reused",
+                                  target_env=t_env)
         await runs.log_event(spec.run_id, "note",
                              {"stage": "artifact", "node": name,
                               "status": "reused", "reason": "输入指纹未变"})
@@ -293,7 +296,8 @@ async def art_materialize(raw: dict, name: str, node_def: dict,
     await runs.log_event(spec.run_id, "note",
                          {"stage": "artifact", "node": name, "status": "start"})
     content = await _execute_node(d, spec, name, node_def, payload)
-    await artifacts_store.put(spec.run_id, spec.task_type, name, content, hash_)
+    await artifacts_store.put(spec.run_id, spec.task_type, name, content, hash_,
+                              target_env=t_env)
     await runs.log_event(spec.run_id, "note",
                          {"stage": "artifact", "node": name,
                           "status": "materialized",
@@ -367,18 +371,22 @@ async def art_gate(run_id: str, node: str, summary: str) -> bool:
         await approvals.wait_decision(approval_id)
         return True
     except Exception:  # 拒绝或超时：安全侧默认，不物化
-        spec_task = ""
+        spec_task, t_env = "", ""
         run = await runs.get(run_id)
         if run:
             spec_task = run["task_type"]
-        await artifacts_store.mark(run_id, spec_task, node, "rejected")
+            t_env = run.get("target_env") or ""
+        await artifacts_store.mark(run_id, spec_task, node, "rejected",
+                                   target_env=t_env)
         return False
 
 
 @activity.defn
-async def art_mark(run_id: str, task_type: str, name: str, status: str) -> None:
+async def art_mark(run_id: str, task_type: str, name: str, status: str,
+                   target_env: str = "") -> None:
     """记录节点跳过/拒绝状态（Viewer 血缘图染色的数据源）。"""
-    await artifacts_store.mark(run_id, task_type, name, status)
+    await artifacts_store.mark(run_id, task_type, name, status,
+                               target_env=target_env)
     await runs.log_event(run_id, "note",
                          {"stage": "artifact", "node": name, "status": status})
 

@@ -119,14 +119,14 @@ async def run_graph(
         missing = [d for d in node.deps if results.get(d) in (None, SKIPPED)]
         if missing:  # 上游被跳过 → 连带跳过
             await call(activities.art_mark, run_id, spec["task_type"],
-                       name, "skipped")
+                       name, "skipped", spec.get("target_env", ""))
             results[name] = SKIPPED
             return
         deps = {d: results[d] for d in node.deps}
         if node.gate:
             if not gate_holds(node.gate["when"], results):
                 await call(activities.art_mark, run_id, spec["task_type"],
-                           name, "skipped")
+                           name, "skipped", spec.get("target_env", ""))
                 results[name] = SKIPPED
                 return
             approved = await call(activities.art_gate, run_id, name,
@@ -143,7 +143,7 @@ async def run_graph(
             items = list(seq or [])
             if not items:
                 await call(activities.art_mark, run_id, spec["task_type"],
-                           name, "skipped")
+                           name, "skipped", spec.get("target_env", ""))
                 results[name] = SKIPPED
                 return
             mapped = await asyncio.gather(*(

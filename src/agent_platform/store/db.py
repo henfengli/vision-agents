@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     run_id      TEXT REFERENCES runs(run_id),
     task_type   TEXT NOT NULL,
     name        TEXT NOT NULL,               -- 产物节点名
+    target_env  TEXT NOT NULL DEFAULT '',    -- 目标业务环境：复用只在同环境内发生
     content     JSONB,                       -- 产物内容（skipped/rejected 为 NULL）
     input_hash  TEXT,                        -- 输入指纹：重跑复用的判定依据
     status      TEXT NOT NULL,               -- materialized/reused/skipped/rejected
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     PRIMARY KEY (run_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_reuse
-    ON artifacts(task_type, name, input_hash, created_at);
+    ON artifacts(target_env, task_type, name, input_hash, created_at);
 
 CREATE TABLE IF NOT EXISTS definitions (
     kind       TEXT NOT NULL,                -- role / task
@@ -138,6 +139,10 @@ MIGRATIONS = [
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS task_version INT",
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS role_version INT",
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS target_env TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS target_env"
+    " TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_reuse_env"
+    " ON artifacts(target_env, task_type, name, input_hash, created_at)",
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "

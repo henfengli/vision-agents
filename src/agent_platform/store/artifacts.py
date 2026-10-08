@@ -22,21 +22,25 @@ def input_hash(node_def: dict, payload: dict) -> str:
 
 
 async def put(run_id: str, task_type: str, name: str, content: Any,
-              hash_: str | None, status: str = "materialized") -> None:
+              hash_: str | None, status: str = "materialized",
+              target_env: str = "") -> None:
     async with pool().connection() as conn:
         await conn.execute(
-            "INSERT INTO artifacts (run_id, task_type, name, content, input_hash, status)"
-            " VALUES (%s,%s,%s,%s,%s,%s)"
+            "INSERT INTO artifacts (run_id, task_type, name, target_env,"
+            " content, input_hash, status) VALUES (%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (run_id, name) DO UPDATE SET"
-            " content=EXCLUDED.content, input_hash=EXCLUDED.input_hash,"
+            " target_env=EXCLUDED.target_env, content=EXCLUDED.content,"
+            " input_hash=EXCLUDED.input_hash,"
             " status=EXCLUDED.status, created_at=now()",
-            (run_id, task_type, name,
+            (run_id, task_type, name, target_env,
              json.dumps(content, ensure_ascii=False, default=str), hash_, status))
 
 
-async def mark(run_id: str, task_type: str, name: str, status: str) -> None:
+async def mark(run_id: str, task_type: str, name: str, status: str,
+               target_env: str = "") -> None:
     """只记状态（skipped/rejected），无产物内容。"""
-    await put(run_id, task_type, name, None, None, status=status)
+    await put(run_id, task_type, name, None, None, status=status,
+              target_env=target_env)
 
 
 async def get(run_id: str, name: str) -> dict | None:
@@ -58,8 +62,13 @@ async def list_by_run(run_id: str) -> list[dict]:
 
 
 async def find_reusable(task_type: str, name: str, hash_: str,
-                        prefer_run: str | None = None) -> dict | None:
-    """输入 hash 未变的最新产物：本 run 已有优先，否则跨 run 取最近一次。"""
+                        prefer_run: str | None = None,
+                        target_env: str = "") -> dict | None:
+    """输入 hash 未变的最新产物：本 run 已有优先，否则跨 run 取最近一次。
+
+    跨 run 复用限定同一目标环境——产物内容来自环境特定的数据/代码，
+    不能把 test 物化的结果记到 prod 的账上。
+    """
     async with pool().connection() as conn:
         if prefer_run:
             cur = await conn.execute(
@@ -72,9 +81,10 @@ async def find_reusable(task_type: str, name: str, hash_: str,
                 return _row(row)
         cur = await conn.execute(
             "SELECT name, content, input_hash, status, created_at FROM artifacts"
-            " WHERE task_type=%s AND name=%s AND input_hash=%s"
+            " WHERE target_env=%s AND task_type=%s AND name=%s AND input_hash=%s"
             " AND status IN ('materialized','reused')"
-            " ORDER BY created_at DESC LIMIT 1", (task_type, name, hash_))
+            " ORDER BY created_at DESC LIMIT 1",
+            (target_env, task_type, name, hash_))
         row = await cur.fetchone()
     return _row(row) if row else None
 

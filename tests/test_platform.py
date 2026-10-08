@@ -668,6 +668,27 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                  for a in await artifacts_store.list_by_run(r3["run_id"])}
         self.assertEqual(rows3["extract"]["status"], "materialized")
 
+    async def test_artifact_reuse_partitioned_by_env(self):
+        """产物复用限定同一目标环境：test 物化的产物不能被 prod 的 run 复用。"""
+        from agent_platform.store import artifacts as artifacts_store
+        await self._register_etl_task()
+        configure_fake_deps(self.settings, self.defs, model_content='"ok"')
+        sub = self._multi_env_submitter()
+        r1 = await sub.submit("asset-etl", {"topic": "t"}, "sdk",
+                              target_env="test")
+        r2 = await sub.submit("asset-etl", {"topic": "t"}, "sdk",
+                              target_env="prod")
+        rows2 = {a["name"]: a
+                 for a in await artifacts_store.list_by_run(r2["run_id"])}
+        # 同样的输入指纹，但跨环境 → 不复用，重新物化
+        self.assertEqual(rows2["extract"]["status"], "materialized")
+        # 同环境再跑 → 复用本环境（prod）的产物
+        r3 = await sub.submit("asset-etl", {"topic": "t"}, "sdk",
+                              target_env="prod")
+        rows3 = {a["name"]: a
+                 for a in await artifacts_store.list_by_run(r3["run_id"])}
+        self.assertEqual(rows3["extract"]["status"], "reused")
+
     async def test_artifact_gate_approval_paths(self):
         from unittest.mock import patch
 

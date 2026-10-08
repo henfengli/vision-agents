@@ -24,9 +24,9 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 ## 核心设计（一句话版）
 
 - **目标环境维度**：`settings.env` 只是实例标签（定义/种子按它存取）；run 操作的
-  业务环境由请求 `env` 决定——run 记录、记忆分区、env_gate 与策略 `envs` 过滤、
-  域连接信息（`DomainConfig.envs` 覆盖）全部按它走。不配 `target_envs` 即单环境，
-  一切照旧。
+  业务环境由请求 `env` 决定——run 记录、记忆分区、产物复用分区、env_gate 与
+  策略 `envs` 过滤、域连接信息（`DomainConfig.envs` 覆盖）全部按它走。
+  不配 `target_envs` 即单环境，一切照旧。
 - **一切需求归一为任务声明**：新增需求 = Admin API 写一条任务定义，即时生效。
   任务三种形态：单 agent 问答（默认）/ 资产化任务图（artifacts）/ 内建处理器（handler）。
 - **资产化任务图**：节点是产物、边是依赖（数据流不是控制流）；动态性只收进
