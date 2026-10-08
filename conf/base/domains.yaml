@@ -1,0 +1,9 @@
+# 业务域：只声明代码/配置所在目录（静态拓扑，随部署走）。
+# DB 连接串等由 agent 直接读业务配置文件获取，此处不重复声明。
+domains:
+  board:
+    code_paths: ["/srv/board"]
+  dagster:
+    code_paths: ["/srv/dagster"]
+  config-center:
+    code_paths: ["/srv/config-center"]

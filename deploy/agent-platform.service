@@ -1,0 +1,28 @@
+# /etc/systemd/system/agent-platform.service
+# 权限收口：低权限用户 + 全盘只读 + 仅 scratch 可写，bash 工具继承此进程权限
+[Unit]
+Description=agent-platform
+After=network.target
+
+[Service]
+User=agent-svc
+Group=agent-svc
+Environment=AGENT_ENV=prod
+EnvironmentFile=/etc/agent-platform/secrets.env
+ExecStart=/opt/agent-platform/venv/bin/uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
+Restart=on-failure
+RestartSec=5
+
+# —— 文件系统收口 ——
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-platform/scratch /var/log/agent-platform
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+# —— 网络收口（生产按需开启） ——
+# IPAddressAllow=10.0.0.0/8
+# IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

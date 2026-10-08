@@ -1,0 +1,20 @@
+[Unit]
+Description=Temporal Server (agent-platform durable execution)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=agent
+# Temporal server 是单个 Go 二进制，持久层复用现有 Postgres
+ExecStart=/usr/local/bin/temporal server start-dev \
+  --db-filename /var/lib/temporal/history.db \
+  --ip 127.0.0.1 --port 7233 --ui-port 8080
+# 生产建议改用 --env prod 集群模式 + Postgres 持久层；dev 模式用 SQLite 起步
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/temporal
+
+[Install]
+WantedBy=multi-user.target

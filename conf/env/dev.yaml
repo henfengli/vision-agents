@@ -1,0 +1,39 @@
+env: dev
+
+server:
+  host: 127.0.0.1
+  port: 8100
+
+model:
+  url: https://internal-llm/v1
+  name: internal-model-v3
+  tokens: ["${MODEL_TOKEN_A}"]
+  max_concurrency: 20
+
+db:
+  dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
+
+
+dingtalk:
+  relay_url: "https://alert-notification.ipa.zs/robot/send"
+  access_token: "${DINGTALK_ACCESS_TOKEN}"
+
+viewer_base_url: "http://127.0.0.1:8100"
+
+approvals:
+  enabled: false
+  danger_patterns: ['\brm\s+-[rf]', '\bdrop\b', '\btruncate\b', '\bkill\b', '\bsystemctl\b']
+
+scratch_dir: /var/lib/agent-platform/scratch
+bearer_token: "${AGENT_BEARER_TOKEN}"
+
+temporal:
+  address: 127.0.0.1:7233
+  namespace: default
+  task_queue: agent-platform
+
+langfuse:
+  enabled: false                   # 默认关闭：角色读 PG 缓存表，trace 不发送
+  host: http://127.0.0.1:3000
+  public_key: ""
+  secret_key: ""

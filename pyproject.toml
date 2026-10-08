@@ -1,0 +1,34 @@
+[project]
+name = "agent-platform"
+version = "3.1.0"
+description = "平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents==0.6.*",          # 锁版本：pre-1.0，角色定义收在自有配置层隔离 API 变更
+    "langgraph>=1.0,<2.0",
+    "langgraph-checkpoint-postgres>=2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "openai>=1.50",               # 模型连接池用（OpenAI 兼容协议）
+    "langchain-openai>=0.2",      # init_chat_model 的 OpenAI provider
+    "psycopg[binary,pool]>=3.2",
+    "pyyaml>=6.0",
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "temporalio>=1.27",           # durable execution：编排/调度/恢复
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# 链路追踪（Langfuse/OTEL）：生产建议安装；不装则 langfuse.enabled 不可开
+obs = ["opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
+       "openinference-instrumentation-langchain>=0.1"]
+# 内部 MCP 服务器接入（可选；不配 mcp_servers 则不需要）
+mcp = ["langchain-mcp-adapters>=0.1"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
