@@ -43,7 +43,8 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
   重判，finalize 时只取代最近一次 run 沉淀的记忆，不误伤历史。
 - **工具分层**：L0 bash（bwrap 沙箱）/ L2 run_code（CodeAct，一次编排多工具）/
   薄工具（sql_query、dingtalk_send、update_asset_profile）/ MCP 桥（内部服务类型化接口；
-  自带 dagster / browser / datahub 三个 stdio server，见 `mcp_servers/`）。
+  browser / datahub 直接用官方实现 @playwright/mcp、mcp-server-datahub，
+  仓库只自带 dagster server，见 `mcp_servers/`）。
 - **安全**：systemd 物理收口 + bwrap 沙箱 + 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
 
 ## 快速开始
@@ -78,7 +79,7 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 94 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 96 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）
@@ -95,8 +96,8 @@ CLI：`agent-chat --server board --role data_searcher`
 
 ```
 src/agent_platform/   服务源码（分层见包注释）
-mcp_servers/          内部 MCP server（stdio）：dagster 报错分析 / browser 网页自动化 /
-                      datahub 元数据与血缘；settings.mcp_servers 按名字接入
+mcp_servers/          仓库自带的内部 MCP server（stdio）：dagster 报错分析（无现成实现）；
+                      browser / datahub 用官方包，settings.mcp_servers 里 npx/uvx 接入
 conf/                 base/common.yaml（共享默认）+ env/{dev,test,prod}.yaml（只写差异，深合并）
 deploy/               systemd unit + install.sh
 sdk/agent_client/     业务方客户端 + agent-chat CLI

@@ -27,8 +27,10 @@ langfuse:
   prompt_cache_ttl_s: 10
 
 # 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}
-# 仓库自带三个 stdio server（mcp_servers/）：dagster 报错分析、browser 网页
-# 冒烟、datahub 元数据/血缘；server 端依赖见 pyproject 的 browser/datahub extras
+# browser / datahub 直接用官方实现，零维护代码：
+#   - browser：微软官方 @playwright/mcp（需 Node.js，npx 自动下载）
+#   - datahub：DataHub 官方 mcp-server-datahub（需 uv/uvx，uvx 自动建虚拟环境）
+# 只有 dagster 是仓库自带（内部 GraphQL 接口，无现成实现），见 mcp_servers/
 # mcp_servers:
 #   dagster:
 #     transport: stdio
@@ -36,9 +38,14 @@ langfuse:
 #     args: ["mcp_servers/dagster_mcp.py"]
 #   browser:
 #     transport: stdio
-#     command: python
-#     args: ["mcp_servers/browser_mcp.py"]
+#     command: npx
+#     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated",
+#            "--output-dir", "/var/lib/agent-platform/scratch"]
+#     # 内网安全：按需收敛可访问站点，如 --allowed-hosts "*.corp.local"
 #   datahub:
 #     transport: stdio
-#     command: python
-#     args: ["mcp_servers/datahub_mcp.py"]
+#     command: uvx
+#     args: ["--from", "mcp-server-datahub==0.7.1", "mcp-server-datahub"]
+#     env:
+#       DATAHUB_GMS_URL: "http://datahub-gms:8080"
+#       DATAHUB_GMS_TOKEN: "${DATAHUB_GMS_TOKEN}"

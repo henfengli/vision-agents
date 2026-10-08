@@ -25,10 +25,11 @@ dependencies = [
 obs = ["opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
        "openinference-instrumentation-langchain>=0.1"]
 # 内部 MCP 服务器接入（可选；不配 mcp_servers 则不需要）
+# browser / datahub 用官方实现（@playwright/mcp、mcp-server-datahub），是独立
+# 进程的外部运行时（Node.js / uv），不入 Python 依赖；见 conf/env/prod.yaml
 mcp = ["langchain-mcp-adapters>=0.1"]
-# mcp_servers/ 里的 server 端（按需选装；server 是独立进程，不随主服务装）
-browser = ["fastmcp>=2.0", "playwright>=1.40"]   # 另需 playwright install chromium
-datahub = ["fastmcp>=2.0", "httpx>=0.27"]
+# mcp_servers/dagster_mcp.py 的 server 端依赖（独立进程，不随主服务装）
+dagster-mcp = ["fastmcp>=2.0", "httpx>=0.27"]
 
 [build-system]
 requires = ["setuptools>=68"]
