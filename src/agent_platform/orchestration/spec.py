@@ -38,3 +38,11 @@ class RunSpec:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def effective_env(self, instance_env: str) -> str:
+        """本 run 实际生效的目标环境；未指定时退化为实例标签（单环境部署）。
+
+        执行期所有按环境取值的点（记忆分区/域连接/产物复用/trace 属性）
+        统一走这里，不各自写 target_env or settings.env。
+        """
+        return self.target_env or instance_env

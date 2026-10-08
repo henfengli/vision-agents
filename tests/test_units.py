@@ -321,6 +321,12 @@ class TestSpec(unittest.TestCase):
         self.assertEqual(spec.timeout_s, 300)
         self.assertFalse(spec.correction)
 
+    def test_effective_env(self):
+        from agent_platform.orchestration.spec import RunSpec
+        self.assertEqual(RunSpec().effective_env("deploy"), "deploy")  # 退化实例标签
+        self.assertEqual(RunSpec(target_env="prod").effective_env("deploy"),
+                         "prod")
+
 
 class TestModelPool(unittest.IsolatedAsyncioTestCase):
     async def test_token_rotation_on_retryable(self):

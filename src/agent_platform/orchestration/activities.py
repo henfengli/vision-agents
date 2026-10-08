@@ -91,7 +91,7 @@ async def prepare_run(raw: dict) -> dict:
     spec.domain = spec.domain or (role.domains[0] if role.domains else None)
     # 目标环境：run 操作哪套业务环境——域连接信息（code_paths/只读库）与
     # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）
-    t_env = spec.target_env or d.settings.env
+    t_env = spec.effective_env(d.settings.env)
     if spec.domain and spec.domain in d.settings.domains:
         spec.code_paths = d.settings.domains[spec.domain].for_env(t_env).code_paths
 
@@ -150,7 +150,7 @@ async def finalize_run(raw: dict, output: dict) -> dict:
     await runs.set_status(spec.run_id, "success", output=output)
     # 纠正式反馈：新结论沉淀前，把本 session 最近一次 run 沉淀的记忆标记为被取代。
     # 只杀最近的判断——纠正针对的是上一次结论，不误伤 session 里沉淀正确的历史知识。
-    t_env = spec.target_env or d.settings.env   # 记忆按目标环境分区
+    t_env = spec.effective_env(d.settings.env)  # 记忆按目标环境分区
     if spec.correction and spec.session_id:
         last = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
         old_ids = [last["run_id"]] if last else []
@@ -197,7 +197,7 @@ def _run_span(d: Deps, spec: RunSpec):
                     "agent.task_type": spec.task_type,
                     "agent.role": spec.role,
                     "agent.env": d.settings.env,
-                    "agent.target_env": spec.target_env or d.settings.env,
+                    "agent.target_env": spec.effective_env(d.settings.env),
                     "agent.session_id": spec.session_id or ""})
 
 
@@ -277,7 +277,7 @@ async def art_materialize(raw: dict, name: str, node_def: dict,
     """
     d = _d()
     spec = RunSpec.from_dict(raw)
-    t_env = spec.target_env or d.settings.env   # 产物复用按目标环境分区
+    t_env = spec.effective_env(d.settings.env)  # 产物复用按目标环境分区
     hash_ = artifacts_store.input_hash(
         {"name": name, "node": node_def}, payload)
 
