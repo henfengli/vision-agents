@@ -41,10 +41,12 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
   （资产档案逐字保留 → 前序交接摘要四节模板 → 历史知识 RRF 混合检索 → 同类案例）。
 - **纠正式反馈**：`POST /v1/sessions/{sid}/feedback` 从 session 最近 run 继承任务上下文
   重判，finalize 时只取代最近一次 run 沉淀的记忆，不误伤历史。
-- **工具分层**：L0 bash（bwrap 沙箱）/ L2 run_code（CodeAct，一次编排多工具）/
-  薄工具（sql_query、dingtalk_send、update_asset_profile）/ MCP 桥（内部服务类型化接口；
-  browser / datahub 直接用官方实现 @playwright/mcp、mcp-server-datahub，
-  仓库只自带 dagster server，见 `mcp_servers/`）。
+- **工具分层**：L0 bash（bwrap 沙箱：全盘只读/仅 scratch 可写/默认断网——
+  出网访问全部收口成薄工具，命令是 LLM 现场拼的，正则审批管不住 API 语义）/
+  L2 run_code（CodeAct，一次编排多工具）/
+  薄工具（sql_query、host_metrics、dingtalk_send、update_asset_profile）/
+  MCP 桥（内部服务类型化接口；browser / datahub 直接用官方实现
+  @playwright/mcp、mcp-server-datahub，仓库只自带 dagster server，见 `mcp_servers/`）。
 - **安全**：systemd 物理收口 + bwrap 沙箱 + 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
 
 ## 快速开始
@@ -55,8 +57,16 @@ export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_B
 AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 ```
 
-Run Viewer：列表页 `/runs`（可按目标环境过滤）、详情页 `/runs/{run_id}`；
-管理页 `/admin`；对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
+Run Viewer：总览图 `/graph`（Agent 拓扑，cytoscape 渲染）、Runs 列表 `/runs`
+（可按目标环境过滤）、详情 `/runs/{run_id}`（运行图 + 步骤时间线）、
+审批待办 `/approvals`（顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达
+`/approvals/{run_id}` 处理页）、管理页 `/admin`、记忆页 `/memory`、
+对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
+
+主机监控：配好 `grafana:`（url + Prometheus 数据源 uid + 只读 token）并在域包
+`domain.yaml` 登记 `hosts` 后，角色可用 `host_metrics` 工具查部署机器的
+内存/负载/根盘（经 Grafana datasource proxy，指标集固定）。既有部署需在
+管理页给角色热加该工具。
 
 生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
 Temporal server 见 `deploy/temporal-server.service`。
@@ -79,7 +89,7 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 102 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 105 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）
