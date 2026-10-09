@@ -92,7 +92,8 @@ def make_static_router() -> APIRouter:
     router = APIRouter()
     allowed = {"app.css", "graph.js", "cytoscape.min.js", "cytoscape-dagre.min.js"}
 
-    @router.get("/static/{filename}")
+    # filename:path 才能匹配 fonts/ 子目录（默认 path converter 不吃斜杠，字体曾因此 404）
+    @router.get("/static/{filename:path}")
     async def static_file(filename: str):
         if filename in allowed:
             return FileResponse(STATIC / filename)
