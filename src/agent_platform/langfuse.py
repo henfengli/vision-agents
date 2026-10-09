@@ -42,6 +42,7 @@ class LangfuseClient:
         self._client: Any = None
         # 进程内 last-known-good：SDK 缓存过期且远端失败时的中间降级层
         self._last_known: dict[str, dict] = {}
+        self._pid: str | None = None  # trace 页 URL 用，首次解析后缓存
         if not cfg.enabled:
             return
         if client_factory is None:
@@ -120,6 +121,38 @@ class LangfuseClient:
         )
         self._last_known[name] = definition
 
+    # ---- trace 直达 ----
+
+    async def trace_url(self, trace_id: str) -> str:
+        """Langfuse trace 页直达链接（/project/{pid}/traces/{tid}）。
+
+        未启用 / project id 解析失败返回空串——调用方降级为"手动搜索"文案。
+        """
+        if self._client is None or not trace_id:
+            return ""
+        pid = await self._project_id()
+        if not pid:
+            return ""
+        return f"{self._cfg.host}/project/{pid}/traces/{trace_id}"
+
+    async def _project_id(self) -> str:
+        """public API 解析 project id（自托管单项目，解析一次进程内缓存）。"""
+        if self._pid is not None:
+            return self._pid
+        try:
+            auth = base64.b64encode(
+                f"{self._cfg.public_key}:{self._cfg.secret_key}"
+                .encode()).decode()
+            data = await asyncio.to_thread(
+                _http_get_json, f"{self._cfg.host}/api/public/projects",
+                {"Authorization": f"Basic {auth}"})
+            items = data.get("data") or []
+            self._pid = items[0].get("id", "") if items else ""
+        except Exception:  # noqa: BLE001 —— 解析失败不影响详情页其余部分
+            log.warning("Langfuse project id 解析失败，trace 链接降级为手动搜索")
+            self._pid = ""
+        return self._pid
+
     # ---- 反馈回写 ----
 
     async def score(self, trace_id: str, name: str, value: float,
@@ -150,6 +183,15 @@ class LangfuseClient:
                 await asyncio.to_thread(self._client.flush)
             except Exception:  # noqa: BLE001 —— 关停路径不再放大故障
                 log.warning("Langfuse flush 失败")
+
+
+def _http_get_json(url: str, headers: dict) -> dict:
+    """极简 GET JSON（测试可替身）；public API 用，不走 SDK。"""
+    import json as _json
+    import urllib.request
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return _json.loads(resp.read())
 
 
 # ==================== 观测（OTEL → Langfuse） ====================

@@ -627,6 +627,49 @@ class TestLangfuseClient(unittest.IsolatedAsyncioTestCase):
         await lf.flush()
         self.assertTrue(lf._client.flushed)
 
+    async def test_trace_url_direct_link(self):
+        import agent_platform.langfuse as lf_mod
+        lf = self._client()
+        calls = []
+
+        def fake_get(url, headers):
+            calls.append(url)
+            self.assertEqual(url, "http://lf/api/public/projects")
+            self.assertIn("Basic", headers["Authorization"])
+            return {"data": [{"id": "proj-1", "name": "default"}]}
+
+        orig = lf_mod._http_get_json
+        lf_mod._http_get_json = fake_get
+        try:
+            self.assertEqual(await lf.trace_url("tid-9"),
+                             "http://lf/project/proj-1/traces/tid-9")
+            await lf.trace_url("tid-10")          # 第二次命中缓存
+            self.assertEqual(calls, ["http://lf/api/public/projects"])
+        finally:
+            lf_mod._http_get_json = orig
+
+    async def test_trace_url_fallbacks(self):
+        import agent_platform.langfuse as lf_mod
+        # 未启用 → 空串
+        self.assertEqual(await self._client(enabled=False).trace_url("t"), "")
+        lf = self._client()
+        self.assertEqual(await lf.trace_url(""), "")  # 无 trace id → 空串
+        # 解析失败 → 空串且缓存（不再重复请求）
+        orig = lf_mod._http_get_json
+        calls = []
+
+        def boom(url, headers):
+            calls.append(url)
+            raise RuntimeError("down")
+
+        lf_mod._http_get_json = boom
+        try:
+            self.assertEqual(await lf.trace_url("t"), "")
+            self.assertEqual(await lf.trace_url("t"), "")
+            self.assertEqual(len(calls), 1)
+        finally:
+            lf_mod._http_get_json = orig
+
 
 class TestArtGraph(unittest.TestCase):
     """资产化任务图的纯逻辑面：声明校验 / 拓扑分层 / 闸门求值。"""

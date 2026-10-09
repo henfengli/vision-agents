@@ -92,9 +92,13 @@ def make_router(env: str, engine=None, langfuse=None,
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
-                trace_link = (f'<p class="meta">深度 trace：'
-                              f'<a href="{langfuse.host}" target="_blank">Langfuse</a>'
-                              f' 中搜索 <code>{tid}</code></p>')
+                url = await langfuse.trace_url(tid)
+                inner = (f'<a href="{url}" target="_blank">'
+                         f'在 Langfuse 打开完整 trace ↗</a>'
+                         f'（<code>{tid}</code>）' if url else
+                         f'<a href="{langfuse.host}" target="_blank">Langfuse</a>'
+                         f' 中搜索 <code>{tid}</code>')
+                trace_link = f'<p class="meta">深度 trace：{inner}</p>'
         body = f"""
         <div id="run-head"><div class="meta">加载中…</div></div>
         {trace_link}
