@@ -102,7 +102,7 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
           const src = {{role: ROLES, task: TASKS, policy: POLICIES}}[kind];
           document.getElementById(kind+"-name").value = name;
           const d = src[name] || {{}};
-          const {{name, ...rest}} = d;
+          const {{name: _omit, ...rest}} = d;
           document.getElementById(kind+"-def").value = JSON.stringify(rest, null, 2);
         }}
         async function saveDef(kind) {{
