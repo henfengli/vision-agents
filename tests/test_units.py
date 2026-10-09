@@ -178,6 +178,79 @@ class TestHostInfo(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未登记部署主机", await fn("board"))
 
 
+class TestTraceGraph(unittest.TestCase):
+    """详情页轨迹图：按本 run 事件流构建，每个 run 形状不同。"""
+
+    @staticmethod
+    def _ev(seq, kind, **payload):
+        return {"seq": seq, "kind": kind, "payload": payload,
+                "created_at": "2026-10-09T10:00:00"}
+
+    def test_empty(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        self.assertIsNone(_trace_graph([], "queued"))
+        # graph 事件不属于执行轨迹（资产图 run 走另一分支）
+        self.assertIsNone(_trace_graph(
+            [self._ev(1, "graph", nodes=[], edges=[])], "running"))
+
+    def test_tool_chain_with_final(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        events = [
+            self._ev(1, "thought", node="model", content="先查知识库"),
+            self._ev(2, "tool_call", node="tools", tool="grep",
+                     args='{"pattern": "margin"}'),
+            self._ev(3, "tool_result", node="tools", tool="grep", output="hit"),
+            self._ev(4, "tool_call", node="tools", tool="sql_query",
+                     args='{"sql": "select 1"}'),
+            self._ev(5, "tool_result", node="tools", tool="sql_query",
+                     output="1"),
+            self._ev(6, "llm", stage="final", content="结论"),
+        ]
+        g = _trace_graph(events, "success")
+        self.assertEqual([n["id"] for n in g["nodes"]],
+                         ["start", "seq-2", "seq-4", "seq-6"])
+        self.assertEqual(g["nodes"][1]["label"], 'grep\n{"pattern": "margin"}')
+        self.assertEqual(g["nodes"][3]["label"], "结论")
+        self.assertEqual([(e["source"], e["target"]) for e in g["edges"]],
+                         [("start", "seq-2"), ("seq-2", "seq-4"),
+                          ("seq-4", "seq-6")])
+        # 成功 run 全部已执行
+        self.assertEqual(set(g["statuses"].values()), {"executed"})
+        self.assertTrue(g["trace"])
+
+    def test_running_marks_last_active(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        events = [self._ev(1, "thought", node="model", content="清理临时目录"),
+                  self._ev(2, "tool_call", node="tools", tool="bash",
+                           args='{"command": "rm -rf /tmp/x"}')]
+        g = _trace_graph(events, "running")
+        self.assertEqual(g["statuses"], {"start": "executed",
+                                         "seq-2": "active"})
+
+    def test_failed_marks_last_failed(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        events = [self._ev(1, "tool_call", node="tools", tool="bash",
+                           args="ls"),
+                  self._ev(2, "tool_result", node="tools", tool="bash",
+                           output="boom")]
+        g = _trace_graph(events, "failed")
+        self.assertEqual(g["statuses"]["seq-1"], "failed")
+
+    def test_no_tool_fallback_node(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        # 纯问答：无工具调用，末事件兜底一个节点，图不缺席
+        g = _trace_graph([self._ev(1, "thought", node="model", content="嗨")],
+                         "success")
+        self.assertEqual([n["label"] for n in g["nodes"]], ["开始", "思考"])
+        self.assertEqual(g["edges"], [{"source": "start", "target": "seq-1"}])
+
+    def test_args_clipped_first_line(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        g = _trace_graph([self._ev(1, "tool_call", node="tools", tool="bash",
+                                   args="x" * 60 + "\n第二行")], "success")
+        self.assertEqual(g["nodes"][1]["label"], "bash\n" + "x" * 48)
+
+
 class TestBashTool(unittest.TestCase):
     def test_truncate(self):
         from agent_platform.agent.tools.bash import truncate

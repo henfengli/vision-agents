@@ -77,9 +77,10 @@ function mountGraph(el, graph) {
     const node = e.target;
     cy.elements().addClass("faded");
     node.closedNeighborhood().removeClass("faded");
-    // 运行详情页：点击节点跳到该节点的第一条步骤
+    // 运行详情页：点击节点跳到对应步骤（骨架图按节点名，轨迹图按 seq-N 元素 id）
     const step = document.querySelector(
-      `[data-step-node="${CSS.escape(node.id())}"]`);
+      `[data-step-node="${CSS.escape(node.id())}"]`)
+      || document.getElementById(node.id());
     if (step) step.scrollIntoView({behavior: "smooth", block: "center"});
   });
   cy.on("tap", e => { if (e.target === cy) cy.elements().removeClass("faded"); });
@@ -197,12 +198,14 @@ async function watchRun(runId) {
     renderRunHead(s);
     if (s.graph && s.graph.nodes && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";
-      // 资产图 run 的节点状态由 artifacts 表直给；普通 run 从事件推导
-      const statuses = s.graph.statuses
-        ? Object.fromEntries(Object.entries(s.graph.statuses).map(([k, v]) =>
-            [k, v === "materialized" || v === "reused" ? "executed"
-              : v === "rejected" ? "failed" : ""]))
-        : nodeStatusOf(s.events, s.run.status);
+      // 状态来源三种：轨迹图直给三态 / 资产图 artifacts 表映射 / 骨架图事件推导
+      const statuses = s.graph.trace
+        ? s.graph.statuses
+        : s.graph.statuses
+          ? Object.fromEntries(Object.entries(s.graph.statuses).map(([k, v]) =>
+              [k, v === "materialized" || v === "reused" ? "executed"
+                : v === "rejected" ? "failed" : ""]))
+          : nodeStatusOf(s.events, s.run.status);
       renderInto(graphEl, s.graph, statuses);
     }
     renderSteps(document.getElementById("steps"), s.events);

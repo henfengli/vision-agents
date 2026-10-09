@@ -77,11 +77,10 @@ def make_router(env: str, engine=None, langfuse=None,
             state["graph"] = {**graph_event,
                               "statuses": {a["name"]: a["status"]
                                            for a in arts}}
-        elif engine is not None:
-            try:
-                state["graph"] = await engine.graph_json()
-            except Exception:  # noqa: BLE001 —— 图失败不影响步骤时间线
-                pass
+        else:
+            # 普通 agent run：轨迹图按本 run 事件流构建——每个 run 形状不同；
+            # 引擎静态骨架只在 /graph 拓扑页，详情页不再触发引擎构建
+            state["graph"] = _trace_graph(events, run["status"])
         return state
 
     @router.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -180,6 +179,51 @@ def make_router(env: str, engine=None, langfuse=None,
         return await engine.graph_json()
 
     return router
+
+
+def _trace_graph(events: list[dict], status: str) -> dict | None:
+    """普通 agent run 的执行轨迹图：按本 run 实际事件画出走过的步骤链。
+
+    节点 = 开始 + 每次工具调用（工具名 + 参数首行预览）+ 结论（llm 收尾事件），
+    边 = 事件先后；节点 id 与时间线步骤元素 id（seq-N）一致，点击可联动滚动。
+    状态沿用运行图三态：已执行 / 进行中（末节点，run 未完结）/ 失败点。
+    无事件（排队中）返回 None——详情页不显示图卡。
+    """
+    real = [e for e in events if e["kind"] != "graph"]
+    if not real:
+        return None
+    nodes, edges = [{"id": "start", "label": "开始"}], []
+    prev = "start"
+    for e in real:
+        if e["kind"] != "tool_call":
+            continue
+        p = e["payload"] if isinstance(e["payload"], dict) else {}
+        nid = f"seq-{e['seq']}"
+        label = p.get("tool") or "tool"
+        args = str(p.get("args") or "").splitlines()[0][:48]
+        if args:
+            label += f"\n{args}"
+        nodes.append({"id": nid, "label": label})
+        edges.append({"source": prev, "target": nid})
+        prev = nid
+    final = next((e for e in reversed(real) if e["kind"] == "llm"), None)
+    if final is not None:
+        nodes.append({"id": f"seq-{final['seq']}", "label": "结论"})
+        edges.append({"source": prev, "target": f"seq-{final['seq']}"})
+        prev = f"seq-{final['seq']}"
+    if len(nodes) == 1:  # 无工具调用（纯问答 / 模型即失败）：末事件兜底一个节点
+        last = real[-1]
+        label = {"thought": "思考", "llm": "结论", "note": "备注"}.get(
+            last["kind"], last["kind"])
+        nodes.append({"id": f"seq-{last['seq']}", "label": label})
+        edges.append({"source": "start", "target": f"seq-{last['seq']}"})
+        prev = f"seq-{last['seq']}"
+    statuses = {n["id"]: "executed" for n in nodes}
+    if status in ("running", "queued"):
+        statuses[prev] = "active"
+    elif status == "failed":
+        statuses[prev] = "failed"
+    return {"nodes": nodes, "edges": edges, "statuses": statuses, "trace": True}
 
 
 def _event_summary(e: dict) -> dict:

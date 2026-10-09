@@ -60,7 +60,8 @@ AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 -
 Run Viewer：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
 最近失败 + 任务分布）、引擎拓扑 `/graph`（Agent 静态结构，cytoscape 渲染）、
 Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
-（运行图 + 步骤时间线）、审批待办 `/approvals`（顶栏「审批」带待办数角标；
+（执行轨迹图——按本 run 事件流构建：开始 → 工具调用 → 结论，每个 run 形状
+不同 + 步骤时间线）、审批待办 `/approvals`（顶栏「审批」带待办数角标；
 钉钉卡片 deep-link 直达 `/approvals/{run_id}` 处理页）、管理页 `/admin`、
 记忆页 `/memory`、对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
 
