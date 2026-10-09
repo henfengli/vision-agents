@@ -15,6 +15,7 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from . import bash as bash_mod
+from . import hostinfo as hostinfo_mod
 from . import run_code as run_code_mod
 from . import sql as sql_mod
 
@@ -31,12 +32,15 @@ class ToolRegistry:
                  review: ReviewFn | None = None,
                  profile_writer: Callable[..., Awaitable[None]] | None = None,
                  sql_dsn: Callable[[str | None], str | None] | None = None,
+                 host_resolver: Callable[[str | None, str | None],
+                                         tuple[list[str], Any]] | None = None,
                  extra_tools: list | None = None):
         self._scratch_dir = scratch_dir
         self._relay = relay
         self._review = review
         self._profile_writer = profile_writer
         self._sql_dsn = sql_dsn               # domain → 只读 DSN
+        self._host_resolver = host_resolver   # (domain, env) → (主机列表, GrafanaConfig)
         self._extra_tools = extra_tools or []  # MCP 等外部加载的 LangChain 工具
 
         # 工具目录：名字 → 工厂。每个工具的唯一定义点。
@@ -46,6 +50,8 @@ class ToolRegistry:
         }
         if sql_dsn is not None:
             self._catalog["sql_query"] = self._build_sql_query
+        if host_resolver is not None:
+            self._catalog["host_metrics"] = self._build_host_metrics
         if relay is not None:
             self._catalog["dingtalk_send"] = self._build_dingtalk_send
         if profile_writer is not None:
@@ -103,6 +109,30 @@ class ToolRegistry:
             return "已发送"
         return dingtalk_send
 
+    def _build_host_metrics(self) -> Callable:
+        resolver = self._host_resolver
+
+        async def host_metrics(domain: str | None = None,
+                               env: str | None = None) -> str:
+            """查询业务域部署主机的实时资源状况：内存使用率、系统负载、根盘使用率。
+            数据来自 Grafana 监控（node_exporter）。domain 缺省取第一个业务域，
+            env 缺省取默认目标环境。"""
+            assert resolver is not None
+            hosts, graf = resolver(domain, env)
+            if graf is None:
+                return "[未配置] 未接入 Grafana 监控（settings.grafana）"
+            if not hosts:
+                return "[无数据] 该域未登记部署主机（domain.yaml 的 hosts 字段）"
+
+            async def fetch(expr: str) -> dict[str, float]:
+                return await hostinfo_mod.grafana_query(
+                    graf.url, graf.datasource_uid, graf.token, expr)
+            try:
+                return await hostinfo_mod.collect(fetch, hosts)
+            except Exception as e:  # noqa: BLE001 —— 监控故障结构化返回，不炸 run
+                return f"[监控不可用] {type(e).__name__}: {str(e)[:300]}"
+        return host_metrics
+
     def _build_update_asset_profile(self) -> Callable:
         writer = self._profile_writer
 
@@ -128,8 +158,8 @@ class ToolRegistry:
 
         async def run_code(code: str, timeout: int = 120) -> str:
             """写 Python 代码一次编排多个工具：桩函数直接调用角色白名单内的工具
-            （bash/sql_query/dingtalk_send/update_asset_profile/MCP 工具），可循环/
-            分支/并发；中间数据不进上下文，只有 print 输出返回。代码在沙箱内执行。"""
+            （bash/sql_query/host_metrics/dingtalk_send/update_asset_profile/MCP 工具），
+            可循环/分支/并发；中间数据不进上下文，只有 print 输出返回。代码在沙箱内执行。"""
             if review is not None:
                 await review(code)
             return await run_code_mod.execute_code(

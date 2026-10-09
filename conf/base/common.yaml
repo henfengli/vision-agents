@@ -25,5 +25,12 @@ langfuse:
   public_key: ""
   secret_key: ""
 
+# Grafana 监控（host_metrics 工具）：datasource_uid 是 Prometheus 类型数据源的 uid，
+# token 用只读 service account；整段不配则工具不注册。
+# grafana:
+#   url: http://grafana.internal:3000
+#   datasource_uid: prometheus
+#   token: "${GRAFANA_TOKEN}"
+
 # 业务域已迁出内核：见 conf/domains/<name>/ 域包
 #（domain.yaml/rules.yaml/session.yaml/tasks.yaml）

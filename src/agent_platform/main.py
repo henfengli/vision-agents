@@ -54,7 +54,8 @@ SEED_ROLES = [
     {"name": "ops_analyst",
      "description": "Dagster 报错分析：区分代码/数据/基础设施/上游问题",
      "domains": ["dagster", "board"],
-     "tools": ["bash", "run_code", "sql_query", "read_file", "grep", "dingtalk_send"],
+     "tools": ["bash", "run_code", "sql_query", "host_metrics", "read_file",
+              "grep", "dingtalk_send"],
      "prompt": "你是运维分析助手。分析步骤：\n"
                "1. 参考同类案例（如 prompt 中已注入）。\n"
                "2. 用 curl 查 Dagster GraphQL 拿报错堆栈与上游状态。\n"
@@ -145,10 +146,22 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         cfg = settings.domains.get(dom) if dom else None
         return cfg.readonly_dsn if cfg else None
 
+    def host_resolver(domain: str | None, env: str | None):
+        """(domain, env) → (部署主机列表, GrafanaConfig)。主机按目标环境取 envs 覆盖值。"""
+        dom = domain or next(iter(settings.domains), None)
+        cfg = settings.domains.get(dom) if dom else None
+        if cfg is None:
+            return [], settings.grafana
+        tenv = settings.resolve_target_env(env)
+        return cfg.for_env(tenv).hosts, settings.grafana
+
     tool_registry = ToolRegistry(settings.scratch_dir, relay=relay,
                                  review=review_hook,
                                  profile_writer=write_asset_profile,
-                                 sql_dsn=sql_dsn, extra_tools=extra_tools)
+                                 sql_dsn=sql_dsn,
+                                 host_resolver=(host_resolver
+                                                if settings.grafana else None),
+                                 extra_tools=extra_tools)
     engine = Engine(settings, defs, tool_registry, langfuse=langfuse)
 
     from temporalio.client import Client

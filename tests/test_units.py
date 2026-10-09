@@ -132,6 +132,52 @@ class TestSqlTool(unittest.IsolatedAsyncioTestCase):
             self.skipTest("pgserver 不可用")
 
 
+class TestHostInfo(unittest.IsolatedAsyncioTestCase):
+    async def test_instance_regex(self):
+        from agent_platform.agent.tools.hostinfo import instance_regex
+        r = instance_regex(["10.0.0.11", "10.0.0.21"])
+        self.assertIn(r"\.", r)                    # IP 点号被转义（不当通配符）
+        self.assertRegex("10.0.0.11:9100", r)
+        self.assertRegex("10.0.0.21", r)
+        self.assertNotRegex("10.0.0.119", r)       # 前缀不误匹配
+
+    async def test_collect_render(self):
+        from agent_platform.agent.tools.hostinfo import collect
+        gb = 1024 ** 3
+
+        async def fetch(expr):
+            if "MemTotal" in expr:
+                return {"10.0.0.11:9100": 32 * gb}
+            if "MemAvailable" in expr:
+                return {"10.0.0.11:9100": 8 * gb}
+            if "node_load1" in expr:
+                return {"10.0.0.11:9100": 3.2}
+            if "cpu_seconds" in expr:
+                return {"10.0.0.11:9100": 8.0}
+            if "filesystem_size" in expr:
+                return {"10.0.0.11:9100": 200 * gb}
+            if "filesystem_avail" in expr:
+                return {"10.0.0.11:9100": 100 * gb}
+            return {}
+
+        out = await collect(fetch, ["10.0.0.11", "10.0.0.21"])
+        self.assertIn("75%", out)                  # (32-8)/32
+        self.assertIn("3.20 / 8 核", out)
+        self.assertIn("50%", out)                  # 根盘
+        self.assertIn("10.0.0.21 | 无数据", out)   # 采不到的主机显式列出
+
+    async def test_tool_wiring(self):
+        from agent_platform.agent.tools.registry import ToolRegistry
+        # 无 resolver：不注册
+        reg = ToolRegistry(tempfile.mkdtemp())
+        self.assertNotIn("host_metrics", reg._catalog)
+        # 有 resolver 但域未登记主机
+        reg = ToolRegistry(tempfile.mkdtemp(),
+                           host_resolver=lambda d, e: ([], object()))
+        fn = reg.host_tools(["host_metrics"])["host_metrics"]
+        self.assertIn("未登记部署主机", await fn("board"))
+
+
 class TestBashTool(unittest.TestCase):
     def test_truncate(self):
         from agent_platform.agent.tools.bash import truncate

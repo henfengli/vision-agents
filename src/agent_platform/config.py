@@ -28,6 +28,7 @@ class DomainConfig(BaseModel):
 
     code_paths: list[str] = []
     readonly_dsn: str | None = None
+    hosts: list[str] = []                     # 该域服务实际部署的机器（IP/主机名，供 host_metrics 查监控）
     rules: list[dict] = []                    # [{pattern, category, conclusion}]
     session_template: str | None = None       # 含 {asset}/{error_class}/{date}
     seed_tasks: list[dict] = []               # 域自带种子任务定义
@@ -78,6 +79,18 @@ class ApprovalsConfig(BaseModel):
     danger_patterns: list[str] = Field(default_factory=list)
 
 
+class GrafanaConfig(BaseModel):
+    """Grafana 监控接入：host_metrics 工具经 datasource proxy 查 Prometheus。
+
+    datasource_uid 指向 Prometheus 类型的 datasource（node_exporter 指标）；
+    token 用 service account（只读权限即可），内网匿名读可留空。
+    """
+
+    url: str
+    datasource_uid: str
+    token: str = ""
+
+
 class Settings(BaseModel):
     env: str                               # 实例标签：本套部署自己是谁（定义/种子按它存取）
     target_envs: list[str] = Field(default_factory=list)  # 可操作的业务环境；空=单环境(=env)
@@ -95,6 +108,7 @@ class Settings(BaseModel):
     temporal: TemporalConfig = TemporalConfig()
     langfuse: LangfuseConfig = LangfuseConfig()
     approvals: ApprovalsConfig = ApprovalsConfig()
+    grafana: GrafanaConfig | None = None     # 不配则 host_metrics 工具不注册
     # 内部 MCP 服务器：{名字: langchain-mcp-adapters 连接配置}
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
 

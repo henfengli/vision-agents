@@ -1,1 +1,10 @@
 code_paths: ["/srv/dagster"]
+hosts: ["10.0.0.11"]       # dagster 实际部署的机器（host_metrics 查监控用）
+
+# 按目标环境覆盖域连接信息（可选）：基座写任一环境的值，差异放 envs。
+# envs:
+#   prod:
+#     hosts: ["10.0.0.11", "10.0.0.12"]
+#     readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@prod-db:5432/dagster"
+#   test:
+#     hosts: ["10.0.1.11"]
