@@ -154,7 +154,8 @@ def make_router(env: str, engine=None, langfuse=None,
         <div class="page-head">
           <div class="eyebrow">TOPOLOGY</div>
           <h2>Agent 图拓扑</h2>
-          <div class="meta">拖拽平移 · 滚轮缩放 · 点击节点高亮邻接关系 · 自上而下为执行流向</div>
+          <div class="meta"><a href="/">← 总览</a> · 引擎静态结构（与具体 run 无关）·
+            拖拽平移 · 滚轮缩放 · 点击节点高亮邻接关系</div>
         </div>
         <div class="graph-shell tall">
           <div class="cy" id="graph"></div>

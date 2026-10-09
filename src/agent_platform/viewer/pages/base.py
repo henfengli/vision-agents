@@ -34,7 +34,7 @@ _LOGO_SVG = """<svg width="18" height="18" viewBox="0 0 18 18" fill="none">
   stroke-linecap="round"><animateTransform attributeName="transform" type="rotate"
   from="0 9 9" to="360 9 9" dur="4.2s" repeatCount="indefinite"/></line></svg>"""
 
-_NAV = [("/graph", "总览"), ("/chat", "对话"), ("/runs", "Runs"),
+_NAV = [("/", "总览"), ("/chat", "对话"), ("/runs", "Runs"),
         ("/approvals", "审批"), ("/admin", "管理"), ("/memory", "记忆")]
 
 # 顶栏审批角标：on-load 拉一次待办数（不轮询），>0 时在「审批」链接上挂计数
@@ -68,7 +68,7 @@ def page(title: str, body: str, active: str = "", nav: bool = True) -> HTMLRespo
         logout = '<a href="/logout" class="meta">退出</a>' if _AUTH_ENABLED else ""
         body = f"""
 <header class="topbar">
-  <a class="brand" href="/graph">{_LOGO_SVG}agent-platform</a>
+  <a class="brand" href="/">{_LOGO_SVG}agent-platform</a>
   <nav class="nav">{links}</nav>
   <span class="meta"><span class="led live"></span>LIVE</span>
   {logout}
@@ -135,7 +135,7 @@ def make_login_router(expected_token: str) -> APIRouter:
         if not hmac.compare_digest(token, expected_token):
             return page("登录", _LOGIN_BODY.format(
                 hint='<span class="err-hint">令牌不正确</span>'), nav=False)
-        resp = RedirectResponse("/graph", status_code=303)
+        resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax")
         return resp
 

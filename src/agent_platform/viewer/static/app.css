@@ -94,6 +94,40 @@ h3 { font-size: 15px; }
 .topbar .meta { margin-left: auto; }
 
 /* —— 布局 —— */
+/* 总览面板：指标卡 + 双列网格 */
+.stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;
+             margin-bottom: 14px; }
+.stat-card { background: var(--panel); border: 1px solid var(--border);
+             border-radius: 10px; padding: 14px 16px 12px; display: block; }
+a.stat-card:hover { border-color: var(--accent); text-decoration: none; }
+.stat-num { font-family: var(--mono); font-size: 26px; font-weight: 700;
+            color: var(--text); line-height: 1.1; }
+.stat-num.ok { color: var(--ok); }
+.stat-num.warn { color: var(--warn); }
+.stat-num.err { color: var(--err); }
+.stat-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+              color: var(--text-dim); margin-top: 6px; text-transform: uppercase; }
+.dash-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px;
+             margin-bottom: 14px; align-items: start; }
+.card h3 .more { float: right; font-size: 12px; font-weight: 400;
+                 font-family: var(--mono); }
+.pend-row { display: flex; align-items: center; gap: 10px; padding: 8px 0;
+            border-bottom: 1px solid var(--border); }
+.pend-row:last-child { border-bottom: none; }
+.pend-row pre { margin: 0; flex: 1; font-size: 12px; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; background: none;
+                border: none; padding: 0; font-family: var(--mono);
+                color: var(--text); }
+.pend-row span { flex: 1; font-size: 12.5px; }
+.pend-row .meta { flex: none; }
+.bar-track { height: 6px; background: var(--panel-2); border-radius: 3px;
+             overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; }
+@media (max-width: 1100px) {
+  .stat-grid { grid-template-columns: repeat(3, 1fr); }
+  .dash-grid { grid-template-columns: 1fr; }
+}
+
 .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
 .eyebrow { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.22em;
            color: var(--accent); text-transform: uppercase; margin-bottom: 4px; }

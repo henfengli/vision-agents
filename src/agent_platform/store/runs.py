@@ -145,5 +145,31 @@ async def trace_id_of(run_id: str) -> str:
                  if e["kind"] == "trace" and isinstance(e["payload"], dict)), "")
 
 
+async def overview(hours: int = 24) -> dict:
+    """总览页聚合：近 N 小时状态计数 + 任务分布 + 最近失败 5 条。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT status, count(*) FROM runs"
+            " WHERE created_at > now() - make_interval(hours => %s)"
+            " GROUP BY status", (hours,))
+        by_status = dict(await cur.fetchall())
+        cur = await conn.execute(
+            "SELECT task_type, count(*),"
+            " count(*) FILTER (WHERE status='success'),"
+            " count(*) FILTER (WHERE status='failed')"
+            " FROM runs WHERE created_at > now() - make_interval(hours => %s)"
+            " GROUP BY task_type ORDER BY count(*) DESC LIMIT 8", (hours,))
+        tasks = [{"task_type": r[0], "total": r[1], "success": r[2],
+                  "failed": r[3]} for r in await cur.fetchall()]
+        cur = await conn.execute(
+            "SELECT run_id, task_type, role, target_env, created_at FROM runs"
+            " WHERE status='failed' ORDER BY created_at DESC LIMIT 5")
+        failed = [{"run_id": r[0], "task_type": r[1], "role": r[2],
+                   "target_env": r[3], "created_at": r[4].isoformat()}
+                  for r in await cur.fetchall()]
+    return {"by_status": by_status, "tasks": tasks, "failed": failed,
+            "hours": hours}
+
+
 def _row_to_dict(cur, row) -> dict:
     return {d.name: v for d, v in zip(cur.description, row)}

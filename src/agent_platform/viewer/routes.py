@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..api.auth import make_viewer_auth_dependency
-from .pages import admin, approvals, base, chat, memory, runs
+from .pages import admin, approvals, base, chat, memory, overview, runs
 
 
 def make_viewer_router(submitter, defs_store, env: str, engine=None,
@@ -26,6 +26,7 @@ def make_viewer_router(submitter, defs_store, env: str, engine=None,
 
     pages = APIRouter(
         dependencies=[Depends(make_viewer_auth_dependency(token))] if token else [])
+    pages.include_router(overview.make_router())
     pages.include_router(runs.make_router(env, engine=engine, langfuse=langfuse,
                                           target_envs=target_envs))
     pages.include_router(approvals.make_router(submitter))

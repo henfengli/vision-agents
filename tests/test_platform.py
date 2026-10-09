@@ -344,6 +344,10 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("board", resp.text)  # 业务域从配置注入，不再硬编码
 
+        resp = client.get("/")       # 总览面板：聚合台账，不应因空库报错
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("总览", resp.text)
+
     async def test_hooks_require_auth(self):
         """P1 回归：webhook 端点与 /v1 API 一样要 bearer。"""
         from fastapi.testclient import TestClient

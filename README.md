@@ -57,11 +57,12 @@ export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_B
 AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 ```
 
-Run Viewer：总览图 `/graph`（Agent 拓扑，cytoscape 渲染）、Runs 列表 `/runs`
-（可按目标环境过滤）、详情 `/runs/{run_id}`（运行图 + 步骤时间线）、
-审批待办 `/approvals`（顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达
-`/approvals/{run_id}` 处理页）、管理页 `/admin`、记忆页 `/memory`、
-对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
+Run Viewer：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
+最近失败 + 任务分布）、引擎拓扑 `/graph`（Agent 静态结构，cytoscape 渲染）、
+Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
+（运行图 + 步骤时间线）、审批待办 `/approvals`（顶栏「审批」带待办数角标；
+钉钉卡片 deep-link 直达 `/approvals/{run_id}` 处理页）、管理页 `/admin`、
+记忆页 `/memory`、对话页 `/chat`（配置了 `target_envs` 时带环境选择器）。
 
 主机监控：配好 `grafana:`（url + Prometheus 数据源 uid + 只读 token）并在域包
 `domain.yaml` 登记 `hosts` 后，角色可用 `host_metrics` 工具查部署机器的
