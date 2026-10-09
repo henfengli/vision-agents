@@ -99,6 +99,7 @@ class Runtime:
             await self.worker.shutdown()
         if self._worker_task is not None:
             self._worker_task.cancel()
+        await self.langfuse.flush()  # 冲刷 SDK 的 score 批量队列
         await self.engine.close()
         await db.close_db()
 

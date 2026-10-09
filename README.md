@@ -79,7 +79,7 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 96 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 101 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）

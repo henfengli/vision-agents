@@ -21,8 +21,10 @@ dependencies = [
 
 [project.optional-dependencies]
 # 测试用标准库 unittest 跑（python3 -m unittest discover -s tests），无额外 dev 依赖
-# 链路追踪（Langfuse/OTEL）：生产建议安装；不装则 langfuse.enabled 不可开
-obs = ["opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
+# Langfuse 集成（prompt 源头 + OTEL 观测）：生产建议安装；不装则 langfuse.enabled 不可开
+# langfuse 官方 SDK 负责 prompt/score 数据 API；OTEL 三件套负责 tracing 管线
+obs = ["langfuse>=4.0,<5.0",
+       "opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
        "openinference-instrumentation-langchain>=0.1"]
 # 内部 MCP 服务器接入（可选；不配 mcp_servers 则不需要）
 # browser / datahub 用官方实现（@playwright/mcp、mcp-server-datahub），是独立

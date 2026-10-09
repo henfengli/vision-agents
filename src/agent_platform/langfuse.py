@@ -1,22 +1,28 @@
 """Langfuse 集成：prompt 源头 + OTEL trace + 反馈回写。
 
-三层职责：
-1. **prompt 源头**：角色定义（prompt=系统提示文本 / config=工具等结构化配置）
-   存 Langfuse，name="role:<角色名>"，label 区分灰度。读取路径：
-   Langfuse API → 进程内缓存（TTL 秒级）→ PG definitions 表（写穿持久缓存）。
-   Langfuse 挂了用缓存，缓存空用 PG——服务可独立存活。
-2. **观测**：OTLP exporter 指向 Langfuse 的 OTEL 端点，LangChainInstrumentor
-   自动覆盖模型/工具调用；run span 挂业务属性。
-3. **反馈回写**：👍/👎/纠正文字写为 Langfuse score，评估侧直接可用。
+底层是官方 SDK（langfuse.Langfuse），平台只保留 SDK 没有的韧性层：
 
-enabled=false：全部空操作，角色定义直接读 PG definitions 表（降级模式）。
+1. **prompt 源头**：角色定义存 Langfuse，name="role:<角色名>"，label 区分灰度。
+   SDK 的 get_prompt(label=..., cache_ttl_seconds=...) 负责拉取与进程内 TTL
+   缓存（create_prompt 会使对应缓存失效，写入即时生效）。SDK 失败时（服务挂
+   了/网络断）SDK 直接抛错，这里补上两级降级：进程内 last-known-good
+   （本进程拿到过的最后一份定义）→ PG definitions 写穿持久缓存。
+   Langfuse 挂了服务可独立存活。
+2. **观测**：OTLP exporter 指向 Langfuse 的 OTEL 端点（self-hosted 官方摄入
+   路径），LangChainInstrumentor 自动覆盖模型/工具调用；run span 挂业务属性。
+   SDK client 以 tracing_enabled=False 构造——tracing 由本模块的 OTEL 管线
+   统一拥有，SDK 只负责 prompt/score 数据 API。
+3. **反馈回写**：👍/👎/纠正文字经 SDK create_score 挂在 trace 上；SDK 批量
+   异步入队，关停前 flush() 冲刷。
+
+enabled=false：全部空操作（_client 为 None），角色定义直接读 PG（降级模式）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
-import time
 from typing import Any
 
 from .config import LangfuseConfig
@@ -25,15 +31,33 @@ log = logging.getLogger(__name__)
 
 
 class LangfuseClient:
-    """Langfuse 门面：平台其余代码只跟它打交道。"""
+    """Langfuse 门面：平台其余代码只跟它打交道。
 
-    def __init__(self, cfg: LangfuseConfig):
+    client_factory 可注入（测试不依赖 langfuse 包/服务）；缺省是官方
+    langfuse.Langfuse，延迟导入——langfuse 在 obs extra 里，属可选依赖。
+    """
+
+    def __init__(self, cfg: LangfuseConfig, client_factory: Any = None):
         self._cfg = cfg
-        self._prompt_cache: dict[str, tuple[float, dict]] = {}
+        self._client: Any = None
+        # 进程内 last-known-good：SDK 缓存过期且远端失败时的中间降级层
+        self._last_known: dict[str, dict] = {}
+        if not cfg.enabled:
+            return
+        if client_factory is None:
+            from langfuse import Langfuse
+            client_factory = Langfuse
+        self._client = client_factory(
+            public_key=cfg.public_key,
+            secret_key=cfg.secret_key,
+            host=cfg.host,
+            # tracing 由 setup_observability 的 OTEL 管线拥有；SDK 只当数据客户端
+            tracing_enabled=False,
+        )
 
     @property
     def enabled(self) -> bool:
-        return self._cfg.enabled
+        return self._client is not None
 
     @property
     def host(self) -> str:
@@ -45,91 +69,92 @@ class LangfuseClient:
         """取角色定义。pg_fallback: async get_cache(name)/put_cache(name, def)。
 
         返回 {"prompt": ..., "tools": [...], ...}；拿不到返回 None。
+        降级链：SDK（自带 TTL 缓存）→ 进程内 last-known-good → PG 持久缓存。
         """
-        cache_key = f"role:{name}"
-        hit = self._prompt_cache.get(cache_key)
-        if hit and time.monotonic() - hit[0] < self._cfg.prompt_cache_ttl_s:
-            return hit[1]
+        if self._client is None:
+            return await pg_fallback.get_cache(name)
         definition = await self._fetch_remote(name)
         if definition is not None:
-            self._prompt_cache[cache_key] = (time.monotonic(), definition)
+            self._last_known[name] = definition
             try:
                 await pg_fallback.put_cache(name, definition)  # 写穿 PG
             except Exception:  # noqa: BLE001 —— 缓存写失败不影响主流程
                 log.warning("role %s 写穿 PG 缓存失败", name)
             return definition
-        # 远端失败：进程内过期缓存 → PG 持久缓存
-        if hit:
-            return hit[1]
+        if name in self._last_known:
+            return self._last_known[name]
         return await pg_fallback.get_cache(name)
 
     async def _fetch_remote(self, name: str) -> dict | None:
-        if not self.enabled:
-            return None
         try:
-            import httpx
-            url = (f"{self._cfg.host}/api/public/v2/prompts/role:{name}"
-                   f"?label={self._cfg.prompt_label}")
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(url, headers=self._auth())
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            definition = {"prompt": data.get("prompt", "")}
-            definition.update(data.get("config") or {})
-            return definition
-        except Exception:  # noqa: BLE001
+            prompt = await asyncio.to_thread(
+                self._client.get_prompt,
+                f"role:{name}",
+                label=self._cfg.prompt_label,
+                cache_ttl_seconds=max(1, int(self._cfg.prompt_cache_ttl_s)),
+                fetch_timeout_seconds=5,
+            )
+        except Exception:  # noqa: BLE001 —— 远端任何失败都走降级链
             log.warning("Langfuse 拉取 role:%s 失败，走缓存降级", name)
             return None
+        return {"prompt": prompt.prompt, **(prompt.config or {})}
 
     async def put_role(self, name: str, definition: dict,
                        updated_by: str = "") -> None:
-        """写角色定义到 Langfuse（产生新版本；label 提升由 Langfuse UI/API 管）。"""
-        if not self.enabled:
+        """写角色定义到 Langfuse（产生新版本并接管 label）。
+
+        SDK create_prompt 会使该 prompt 的缓存失效，下一次 fetch 即读到新版；
+        进程内 last-known 同步更新，不等下一次拉取。
+        """
+        if self._client is None:
             raise RuntimeError("Langfuse 未启用，角色定义只能写 PG（降级模式）")
-        import httpx
         config = {k: v for k, v in definition.items() if k != "prompt"}
-        body = {
-            "name": f"role:{name}",
-            "prompt": definition.get("prompt", ""),
-            "config": config,
-            "labels": [self._cfg.prompt_label],  # 新版本直接接管 label
-            "type": "text",
-        }
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(f"{self._cfg.host}/api/public/v2/prompts",
-                                     json=body, headers=self._auth())
-            resp.raise_for_status()
-        self._prompt_cache.pop(f"role:{name}", None)
+        await asyncio.to_thread(
+            self._client.create_prompt,
+            name=f"role:{name}",
+            prompt=definition.get("prompt", ""),
+            config=config,
+            labels=[self._cfg.prompt_label],  # 新版本直接接管 label
+            type="text",
+            commit_message=f"by {updated_by}" if updated_by else None,
+        )
+        self._last_known[name] = definition
 
     # ---- 反馈回写 ----
 
     async def score(self, trace_id: str, name: str, value: float,
                     comment: str = "") -> bool:
         """把反馈写为 Langfuse score（挂在 trace 上）。失败只记日志。"""
-        if not self.enabled or not trace_id:
+        if self._client is None or not trace_id:
             return False
         try:
-            import httpx
-            body = {"traceId": trace_id, "name": name, "value": value,
-                    "comment": comment}
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.post(f"{self._cfg.host}/api/public/scores",
-                                         json=body, headers=self._auth())
-            return resp.status_code < 400
+            await asyncio.to_thread(
+                self._client.create_score,
+                trace_id=trace_id,
+                name=name,
+                value=value,
+                data_type="NUMERIC",
+                comment=comment or None,
+            )
+            return True
         except Exception:  # noqa: BLE001
             log.warning("Langfuse score 写入失败")
             return False
 
-    # ---- 内部 ----
+    # ---- 生命周期 ----
 
-    def _auth(self) -> dict[str, str]:
-        token = base64.b64encode(
-            f"{self._cfg.public_key}:{self._cfg.secret_key}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
+    async def flush(self) -> None:
+        """关停前冲刷 SDK 队列（score 批量异步入队，不冲刷会丢尾部反馈）。"""
+        if self._client is not None:
+            try:
+                await asyncio.to_thread(self._client.flush)
+            except Exception:  # noqa: BLE001 —— 关停路径不再放大故障
+                log.warning("Langfuse flush 失败")
 
 
 # ==================== 观测（OTEL → Langfuse） ====================
+# 这一层用的全是官方组件：OTEL SDK + openinference 的 LangChain 探针 +
+# Langfuse 的 OTEL 摄入端点（self-hosted 官方接入路径）。
 
 _tracer: Any = None
 

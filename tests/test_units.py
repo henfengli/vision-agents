@@ -375,6 +375,124 @@ class TestModelPool(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await pool.embed(["text"]))
 
 
+class _FakeLangfuseSDK:
+    """langfuse.Langfuse 的测试替身：记录调用，可模拟远端故障。"""
+
+    def __init__(self, **kw):
+        self.kw = kw                    # 构造参数（host/keys/tracing_enabled）
+        self.prompts: dict[str, dict] = {}
+        self.scores: list[dict] = []
+        self.flushed = False
+        self.down = False
+
+    def get_prompt(self, name, *, label=None, cache_ttl_seconds=None,
+                   fetch_timeout_seconds=None, **_):
+        if self.down:
+            raise RuntimeError("Langfuse 不可达")
+        p = self.prompts[name]
+        from types import SimpleNamespace
+        return SimpleNamespace(prompt=p["prompt"], config=p.get("config"))
+
+    def create_prompt(self, *, name, prompt, config, labels, type,  # noqa: A002
+                      commit_message=None, **_):
+        self.prompts[name] = {"prompt": prompt, "config": config,
+                              "labels": labels}
+
+    def create_score(self, **kw):
+        if self.down:
+            raise RuntimeError("Langfuse 不可达")
+        self.scores.append(kw)
+
+    def flush(self):
+        self.flushed = True
+
+
+class _FakePgFallback:
+    """definitions 表缓存的测试替身。"""
+
+    def __init__(self):
+        self.store: dict[str, dict] = {}
+
+    async def get_cache(self, name):
+        return self.store.get(name)
+
+    async def put_cache(self, name, definition):
+        self.store[name] = definition
+
+
+class TestLangfuseClient(unittest.IsolatedAsyncioTestCase):
+    """langfuse 门面：官方 SDK 注入替身，验证降级链与回写语义。"""
+
+    def _client(self, enabled=True):
+        from agent_platform.config import LangfuseConfig
+        from agent_platform.langfuse import LangfuseClient
+        cfg = LangfuseConfig(enabled=enabled, host="http://lf",
+                             public_key="pk", secret_key="sk",
+                             prompt_label="production", prompt_cache_ttl_s=10)
+        return LangfuseClient(cfg, client_factory=_FakeLangfuseSDK)
+
+    async def test_fetch_remote_and_write_through_pg(self):
+        lf = self._client()
+        sdk = lf._client
+        sdk.prompts["role:analyst"] = {"prompt": "你是分析师",
+                                       "config": {"tools": ["sql_query"]}}
+        pg = _FakePgFallback()
+        d = await lf.fetch_role("analyst", pg)
+        self.assertEqual(d, {"prompt": "你是分析师", "tools": ["sql_query"]})
+        self.assertEqual(pg.store["analyst"], d)      # 写穿 PG 持久缓存
+        self.assertEqual(sdk.kw["tracing_enabled"], False)  # tracing 归 OTEL 管线
+
+    async def test_remote_down_falls_back_to_last_known_then_pg(self):
+        lf = self._client()
+        sdk = lf._client
+        sdk.prompts["role:analyst"] = {"prompt": "v1", "config": {}}
+        pg = _FakePgFallback()
+        await lf.fetch_role("analyst", pg)
+        sdk.down = True
+        # 远端挂 + 进程内 last-known-good 命中
+        self.assertEqual((await lf.fetch_role("analyst", pg))["prompt"], "v1")
+        # 进程重启（新门面无 last-known）→ PG 持久缓存兜底
+        lf2 = self._client()
+        lf2._client.down = True
+        self.assertEqual((await lf2.fetch_role("analyst", pg))["prompt"], "v1")
+        # PG 也没有 → None
+        self.assertIsNone(await lf2.fetch_role("ghost", pg))
+
+    async def test_disabled_goes_straight_to_pg(self):
+        lf = self._client(enabled=False)
+        self.assertFalse(lf.enabled)
+        pg = _FakePgFallback()
+        pg.store["analyst"] = {"prompt": "pg 版"}
+        self.assertEqual((await lf.fetch_role("analyst", pg))["prompt"], "pg 版")
+        with self.assertRaises(RuntimeError):
+            await lf.put_role("analyst", {"prompt": "x"})
+        self.assertFalse(await lf.score("tid", "user_feedback", 1.0))
+
+    async def test_put_role_new_version_takes_label(self):
+        lf = self._client()
+        await lf.put_role("analyst", {"prompt": "v2", "tools": ["bash"]},
+                          updated_by="admin")
+        p = lf._client.prompts["role:analyst"]
+        self.assertEqual(p["labels"], ["production"])  # 新版本接管 label
+        self.assertEqual(p["config"], {"tools": ["bash"]})  # prompt 不进 config
+        # last-known 同步更新，不依赖下一次拉取
+        pg = _FakePgFallback()
+        lf._client.down = True
+        self.assertEqual((await lf.fetch_role("analyst", pg))["prompt"], "v2")
+
+    async def test_score_and_flush(self):
+        lf = self._client()
+        self.assertTrue(await lf.score("tid-1", "user_feedback", 1.0,
+                                       comment="赞"))
+        self.assertEqual(lf._client.scores[0]["trace_id"], "tid-1")
+        self.assertEqual(lf._client.scores[0]["data_type"], "NUMERIC")
+        self.assertFalse(await lf.score("", "user_feedback", 1.0))  # 无 trace 不写
+        lf._client.down = True
+        self.assertFalse(await lf.score("tid-1", "user_feedback", 0.0))
+        await lf.flush()
+        self.assertTrue(lf._client.flushed)
+
+
 class TestArtGraph(unittest.TestCase):
     """资产化任务图的纯逻辑面：声明校验 / 拓扑分层 / 闸门求值。"""
 
