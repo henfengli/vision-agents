@@ -119,16 +119,14 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                            embedding_name=settings.model.embedding_name)
 
     # 审批通知：工具命中危险模式 → 钉钉 actionCard → Viewer 审批页
-    approval_notify = None
+    review_hook = None
     if settings.approvals.enabled:
         async def approval_notify(run_id: str, command: str) -> None:
             await relay.send_action_card(
                 "危险操作待审批", f"run `{run_id}` 请求执行：\n```\n{command}\n```",
                 "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
-
-    review_hook = (make_review_hook(settings.approvals.danger_patterns,
-                                    approval_notify)
-                   if settings.approvals.enabled else None)
+        review_hook = make_review_hook(settings.approvals.danger_patterns,
+                                       approval_notify)
 
     async def write_asset_profile(asset_key: str, content: str,
                                   domain: str | None = None) -> None:

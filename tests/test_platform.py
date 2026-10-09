@@ -146,7 +146,6 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
 
     async def test_env_gate(self):
         from agent_platform.orchestration.submitter import TaskRejected
-        settings = _settings(db_dsn=self._pg.get_uri(), env="dev")
         from agent_platform.orchestration.submitter import Submitter
         sub = Submitter(self.temporal, self.tasks, "tq", "dev")
         with self.assertRaises(TaskRejected):  # failure-analysis 只在 prod/test
@@ -200,7 +199,7 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         configure_fake_deps(self.settings, self.defs,
                             model_content='[{"kind":"knowledge","key":"k_new",'
                                           '"content":"新结论"}]')
-        r2 = await self.submitter.submit(
+        await self.submitter.submit(
             "data-qa", {"server": "board", "question": "q2"}, "sdk",
             session_id="s-corr")
 
@@ -220,7 +219,6 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
     # ---- API ----
 
     async def test_api_endpoints(self):
-        from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app, make_api_router
@@ -687,8 +685,8 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         await self._register_etl_task()
         configure_fake_deps(self.settings, self.defs, model_content='"ok"')
         sub = self._multi_env_submitter()
-        r1 = await sub.submit("asset-etl", {"topic": "t"}, "sdk",
-                              target_env="test")
+        await sub.submit("asset-etl", {"topic": "t"}, "sdk",
+                         target_env="test")
         r2 = await sub.submit("asset-etl", {"topic": "t"}, "sdk",
                               target_env="prod")
         rows2 = {a["name"]: a
