@@ -23,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from .config import LangfuseConfig
@@ -43,6 +45,7 @@ class LangfuseClient:
         # 进程内 last-known-good：SDK 缓存过期且远端失败时的中间降级层
         self._last_known: dict[str, dict] = {}
         self._pid: str | None = None  # trace 页 URL 用，首次解析后缓存
+        self._published: set[str] = set()  # 已设为公开链接的 trace id（幂等去重）
         if not cfg.enabled:
             return
         if client_factory is None:
@@ -63,6 +66,10 @@ class LangfuseClient:
     @property
     def host(self) -> str:
         return self._cfg.host
+
+    @property
+    def embed(self) -> bool:
+        return self._cfg.embed
 
     # ---- prompt 源头 ----
 
@@ -153,6 +160,49 @@ class LangfuseClient:
             self._pid = ""
         return self._pid
 
+    # ---- trace 内嵌（公开链接 + frame 探测） ----
+
+    async def publish_trace(self, trace_id: str) -> bool:
+        """把 trace 设为公开链接（免登可查看）——iframe 内嵌的前提。
+
+        走 ingestion API 的 trace-create 更新（与 Langfuse UI"分享"按钮同一
+        数据通路：同 id 合并，只动 public 字段）；幂等，进程内去重。失败返回
+        False——调用方降级为外链，不影响详情页其余部分。"""
+        if (self._client is None or not trace_id or not self._cfg.embed
+                or trace_id in self._published):
+            return trace_id in self._published
+        try:
+            auth = base64.b64encode(
+                f"{self._cfg.public_key}:{self._cfg.secret_key}"
+                .encode()).decode()
+            await asyncio.to_thread(
+                _http_post_json, f"{self._cfg.host}/api/public/ingestion",
+                {"batch": [{
+                    "id": uuid.uuid4().hex,          # 事件 id 每次唯一（去重键）
+                    "type": "trace-create",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "body": {"id": trace_id, "public": True},
+                }]},
+                {"Authorization": f"Basic {auth}"})
+            self._published.add(trace_id)
+            return True
+        except Exception:  # noqa: BLE001 —— 公开设置失败只降级，不放大
+            log.warning("Langfuse trace 公开设置失败，内嵌降级为外链")
+            return False
+
+    async def frame_check(self, url: str) -> bool:
+        """探测 Langfuse 是否允许被 iframe 嵌入（响应头无 X-Frame-Options /
+        CSP frame-ancestors 限制）。自托管默认带 SAMEORIGIN——网关剥头后
+        本探测自动转 True（结果不缓存，修好即生效）。异常一律 False。"""
+        try:
+            headers = await asyncio.to_thread(_http_headers, url)
+        except Exception:  # noqa: BLE001 —— 不可达/超时都按不可嵌入处理
+            return False
+        if "x-frame-options" in headers:
+            return False
+        return "frame-ancestors" not in headers.get(
+            "content-security-policy", "").lower()
+
     # ---- 反馈回写 ----
 
     async def score(self, trace_id: str, name: str, value: float,
@@ -192,6 +242,25 @@ def _http_get_json(url: str, headers: dict) -> dict:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return _json.loads(resp.read())
+
+
+def _http_post_json(url: str, payload: dict, headers: dict) -> int:
+    """极简 POST JSON（测试可替身）；ingestion 用，207/2xx 即成功。"""
+    import json as _json
+    import urllib.request
+    req = urllib.request.Request(
+        url, data=_json.dumps(payload).encode(), method="POST",
+        headers={**headers, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status
+
+
+def _http_headers(url: str) -> dict:
+    """GET 只取响应头（小写键，测试可替身）；body 不读——trace 页是 SSR 大页。"""
+    import urllib.request
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return {k.lower(): v for k, v in resp.headers.items()}
 
 
 # ==================== 观测（OTEL → Langfuse） ====================

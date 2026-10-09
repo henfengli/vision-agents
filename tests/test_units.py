@@ -687,6 +687,64 @@ class TestLangfuseClient(unittest.IsolatedAsyncioTestCase):
         finally:
             lf_mod._http_get_json = orig
 
+    async def test_publish_trace_marks_public_and_caches(self):
+        import agent_platform.langfuse as lf_mod
+        lf = self._client()
+        posts = []
+
+        def fake_post(url, payload, headers):
+            posts.append((url, payload))
+            return 207
+
+        orig = lf_mod._http_post_json
+        lf_mod._http_post_json = fake_post
+        try:
+            self.assertTrue(await lf.publish_trace("tid-1"))
+            self.assertTrue(await lf.publish_trace("tid-1"))  # 幂等去重
+            self.assertEqual(len(posts), 1)
+            url, payload = posts[0]
+            self.assertEqual(url, "http://lf/api/public/ingestion")
+            ev = payload["batch"][0]
+            self.assertEqual(ev["type"], "trace-create")
+            self.assertEqual(ev["body"], {"id": "tid-1", "public": True})
+        finally:
+            lf_mod._http_post_json = orig
+        # 失败不记入已发布集合（下次重试），也不抛出
+        def boom(url, payload, headers):
+            raise RuntimeError("down")
+
+        lf_mod._http_post_json = boom
+        try:
+            self.assertFalse(await lf.publish_trace("tid-2"))
+            self.assertNotIn("tid-2", lf._published)
+        finally:
+            lf_mod._http_post_json = orig
+        # embed 关闭 / 未启用 → 不发布
+        self.assertFalse(await self._client(enabled=False).publish_trace("t"))
+
+    async def test_frame_check(self):
+        import agent_platform.langfuse as lf_mod
+        lf = self._client()
+        orig = lf_mod._http_headers
+        try:
+            lf_mod._http_headers = lambda url: {}
+            self.assertTrue(await lf.frame_check("http://lf/x"))
+            lf_mod._http_headers = lambda url: {
+                "x-frame-options": "SAMEORIGIN"}
+            self.assertFalse(await lf.frame_check("http://lf/x"))
+            lf_mod._http_headers = lambda url: {
+                "content-security-policy": "default-src 'self'; "
+                                           "frame-ancestors 'self'"}
+            self.assertFalse(await lf.frame_check("http://lf/x"))
+
+            def boom(url):
+                raise RuntimeError("down")
+
+            lf_mod._http_headers = boom
+            self.assertFalse(await lf.frame_check("http://lf/x"))  # 不可达按禁止
+        finally:
+            lf_mod._http_headers = orig
+
 
 class TestArtGraph(unittest.TestCase):
     """资产化任务图的纯逻辑面：声明校验 / 拓扑分层 / 闸门求值。"""

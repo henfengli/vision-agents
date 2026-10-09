@@ -62,7 +62,11 @@ class TemporalConfig(BaseModel):
 
 
 class LangfuseConfig(BaseModel):
-    """提示词源头 + 观测。enabled=false 时角色直读 PG。"""
+    """提示词源头 + 观测。enabled=false 时角色直读 PG。
+
+    embed=true（默认）：run 详情页把 Langfuse trace 页以 iframe 内嵌——
+    trace 会被自动设为公开链接（免登，内网前提），Langfuse 网关若带
+    X-Frame-Options/CSP frame-ancestors 需剥掉，否则页面自动降级外链。"""
 
     enabled: bool = False
     host: str = "http://127.0.0.1:3000"
@@ -70,6 +74,7 @@ class LangfuseConfig(BaseModel):
     secret_key: str = ""
     prompt_label: str = "production"
     prompt_cache_ttl_s: float = 10.0
+    embed: bool = True
 
 
 class ApprovalsConfig(BaseModel):

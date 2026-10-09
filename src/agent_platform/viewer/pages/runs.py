@@ -91,20 +91,58 @@ def make_router(env: str, engine=None, langfuse=None,
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        trace_link = ""
+        # Langfuse trace 区：embed 开启时把官方 trace 页整页内嵌（先自动设为
+        # 公开链接免登，再探测网关是否放行 iframe）；任一条件不满足降级外链。
+        # 内嵌成功后自研轨迹图/时间线不再渲染——深层观测不重复造。
+        trace_section, embedded = "", False
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
                 url = await langfuse.trace_url(tid)
-                inner = (f'<a href="{url}" target="_blank">'
-                         f'在 Langfuse 打开完整 trace ↗</a>'
-                         f'（<code>{tid}</code>）' if url else
-                         f'<a href="{langfuse.host}" target="_blank">Langfuse</a>'
-                         f' 中搜索 <code>{tid}</code>')
-                trace_link = f'<p class="meta">深度 trace：{inner}</p>'
+                if (url and langfuse.embed
+                        and await langfuse.publish_trace(tid)
+                        and await langfuse.frame_check(url)):
+                    embedded = True
+                    trace_section = f"""
+        <div class="card trace-embed">
+          <div class="meta">Langfuse trace（公开链接 · 免登）
+            <a href="{url}" target="_blank"
+               style="float:right">新窗口打开 ↗</a></div>
+          <iframe src="{url}" class="trace-frame"
+                  title="Langfuse trace"></iframe>
+        </div>"""
+                elif url and langfuse.embed:
+                    trace_section = f"""
+        <div class="card">
+          <b>Langfuse 暂不可内嵌</b>
+          <p class="meta">自托管默认带 <code>X-Frame-Options: SAMEORIGIN</code>
+          （或 Langfuse 当前不可达）。在它的反向代理里剥掉限制头：</p>
+          <pre>proxy_hide_header X-Frame-Options;
+proxy_hide_header Content-Security-Policy;</pre>
+          <p class="meta">每次打开本页都会重新探测，剥头后即自动内嵌。现在：
+          <a href="{url}" target="_blank">新窗口打开完整 trace ↗</a></p>
+        </div>"""
+                else:
+                    inner = (f'<a href="{url}" target="_blank">'
+                             f'在 Langfuse 打开完整 trace ↗</a>'
+                             f'（<code>{tid}</code>）' if url else
+                             f'<a href="{langfuse.host}" target="_blank">'
+                             f'Langfuse</a> 中搜索 <code>{tid}</code>')
+                    trace_section = f'<p class="meta">深度 trace：{inner}</p>'
+        pending = await approvals.find_pending(run_id)
+        pending_banner = (f'<div class="card pending-banner">⏸ 待审批：'
+                          f'<code>{esc(pending["command"])}</code> — 到 '
+                          f'<a href="/approvals">审批台</a> 放行或拒绝</div>'
+                          if pending else "")
+        steps_block = "" if embedded else """
+        <div class="page-head" style="margin-top:22px">
+          <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
+        </div>
+        <div id="steps"></div>"""
         body = f"""
         <div id="run-head"><div class="meta">加载中…</div></div>
-        {trace_link}
+        {pending_banner}
+        {trace_section}
         <div class="graph-shell" id="graph-card" style="display:none">
           <div class="cy" id="graph"></div>
           <div class="graph-overlay graph-legend">
@@ -120,10 +158,7 @@ def make_router(env: str, engine=None, langfuse=None,
           </div>
         </div>
         <div class="card"><b>输入</b><pre>{esc(json.dumps(run.get('input'), ensure_ascii=False, indent=2))}</pre></div>
-        <div class="page-head" style="margin-top:22px">
-          <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
-        </div>
-        <div id="steps"></div>
+        {steps_block}
         <div class="card"><b>最终输出</b><pre id="output"></pre></div>
         <div class="card">
           <b>这个结论有帮助吗？</b>
@@ -136,7 +171,7 @@ def make_router(env: str, engine=None, langfuse=None,
         <script src="/static/cytoscape.min.js"></script>
         <script src="/static/cytoscape-dagre.min.js"></script>
         <script src="/static/graph.js"></script>
-        <script>watchRun("{run_id}");</script>"""
+        <script>watchRun("{run_id}", {"true" if embedded else "false"});</script>"""
         return page(f"Run {run_id[:8]}", body, active="/runs")
 
     @router.post("/runs/{run_id}/feedback")

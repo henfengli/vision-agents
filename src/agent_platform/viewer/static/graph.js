@@ -185,7 +185,8 @@ function renderRunHead(s) {
 }
 
 /* —— Run 详情页：轮询 state.json，局部刷新图与步骤 —— */
-async function watchRun(runId) {
+/* embedded=true：页面已内嵌 Langfuse trace，自研轨迹图/时间线不再渲染 */
+async function watchRun(runId, embedded) {
   const graphEl = document.getElementById("graph");
   while (true) {
     let s;
@@ -196,7 +197,7 @@ async function watchRun(runId) {
       continue;
     }
     renderRunHead(s);
-    if (s.graph && s.graph.nodes && s.graph.nodes.length) {
+    if (!embedded && s.graph && s.graph.nodes && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";
       // 状态来源三种：轨迹图直给三态 / 资产图 artifacts 表映射 / 骨架图事件推导
       const statuses = s.graph.trace
@@ -208,7 +209,7 @@ async function watchRun(runId) {
           : nodeStatusOf(s.events, s.run.status);
       renderInto(graphEl, s.graph, statuses);
     }
-    renderSteps(document.getElementById("steps"), s.events);
+    if (!embedded) renderSteps(document.getElementById("steps"), s.events);
     document.getElementById("output").textContent = JSON.stringify(s.run.output);
     if (s.run.status !== "queued" && s.run.status !== "running") break;
     await new Promise(r => setTimeout(r, 2000));

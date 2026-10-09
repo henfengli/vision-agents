@@ -258,6 +258,17 @@ button.ok:hover { background: rgba(52, 211, 153, 0.18); }
 .graph-legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
                     margin-right: 7px; vertical-align: 0; }
 .graph-tools { bottom: 12px; right: 12px; display: flex; gap: 4px; padding: 4px; }
+
+/* —— Langfuse trace 内嵌（详情页深层观测直接用官方 UI） —— */
+.trace-embed { padding: 10px 12px; }
+.trace-embed .trace-frame {
+  width: 100%; height: 72vh; min-height: 480px; margin-top: 8px;
+  border: 1px solid var(--border); border-radius: 8px; background: #0b1020;
+}
+.pending-banner {
+  border-color: #fbbf24; background: rgba(251, 191, 36, 0.08);
+  font-family: var(--mono); font-size: 13px;
+}
 .graph-tools button {
   margin: 0; padding: 4px 10px; font-size: 13px; border: none; background: transparent;
   color: var(--text-dim); border-radius: 5px; box-shadow: none;
