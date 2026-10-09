@@ -48,14 +48,38 @@ async def request_approval(run_id: str, command: str) -> int:
 
 
 async def find_pending(run_id: str) -> dict | None:
-    """run 的最新一条待审批项（id + command）；无则 None。api 与 viewer 共用。"""
+    """run 的最新一条待审批项（id + command + created_at）；无则 None。api 与 viewer 共用。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, command FROM approvals"
+            "SELECT id, command, created_at FROM approvals"
             " WHERE run_id=%s AND status='pending' ORDER BY id DESC LIMIT 1",
             (run_id,))
         row = await cur.fetchone()
-    return {"id": row[0], "command": row[1]} if row else None
+    return ({"id": row[0], "command": row[1],
+             "created_at": row[2].isoformat()} if row else None)
+
+
+async def list_pending(limit: int = 50) -> list[dict]:
+    """审批收件箱：全部待办（viewer 列表页）。钉钉 deep-link 之外的兜底入口。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT a.id, a.run_id, a.command, a.created_at,"
+            "       r.task_type, r.trigger_source"
+            " FROM approvals a LEFT JOIN runs r ON r.run_id = a.run_id"
+            " WHERE a.status='pending' ORDER BY a.id DESC LIMIT %s", (limit,))
+        rows = await cur.fetchall()
+    return [{"id": r[0], "run_id": r[1], "command": r[2],
+             "created_at": r[3].isoformat(),
+             "task_type": r[4] or "", "trigger_source": r[5] or ""}
+            for r in rows]
+
+
+async def pending_count() -> int:
+    """顶栏角标用：待办条数。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM approvals WHERE status='pending'")
+        return (await cur.fetchone())[0]
 
 
 async def decide(approval_id: int, approved: bool, decided_by: str = "") -> None:

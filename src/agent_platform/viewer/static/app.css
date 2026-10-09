@@ -85,6 +85,12 @@ h3 { font-size: 15px; }
 }
 .nav a:hover { color: var(--text); background: var(--panel-2); text-decoration: none; }
 .nav a.active { color: var(--accent); background: rgba(34, 211, 238, 0.1); }
+.nav-badge {
+  display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 6px;
+  border-radius: 8px; background: var(--err); color: #14060a;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  line-height: 16px; text-align: center; vertical-align: 1px;
+}
 .topbar .meta { margin-left: auto; }
 
 /* —— 布局 —— */

@@ -35,7 +35,20 @@ _LOGO_SVG = """<svg width="18" height="18" viewBox="0 0 18 18" fill="none">
   from="0 9 9" to="360 9 9" dur="4.2s" repeatCount="indefinite"/></line></svg>"""
 
 _NAV = [("/graph", "总览"), ("/chat", "对话"), ("/runs", "Runs"),
-        ("/admin", "管理"), ("/memory", "记忆")]
+        ("/approvals", "审批"), ("/admin", "管理"), ("/memory", "记忆")]
+
+# 顶栏审批角标：on-load 拉一次待办数（不轮询），>0 时在「审批」链接上挂计数
+_BADGE_JS = """<script>
+fetch('/approvals/pending.json').then(r => r.json()).then(d => {
+  if (!d.count) return;
+  const a = document.querySelector('nav.nav a[href="/approvals"]');
+  if (!a) return;
+  const b = document.createElement('span');
+  b.className = 'nav-badge';
+  b.textContent = d.count > 99 ? '99+' : d.count;
+  a.appendChild(b);
+}).catch(() => {});
+</script>"""
 
 _HEAD = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -60,7 +73,8 @@ def page(title: str, body: str, active: str = "", nav: bool = True) -> HTMLRespo
   <span class="meta"><span class="led live"></span>LIVE</span>
   {logout}
 </header>
-<main class="wrap">{body}</main>"""
+<main class="wrap">{body}</main>
+{_BADGE_JS}"""
     return HTMLResponse(_HEAD.format(title=title, body=body))
 
 
