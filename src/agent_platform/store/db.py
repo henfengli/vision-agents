@@ -12,10 +12,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -168,8 +171,8 @@ async def open_db(dsn: str) -> None:
         for sql in MIGRATIONS:
             try:
                 await conn.execute(sql)
-            except Exception:  # noqa: BLE001 —— 扩展缺失时跳过对应能力
-                pass
+            except Exception as e:  # noqa: BLE001 —— 扩展缺失时跳过对应能力，但留痕
+                log.warning("迁移跳过：%.80s → %s", sql.strip(), e)
 
 
 async def close_db() -> None:

@@ -99,20 +99,24 @@ class Settings(BaseModel):
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
 
     def resolve_target_env(self, env: str | None) -> str:
-        """请求级目标环境：缺省给默认；配了 target_envs 则必须在列表里。
+        """请求级目标环境解析；实现见模块级 resolve_target_env（唯一出处）。"""
+        return resolve_target_env(env, self.target_envs,
+                                  self.default_target_env, self.env)
 
-        一套 agent 部署服务多套业务环境（prod/test/dev 的 Dagster/board…），
-        run/记忆/闸门都按这个维度区分；不配 target_envs 时退化为实例标签本身。
-        与 orchestration.submitter.Submitter._resolve_target_env 同一逻辑、
-        两处实现（那边从构造参数取值，不依赖 Settings），语义变更时两边同步改。
-        """
-        if not env:
-            return self.default_target_env or (self.target_envs[0]
-                                               if self.target_envs else self.env)
-        if self.target_envs and env not in self.target_envs:
-            raise ValueError(
-                f"未知目标环境 {env}（本实例可操作：{self.target_envs}）")
-        return env
+
+def resolve_target_env(env: str | None, target_envs: list[str],
+                       default_target: str | None, instance_env: str) -> str:
+    """目标业务环境解析（唯一实现）：缺省给默认；配了列表则必须在列表里。
+
+    一套 agent 部署服务多套业务环境（prod/test/dev 的 Dagster/board…），
+    run/记忆/闸门都按这个维度区分；不配 target_envs 时退化为实例标签本身。
+    Settings.resolve_target_env 与 Submitter._resolve_target_env 共用本函数。
+    """
+    if not env:
+        return default_target or (target_envs[0] if target_envs else instance_env)
+    if target_envs and env not in target_envs:
+        raise ValueError(f"未知目标环境 {env}（本实例可操作：{target_envs}）")
+    return env
 
 
 _ENV_VAR = re.compile(r"\$\{(\w+)\}")

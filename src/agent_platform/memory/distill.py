@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from ..model import ModelPool
 from ..store import cases as cases_store
 from ..store import knowledge as knowledge_store
+
+log = logging.getLogger(__name__)
 
 _DISTILL_PROMPT = """以下是 agent 刚完成的一次任务记录。判断是否产出了可复用结论。
 
@@ -103,5 +106,6 @@ async def _handoff_summary(pool: ModelPool, task_type: str,
         }])
         text = (resp.choices[0].message.content or "").strip()
         return text if text.startswith("##") else None
-    except Exception:  # noqa: BLE001 —— 摘要失败不影响主流程
+    except Exception:  # noqa: BLE001 —— 摘要失败不影响主流程，但留痕
+        log.exception("session 交接摘要生成失败（%s）", task_type)
         return None

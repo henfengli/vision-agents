@@ -17,6 +17,7 @@ import uuid
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
+from ..config import resolve_target_env
 from ..store import runs
 from ..store.definitions import DefinitionStore
 from . import policies
@@ -55,19 +56,16 @@ class Submitter:
     # —— 内部 ——
 
     def _resolve_target_env(self, env: str | None) -> str:
-        """目标业务环境：缺省给默认；配了列表则必须在列表里。
+        """目标业务环境解析；实现在 config.resolve_target_env（唯一出处）。
 
-        与 config.Settings.resolve_target_env 同一逻辑、两处实现：
-        这里从构造参数取值（Submitter 不依赖 Settings 便于独立测试），
-        语义变更时两边同步改。
+        这里只做异常翻译：config 层抛 ValueError，提交入口统一对外
+        TaskRejected（Submitter 从构造参数取值，不依赖 Settings）。
         """
-        if not env:
-            return self._default_target or (self._target_envs[0]
-                                            if self._target_envs else self._env)
-        if self._target_envs and env not in self._target_envs:
-            raise TaskRejected(
-                f"未知目标环境 {env}（本实例可操作：{self._target_envs}）")
-        return env
+        try:
+            return resolve_target_env(env, self._target_envs,
+                                      self._default_target, self._env)
+        except ValueError as e:
+            raise TaskRejected(str(e)) from e
 
     async def _resolve_task(self, task_name: str, role: str | None,
                             target_env: str) -> TaskDef:

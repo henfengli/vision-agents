@@ -374,6 +374,22 @@ class TestModelPool(unittest.IsolatedAsyncioTestCase):
         pool = ModelPool("http://x", "m", ["t"], client_factory=lambda t: None)
         self.assertIsNone(await pool.embed(["text"]))
 
+    async def test_engine_model_http_reused_across_rebuilds(self):
+        """agent TTL 重建时 http client 复用同一个——每周期新建就是连接池泄漏。"""
+        from types import SimpleNamespace
+
+        from agent_platform.agent.engine import Engine
+        settings = SimpleNamespace(model=SimpleNamespace(
+            url="http://m/v1", name="m", tokens=["t1", "t2"]))
+        engine = Engine(settings, defs_store=None, tool_registry=None)
+        engine._make_model()
+        first = engine._model_http
+        engine._make_model()  # 模拟 TTL 到期重建
+        self.assertIs(engine._model_http, first)
+        await engine.close()
+        self.assertIsNone(engine._model_http)
+        self.assertTrue(first.is_closed)
+
 
 class _FakeLangfuseSDK:
     """langfuse.Langfuse 的测试替身：记录调用，可模拟远端故障。"""

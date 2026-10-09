@@ -152,15 +152,17 @@ class Engine:
 
         多 token 轮询（与 ModelPool 同一配置语义）：RotatingTokenAuth 逐请求
         轮换 Authorization——主 agent 是流量大头，限流时 SDK 重试自动换 token。
-        http client 生命周期归 Engine（close 时释放）；api_key 仅作占位，
-        实际鉴权头每请求被 auth 覆盖。
+        http client 与角色定义无关：全程只建一个、复用到 close 才释放，
+        不随 TTL 重建（否则持续流量下每个重建周期泄漏一个连接池）；
+        api_key 仅作占位，实际鉴权头每请求被 auth 覆盖。
         """
         import httpx
         from langchain.chat_models import init_chat_model
 
         from ..model.pool import RotatingTokenAuth
-        self._model_http = httpx.AsyncClient(
-            auth=RotatingTokenAuth(self._settings.model.tokens))
+        if self._model_http is None:
+            self._model_http = httpx.AsyncClient(
+                auth=RotatingTokenAuth(self._settings.model.tokens))
         return init_chat_model(
             f"openai:{self._settings.model.name}",
             base_url=self._settings.model.url,

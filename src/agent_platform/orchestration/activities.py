@@ -10,11 +10,14 @@ Worker 启动时 configure() 注入 Deps，activity 体内禁止访问未注入�
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from temporalio import activity
+
+log = logging.getLogger(__name__)
 
 from ..agent.approvals import current_run_id
 from ..agent.roles import resolve
@@ -162,8 +165,8 @@ async def finalize_run(raw: dict, output: dict) -> dict:
                       spec.run_id, spec.task_type,
                       {"question": spec.question, "error": spec.error_text},
                       output, spec.code_paths, session_id=spec.session_id)
-    except Exception:  # noqa: BLE001 —— 沉淀失败不影响主流程
-        pass
+    except Exception:  # noqa: BLE001 —— 沉淀失败不影响主流程，但必须留痕
+        log.exception("run %s 记忆沉淀失败（记忆层将缺失本次沉淀）", spec.run_id)
     return output
 
 

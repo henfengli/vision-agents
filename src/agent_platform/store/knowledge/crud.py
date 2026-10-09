@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from ..db import pool
+
+log = logging.getLogger(__name__)
+_vec_fallback_warned = False  # pgvector 缺失告警只报一次（每写一次报一次会刷屏）
 
 # upsert 的两种形态写成两个具名常量，不用 format 拼（全库只此两处，
 # 读一遍即可懂）：差别仅是有无 embedding 一列。
@@ -47,8 +51,11 @@ async def upsert(env: str, domain: str, key: str, content: str,
             async with pool().connection() as conn:
                 await conn.execute(_SQL_UPSERT_WITH_VEC, (*params, vec))
             return
-        except Exception:  # noqa: BLE001 —— 无 pgvector 时退化为纯文本写
-            pass
+        except Exception as e:  # noqa: BLE001 —— 无 pgvector 时退化为纯文本写
+            global _vec_fallback_warned
+            if not _vec_fallback_warned:
+                _vec_fallback_warned = True
+                log.warning("向量写入失败，知识库退化为纯文本检索（仅首次告警）：%s", e)
     async with pool().connection() as conn:
         await conn.execute(_SQL_UPSERT, params)
 
