@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from ...agent import approvals
 from ...store import feedback as feedback_store
 from ...store import runs
 from .base import esc, page, status_pill
@@ -80,7 +81,9 @@ def make_router(env: str, engine=None, langfuse=None,
         else:
             # 普通 agent run：轨迹图按本 run 事件流构建——每个 run 形状不同；
             # 引擎静态骨架只在 /graph 拓扑页，详情页不再触发引擎构建
-            state["graph"] = _trace_graph(events, run["status"])
+            pending = await approvals.find_pending(run_id)
+            state["graph"] = _trace_graph(events, run["status"],
+                                          pending=pending is not None)
         return state
 
     @router.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -185,12 +188,15 @@ def make_router(env: str, engine=None, langfuse=None,
     return router
 
 
-def _trace_graph(events: list[dict], status: str) -> dict | None:
+def _trace_graph(events: list[dict], status: str,
+                 pending: bool = False) -> dict | None:
     """普通 agent run 的执行轨迹图：按本 run 实际事件画出走过的步骤链。
 
     节点 = 开始 + 每次工具调用（工具名 + 参数首行预览）+ 结论（llm 收尾事件），
     边 = 事件先后；节点 id 与时间线步骤元素 id（seq-N）一致，点击可联动滚动。
-    状态沿用运行图三态：已执行 / 进行中（末节点，run 未完结）/ 失败点。
+    状态沿用运行图三态：已执行 / 进行中（末节点，run 未完结）/ 失败点；
+    pending=True（有未决审批）时位置节点加 ⏸ 待审批——业务状态，Langfuse
+    与 Temporal 都没有，只能在这里标。每步耗时/成败详情不归本图（Langfuse）。
     无事件（排队中）返回 None——详情页不显示图卡。
     """
     real = [e for e in events if e["kind"] != "graph"]
@@ -227,6 +233,10 @@ def _trace_graph(events: list[dict], status: str) -> dict | None:
         statuses[prev] = "active"
     elif status == "failed":
         statuses[prev] = "failed"
+    if pending and len(nodes) > 1:
+        for n in nodes:
+            if n["id"] == prev:
+                n["label"] += "\n⏸ 待审批"
     return {"nodes": nodes, "edges": edges, "statuses": statuses, "trace": True}
 
 

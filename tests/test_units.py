@@ -250,6 +250,23 @@ class TestTraceGraph(unittest.TestCase):
                                    args="x" * 60 + "\n第二行")], "success")
         self.assertEqual(g["nodes"][1]["label"], "bash\n" + "x" * 48)
 
+    def test_pending_approval_marker(self):
+        from agent_platform.viewer.pages.runs import _trace_graph
+        events = [self._ev(1, "thought", node="model", content="清"),
+                  self._ev(2, "tool_call", node="tools", tool="bash",
+                           args="rm -rf /x")]
+        g = _trace_graph(events, "running", pending=True)
+        self.assertIn("⏸ 待审批", g["nodes"][-1]["label"])  # 位置节点显式标记
+        self.assertEqual(g["statuses"]["seq-2"], "active")
+        # 无 pending 不带标记
+        g2 = _trace_graph(events, "running")
+        self.assertNotIn("⏸", g2["nodes"][-1]["label"])
+        # 提交闸门（结论后待审批）：标记落在结论节点
+        g3 = _trace_graph(events + [self._ev(3, "llm", content="done")],
+                          "running", pending=True)
+        self.assertIn("⏸ 待审批", g3["nodes"][-1]["label"])
+        self.assertEqual(g3["nodes"][-1]["id"], "seq-3")
+
 
 class TestBashTool(unittest.TestCase):
     def test_truncate(self):
