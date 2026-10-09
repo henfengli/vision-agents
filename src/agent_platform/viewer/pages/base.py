@@ -42,7 +42,7 @@ _HEAD = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} · agent-platform</title>
 <link rel="stylesheet" href="/static/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><circle cx='9' cy='9" r='7' fill='none' stroke='%2322d3ee'/><circle cx='9' cy='9' r='2' fill='%2322d3ee'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><circle cx='9' cy='9' r='7' fill='none' stroke='%2322d3ee'/><circle cx='9' cy='9' r='2' fill='%2322d3ee'/></svg>">
 </head><body>{body}</body></html>"""
 
 

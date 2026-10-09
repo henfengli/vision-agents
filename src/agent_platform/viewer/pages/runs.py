@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
@@ -111,7 +113,7 @@ def make_router(env: str, engine=None, langfuse=None,
             <button data-act="fit">fit</button>
           </div>
         </div>
-        <div class="card"><b>输入</b><pre>{esc(str(run.get('input')))}</pre></div>
+        <div class="card"><b>输入</b><pre>{esc(json.dumps(run.get('input'), ensure_ascii=False, indent=2))}</pre></div>
         <div class="page-head" style="margin-top:22px">
           <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
         </div>
