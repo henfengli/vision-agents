@@ -9,6 +9,7 @@ Worker 启动时 configure() 注入 Deps，activity 体内禁止访问未注入�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -18,6 +19,24 @@ from typing import Any, Awaitable, Callable
 from temporalio import activity
 
 log = logging.getLogger(__name__)
+
+
+async def _with_heartbeat(awaitable, interval_s: float = 30.0):
+    """慢调用（推理型模型单次调用可超 120s 的 heartbeat_timeout）期间定期报活。
+
+    不报活会被 Temporal 误判 activity 卡死而超时杀掉。CancelledError 不吞
+    （取消语义靠它传播）；非 activity 上下文（FakeTemporalClient 内联执行）
+    时 heartbeat 抛普通异常，静默即可。
+    """
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        done, _pending = await asyncio.wait({task}, timeout=interval_s)
+        if done:
+            return task.result()
+        try:
+            activity.heartbeat("running")
+        except Exception:  # noqa: BLE001 —— 不在 activity 上下文时静默
+            pass
 
 from ..agent.approvals import current_run_id
 from ..agent.roles import resolve
@@ -134,11 +153,12 @@ async def run_agent(raw: dict) -> dict:
         if spec.resume:
             await runs.log_event(spec.run_id, "note",
                                  {"stage": "resume", "session_id": spec.session_id})
-            result = await _invoke_streaming(agent, None, config, spec.run_id)
+            result = await _with_heartbeat(
+                _invoke_streaming(agent, None, config, spec.run_id))
         else:
-            result = await _invoke_streaming(
+            result = await _with_heartbeat(_invoke_streaming(
                 agent, {"messages": [{"role": "user", "content": spec.prompt}]},
-                config, spec.run_id)
+                config, spec.run_id))
 
     output_text = _extract_final_text(result)
     await runs.log_event(spec.run_id, "llm",
