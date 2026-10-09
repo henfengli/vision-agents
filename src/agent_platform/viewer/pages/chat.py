@@ -8,28 +8,40 @@ from fastapi.responses import HTMLResponse
 from .base import page
 
 _CHAT_HTML = """
-<h2>Agent 对话</h2>
-<div class="card">
-  <select id="server">__SERVER_OPTIONS__</select>
-  __ENV_SELECT__
-  <input id="role" value="data_searcher" placeholder="角色">
-  <input id="session" placeholder="session_id（留空自动新建）">
+<div class="page-head">
+  <div class="eyebrow">CHAT</div>
+  <h2>Agent 对话</h2>
+  <div class="meta">流式输出 · 每次问答生成一个 Run，可点击跳转详情</div>
 </div>
-<div id="log"></div>
 <div class="card">
-  <input id="q" placeholder="输入问题，回车发送">
+  <div class="chat-config">
+    <select id="server" title="业务系统">__SERVER_OPTIONS__</select>
+    __ENV_SELECT__
+    <input id="role" value="data_searcher" placeholder="角色">
+    <input id="session" placeholder="session_id（留空自动新建）">
+  </div>
+</div>
+<div class="chat-log" id="log"></div>
+<div class="card">
+  <div class="chat-input">
+    <input id="q" placeholder="输入问题，回车发送" autocomplete="off">
+  </div>
 </div>
 <script>
 let sessionId = "";
 const log = document.getElementById("log");
-const esc = (t) => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;");
-const step = (cls, label, text) =>
-  log.innerHTML += `<div class="step step-${cls}"><div class="meta">${label}</div><pre>${esc(text)}</pre></div>`;
+const esc = (t) => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+/* kind 标签颜色由 .step-<kind> .kind 样式决定 */
+const step = (cls, label, content, raw) =>
+  log.insertAdjacentHTML("beforeend",
+    `<div class="step step-${cls}"><div class="meta"><span class="kind">${label}</span></div><pre>${raw ? content : esc(content)}</pre></div>`);
 
 document.getElementById("q").addEventListener("keydown", async (e) => {
   if (e.key !== "Enter") return;
-  const q = e.target.value; e.target.value = "";
-  log.innerHTML += `<div class="card"><b>我：</b><pre>${esc(q)}</pre></div>`;
+  const q = e.target.value.trim(); if (!q) return;
+  e.target.value = "";
+  log.insertAdjacentHTML("beforeend",
+    `<div class="msg-user"><b>我</b><pre>${esc(q)}</pre></div>`);
   const resp = await fetch("/v1/chat/stream", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({server: document.getElementById("server").value,
@@ -50,13 +62,14 @@ document.getElementById("q").addEventListener("keydown", async (e) => {
       if (ev.type === "run") {
         sessionId = ev.session_id;
         document.getElementById("session").value = sessionId;
-        step("note", "ℹ️ run", `<a href="/runs/${ev.run_id}">${ev.run_id}</a>`);
-      } else if (ev.type === "thought") step("thought", "💭 思考", ev.content);
-      else if (ev.type === "tool_call") step("tool_call", "🔧 " + ev.tool, ev.args);
-      else if (ev.type === "tool_result") step("tool_result", "📄 " + ev.tool, ev.output);
-      else if (ev.type === "final") step("final", "✅ 完成", JSON.stringify(ev.output));
+        step("note", "run", `<a href="/runs/${ev.run_id}">${ev.run_id}</a>`, true);
+      } else if (ev.type === "thought") step("thought", "思考", ev.content);
+      else if (ev.type === "tool_call") step("tool_call", "工具 · " + ev.tool, ev.args);
+      else if (ev.type === "tool_result") step("tool_result", "结果 · " + ev.tool, ev.output);
+      else if (ev.type === "final") step("final", "结论", JSON.stringify(ev.output, null, 2));
     }
   }
+  log.lastElementChild.scrollIntoView({behavior: "smooth", block: "end"});
 });
 </script>
 """
@@ -82,6 +95,7 @@ def make_router(domains: list[str] | None = None,
     async def chat_page():
         return page("对话", _CHAT_HTML
                     .replace("__SERVER_OPTIONS__", options)
-                    .replace("__ENV_SELECT__", env_select))
+                    .replace("__ENV_SELECT__", env_select),
+                    active="/chat")
 
     return router

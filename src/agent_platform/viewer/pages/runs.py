@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from ...store import feedback as feedback_store
 from ...store import runs
-from .base import esc, page
+from .base import esc, page, status_pill
 
 
 def make_router(env: str, engine=None, langfuse=None,
@@ -25,28 +25,30 @@ def make_router(env: str, engine=None, langfuse=None,
                 f'<option value="{esc(e)}"'
                 f'{" selected" if e == qenv else ""}>{esc(e)}</option>'
                 for e in target_envs]
-            filt = (f'<form method="get" action="/runs" style="margin:0 0 8px">'
-                    f'<select name="env" onchange="this.form.submit()" '
-                    f'style="width:auto">{"".join(opts)}</select></form>')
+            filt = (f'<form method="get" action="/runs" class="filter-bar">'
+                    f'<select name="env" class="inline" onchange="this.form.submit()"'
+                    f'>{"".join(opts)}</select></form>')
         body_rows = "".join(
-            f'<tr><td><a href="/runs/{r["run_id"]}">{r["run_id"][:8]}</a></td>'
+            f'<tr><td><a class="run-link" href="/runs/{r["run_id"]}">'
+            f'{r["run_id"][:8]}</a></td>'
             f'<td>{esc(r["task_type"])}</td><td>{esc(r["role"])}</td>'
             f'<td>{esc(r["target_env"] or "-")}</td>'
-            f'<td class="status-{r["status"]}">{r["status"]}</td>'
+            f'<td>{status_pill(r["status"])}</td>'
             f'<td>{esc(r["trigger_source"])}</td>'
             f'<td class="meta">{r["created_at"]}</td></tr>'
             for r in rows)
         return page("Runs", f"""
-        <h2>最近 Runs</h2>
+        <div class="page-head">
+          <div class="eyebrow">EXECUTIONS</div>
+          <h2>最近 Runs</h2>
+          <div class="meta">近 100 条 · 点击 run id 查看执行过程与运行图</div>
+        </div>
         {filt}
-        <div class="card"><table style="width:100%;border-collapse:collapse">
-          <tr class="meta" style="text-align:left">
-            <th>run</th><th>任务</th><th>角色</th><th>目标环境</th>
-            <th>状态</th><th>来源</th><th>时间</th></tr>
-          {body_rows or '<tr><td colspan="7" class="meta">暂无</td></tr>'}
-        </table></div>
-        <style>td, th {{ padding:4px 8px; border-bottom:1px solid #eee;
-                 font-size:13px; text-align:left }}</style>""")
+        <div class="card"><table class="grid">
+          <thead><tr><th>run</th><th>任务</th><th>角色</th><th>目标环境</th>
+            <th>状态</th><th>来源</th><th>时间</th></tr></thead>
+          <tbody>{body_rows or '<tr><td colspan="7" class="meta">暂无</td></tr>'}</tbody>
+        </table></div>""", active="/runs")
 
     @router.get("/runs/{run_id}/state.json")
     async def run_state(run_id: str):
@@ -89,32 +91,45 @@ def make_router(env: str, engine=None, langfuse=None,
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
-                trace_link = (f'<p class="meta">🔍 深度 trace：'
+                trace_link = (f'<p class="meta">深度 trace：'
                               f'<a href="{langfuse.host}" target="_blank">Langfuse</a>'
                               f' 中搜索 <code>{tid}</code></p>')
         body = f"""
-        <div id="run-head"></div>
+        <div id="run-head"><div class="meta">加载中…</div></div>
         {trace_link}
-        <div class="card" id="graph-card" style="display:none">
-          <b>运行图</b>
-          <span class="meta">绿=已执行 · 黄=进行中 · 红=失败点 · 点击节点跳到对应步骤</span>
-          <div id="graph"></div>
+        <div class="graph-shell" id="graph-card" style="display:none">
+          <div class="cy" id="graph"></div>
+          <div class="graph-overlay graph-legend">
+            <div><span class="sw" style="background:#34d399"></span>已执行</div>
+            <div><span class="sw" style="background:#fbbf24"></span>进行中</div>
+            <div><span class="sw" style="background:#f87171"></span>失败点</div>
+            <div><span class="sw" style="background:#2a3a5f"></span>未执行</div>
+            <div class="meta" style="margin-top:6px">点击节点 → 跳到对应步骤</div>
+          </div>
+          <div class="graph-overlay graph-tools">
+            <button data-act="in">+</button><button data-act="out">−</button>
+            <button data-act="fit">fit</button>
+          </div>
         </div>
         <div class="card"><b>输入</b><pre>{esc(str(run.get('input')))}</pre></div>
-        <h3>执行过程</h3><div id="steps"></div>
+        <div class="page-head" style="margin-top:22px">
+          <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
+        </div>
+        <div id="steps"></div>
         <div class="card"><b>最终输出</b><pre id="output"></pre></div>
         <div class="card">
-          <form method="post" action="/runs/{run_id}/feedback">
-            <b>这个结论有帮助吗？</b><br>
-            <button name="score" value="1">👍 有用</button>
-            <button name="score" value="-1">👎 有问题</button><br>
-            <input name="comment" placeholder="补充说明（可选）">
+          <b>这个结论有帮助吗？</b>
+          <form method="post" action="/runs/{run_id}/feedback" class="filter-bar">
+            <button name="score" value="1" class="ok">有用</button>
+            <button name="score" value="-1" class="danger">有问题</button>
+            <input name="comment" class="inline" placeholder="补充说明（可选）">
           </form>
         </div>
-        <script src="/static/dagre.min.js"></script>
+        <script src="/static/cytoscape.min.js"></script>
+        <script src="/static/cytoscape-dagre.min.js"></script>
         <script src="/static/graph.js"></script>
         <script>watchRun("{run_id}");</script>"""
-        return page(f"Run {run_id}", body)
+        return page(f"Run {run_id[:8]}", body, active="/runs")
 
     @router.post("/runs/{run_id}/feedback")
     async def run_feedback(run_id: str, request: Request):
@@ -125,19 +140,35 @@ def make_router(env: str, engine=None, langfuse=None,
         run = await runs.get(run_id)
         await feedback_store.propagate_to_memory(
             (run or {}).get("target_env") or env, run_id, score)
-        return page("反馈", "<p>已记录，感谢。</p>"
-                           "<p><a href='javascript:history.back()'>返回</a></p>")
+        return page("反馈", '<div class="card"><b>已记录，感谢。</b>'
+                            '<p><a href="javascript:history.back()">← 返回</a></p></div>',
+                    active="/runs")
 
     @router.get("/graph", response_class=HTMLResponse)
     async def graph_page():
         if engine is None:
             raise HTTPException(501, "未接入引擎")
         return page("Agent 图", """
-        <h2>Agent 图拓扑</h2>
-        <div class="card"><div id="graph"></div></div>
-        <script src="/static/dagre.min.js"></script>
+        <div class="page-head">
+          <div class="eyebrow">TOPOLOGY</div>
+          <h2>Agent 图拓扑</h2>
+          <div class="meta">拖拽平移 · 滚轮缩放 · 点击节点高亮邻接关系 · 自上而下为执行流向</div>
+        </div>
+        <div class="graph-shell tall">
+          <div class="cy" id="graph"></div>
+          <div class="graph-overlay graph-legend">
+            <div><span class="sw" style="background:#22d3ee"></span>hover / 选中</div>
+            <div><span class="sw" style="background:#2a3a5f"></span>节点</div>
+          </div>
+          <div class="graph-overlay graph-tools">
+            <button data-act="in">+</button><button data-act="out">−</button>
+            <button data-act="fit">fit</button>
+          </div>
+        </div>
+        <script src="/static/cytoscape.min.js"></script>
+        <script src="/static/cytoscape-dagre.min.js"></script>
         <script src="/static/graph.js"></script>
-        <script>showTopology();</script>""")
+        <script>showTopology();</script>""", active="/graph")
 
     @router.get("/graph.json")
     async def graph_json():

@@ -21,6 +21,8 @@ def make_viewer_router(submitter, defs_store, env: str, engine=None,
                        target_envs: list[str] | None = None) -> APIRouter:
     router = APIRouter()
     router.include_router(base.make_static_router())
+    # 顶栏"退出"入口仅登录开启时出现
+    base.set_auth_enabled(token is not None)
 
     pages = APIRouter(
         dependencies=[Depends(make_viewer_auth_dependency(token))] if token else [])

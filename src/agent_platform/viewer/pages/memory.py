@@ -28,34 +28,48 @@ def make_router(env: str, target_envs: list[str] | None = None) -> APIRouter:
             view_env, domain or None, include_inactive=include_inactive)
         env_opts = ""
         if target_envs:
-            env_opts = ('<select name="env" style="width:auto">'
+            env_opts = ('<select name="env" class="inline">'
                         + "".join(
                             f'<option value="{esc(e)}"'
                             f'{" selected" if e == view_env else ""}>{esc(e)}</option>'
                             for e in target_envs) + "</select>")
+
+        def _status(i: dict) -> str:
+            if i["superseded"]:
+                return '<span class="pill pill-failed">已取代</span>'
+            if i["expired"]:
+                return '<span class="pill pill-queued">已过期</span>'
+            return ('<span class="pill pill-success"><span class="led"></span>生效中</span>'
+                    f' <span class="meta">+{i["feedback_score"]}</span>')
+
         rows = "".join(
-            f'<tr><td>{esc(i["domain"])}</td><td>{esc(i["key"])}</td>'
-            f'<td><pre style="max-width:500px;white-space:pre-wrap">{esc(i["content"][:500])}</pre></td>'
-            f'<td>{"🗑已取代" if i["superseded"] else ("⛔已过期" if i["expired"] else "✅")}'
-            f' 👍{i["feedback_score"]}</td>'
+            f'<tr><td><span class="tag">{esc(i["domain"])}</span></td>'
+            f'<td class="meta">{esc(i["key"])}</td>'
+            f'<td><pre style="max-width:520px">{esc(i["content"][:500])}</pre></td>'
+            f'<td>{_status(i)}</td>'
             f'<td><button onclick="editEntry({i["id"]})">编辑</button></td></tr>'
             for i in items)
         entries_json = json.dumps(
             {i["id"]: i["content"] for i in items},
             ensure_ascii=False).replace("</", "<\\/")  # 防内容里的 </script> 提前闭合
         body = f"""
-        <h2>记忆管理</h2>
+        <div class="page-head">
+          <div class="eyebrow">MEMORY</div>
+          <h2>记忆管理</h2>
+          <div class="meta">按环境分区 · 反馈会影响条目权重 · 编辑保存后重新生效</div>
+        </div>
         <div class="card">
-          <form method="get">{env_opts}<input name="domain" value="{esc(domain)}"
-            placeholder="域过滤" style="width:auto">
-          <label><input type="checkbox" name="include_inactive" value="true"
-            {"checked" if include_inactive else ""}> 含失效</label>
-          <button>筛选</button></form></div>
-        <div class="card"><table border="1" cellpadding="6" style="border-collapse:collapse;width:100%">
-          <tr><th>域</th><th>key</th><th>内容</th><th>状态</th><th></th></tr>{rows}</table></div>
+          <form method="get" class="filter-bar">{env_opts}
+            <input name="domain" class="inline" value="{esc(domain)}" placeholder="域过滤">
+            <label class="meta"><input type="checkbox" name="include_inactive" value="true"
+              {"checked" if include_inactive else ""}> 含失效</label>
+            <button>筛选</button></form></div>
+        <div class="card"><table class="grid">
+          <thead><tr><th>域</th><th>key</th><th>内容</th><th>状态</th><th></th></tr></thead>
+          <tbody>{rows or '<tr><td colspan="5" class="meta">暂无条目</td></tr>'}</tbody></table></div>
         <div class="card" id="edit-card" style="display:none">
-          <b>编辑条目 <span id="edit-id"></span></b>
-          <textarea id="edit-content" rows="8" style="width:100%"></textarea>
+          <b>编辑条目</b> <span id="edit-id" class="meta"></span>
+          <textarea id="edit-content" rows="8"></textarea>
           <button onclick="saveEntry()">保存（重新生效）</button>
           <span id="edit-msg" class="meta"></span></div>
         <script>
@@ -76,7 +90,7 @@ def make_router(env: str, target_envs: list[str] | None = None) -> APIRouter:
           if (resp.ok) setTimeout(() => location.reload(), 600);
         }}
         </script>"""
-        return page("记忆管理", body)
+        return page("记忆管理", body, active="/memory")
 
     @router.post("/memory/{entry_id}")
     async def memory_update(entry_id: int, req: MemoryUpdateRequest):

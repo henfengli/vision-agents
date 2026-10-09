@@ -41,39 +41,54 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
                 f"<li><code>{esc(e['session_id'])}</code> 被纠正 {e['count']} 次"
                 f"（最近 {e['last_at'][:10]}）——记忆层反复兜不住，"
                 f"建议人工升舱为角色 prompt</li>" for e in escalations)
-            esc_html = (f'<div class="card"><b>升舱提示</b>'
+            esc_html = (f'<div class="alert warn"><b>升舱提示</b>'
                         f"（同一 session 被纠正 ≥3 次）<ul>{items}</ul></div>")
 
         source = ("Langfuse 为源头" if langfuse is not None and langfuse.enabled
                   else "PG 为源头（Langfuse 未启用）")
         body = f"""
-        <h2>管理</h2>{esc_html}
-        <div class="card"><b>角色定义</b>（{source}）<br>
-          <select id="role-sel" onchange="loadDef('role')"><option value="">新建…</option>{role_opts}</select>
-          <input id="role-name" placeholder="角色名">
-          <textarea id="role-def" rows="12" style="width:100%" placeholder="角色定义 JSON"></textarea>
+        <div class="page-head">
+          <div class="eyebrow">ADMIN</div>
+          <h2>管理</h2>
+          <div class="meta">角色 / 任务 / 策略热更新 · 保存即新版本即时生效</div>
+        </div>
+        {esc_html}
+        <div class="card"><b>角色定义</b> <span class="meta">（{source}）</span>
+          <div class="admin-row">
+            <select id="role-sel" onchange="loadDef('role')"><option value="">新建…</option>{role_opts}</select>
+            <input id="role-name" placeholder="角色名">
+          </div>
+          <textarea id="role-def" rows="12" placeholder="角色定义 JSON"></textarea>
           <button onclick="saveDef('role')">保存（新版本，即时生效）</button>
-          <span id="role-msg" class="meta"></span><br>
-          <span class="meta">版本对比：</span>
-          <input id="role-a" type="number" min="1" style="width:70px" placeholder="v?">
-          <input id="role-b" type="number" min="1" style="width:70px" placeholder="v?">
-          <button onclick="diffDef('role')">diff</button></div>
-        <div class="card"><b>任务定义</b><br>
-          <select id="task-sel" onchange="loadDef('task')"><option value="">新建…</option>{task_opts}</select>
-          <input id="task-name" placeholder="任务名">
-          <textarea id="task-def" rows="10" style="width:100%" placeholder="任务定义 JSON（含 schedule 可选）"></textarea>
+          <span id="role-msg" class="meta"></span>
+          <div class="diff-row">
+            <span class="meta">版本对比</span>
+            <input id="role-a" type="number" min="1" placeholder="v?">
+            <input id="role-b" type="number" min="1" placeholder="v?">
+            <button onclick="diffDef('role')">diff</button>
+          </div></div>
+        <div class="card"><b>任务定义</b>
+          <div class="admin-row">
+            <select id="task-sel" onchange="loadDef('task')"><option value="">新建…</option>{task_opts}</select>
+            <input id="task-name" placeholder="任务名">
+          </div>
+          <textarea id="task-def" rows="10" placeholder="任务定义 JSON（含 schedule 可选）"></textarea>
           <button onclick="saveDef('task')">保存</button>
-          <span id="task-msg" class="meta"></span><br>
-          <span class="meta">版本对比：</span>
-          <input id="task-a" type="number" min="1" style="width:70px" placeholder="v?">
-          <input id="task-b" type="number" min="1" style="width:70px" placeholder="v?">
-          <button onclick="diffDef('task')">diff</button></div>
-        <div class="card"><b>提交策略（闸门链）</b><br>
-          <span class="meta">正则命中 任务名/输入/question 即按 action 处理；
-            order 小的先判；action = deny | require_approval</span>
-          <select id="policy-sel" onchange="loadDef('policy')"><option value="">新建…</option>{policy_opts}</select>
-          <input id="policy-name" placeholder="策略名">
-          <textarea id="policy-def" rows="6" style="width:100%"
+          <span id="task-msg" class="meta"></span>
+          <div class="diff-row">
+            <span class="meta">版本对比</span>
+            <input id="task-a" type="number" min="1" placeholder="v?">
+            <input id="task-b" type="number" min="1" placeholder="v?">
+            <button onclick="diffDef('task')">diff</button>
+          </div></div>
+        <div class="card"><b>提交策略（闸门链）</b>
+          <p class="meta">正则命中 任务名/输入/question 即按 action 处理；
+            order 小的先判；action = deny | require_approval</p>
+          <div class="admin-row">
+            <select id="policy-sel" onchange="loadDef('policy')"><option value="">新建…</option>{policy_opts}</select>
+            <input id="policy-name" placeholder="策略名">
+          </div>
+          <textarea id="policy-def" rows="6"
             placeholder='{{"match_regex": "drop\\s+table", "action": "deny", "message": "禁止删表"}}'></textarea>
           <button onclick="saveDef('policy')">保存</button>
           <span id="policy-msg" class="meta"></span></div>
@@ -116,7 +131,7 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
           window.open(`/admin/diff?kind=${{kind}}&name=${{encodeURIComponent(name)}}&a=${{a}}&b=${{b}}`);
         }}
         </script>"""
-        return page("管理", body)
+        return page("管理", body, active="/admin")
 
     @router.get("/admin/diff", response_class=HTMLResponse)
     async def def_diff(kind: str, name: str, a: int, b: int):
@@ -137,9 +152,10 @@ def make_router(defs_store, env: str, langfuse=None) -> APIRouter:
             fromfile=f"{name} v{a}（{by_version[a]['updated_by'] or '?'}）",
             tofile=f"{name} v{b}（{by_version[b]['updated_by'] or '?'}）",
             lineterm="")
-        body = (f"<h2>{esc(kind)} <code>{esc(name)}</code>：v{a} → v{b}</h2>"
+        body = (f'<div class="page-head"><div class="eyebrow">DIFF</div>'
+                f"<h2>{esc(kind)} <code>{esc(name)}</code>：v{a} → v{b}</h2></div>"
                 f'<div class="card"><pre>{esc(chr(10).join(diff)) or "（无差异）"}</pre></div>'
-                f'<div class="card"><a href="/admin">← 返回管理页</a></div>')
-        return page(f"diff {name}", body)
+                f'<p><a href="/admin">← 返回管理页</a></p>')
+        return page(f"diff {name}", body, active="/admin")
 
     return router
