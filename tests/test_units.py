@@ -187,14 +187,14 @@ class TestTraceGraph(unittest.TestCase):
                 "created_at": "2026-10-09T10:00:00"}
 
     def test_empty(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         self.assertIsNone(_trace_graph([], "queued"))
         # graph 事件不属于执行轨迹（资产图 run 走另一分支）
         self.assertIsNone(_trace_graph(
             [self._ev(1, "graph", nodes=[], edges=[])], "running"))
 
     def test_tool_chain_with_final(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         events = [
             self._ev(1, "thought", node="model", content="先查知识库"),
             self._ev(2, "tool_call", node="tools", tool="grep",
@@ -219,7 +219,7 @@ class TestTraceGraph(unittest.TestCase):
         self.assertTrue(g["trace"])
 
     def test_running_marks_last_active(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         events = [self._ev(1, "thought", node="model", content="清理临时目录"),
                   self._ev(2, "tool_call", node="tools", tool="bash",
                            args='{"command": "rm -rf /tmp/x"}')]
@@ -228,7 +228,7 @@ class TestTraceGraph(unittest.TestCase):
                                          "seq-2": "active"})
 
     def test_failed_marks_last_failed(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         events = [self._ev(1, "tool_call", node="tools", tool="bash",
                            args="ls"),
                   self._ev(2, "tool_result", node="tools", tool="bash",
@@ -237,7 +237,7 @@ class TestTraceGraph(unittest.TestCase):
         self.assertEqual(g["statuses"]["seq-1"], "failed")
 
     def test_no_tool_fallback_node(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         # 纯问答：无工具调用，末事件兜底一个节点，图不缺席
         g = _trace_graph([self._ev(1, "thought", node="model", content="嗨")],
                          "success")
@@ -245,13 +245,13 @@ class TestTraceGraph(unittest.TestCase):
         self.assertEqual(g["edges"], [{"source": "start", "target": "seq-1"}])
 
     def test_args_clipped_first_line(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         g = _trace_graph([self._ev(1, "tool_call", node="tools", tool="bash",
                                    args="x" * 60 + "\n第二行")], "success")
         self.assertEqual(g["nodes"][1]["label"], "bash\n" + "x" * 48)
 
     def test_pending_approval_marker(self):
-        from agent_platform.viewer.pages.runs import _trace_graph
+        from agent_platform.api.console import _trace_graph
         events = [self._ev(1, "thought", node="model", content="清"),
                   self._ev(2, "tool_call", node="tools", tool="bash",
                            args="rm -rf /x")]

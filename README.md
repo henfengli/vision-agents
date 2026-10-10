@@ -8,14 +8,14 @@
 
 ```
 触发层    Dagster sensor / GitLab webhook / chat(CLI+Web SSE) / Temporal Schedule / SDK
-接入层    FastAPI /v1 + webhook（统一 bearer）/ Viewer（cookie 登录）
+接入层    FastAPI /v1 + webhook + 控制台 SPA（统一 bearer，令牌存浏览器 localStorage）
 编排层    Temporal：任务三形态 = 单 agent / 资产化任务图 / 内建处理器；
           提交闸门链（env_gate → DB 策略）在提交路径上统一收口
 agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工具层（tools）
 记忆层    recall（运行前召回）/ distill（运行后沉淀）/ gardener（夜间维护口子）
 存储层    Postgres：runs(含定义版本谱系)/run_events/definitions(角色/任务/策略)/
           knowledge/cases/feedback/approvals/artifacts(产物血缘)
-观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ Run Viewer（自托管页面）
+观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ 控制台（React SPA，FastAPI 托管）
 通知      钉钉中继（单向只发）
 ```
 
@@ -57,19 +57,24 @@ export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_B
 AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
 ```
 
-Run Viewer：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
-最近失败 + 任务分布）、引擎拓扑 `/graph`（Agent 静态结构，cytoscape 渲染）、
-Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
+控制台（v5 起为 React SPA，源码在 `web/`，构建产物 `web/dist` 由 FastAPI
+静态托管；`?demo=1` 可无后端演示）：总览 `/#/`（近 24h 聚合仪表盘：状态
+统计卡 + 最近 Runs + 待审批/最近失败 + 任务分布）、引擎拓扑 `/#/graph`
+（Agent 静态结构，cytoscape 渲染）、Runs 列表 `/#/runs`（可按目标环境
+过滤）、详情 `/#/runs/{run_id}`
 （**Langfuse trace 页整页内嵌**——打开时自动把 trace 设为公开链接免登；
 自托管需在 Langfuse 反向代理剥 `X-Frame-Options`/CSP 头，未剥或 Langfuse
 未启用时降级为自研执行轨迹图 + 步骤时间线）；**步骤时间线始终渲染，每步
 👍👎 节点级反馈**（kind=step 留痕 + 回写 Langfuse——score 直接挂对应
 span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step#seq`）；
 终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开
-run 并跳过去重）、审批待办 `/approvals`
-（顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达 `/approvals/{run_id}`
-处理页）、管理页 `/admin`、记忆页 `/memory`、对话页 `/chat`（配置了
-`target_envs` 时带环境选择器）。
+run 并跳过去重）、审批待办 `/#/approvals`
+（顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达 `/#/approvals/{run_id}`
+处理页）、管理页 `/#/admin`、记忆页 `/#/memory`、对话页 `/#/chat`。
+旧深链（`/runs/{id}` 等）301 到对应 hash 路由；浏览器令牌存
+localStorage，全站统一 bearer（`/v1/console/*` 数据端点）。
+
+前端构建：`cd web && npm ci && npm run build`（install.sh 自动处理）。
 
 主机监控：配好 `grafana:`（url + Prometheus 数据源 uid + 只读 token）并在域包
 `domain.yaml` 登记 `hosts` 后，角色可用 `host_metrics` 工具查部署机器的

@@ -12,9 +12,9 @@
 - notify         钉钉单向中继
 - api            接入层（/v1 业务路由）
 - triggers       触发层（dagster sensor / gitlab webhook / chat）
-- viewer         Run Viewer 自托管观测站点
+- web            Run Viewer SPA（React+Vite，产物由 FastAPI 托管）
 - main           装配与启动入口
 - svcrun         通用服务纳管启动器（同机业务服务按需起停，bwrap 隔离环境配置）
 """
 
-__version__ = "4.11.2"
+__version__ = "5.0.0"

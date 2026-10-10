@@ -149,7 +149,7 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
 
     @router.get("/v1/admin/roles")
     async def list_roles():
-        return await defs.list_active("role", settings.env)
+        return await defs.list_active_rows("role", settings.env)
 
     @router.get("/v1/admin/roles/{name}/history")
     async def role_history(name: str):
@@ -182,7 +182,7 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
 
     @router.get("/v1/admin/tasks")
     async def list_tasks():
-        return await tasks.list()
+        return await defs.list_active_rows("task", settings.env)
 
     # —— Admin：提交策略（闸门链，policies.py） ——
 
@@ -198,6 +198,14 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
 
     @router.get("/v1/admin/policies")
     async def list_policies():
-        return await defs.list_active("policy", settings.env)
+        return await defs.list_active_rows("policy", settings.env)
+
+    @router.get("/v1/admin/{kind}/{name}/history")
+    async def definition_history(kind: str, name: str):
+        """任务/策略的版本历史（角色的用 /v1/admin/roles/{name}/history，
+        因回滚语义不同单列）。kind ∈ task/policy。"""
+        if kind not in ("tasks", "policies"):
+            raise HTTPException(404, "kind 只支持 tasks/policies")
+        return await defs.history(kind[:-1], settings.env, name)
 
     return router

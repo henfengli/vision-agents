@@ -55,6 +55,18 @@ class DefinitionStore:
             self._cache[key] = (time.monotonic(), definition)
         return definition
 
+    async def list_active_rows(self, kind: Kind, env: str) -> list[dict]:
+        """管理台用：当前生效版本，结构化为 {name, version, definition}。
+        与 list_active（铺平 definition、喂运行时校验模型）区分开。"""
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT DISTINCT ON (name) name, version, definition"
+                " FROM definitions WHERE kind=%s AND env=%s"
+                " ORDER BY name, version DESC", (kind, env))
+            rows = await cur.fetchall()
+        return [{"name": n, "version": v, "definition": _as_dict(d)}
+                for n, v, d in rows]
+
     async def list_active(self, kind: Kind, env: str) -> list[dict]:
         async with pool().connection() as conn:
             cur = await conn.execute(
