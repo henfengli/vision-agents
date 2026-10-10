@@ -12,8 +12,10 @@
    路径），LangChainInstrumentor 自动覆盖模型/工具调用；run span 挂业务属性。
    SDK client 以 tracing_enabled=False 构造——tracing 由本模块的 OTEL 管线
    统一拥有，SDK 只负责 prompt/score 数据 API。
-3. **反馈回写**：👍/👎/纠正文字经 SDK create_score 挂在 trace 上；SDK 批量
-   异步入队，关停前 flush() 冲刷。
+3. **反馈回写**：👍/👎/纠正文字经 SDK create_score 挂 trace；节点级反馈经
+   match_observation 把步骤 seq 映射到 observation id，score 直接挂 span
+   （等价 UI 的 Annotate，走 API 不需要登录态）。SDK 批量异步入队，关停前
+   flush() 冲刷。
 
 enabled=false：全部空操作（_client 为 None），角色定义直接读 PG（降级模式）。
 """
@@ -205,20 +207,40 @@ class LangfuseClient:
 
     # ---- 反馈回写 ----
 
+    async def observations(self, trace_id: str) -> list[dict]:
+        """拉 trace 的全部 observation（span）：id/name/type/startTime。
+
+        用途单一：节点级反馈把 step seq 映射到 span id（Annotate 的 API 等价
+        物——score 带 observation_id 即挂在那个 span 上）。失败返回空表，
+        调用方降级为 trace 级 score。"""
+        if self._client is None or not trace_id:
+            return []
+        try:
+            auth = base64.b64encode(
+                f"{self._cfg.public_key}:{self._cfg.secret_key}"
+                .encode()).decode()
+            data = await asyncio.to_thread(
+                _http_get_json,
+                f"{self._cfg.host}/api/public/observations?traceId={trace_id}",
+                {"Authorization": f"Basic {auth}"})
+            return data.get("data") or []
+        except Exception:  # noqa: BLE001 —— 拉不到就降级，不放大
+            log.warning("Langfuse observations 拉取失败，步骤反馈降级 trace 级")
+            return []
+
     async def score(self, trace_id: str, name: str, value: float,
-                    comment: str = "") -> bool:
-        """把反馈写为 Langfuse score（挂在 trace 上）。失败只记日志。"""
+                    comment: str = "",
+                    observation_id: str | None = None) -> bool:
+        """把反馈写为 Langfuse score。给 observation_id 即挂到对应 span
+        （等价 UI 的 Annotate），否则挂 trace。失败只记日志。"""
         if self._client is None or not trace_id:
             return False
         try:
-            await asyncio.to_thread(
-                self._client.create_score,
-                trace_id=trace_id,
-                name=name,
-                value=value,
-                data_type="NUMERIC",
-                comment=comment or None,
-            )
+            kw = dict(trace_id=trace_id, name=name, value=value,
+                      data_type="NUMERIC", comment=comment or None)
+            if observation_id:
+                kw["observation_id"] = observation_id
+            await asyncio.to_thread(self._client.create_score, **kw)
             return True
         except Exception:  # noqa: BLE001
             log.warning("Langfuse score 写入失败")
@@ -233,6 +255,44 @@ class LangfuseClient:
                 await asyncio.to_thread(self._client.flush)
             except Exception:  # noqa: BLE001 —— 关停路径不再放大故障
                 log.warning("Langfuse flush 失败")
+
+
+def match_observation(events: list[dict], seq: int,
+                      observations: list[dict]) -> str | None:
+    """把时间线步骤（run_events.seq）映射到 Langfuse observation id。
+
+    对齐规则（OTEL 探针的 span 命名）：
+    - 工具步骤（tool_call/tool_result）→ observation.name == 工具名
+    - 模型步骤（llm/final）→ observation.type == GENERATION
+    同名多次出现按 startTime 排序后取第 n 次（n = 该事件在同类事件中的
+    次序）。映射不上（思考/备注/trace 行、名称对不上）返回 None——调用方
+    降级为 trace 级 score，绝不瞎挂。
+    """
+    target = next((e for e in events if e.get("seq") == seq), None)
+    if target is None:
+        return None
+    kind = target.get("kind")
+    payload = target.get("payload") if isinstance(
+        target.get("payload"), dict) else {}
+    if kind in ("tool_call", "tool_result") and payload.get("tool"):
+        cands = [o for o in observations if o.get("name") == payload["tool"]]
+        # tool_call/tool_result 是同一次工具执行的两条台账事件：第几次执行
+        # 按它之前同工具的 tool_call 条数算；tool_result 会把本对儿的 call
+        # 也数进去，减一回退到同一次执行
+        idx = sum(1 for e in events
+                  if e.get("seq", 0) < seq and e.get("kind") == "tool_call"
+                  and isinstance(e.get("payload"), dict)
+                  and e["payload"].get("tool") == payload["tool"])
+        if kind == "tool_result":
+            idx = max(0, idx - 1)
+    elif kind in ("llm", "final"):
+        cands = [o for o in observations if o.get("type") == "GENERATION"]
+        idx = sum(1 for e in events
+                  if e.get("seq", 0) < seq and e.get("kind") in ("llm", "final"))
+    else:
+        return None
+    cands.sort(key=lambda o: o.get("startTime") or "")
+    return cands[idx].get("id") if 0 <= idx < len(cands) else None
 
 
 def _http_get_json(url: str, headers: dict) -> dict:

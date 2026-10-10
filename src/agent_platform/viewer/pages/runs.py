@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...agent import approvals
+from ...langfuse import match_observation
 from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
@@ -194,8 +195,9 @@ proxy_hide_header Content-Security-Policy;</pre>
 
     @router.post("/runs/{run_id}/steps/{seq}/feedback")
     async def step_feedback(run_id: str, seq: int, request: Request):
-        """节点级反馈：时间线某一步的 👍👎。回写 Langfuse score
-        （名字带 step#seq 定位到步骤；observation 映射不在 viewer 侧维护）。"""
+        """节点级反馈：时间线某一步的 👍👎。Langfuse 回写优先挂到对应 span
+        （match_observation：seq → observation id，等价 Annotate）；映射不上
+        降级为 trace 级 score（名字带 step#seq 定位）。"""
         form = await request.form()
         score = int(form["score"])
         comment = str(form.get("comment", ""))
@@ -203,7 +205,11 @@ proxy_hide_header Content-Security-Policy;</pre>
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
-                await langfuse.score(tid, f"step#{seq}", float(score), comment)
+                events = await runs.get_events(run_id)
+                obs = await langfuse.observations(tid)
+                oid = match_observation(events, seq, obs)
+                await langfuse.score(tid, f"step#{seq}", float(score), comment,
+                                     observation_id=oid)
         return {"ok": True}
 
     @router.post("/runs/{run_id}/rerun")

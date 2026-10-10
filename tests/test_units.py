@@ -644,6 +644,73 @@ class TestLangfuseClient(unittest.IsolatedAsyncioTestCase):
         await lf.flush()
         self.assertTrue(lf._client.flushed)
 
+    async def test_score_span_level(self):
+        """节点级反馈：给 observation_id 即挂 span（Annotate 的 API 等价）。"""
+        lf = self._client()
+        self.assertTrue(await lf.score("tid-1", "step#2", -1.0,
+                                       observation_id="obs-9"))
+        self.assertEqual(lf._client.scores[0]["observation_id"], "obs-9")
+        await lf.score("tid-1", "user_feedback", 1.0)  # 不给则不多传（trace 级）
+        self.assertNotIn("observation_id", lf._client.scores[1])
+
+    async def test_observations_failure_returns_empty(self):
+        lf = self._client()
+        # 替身没有 public API（连接 refuse）→ 空表降级，不抛错
+        self.assertEqual(await lf.observations("tid-x"), [])
+        self.assertEqual(await lf.observations(""), [])
+
+
+class TestMatchObservation(unittest.TestCase):
+    """seq → Langfuse observation id 的对齐规则。"""
+
+    EVENTS = [
+        {"seq": 0, "kind": "trace", "payload": {"trace_id": "t"}},
+        {"seq": 1, "kind": "thought", "payload": {"content": "..."}},
+        {"seq": 2, "kind": "tool_call", "payload": {"tool": "grep"}},
+        {"seq": 3, "kind": "tool_result", "payload": {"tool": "grep"}},
+        {"seq": 4, "kind": "tool_call", "payload": {"tool": "sql_query"}},
+        {"seq": 5, "kind": "tool_result", "payload": {"tool": "sql_query"}},
+        {"seq": 6, "kind": "tool_call", "payload": {"tool": "grep"}},
+        {"seq": 7, "kind": "tool_result", "payload": {"tool": "grep"}},
+        {"seq": 8, "kind": "llm", "payload": {"content": "a1"}},
+        {"seq": 9, "kind": "llm", "payload": {"content": "a2"}},
+    ]
+    OBS = [
+        {"id": "o-grep-2", "name": "grep", "type": "SPAN",
+         "startTime": "2026-01-01T00:00:04Z"},   # 乱序到达，靠 startTime 排
+        {"id": "o-grep-1", "name": "grep", "type": "SPAN",
+         "startTime": "2026-01-01T00:00:02Z"},
+        {"id": "o-sql", "name": "sql_query", "type": "TOOL",
+         "startTime": "2026-01-01T00:00:03Z"},
+        {"id": "o-gen-2", "name": "ChatOpenAI", "type": "GENERATION",
+         "startTime": "2026-01-01T00:00:06Z"},
+        {"id": "o-gen-1", "name": "ChatOpenAI", "type": "GENERATION",
+         "startTime": "2026-01-01T00:00:05Z"},
+    ]
+
+    def m(self, seq):
+        from agent_platform.langfuse import match_observation
+        return match_observation(self.EVENTS, seq, self.OBS)
+
+    def test_tool_steps_map_by_name_and_occurrence(self):
+        self.assertEqual(self.m(2), "o-grep-1")   # 第一次 grep 的调用
+        self.assertEqual(self.m(3), "o-grep-1")   # 同次执行的结果行
+        self.assertEqual(self.m(4), "o-sql")
+        self.assertEqual(self.m(6), "o-grep-2")   # 第二次 grep
+        self.assertEqual(self.m(7), "o-grep-2")
+
+    def test_llm_steps_map_to_generation_by_occurrence(self):
+        self.assertEqual(self.m(8), "o-gen-1")
+        self.assertEqual(self.m(9), "o-gen-2")
+
+    def test_unmappable_returns_none(self):
+        self.assertIsNone(self.m(0))    # trace 行
+        self.assertIsNone(self.m(1))    # 思考行
+        self.assertIsNone(self.m(99))   # seq 不存在
+        # observations 为空 → None（调用方降级 trace 级）
+        from agent_platform.langfuse import match_observation
+        self.assertIsNone(match_observation(self.EVENTS, 2, []))
+
     async def test_trace_url_direct_link(self):
         import agent_platform.langfuse as lf_mod
         lf = self._client()
