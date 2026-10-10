@@ -73,6 +73,10 @@ class LangfuseClient:
     def embed(self) -> bool:
         return self._cfg.embed
 
+    @property
+    def publish(self) -> bool:
+        return self._cfg.publish
+
     # ---- prompt 源头 ----
 
     async def fetch_role(self, name: str, pg_fallback) -> dict | None:
@@ -171,8 +175,9 @@ class LangfuseClient:
         数据通路：同 id 合并，只动 public 字段）；幂等，进程内去重。失败返回
         False——调用方降级为外链，不影响详情页其余部分。"""
         if (self._client is None or not trace_id or not self._cfg.embed
-                or trace_id in self._published):
-            return trace_id in self._published
+                or not self._cfg.publish or trace_id in self._published):
+            # publish=false（同站点登录态部署）：视为"已就绪"，不公开 trace
+            return not self._cfg.publish or trace_id in self._published
         try:
             auth = base64.b64encode(
                 f"{self._cfg.public_key}:{self._cfg.secret_key}"

@@ -789,6 +789,24 @@ class TestMatchObservation(unittest.TestCase):
         # embed 关闭 / 未启用 → 不发布
         self.assertFalse(await self._client(enabled=False).publish_trace("t"))
 
+    async def test_publish_disabled_skips_public_link(self):
+        """publish=false（同站点登录态部署）：不设公开链接、直接视为就绪。"""
+        import agent_platform.langfuse as lf_mod
+        from agent_platform.config import LangfuseConfig
+        from agent_platform.langfuse import LangfuseClient
+        cfg = LangfuseConfig(enabled=True, host="http://lf", public_key="pk",
+                             secret_key="sk", publish=False)
+        lf = LangfuseClient(cfg, client_factory=_FakeLangfuseSDK)
+        posts = []
+        orig = lf_mod._http_post_json
+        lf_mod._http_post_json = lambda *a: posts.append(a) or 207
+        try:
+            self.assertTrue(await lf.publish_trace("tid-1"))  # 就绪但不发请求
+            self.assertEqual(posts, [])
+            self.assertNotIn("tid-1", lf._published)
+        finally:
+            lf_mod._http_post_json = orig
+
     async def test_frame_check(self):
         import agent_platform.langfuse as lf_mod
         lf = self._client()

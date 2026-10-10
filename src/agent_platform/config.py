@@ -65,8 +65,12 @@ class LangfuseConfig(BaseModel):
     """提示词源头 + 观测。enabled=false 时角色直读 PG。
 
     embed=true（默认）：run 详情页把 Langfuse trace 页以 iframe 内嵌——
-    trace 会被自动设为公开链接（免登，内网前提），Langfuse 网关若带
-    X-Frame-Options/CSP frame-ancestors 需剥掉，否则页面自动降级外链。"""
+    Langfuse 网关若带 X-Frame-Options/CSP frame-ancestors 需剥掉，否则
+    页面自动降级外链。publish=true（默认）：内嵌前把 trace 设为公开链接
+    （免登可看，内网前提）；viewer 与 Langfuse 同站点部署（同机不同端口或
+    兄弟子域）且使用者都有 Langfuse 账号时可关掉——浏览器登录会话经
+    same-site cookie 自动进入 iframe，内嵌即完整登录态 UI（Annotate 等
+    写操作可用），trace 不再公开。"""
 
     enabled: bool = False
     host: str = "http://127.0.0.1:3000"
@@ -75,6 +79,7 @@ class LangfuseConfig(BaseModel):
     prompt_label: str = "production"
     prompt_cache_ttl_s: float = 10.0
     embed: bool = True
+    publish: bool = True
 
 
 class ApprovalsConfig(BaseModel):

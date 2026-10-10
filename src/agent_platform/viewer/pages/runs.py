@@ -106,9 +106,13 @@ def make_router(env: str, engine=None, langfuse=None,
                         and await langfuse.publish_trace(tid)
                         and await langfuse.frame_check(url)):
                     embedded = True
+                    # publish=false：同站点登录态部署，iframe 里是完整登录态
+                    # UI（Annotate 可用）；否则是免登公开链接（只读）
+                    hint = ("公开链接 · 免登" if langfuse.publish
+                            else "登录会话 · Annotate 可用")
                     trace_section = f"""
         <div class="card trace-embed">
-          <div class="meta">Langfuse trace（公开链接 · 免登）
+          <div class="meta">Langfuse trace（{hint}）
             <a href="{url}" target="_blank"
                style="float:right">新窗口打开 ↗</a></div>
           <iframe src="{url}" class="trace-frame"
