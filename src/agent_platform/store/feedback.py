@@ -14,6 +14,20 @@ async def add(run_id: str, score: int, comment: str = "") -> None:
             (run_id, score, comment))
 
 
+async def add_step(run_id: str, seq: int, score: int, comment: str = "") -> None:
+    """节点级反馈：时间线某一步的 👍👎（kind=step，step_seq 定位步骤）。
+
+    不传播记忆——单步好坏不直接改写 run 级知识/案例评分，只留痕供
+    badcase 抽取与 Langfuse 对照。"""
+    if score not in (1, -1):
+        raise ValueError("score 只能是 +1 或 -1")
+    async with pool().connection() as conn:
+        await conn.execute(
+            "INSERT INTO feedback (run_id, kind, score, step_seq, comment)"
+            " VALUES (%s,'step',%s,%s,%s)",
+            (run_id, score, seq, comment))
+
+
 async def propagate_to_memory(env: str, run_id: str, score: int) -> None:
     """反馈闭环：run 的 👍👎 同步到它沉淀的知识条目与案例，影响后续召回排序。"""
     delta = 1 if score == 1 else -1

@@ -184,6 +184,79 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             self.temporal.started[-1][2].get("id_reuse_policy").name,
             "ALLOW_DUPLICATE_FAILED_ONLY")
 
+    # ---- 重跑 / 节点级反馈（v4.11.0） ----
+
+    async def test_rerun_success_opens_new_run_skipping_dedup(self):
+        from agent_platform.store import runs
+        payload = {"run_id": "rr1", "asset_key": "a", "error": "weird failure"}
+        r1 = await self.submitter.submit("failure-analysis", payload, "sensor")
+        # 同输入窗口内直接 submit 会去重；人工重跑必须真跑一个新 run
+        dup = await self.submitter.submit("failure-analysis", payload, "sensor")
+        self.assertTrue(dup["dedup_hit"])
+        again = await self.submitter.rerun(r1["run_id"])
+        self.assertNotEqual(again["run_id"], r1["run_id"])
+        self.assertFalse(again["dedup_hit"])
+        run = await runs.get(again["run_id"])
+        self.assertEqual(run["trigger_source"], "rerun")
+        self.assertEqual(run["status"], "success")
+
+    async def test_rerun_failed_resumes_same_id(self):
+        from agent_platform.orchestration import activities
+        from agent_platform.store import runs
+        deps = activities._d()
+
+        class _BoomEngine:
+            def __init__(self, defs):
+                self._defs = defs
+
+            async def roles(self):
+                from agent_platform.agent.roles import parse_defs
+                return parse_defs(await self._defs.list_active("role", "test"))
+
+            async def agent(self):
+                raise RuntimeError("模型不可用")
+
+        activities.configure(activities.Deps(
+            settings=self.settings, engine=_BoomEngine(self.defs),
+            model_pool=deps.model_pool, notifier=None, langfuse=None))
+        result = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        self.assertEqual((await runs.get(result["run_id"]))["status"], "failed")
+
+        configure_fake_deps(self.settings, self.defs)
+        out = await self.submitter.rerun(result["run_id"])
+        self.assertEqual(out["run_id"], result["run_id"])  # 断点续跑：同 id
+        self.assertEqual(
+            self.temporal.started[-1][2].get("id_reuse_policy").name,
+            "ALLOW_DUPLICATE_FAILED_ONLY")
+
+    async def test_rerun_rejects_in_flight(self):
+        from agent_platform.orchestration.submitter import TaskRejected
+        from agent_platform.store import db, runs
+        await runs.create("run-inflight", "data-qa", "data_searcher", None,
+                          "sdk", "", {})
+        async with db.pool().connection() as conn:
+            await conn.execute(
+                "UPDATE runs SET status='running' WHERE run_id='run-inflight'")
+        with self.assertRaises(TaskRejected):
+            await self.submitter.rerun("run-inflight")
+        with self.assertRaises(TaskRejected):
+            await self.submitter.rerun("no-such-run")
+
+    async def test_step_feedback_stored(self):
+        from agent_platform.store import db, feedback
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        await feedback.add_step(r["run_id"], 3, -1, "这步查错表了")
+        async with db.pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT kind, score, step_seq, comment FROM feedback"
+                " WHERE run_id=%s", (r["run_id"],))
+            row = await cur.fetchone()
+        self.assertEqual(tuple(row), ("step", -1, 3, "这步查错表了"))
+        with self.assertRaises(ValueError):
+            await feedback.add_step(r["run_id"], 3, 0)
+
     # ---- 纠正反馈 ----
 
     async def test_correction_supersedes_only_latest(self):

@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...agent import approvals
+from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
 from .base import esc, page, status_pill
 
 
 def make_router(env: str, engine=None, langfuse=None,
-                target_envs: list[str] | None = None) -> APIRouter:
+                target_envs: list[str] | None = None,
+                submitter=None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/runs", response_class=HTMLResponse)
@@ -134,9 +136,12 @@ proxy_hide_header Content-Security-Policy;</pre>
                           f'<code>{esc(pending["command"])}</code> — 到 '
                           f'<a href="/approvals">审批台</a> 放行或拒绝</div>'
                           if pending else "")
-        steps_block = "" if embedded else """
+        # 时间线始终渲染：每步带 👍👎 节点级反馈（内嵌 Langfuse 后它是唯一的
+        # 步骤反馈载体）；只有自研轨迹图在内嵌模式下隐藏
+        steps_block = """
         <div class="page-head" style="margin-top:22px">
           <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
+          <div class="meta">每步可 👍👎 留反馈（节点级，回写 Langfuse score）</div>
         </div>
         <div id="steps"></div>"""
         body = f"""
@@ -186,6 +191,34 @@ proxy_hide_header Content-Security-Policy;</pre>
         return page("反馈", '<div class="card"><b>已记录，感谢。</b>'
                             '<p><a href="javascript:history.back()">← 返回</a></p></div>',
                     active="/runs")
+
+    @router.post("/runs/{run_id}/steps/{seq}/feedback")
+    async def step_feedback(run_id: str, seq: int, request: Request):
+        """节点级反馈：时间线某一步的 👍👎。回写 Langfuse score
+        （名字带 step#seq 定位到步骤；observation 映射不在 viewer 侧维护）。"""
+        form = await request.form()
+        score = int(form["score"])
+        comment = str(form.get("comment", ""))
+        await feedback_store.add_step(run_id, seq, score, comment)
+        if langfuse is not None and langfuse.enabled:
+            tid = await runs.trace_id_of(run_id)
+            if tid:
+                await langfuse.score(tid, f"step#{seq}", float(score), comment)
+        return {"ok": True}
+
+    @router.post("/runs/{run_id}/rerun")
+    async def run_rerun(run_id: str):
+        """详情页重跑：失败/终止 → 断点续跑（同 id）；成功 → 同输入新开 run。"""
+        if submitter is None:
+            raise HTTPException(501, "未接入提交端")
+        try:
+            result = await submitter.rerun(run_id)
+        except TaskRejected as e:
+            return page("重跑", f'<div class="card"><b>无法重跑</b>'
+                                f'<p class="meta">{esc(str(e))}</p>'
+                                f'<p><a href="/runs/{run_id}">← 返回</a></p></div>',
+                        active="/runs")
+        return RedirectResponse(f"/runs/{result['run_id']}", status_code=303)
 
     @router.get("/graph", response_class=HTMLResponse)
     async def graph_page():

@@ -143,6 +143,7 @@ document.addEventListener("click", e => {
 });
 
 /* —— 步骤时间线：事件 append-only，只增量渲染新步骤 —— */
+/* 每步带 👍👎（节点级反馈）：POST /runs/{runId}/steps/{seq}/feedback */
 function renderSteps(container, events) {
   const list = events.filter(e => e.kind !== "graph");
   const done = parseInt(container.dataset.count || "0", 10);
@@ -153,12 +154,36 @@ function renderSteps(container, events) {
     const node = e.node ? ` <span class="tag">${esc(e.node)}</span>` : "";
     return `<div class="step step-${e.kind}" data-step-node="${esc(e.node || "")}" id="seq-${e.seq}">
       <div class="meta"><span class="tag">#${e.seq}</span><span class="kind">${label}</span>${tool}${node}
-        · ${esc(e.created_at)}</div>
+        · ${esc(e.created_at)}
+        <span class="step-fb" data-seq="${e.seq}">
+          <button data-score="1" title="这步做得好">👍</button><button data-score="-1" title="这步有问题">👎</button>
+        </span></div>
       <pre>${esc(e.text)}</pre></div>`;
   }).join("");
   container.insertAdjacentHTML("beforeend", html);
   container.dataset.count = list.length;
 }
+
+/* 节点级反馈：事件委托，点击后该步按钮锁定并打勾（fetch 不跳页） */
+document.addEventListener("click", async e => {
+  const btn = e.target.closest(".step-fb button");
+  if (!btn) return;
+  const wrap = btn.closest(".step-fb");
+  const runId = document.getElementById("steps").dataset.runId;
+  wrap.querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    const resp = await fetch(`/runs/${runId}/steps/${wrap.dataset.seq}/feedback`, {
+      method: "POST",
+      headers: {"Content-Type": "application/x-www-form-urlencoded"},
+      body: `score=${btn.dataset.score}`,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    wrap.insertAdjacentHTML("beforeend", '<span class="fb-done">✓ 已记录</span>');
+  } catch (err) {
+    wrap.querySelectorAll("button").forEach(b => b.disabled = false);
+    wrap.insertAdjacentHTML("beforeend", '<span class="fb-fail">记录失败，重试</span>');
+  }
+});
 
 /* —— 节点状态推导：执行过 / 进行中（最后事件所在节点）/ 失败点 —— */
 function nodeStatusOf(events, status) {
@@ -176,18 +201,27 @@ function renderRunHead(s) {
   const v = (name, ver) => ver == null ? esc(name) : `${esc(name)} <span class="tag">v${ver}</span>`;
   const envTag = s.run.target_env
     ? ` · 目标环境 <span class="tag">${esc(s.run.target_env)}</span>` : "";
+  // 终态给重跑入口：failed 断点续跑（同 id），其余终态同输入新开 run
+  const rerun = ["success", "failed"].includes(s.run.status)
+    ? `<form method="post" action="/runs/${esc(s.run.run_id)}/rerun"
+         style="display:inline;margin-left:10px">
+         <button class="inline">${s.run.status === "failed" ? "重跑（断点续跑）" : "重跑"}</button>
+       </form>` : "";
   document.getElementById("run-head").innerHTML = `
     <div class="eyebrow">RUN · ${esc(s.run.task_type)}</div>
-    <h2>${esc(s.run.run_id)} ${statusPill(s.run.status)}</h2>
+    <h2>${esc(s.run.run_id)} ${statusPill(s.run.status)}${rerun}</h2>
     <div class="meta">任务 ${v(s.run.task_type, s.run.task_version)}
       · 角色 ${v(s.run.role, s.run.role_version)} · 来源 ${esc(s.run.trigger_source)}${envTag}
       · 耗时 ${s.run.duration_ms || "-"}ms · ${esc(s.created_at)}</div>`;
 }
 
 /* —— Run 详情页：轮询 state.json，局部刷新图与步骤 —— */
-/* embedded=true：页面已内嵌 Langfuse trace，自研轨迹图/时间线不再渲染 */
+/* embedded=true：页面已内嵌 Langfuse trace，自研轨迹图不再渲染；
+   时间线始终渲染——它是节点级反馈（每步 👍👎）的载体 */
 async function watchRun(runId, embedded) {
   const graphEl = document.getElementById("graph");
+  const stepsEl = document.getElementById("steps");
+  stepsEl.dataset.runId = runId;
   while (true) {
     let s;
     try {
@@ -209,7 +243,7 @@ async function watchRun(runId, embedded) {
           : nodeStatusOf(s.events, s.run.status);
       renderInto(graphEl, s.graph, statuses);
     }
-    if (!embedded) renderSteps(document.getElementById("steps"), s.events);
+    renderSteps(stepsEl, s.events);
     document.getElementById("output").textContent = JSON.stringify(s.run.output);
     if (s.run.status !== "queued" && s.run.status !== "running") break;
     await new Promise(r => setTimeout(r, 2000));

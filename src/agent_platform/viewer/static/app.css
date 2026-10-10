@@ -242,6 +242,18 @@ button.ok:hover { background: rgba(52, 211, 153, 0.18); }
 .step-note { border-left-color: var(--border); }
 .step-note .kind { color: var(--text-dim); }
 
+/* —— 节点级反馈：时间线每步的 👍👎 —— */
+.step-fb { margin-left: 8px; }
+.step-fb button {
+  margin: 0 2px; padding: 0 6px; font-size: 12px; line-height: 1.6;
+  border: 1px solid var(--border); background: transparent; border-radius: 5px;
+  color: var(--text-dim); box-shadow: none; cursor: pointer;
+}
+.step-fb button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.step-fb button:disabled { opacity: 0.45; cursor: default; }
+.step-fb .fb-done { color: var(--ok); font-size: 11px; margin-left: 4px; }
+.step-fb .fb-fail { color: var(--err); font-size: 11px; margin-left: 4px; }
+
 /* —— 图画布 —— */
 .graph-shell {
   position: relative; background: var(--panel); border: 1px solid var(--border);

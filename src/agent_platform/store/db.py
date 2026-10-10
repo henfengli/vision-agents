@@ -6,7 +6,7 @@
 - definitions         角色/任务/策略的版本化定义（写后即时生效，历史全留）
 - knowledge           知识库（时序化：valid_from/to + superseded_by）
 - cases               案例库（报错指纹归一化）
-- feedback            反馈（rating=打分 / correction=纠正）
+- feedback            反馈（rating=run 打分 / step=步骤打分 / correction=纠正）
 - approvals           危险命令审批单
 """
 
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS runs (
     role_version  INT,                       -- 执行时生效的角色定义版本
     domain        TEXT,
     target_env    TEXT NOT NULL DEFAULT '',  -- 目标业务环境（prod/test/dev…）：本 run 操作哪套环境的服务
-    trigger_source TEXT NOT NULL,            -- sdk/cli/web/sensor/webhook/schedule/feedback/resume
+    trigger_source TEXT NOT NULL,            -- sdk/cli/web/sensor/webhook/schedule/feedback/resume/rerun
     caller        TEXT,
     input         JSONB,
     output        JSONB,
@@ -114,8 +114,9 @@ CREATE TABLE IF NOT EXISTS feedback (
     id         BIGSERIAL PRIMARY KEY,
     run_id     TEXT REFERENCES runs(run_id),
     session_id TEXT,
-    kind       TEXT NOT NULL DEFAULT 'rating',  -- rating / correction
-    score      INT,                             -- +1/-1（仅 rating）
+    kind       TEXT NOT NULL DEFAULT 'rating',  -- rating / correction / step
+    score      INT,                             -- +1/-1（rating 与 step）
+    step_seq   INT,                             -- 仅 kind=step：时间线步骤的 seq
     comment    TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -149,6 +150,7 @@ MIGRATIONS = [
     # seq 撞号兜底（存量库若有历史重复则索引创建失败，advisory lock 仍保未来）
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run_seq"
     " ON run_events(run_id, seq)",
+    "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS step_seq INT",
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "

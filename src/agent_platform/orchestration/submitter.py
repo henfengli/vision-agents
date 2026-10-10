@@ -3,6 +3,8 @@
 - submit：建台账行 + start_workflow（id=run_id，重复 id 拒绝）
 - run_sync：start + 等待结果（超时转异步轮询）
 - resume_run：同 id 重新 start，ID 复用策略只允许顶替已失败/已终止的执行
+- rerun：详情页重跑——失败/终止走 resume_run 断点续；成功则同输入新开
+  run（跳过去重，trigger=rerun）
 - correct：纠正式反馈——从 session 最近 run 继承 task_type/role/domain，
   不调用方传、不写死任务类型
 
@@ -83,12 +85,13 @@ class Submitter:
                      caller: str | None, session_id: str | None,
                      correction: bool, run_id: str | None = None,
                      resume: bool = False, row_exists: bool = False,
+                     skip_dedup: bool = False,
                      domain: str | None = None, target_env: str = "") -> dict:
         run_id = run_id or uuid.uuid4().hex[:16]
         session_id = session_id or run_id
         if not resume and not row_exists:
             dedup_key = task.compute_dedup_key(input_data)
-            if dedup_key:
+            if dedup_key and not skip_dedup:
                 existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
                 if existing:
                     return {"run_id": existing["run_id"], "status": "dedup_hit",
@@ -267,6 +270,27 @@ class Submitter:
                                  correction=False, run_id=run_id, resume=True,
                                  domain=run.get("domain"),
                                  target_env=run.get("target_env") or "")
+
+    async def rerun(self, run_id: str) -> dict:
+        """详情页"重跑"：失败/终止 → 同 id 断点续跑；成功 → 同输入新开 run。
+
+        新开 run 跳过去重（人工点击重跑就是明确要再跑一次），沿用原 run 的
+        task/role/target_env/session，trigger_source=rerun 留痕。"""
+        run = await runs.get(run_id)
+        if run is None:
+            raise TaskRejected(f"run {run_id} 不存在")
+        if run["status"] in ("queued", "running"):
+            raise TaskRejected("run 还在执行中，等它结束")
+        if run["status"] != "success":
+            return await self.resume_run(run_id)
+        target_env = self._resolve_target_env(run.get("target_env") or None)
+        task = await self._resolve_task(run["task_type"], run["role"] or None,
+                                        target_env)
+        return await self._start(task, run.get("input") or {}, "rerun",
+                                 run.get("caller"), run.get("session_id"),
+                                 correction=False, skip_dedup=True,
+                                 domain=run.get("domain"),
+                                 target_env=target_env)
 
 
 def _to_question(task: TaskDef, input_data: dict) -> str:
