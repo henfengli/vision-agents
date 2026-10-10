@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("INBOX", "审批待办", "待办 " ~ rows|length ~ " 条 · 点 RUN 进入处理页") }}
+{% if rows %}
+<table class="grid"><thead><tr>
+  <th>编号</th><th>RUN</th><th>待执行命令</th>
+  <th>任务</th><th>来源</th><th>发起时间</th>
+</tr></thead><tbody>
+  {% for r in rows %}
+  <tr><td><code>#{{ r.id }}</code></td>
+    <td><a class="run-link" href="/approvals/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
+    <td><pre>{{ r.command[:160] }}{% if r.command|length > 160 %}…{% endif %}</pre></td>
+    <td>{{ r.task_type or "—" }}</td>
+    <td>{{ r.trigger_source or "—" }}</td>
+    <td>{{ r.created_at[:19] }}</td></tr>
+  {% endfor %}
+</tbody></table>
+{% else %}
+<div class="card">
+  <h3 style="border:none;padding:0;margin-bottom:8px">没有待审批项</h3>
+  <div class="meta">钉钉卡片的「去审批」会直达处理页；本列表是兜底入口。</div>
+</div>
+{% endif %}
+{% endblock %}

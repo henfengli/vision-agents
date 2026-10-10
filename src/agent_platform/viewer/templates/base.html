@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · agent-platform</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><circle cx='9' cy='9' r='7' fill='none' stroke='%2322d3ee'/><circle cx='9' cy='9' r='2' fill='%2322d3ee'/></svg>">
+</head><body>
+{% if nav %}
+<header class="topbar">
+  <a class="brand" href="/">{{ logo|safe }}agent-platform</a>
+  <nav class="nav">{% for href, label in nav_links %}<a href="{{ href }}"{% if href == active %} class="active"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+  <span class="meta"><span class="led live"></span>LIVE</span>
+  {% if auth_enabled %}<a href="/logout" class="meta">退出</a>{% endif %}
+</header>
+<main class="wrap">
+{% endif %}
+{% block content %}{% endblock %}
+{% if nav %}
+</main>
+<script>
+// 顶栏审批角标：on-load 拉一次待办数（不轮询），>0 时挂计数
+fetch('/approvals/pending.json').then(r => r.json()).then(d => {
+  if (!d.count) return;
+  const a = document.querySelector('nav.nav a[href="/approvals"]');
+  if (!a) return;
+  const b = document.createElement('span');
+  b.className = 'nav-badge';
+  b.textContent = d.count > 99 ? '99+' : d.count;
+  a.appendChild(b);
+}).catch(() => {});
+</script>
+{% endif %}
+</body></html>

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("APPROVAL", "危险操作审批",
+  "run <code>" ~ run_id ~ "</code> · 发起 " ~ pending.created_at[:19]) }}
+<p style="margin-bottom:14px">
+  <a class="btn sm" href="/approvals">← 待办列表</a></p>
+<div class="alert"><b>待执行命令</b><pre>{{ pending.command }}</pre></div>
+<form method="post" action="/approvals/{{ run_id }}/decide" class="card">
+  <input type="hidden" name="approval_id" value="{{ pending.id }}">
+  <div class="meta">批准后任务继续执行；拒绝则终止。操作以 viewer 身份落账。</div>
+  <div class="actions">
+    <button name="decision" value="approved" class="ok">放行执行</button>
+    <button name="decision" value="rejected" class="danger">拒绝</button>
+  </div>
+</form>
+{% endblock %}

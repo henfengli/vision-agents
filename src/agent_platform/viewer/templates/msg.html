@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{# 操作结果页（反馈已记录 / 无法重跑等）：title + message + 返回链接 #}
+{% block content %}
+<div class="card"><b>{{ heading }}</b>
+  {% if message %}<p class="meta">{{ message }}</p>{% endif %}
+  <p><a href="{{ back_href }}">← 返回</a></p></div>
+{% endblock %}

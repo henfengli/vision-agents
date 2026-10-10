@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("APPROVAL", heading, "run <code>" ~ run_id ~ "</code>") }}
+<div class="card">
+  <b>{{ heading }}</b>{% if extra %}<p class="meta">{{ extra }}</p>{% endif %}
+  <div class="actions">
+    <a class="btn sm" href="/approvals">← 待办列表</a>
+    <a class="btn sm" href="/runs/{{ run_id }}">查看执行轨迹</a>
+  </div>
+</div>
+{% endblock %}

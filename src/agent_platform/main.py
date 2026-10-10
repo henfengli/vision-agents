@@ -23,7 +23,6 @@ from .agent.tools.mcp_bridge import load_mcp_tools
 from .agent.tools.registry import ToolRegistry
 from .api import create_app, make_api_router
 from .api.auth import make_auth_dependency
-from .api.console import make_console_router
 from .config import Settings, load_settings
 from .langfuse import LangfuseClient, setup_observability
 from .model import ModelPool
@@ -37,7 +36,7 @@ from .store import db
 from .store.definitions import DefinitionStore
 from .triggers import chat as chat_trigger
 from .triggers import dagster_sensor, gitlab_webhook
-from .web_static import mount_spa
+from .viewer import make_viewer_router
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +125,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         async def approval_notify(run_id: str, command: str) -> None:
             await relay.send_action_card(
                 "危险操作待审批", f"run `{run_id}` 请求执行：\n```\n{command}\n```",
-                "去审批", f"{settings.viewer_base_url}/#/approvals/{run_id}")
+                "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
         review_hook = make_review_hook(settings.approvals.danger_patterns,
                                        approval_notify)
 
@@ -173,7 +172,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     async def submit_gate_notify(run_id: str, summary: str) -> None:
         await relay.send_action_card(
             "任务提交待审批", f"run `{run_id}`：\n{summary}",
-            "去审批", f"{settings.viewer_base_url}/#/approvals/{run_id}")
+            "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
 
     submitter = Submitter(temporal_client, tasks,
                           settings.temporal.task_queue, settings.env,
@@ -224,15 +223,12 @@ def build_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         rt = await assemble_runtime(settings)
-        # 所有 /v1 入口（含 webhook 与控制台数据）统一挂 bearer 鉴权；
-        # SPA（web/dist 静态产物）本身无需鉴权——它只是壳，数据全走 /v1
+        # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
         auth = make_auth_dependency(settings.bearer_token)
         dagster_pack = settings.domains.get("dagster")
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse),
-            make_console_router(settings, rt.submitter, auth=auth,
-                                engine=rt.engine, langfuse=rt.langfuse),
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 rules=dagster_pack.rules if dagster_pack else [],
@@ -242,7 +238,11 @@ def build_app(settings: Settings | None = None):
             chat_trigger.make_router(rt.submitter, auth=auth),
         ):
             app.include_router(r)
-        mount_spa(app)
+        app.include_router(make_viewer_router(
+            rt.submitter, rt.defs, settings.env, engine=rt.engine,
+            langfuse=rt.langfuse, token=settings.bearer_token,
+            domains=list(settings.domains),
+            target_envs=settings.target_envs or None))
         try:
             yield
         finally:

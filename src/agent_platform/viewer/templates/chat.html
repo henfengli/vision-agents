@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("CHAT", "Agent 对话", "流式输出 · 每次问答生成一个 Run，可点击跳转详情") }}
+<div class="card">
+  <div class="chat-config">
+    <select id="server" title="业务系统">
+      {% for d in domains %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+    </select>
+    {% if target_envs %}
+    <select id="env">
+      <option value="">目标环境：默认</option>
+      {% for e in target_envs %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
+    </select>
+    {% endif %}
+    <input id="role" value="data_searcher" placeholder="角色">
+    <input id="session" placeholder="session_id（留空自动新建）">
+  </div>
+</div>
+<div class="chat-log" id="log"></div>
+<div class="card">
+  <div class="chat-input">
+    <input id="q" placeholder="输入问题，回车发送" autocomplete="off">
+  </div>
+</div>
+<script>
+let sessionId = "";
+const log = document.getElementById("log");
+const esc = (t) => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+/* kind 标签颜色由 .step-<kind> .kind 样式决定 */
+const step = (cls, label, content, raw) =>
+  log.insertAdjacentHTML("beforeend",
+    `<div class="step step-${cls}"><div class="meta"><span class="kind">${label}</span></div><pre>${raw ? content : esc(content)}</pre></div>`);
+
+document.getElementById("q").addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter") return;
+  const q = e.target.value.trim(); if (!q) return;
+  e.target.value = "";
+  log.insertAdjacentHTML("beforeend",
+    `<div class="msg-user"><b>我</b><pre>${esc(q)}</pre></div>`);
+  const resp = await fetch("/v1/chat/stream", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({server: document.getElementById("server").value,
+      role: document.getElementById("role").value, question: q,
+      env: (document.getElementById("env") || {}).value || null,
+      session_id: sessionId || null})});
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    const parts = buf.split("\n\n"); buf = parts.pop();
+    for (const part of parts) {
+      if (!part.startsWith("data: ")) continue;
+      const ev = JSON.parse(part.slice(6));
+      if (ev.type === "run") {
+        sessionId = ev.session_id;
+        document.getElementById("session").value = sessionId;
+        step("note", "run", `<a href="/runs/${ev.run_id}">${ev.run_id}</a>`, true);
+      } else if (ev.type === "thought") step("thought", "思考", ev.content);
+      else if (ev.type === "tool_call") step("tool_call", "工具 · " + ev.tool, ev.args);
+      else if (ev.type === "tool_result") step("tool_result", "结果 · " + ev.tool, ev.output);
+      else if (ev.type === "final") step("final", "结论", JSON.stringify(ev.output, null, 2));
+    }
+  }
+  log.lastElementChild.scrollIntoView({behavior: "smooth", block: "end"});
+});
+</script>
+{% endblock %}

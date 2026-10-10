@@ -388,7 +388,7 @@ async def art_gate(run_id: str, node: str, summary: str) -> bool:
     if d.notifier is not None:
         await d.notifier.send_action_card(
             "产物待审批", f"run `{run_id}` 的节点 `{node}`：\n{summary}",
-            "去审批", f"{d.settings.viewer_base_url}/#/approvals/{run_id}")
+            "去审批", f"{d.settings.viewer_base_url}/approvals/{run_id}")
     try:
         await approvals.wait_decision(approval_id)
         return True

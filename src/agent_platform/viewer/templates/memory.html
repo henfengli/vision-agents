@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("MEMORY", "记忆管理", "按环境分区 · 反馈会影响条目权重 · 编辑保存后重新生效") }}
+<div class="card">
+  <form method="get" class="filter-bar">
+    {% if target_envs %}
+    <select name="env" class="inline">
+      {% for e in target_envs %}
+      <option value="{{ e }}"{% if e == view_env %} selected{% endif %}>{{ e }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    <input name="domain" class="inline" value="{{ domain }}" placeholder="域过滤">
+    <label class="meta"><input type="checkbox" name="include_inactive" value="true"
+      {% if include_inactive %}checked{% endif %}> 含失效</label>
+    <button>筛选</button></form></div>
+<div class="card"><table class="grid">
+  <thead><tr><th>域</th><th>key</th><th>内容</th><th>状态</th><th></th></tr></thead>
+  <tbody>
+    {% for i in items %}
+    <tr><td><span class="tag">{{ i.domain }}</span></td>
+      <td class="meta">{{ i.key }}</td>
+      <td><pre style="max-width:520px">{{ i.content[:500] }}</pre></td>
+      <td>
+        {% if i.superseded %}<span class="pill pill-failed">已取代</span>
+        {% elif i.expired %}<span class="pill pill-queued">已过期</span>
+        {% else %}<span class="pill pill-success"><span class="led"></span>生效中</span>
+          <span class="meta">+{{ i.feedback_score }}</span>{% endif %}
+      </td>
+      <td><button onclick="editEntry({{ i.id }})">编辑</button></td></tr>
+    {% else %}
+    <tr><td colspan="5" class="meta">暂无条目</td></tr>
+    {% endfor %}
+  </tbody></table></div>
+<div class="card" id="edit-card" style="display:none">
+  <b>编辑条目</b> <span id="edit-id" class="meta"></span>
+  <textarea id="edit-content" rows="8"></textarea>
+  <button onclick="saveEntry()">保存（重新生效）</button>
+  <span id="edit-msg" class="meta"></span></div>
+<script>
+// id → 当前内容，点"编辑"时回填 textarea，避免凭记忆重写
+const ENTRIES = {{ entries_json|safe }};
+let editId = null;
+function editEntry(id) {
+  editId = id;
+  document.getElementById("edit-card").style.display = "block";
+  document.getElementById("edit-id").textContent = "#" + id;
+  document.getElementById("edit-content").value = ENTRIES[id] || "";
+}
+async function saveEntry() {
+  const resp = await fetch(`/memory/${editId}`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({content: document.getElementById("edit-content").value})});
+  document.getElementById("edit-msg").textContent = resp.ok ? "已保存" : "失败";
+  if (resp.ok) setTimeout(() => location.reload(), 600);
+}
+</script>
+{% endblock %}

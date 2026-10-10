@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("TOPOLOGY", "Agent 图拓扑",
+  '<a href="/">← 总览</a> · 引擎静态结构（与具体 run 无关）· 拖拽平移 · 滚轮缩放 · 点击节点高亮邻接关系') }}
+<div class="graph-shell tall">
+  <div class="cy" id="graph"></div>
+  <div class="graph-overlay graph-legend">
+    <div><span class="sw" style="background:#22d3ee"></span>hover / 选中</div>
+    <div><span class="sw" style="background:#2a3a5f"></span>节点</div>
+  </div>
+  <div class="graph-overlay graph-tools">
+    <button data-act="in">+</button><button data-act="out">−</button>
+    <button data-act="fit">fit</button>
+  </div>
+</div>
+<script src="/static/cytoscape.min.js"></script>
+<script src="/static/cytoscape-dagre.min.js"></script>
+<script src="/static/graph.js"></script>
+<script>showTopology();</script>
+{% endblock %}

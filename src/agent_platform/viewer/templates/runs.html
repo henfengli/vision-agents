@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("EXECUTIONS", "最近 Runs", "近 100 条 · 点击 run id 查看执行过程与运行图") }}
+{% if target_envs %}
+<form method="get" action="/runs" class="filter-bar">
+  <select name="env" class="inline" onchange="this.form.submit()">
+    <option value="">全部环境</option>
+    {% for e in target_envs %}
+    <option value="{{ e }}"{% if e == qenv %} selected{% endif %}>{{ e }}</option>
+    {% endfor %}
+  </select>
+</form>
+{% endif %}
+<div class="card"><table class="grid">
+  <thead><tr><th>run</th><th>任务</th><th>角色</th><th>目标环境</th>
+    <th>状态</th><th>来源</th><th>时间</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr><td><a class="run-link" href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
+      <td>{{ r.task_type }}</td><td>{{ r.role }}</td>
+      <td>{{ r.target_env or "-" }}</td>
+      <td>{{ m.pill(r.status) }}</td>
+      <td>{{ r.trigger_source }}</td>
+      <td class="meta">{{ r.created_at }}</td></tr>
+    {% else %}
+    <tr><td colspan="7" class="meta">暂无</td></tr>
+    {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

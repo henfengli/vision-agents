@@ -1,0 +1,12 @@
+{# 页面共享宏 #}
+{% macro pill(status) -%}
+<span class="pill pill-{{ status }}"><span class="led"></span>{{ status }}</span>
+{%- endmacro %}
+
+{% macro page_head(eyebrow, title, meta="") -%}
+<div class="page-head">
+  <div class="eyebrow">{{ eyebrow }}</div>
+  <h2>{{ title }}</h2>
+  {% if meta %}<div class="meta">{{ meta|safe }}</div>{% endif %}
+</div>
+{%- endmacro %}

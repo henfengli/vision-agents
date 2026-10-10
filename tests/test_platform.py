@@ -336,94 +336,90 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                            json={"correction": "x"})
         self.assertEqual(resp.status_code, 404)
 
-    async def test_console_meta_and_overview(self):
-        """SPA 引导与总览数据：meta 给环境/域/版本，overview 给聚合。"""
+    async def test_viewer_pages_render(self):
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
-        from agent_platform.api.auth import make_auth_dependency
-        from agent_platform.api.console import make_console_router
+        from agent_platform.viewer import make_viewer_router
         app = create_app(self.settings)
-        app.include_router(make_console_router(
-            self.settings, self.submitter,
-            auth=make_auth_dependency("test-token")))
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
         client = TestClient(app)
-        h = {"Authorization": "Bearer test-token"}
+        for path in ("/admin", "/memory", "/chat", "/runs"):
+            resp = client.get(path)
+            self.assertEqual(resp.status_code, 200, path)
+        # 未配 target_envs：页面不出现环境选择器（单环境部署无感知）
+        self.assertNotIn('id="env"', client.get("/chat").text)
 
-        meta = client.get("/v1/console/meta", headers=h).json()
-        self.assertEqual(meta["env"], "test")
-        self.assertIn("board", meta["domains"])
-        self.assertEqual(meta["target_envs"], [])
-
-        ov = client.get("/v1/console/overview", headers=h).json()
-        self.assertIn("by_status", ov)
-
-    async def test_console_run_detail_and_rerun(self):
-        """详情一整屏数据：run+事件；终态 run 可经 console 重跑。"""
+    async def test_viewer_env_selectors(self):
+        """配置了 target_envs：对话页/列表页/记忆页带环境选择器与过滤。"""
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
-        from agent_platform.api.auth import make_auth_dependency
-        from agent_platform.api.console import make_console_router
-        r = await self.submitter.submit(
-            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        from agent_platform.viewer import make_viewer_router
+        sub = self._multi_env_submitter()
+        await sub.submit("data-qa", {"server": "board", "question": "q"},
+                         "sdk", target_env="prod")
         app = create_app(self.settings)
-        app.include_router(make_console_router(
-            self.settings, self.submitter,
-            auth=make_auth_dependency("test-token")))
+        app.include_router(make_viewer_router(
+            sub, self.defs, "test", target_envs=["prod", "test"]))
         client = TestClient(app)
-        h = {"Authorization": "Bearer test-token"}
 
-        detail = client.get(f"/v1/console/runs/{r['run_id']}", headers=h).json()
-        self.assertEqual(detail["run"]["status"], "success")
-        self.assertTrue(detail["events"])
-        # 普通 agent run 不再有自研轨迹图（观测归 Langfuse iframe；
-        # graph 只留给资产图 run 的 graph 事件）
-        self.assertIsNone(detail["graph"])
-        self.assertEqual(client.get(
-            "/v1/console/runs/nope", headers=h).status_code, 404)
+        self.assertIn('id="env"', client.get("/chat").text)
+        listed = client.get("/runs", params={"env": "prod"})
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn("prod", listed.text)
+        mem = client.get("/memory", params={"env": "prod"})
+        self.assertEqual(mem.status_code, 200)
+        self.assertIn('name="env"', mem.text)
 
-        # 成功 run → 重跑新开 run 并跳过去重
-        rr = client.post(f"/v1/console/runs/{r['run_id']}/rerun", headers=h)
-        self.assertEqual(rr.status_code, 200)
-        self.assertNotEqual(rr.json()["run_id"], r["run_id"])
-
-        # 节点级反馈
-        seq = detail["events"][0]["seq"]
-        fb = client.post(f"/v1/console/runs/{r['run_id']}/steps/{seq}/feedback",
-                         headers=h, json={"score": 1})
-        self.assertEqual(fb.status_code, 200)
-
-    async def test_console_requires_auth(self):
-        """P1 回归：console 端点与 /v1 一样要 bearer。"""
+    async def test_admin_diff_page(self):
+        """定义版本对比页：渲染 diff，缺版本 404。"""
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
-        from agent_platform.api.auth import make_auth_dependency
-        from agent_platform.api.console import make_console_router
+        from agent_platform.viewer import make_viewer_router
+        await self.defs.put("task", "test", "nightly", {"role": "ops_analyst"})
+        await self.defs.put("task", "test", "nightly",
+                            {"role": "ops_analyst", "timeout_s": 900})
         app = create_app(self.settings)
-        app.include_router(make_console_router(
-            self.settings, self.submitter,
-            auth=make_auth_dependency("test-token")))
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
         client = TestClient(app)
-        self.assertEqual(client.get("/v1/console/meta").status_code, 401)
-        self.assertEqual(client.get("/v1/console/meta", headers={
-            "Authorization": "Bearer test-token"}).status_code, 200)
 
-    async def test_legacy_deep_links_redirect(self):
-        """旧 viewer 深链（钉钉卡片）301 到 hash 路由，不死链。"""
+        resp = client.get("/admin/diff", params={
+            "kind": "task", "name": "nightly", "a": 1, "b": 2})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("timeout_s", resp.text)
+        self.assertEqual(client.get("/admin/diff", params={
+            "kind": "task", "name": "nightly", "a": 1, "b": 9}).status_code, 404)
+
+    async def test_viewer_auth_login_flow(self):
+        """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
-        from agent_platform.web_static import mount_spa
+        from agent_platform.viewer import make_viewer_router
         app = create_app(self.settings)
-        mount_spa(app)
+        app.include_router(make_viewer_router(
+            self.submitter, self.defs, "test", token="test-token",
+            domains=["board", "dagster"]))
         client = TestClient(app, follow_redirects=False)
-        resp = client.get("/approvals/abc123")
-        self.assertEqual(resp.status_code, 301)
-        self.assertEqual(resp.headers["location"], "/#/approvals/abc123")
-        resp = client.get("/runs/abc123")
-        self.assertEqual(resp.headers["location"], "/#/runs/abc123")
+
+        resp = client.get("/chat")
+        self.assertEqual(resp.status_code, 307)
+        self.assertEqual(resp.headers["location"], "/login")
+
+        resp = client.post("/login", data={"token": "wrong"})
+        self.assertIn("令牌不正确", resp.text)
+
+        resp = client.post("/login", data={"token": "test-token"})
+        self.assertEqual(resp.status_code, 303)
+        resp = client.get("/chat")   # TestClient 保留 cookie
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("board", resp.text)  # 业务域从配置注入，不再硬编码
+
+        resp = client.get("/")       # 总览面板：聚合台账，不应因空库报错
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("总览", resp.text)
 
     async def test_hooks_require_auth(self):
         """P1 回归：webhook 端点与 /v1 API 一样要 bearer。"""

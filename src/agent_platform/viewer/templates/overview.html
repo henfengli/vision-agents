@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pill, page_head %}
+{% block content %}
+{{ page_head("OVERVIEW", "总览", "近 " ~ stats.hours ~ "h 平台运行状况 · 数据来自执行台账") }}
+<div class="stat-grid">
+  {% for s in cards %}
+  {% if s.href %}<a class="stat-card" href="{{ s.href }}">{% else %}<div class="stat-card">{% endif %}
+    <div class="stat-num {{ s.tone }}">{{ s.value }}</div>
+    <div class="stat-label">{{ s.label }}</div>
+  {% if s.href %}</a>{% else %}</div>{% endif %}
+  {% endfor %}
+</div>
+<div class="dash-grid">
+  <div class="card"><h3>最近 Runs <a class="more" href="/runs">全部 →</a></h3>
+    <table class="grid"><tbody>
+      {% for r in recent %}
+      <tr><td><a class="run-link" href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
+        <td>{{ r.task_type }}</td><td>{{ pill(r.status) }}</td>
+        <td>{{ r.target_env or "-" }}</td>
+        <td class="meta">{{ r.created_at[5:19]|replace("T", " ") }}</td></tr>
+      {% else %}<tr><td class="meta">暂无</td></tr>
+      {% endfor %}
+    </tbody></table></div>
+  <div class="card"><h3>待审批 <a class="more" href="/approvals">收件箱 →</a></h3>
+    {% for p in pending %}
+    <div class="pend-row"><a class="run-link" href="/approvals/{{ p.run_id }}">{{ p.run_id[:8] }}</a>
+      <pre>{{ p.command[:80] }}</pre>
+      <span class="meta">{{ p.task_type or "—" }} · {{ p.created_at[5:19]|replace("T", " ") }}</span></div>
+    {% else %}<div class="meta" style="padding:14px 0">没有待办审批 ✓</div>
+    {% endfor %}
+    <h3 style="margin-top:18px">最近失败</h3>
+    {% for f in stats.failed %}
+    <div class="pend-row"><a class="run-link" href="/runs/{{ f.run_id }}">{{ f.run_id[:8] }}</a>
+      <span>{{ f.task_type }}<span class="meta"> · {{ f.role }} · {{ f.target_env or "-" }}</span></span>
+      <span class="meta">{{ f.created_at[5:19]|replace("T", " ") }}</span></div>
+    {% else %}<div class="meta" style="padding:14px 0">近期无失败 ✓</div>
+    {% endfor %}
+  </div>
+</div>
+<div class="dash-grid">
+  <div class="card"><h3>任务分布（24h）</h3>
+    <table class="grid"><thead><tr><th>任务</th><th>次数</th><th>失败</th>
+      <th style="width:40%">成功率</th><th></th></tr></thead>
+      <tbody>
+      {% for t in tasks %}
+      <tr><td>{{ t.task_type }}</td><td>{{ t.total }}</td>
+        <td>{{ t.failed or "—" }}</td>
+        <td><div class="bar-track"><div class="bar-fill"
+          style="width:{{ t.pct }}%;background:{{ t.color }}"></div></div></td>
+        <td>{{ t.rate_text }}</td></tr>
+      {% else %}<tr><td colspan="5" class="meta">暂无</td></tr>
+      {% endfor %}
+    </tbody></table></div>
+  <div class="card"><h3>引擎</h3>
+    <div class="meta" style="margin-bottom:10px">
+      Agent 静态拓扑（LangGraph 骨架），装配变更后的结构回归看这里。</div>
+    <a class="btn" href="/graph">引擎拓扑 →</a></div>
+</div>
+{% endblock %}

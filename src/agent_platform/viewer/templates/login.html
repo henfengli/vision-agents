@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-wrap"><div class="login-card">
+  <div class="logo">{{ logo_big|safe }}</div>
+  <h2>agent-platform</h2>
+  <span class="meta">内网 Agent 服务 · 输入访问令牌</span>
+  <form method="post" action="/login">
+    <input type="password" name="token" placeholder="ACCESS TOKEN" autofocus>
+    <button type="submit">进入 →</button>
+  </form>
+  {% if bad_token %}<span class="err-hint">令牌不正确</span>{% endif %}
+</div></div>
+{% endblock %}

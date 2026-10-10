@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<div id="run-head"><div class="meta">加载中…</div></div>
+{% if pending %}
+<div class="card pending-banner">⏸ 待审批：<code>{{ pending.command }}</code>
+  — 到 <a href="/approvals">审批台</a> 放行或拒绝</div>
+{% endif %}
+{# Langfuse trace 区：embedded=整页内嵌官方 trace 页；blocked=自托管剥头说明；
+   link=外链降级。内嵌成功后时间线仍是唯一步骤反馈载体。 #}
+{% if trace.mode == "embedded" %}
+<div class="card trace-embed">
+  <div class="meta">Langfuse trace（{{ trace.hint }}）
+    <a href="{{ trace.url }}" target="_blank" style="float:right">新窗口打开 ↗</a></div>
+  <iframe src="{{ trace.url }}" class="trace-frame" title="Langfuse trace"></iframe>
+</div>
+{% elif trace.mode == "blocked" %}
+<div class="card">
+  <b>Langfuse 暂不可内嵌</b>
+  <p class="meta">自托管默认带 <code>X-Frame-Options: SAMEORIGIN</code>
+  （或 Langfuse 当前不可达）。在它的反向代理里剥掉限制头：</p>
+  <pre>proxy_hide_header X-Frame-Options;
+proxy_hide_header Content-Security-Policy;</pre>
+  <p class="meta">每次打开本页都会重新探测，剥头后即自动内嵌。现在：
+  <a href="{{ trace.url }}" target="_blank">新窗口打开完整 trace ↗</a></p>
+</div>
+{% elif trace.mode == "link" %}
+<p class="meta">深度 trace：{{ trace.inner|safe }}</p>
+{% endif %}
+<div class="graph-shell" id="graph-card" style="display:none">
+  <div class="cy" id="graph"></div>
+  <div class="graph-overlay graph-legend">
+    <div><span class="sw" style="background:#34d399"></span>已执行</div>
+    <div><span class="sw" style="background:#fbbf24"></span>进行中</div>
+    <div><span class="sw" style="background:#f87171"></span>失败点</div>
+    <div><span class="sw" style="background:#2a3a5f"></span>未执行</div>
+    <div class="meta" style="margin-top:6px">点击节点 → 跳到对应步骤</div>
+  </div>
+  <div class="graph-overlay graph-tools">
+    <button data-act="in">+</button><button data-act="out">−</button>
+    <button data-act="fit">fit</button>
+  </div>
+</div>
+<div class="card"><b>输入</b><pre>{{ input_json }}</pre></div>
+<div class="page-head" style="margin-top:22px">
+  <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
+  <div class="meta">每步可 👍👎 留反馈（节点级，回写 Langfuse score）</div>
+</div>
+<div id="steps"></div>
+<div class="card"><b>最终输出</b><pre id="output"></pre></div>
+<div class="card">
+  <b>这个结论有帮助吗？</b>
+  <form method="post" action="/runs/{{ run_id }}/feedback" class="filter-bar">
+    <button name="score" value="1" class="ok">有用</button>
+    <button name="score" value="-1" class="danger">有问题</button>
+    <input name="comment" class="inline" placeholder="补充说明（可选）">
+  </form>
+</div>
+<script src="/static/cytoscape.min.js"></script>
+<script src="/static/cytoscape-dagre.min.js"></script>
+<script src="/static/graph.js"></script>
+<script>watchRun("{{ run_id }}", {{ "true" if trace.embedded else "false" }});</script>
+{% endblock %}
