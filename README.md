@@ -63,8 +63,8 @@ AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 -
 （Agent 静态结构，cytoscape 渲染）、Runs 列表 `/#/runs`（可按目标环境
 过滤）、详情 `/#/runs/{run_id}`
 （**Langfuse trace 页整页内嵌**——打开时自动把 trace 设为公开链接免登；
-自托管需在 Langfuse 反向代理剥 `X-Frame-Options`/CSP 头，未剥或 Langfuse
-未启用时降级为自研执行轨迹图 + 步骤时间线）；**步骤时间线始终渲染，每步
+自托管需在 Langfuse 反向代理剥 `X-Frame-Options`/CSP 头，未剥时显示
+说明卡 + 新窗口外链）；**步骤时间线始终渲染，每步
 👍👎 节点级反馈**（kind=step 留痕 + 回写 Langfuse——score 直接挂对应
 span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step#seq`）；
 终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开

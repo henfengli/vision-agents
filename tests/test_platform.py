@@ -359,7 +359,7 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertIn("by_status", ov)
 
     async def test_console_run_detail_and_rerun(self):
-        """详情一整屏数据：run+事件+轨迹图；终态 run 可经 console 重跑。"""
+        """详情一整屏数据：run+事件；终态 run 可经 console 重跑。"""
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
@@ -377,7 +377,9 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         detail = client.get(f"/v1/console/runs/{r['run_id']}", headers=h).json()
         self.assertEqual(detail["run"]["status"], "success")
         self.assertTrue(detail["events"])
-        self.assertIsNotNone(detail["graph"])
+        # 普通 agent run 不再有自研轨迹图（观测归 Langfuse iframe；
+        # graph 只留给资产图 run 的 graph 事件）
+        self.assertIsNone(detail["graph"])
         self.assertEqual(client.get(
             "/v1/console/runs/nope", headers=h).status_code, 404)
 

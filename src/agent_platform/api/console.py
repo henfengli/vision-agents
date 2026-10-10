@@ -2,7 +2,7 @@
 
 SPA（web/，React+Vite 静态构建）的一切数据从这里出；与 SDK 用的 /v1/*
 同进程同鉴权（bearer）。本模块只做"store/引擎 → JSON"的整形，不含业务
-判断；run 详情的轨迹图构建（_trace_graph/_event_summary）也在这里——
+判断；run 详情的事件摘要（_event_summary）也在这里——
 它是详情数据的唯一出处，前端只管渲染。
 """
 
@@ -54,7 +54,7 @@ def make_console_router(settings, submitter: Submitter, auth,
         """详情页一整屏数据：run + 事件 + 轨迹图 + 待审批 + Langfuse trace。
 
         trace.embed 为 true 时前端直接 iframe 内嵌（publish/frame_check 已
-        在服务端做完）；否则前端画自研轨迹图 + 给外链。"""
+        在服务端做完）；否则前端显示说明卡 + 新窗口外链。"""
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
@@ -68,10 +68,6 @@ def make_console_router(settings, submitter: Submitter, auth,
             arts = await artifacts_store.list_by_run(run_id)
             graph = {**graph_event,
                      "statuses": {a["name"]: a["status"] for a in arts}}
-        else:
-            pending_ev = await approvals.find_pending(run_id)
-            graph = _trace_graph(events, run["status"],
-                                 pending=pending_ev is not None)
         pending = await approvals.find_pending(run_id)
         trace = None
         if langfuse is not None and langfuse.enabled:
@@ -145,58 +141,6 @@ def make_console_router(settings, submitter: Submitter, auth,
         return await engine.graph_json()
 
     return router
-
-
-def _trace_graph(events: list[dict], status: str,
-                 pending: bool = False) -> dict | None:
-    """普通 agent run 的执行轨迹图：按本 run 实际事件画出走过的步骤链。
-
-    节点 = 开始 + 每次工具调用（工具名 + 参数首行预览）+ 结论（llm 收尾事件），
-    边 = 事件先后；节点 id 与时间线步骤元素 id（seq-N）一致，点击可联动滚动。
-    状态沿用运行图三态：已执行 / 进行中（末节点，run 未完结）/ 失败点；
-    pending=True（有未决审批）时位置节点加 ⏸ 待审批——业务状态，Langfuse
-    与 Temporal 都没有，只能在这里标。每步耗时/成败详情不归本图（Langfuse）。
-    无事件（排队中）返回 None——前端不显示图卡。
-    """
-    real = [e for e in events if e["kind"] != "graph"]
-    if not real:
-        return None
-    nodes, edges = [{"id": "start", "label": "开始"}], []
-    prev = "start"
-    for e in real:
-        if e["kind"] != "tool_call":
-            continue
-        p = e["payload"] if isinstance(e["payload"], dict) else {}
-        nid = f"seq-{e['seq']}"
-        label = p.get("tool") or "tool"
-        args = str(p.get("args") or "").splitlines()[0][:48]
-        if args:
-            label += f"\n{args}"
-        nodes.append({"id": nid, "label": label})
-        edges.append({"source": prev, "target": nid})
-        prev = nid
-    final = next((e for e in reversed(real) if e["kind"] == "llm"), None)
-    if final is not None:
-        nodes.append({"id": f"seq-{final['seq']}", "label": "结论"})
-        edges.append({"source": prev, "target": f"seq-{final['seq']}"})
-        prev = f"seq-{final['seq']}"
-    if len(nodes) == 1:  # 无工具调用（纯问答 / 模型即失败）：末事件兜底一个节点
-        last = real[-1]
-        label = {"thought": "思考", "llm": "结论", "note": "备注"}.get(
-            last["kind"], last["kind"])
-        nodes.append({"id": f"seq-{last['seq']}", "label": label})
-        edges.append({"source": "start", "target": f"seq-{last['seq']}"})
-        prev = f"seq-{last['seq']}"
-    statuses = {n["id"]: "executed" for n in nodes}
-    if status in ("running", "queued"):
-        statuses[prev] = "active"
-    elif status == "failed":
-        statuses[prev] = "failed"
-    if pending and len(nodes) > 1:
-        for n in nodes:
-            if n["id"] == prev:
-                n["label"] += "\n⏸ 待审批"
-    return {"nodes": nodes, "edges": edges, "statuses": statuses, "trace": True}
 
 
 def _event_summary(e: dict) -> dict:
