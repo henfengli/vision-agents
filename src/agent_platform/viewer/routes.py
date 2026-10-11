@@ -15,7 +15,7 @@ from ..api.auth import make_viewer_auth_dependency
 from .pages import admin, approvals, base, chat, memory, overview, runs
 
 
-def make_viewer_router(submitter, defs_store, env: str, engine=None,
+def make_viewer_router(submitter, defs_store, env: str,
                        langfuse=None, token: str | None = None,
                        domains: list[str] | None = None,
                        target_envs: list[str] | None = None) -> APIRouter:
@@ -27,7 +27,7 @@ def make_viewer_router(submitter, defs_store, env: str, engine=None,
     pages = APIRouter(
         dependencies=[Depends(make_viewer_auth_dependency(token))] if token else [])
     pages.include_router(overview.make_router())
-    pages.include_router(runs.make_router(env, engine=engine, langfuse=langfuse,
+    pages.include_router(runs.make_router(env, langfuse=langfuse,
                                           target_envs=target_envs,
                                           submitter=submitter))
     pages.include_router(approvals.make_router(submitter))

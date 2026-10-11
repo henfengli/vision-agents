@@ -249,18 +249,3 @@ async function watchRun(runId, embedded) {
     await new Promise(r => setTimeout(r, 2000));
   }
 }
-
-/* —— /graph 拓扑页：首次加载引擎构建图约需 30s —— */
-async function showTopology() {
-  const el = document.getElementById("graph");
-  el.innerHTML = '<div class="graph-loading">引擎构建中，首次约需 30s…</div>';
-  try {
-    const resp = await fetch("/graph.json");
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const g = await resp.json();
-    renderInto(el, g, {});
-  } catch (err) {
-    el.innerHTML = `<div class="graph-loading">加载失败：${esc(err.message)}
-      · <a href="/graph">重试</a></div>`;
-  }
-}

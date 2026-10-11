@@ -37,7 +37,7 @@
     {% endfor %}
   </div>
 </div>
-<div class="dash-grid">
+<div class="dash-grid" style="grid-template-columns:1fr">
   <div class="card"><h3>任务分布（24h）</h3>
     <table class="grid"><thead><tr><th>任务</th><th>次数</th><th>失败</th>
       <th style="width:40%">成功率</th><th></th></tr></thead>
@@ -51,9 +51,5 @@
       {% else %}<tr><td colspan="5" class="meta">暂无</td></tr>
       {% endfor %}
     </tbody></table></div>
-  <div class="card"><h3>引擎</h3>
-    <div class="meta" style="margin-bottom:10px">
-      Agent 静态拓扑（LangGraph 骨架），装配变更后的结构回归看这里。</div>
-    <a class="btn" href="/graph">引擎拓扑 →</a></div>
 </div>
 {% endblock %}

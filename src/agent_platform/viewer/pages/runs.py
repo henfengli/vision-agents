@@ -15,7 +15,7 @@ from ...store import runs
 from .base import esc, render
 
 
-def make_router(env: str, engine=None, langfuse=None,
+def make_router(env: str, langfuse=None,
                 target_envs: list[str] | None = None,
                 submitter=None) -> APIRouter:
     router = APIRouter()
@@ -45,7 +45,7 @@ def make_router(env: str, engine=None, langfuse=None,
         }
         # 只有资产图 run 有运行图：拓扑与节点状态来自台账 graph 事件 +
         # artifacts 表。普通 agent run 的深层观测一律走 Langfuse（硬依赖，
-        # 整套栈一起部署），不再自研降级轨迹图；引擎静态骨架只在 /graph 拓扑页
+        # 整套栈一起部署），不再自研降级轨迹图
         graph_event = next((e["payload"] for e in reversed(events)
                             if e["kind"] == "graph"
                             and isinstance(e["payload"], dict)), None)
@@ -137,18 +137,6 @@ def make_router(env: str, engine=None, langfuse=None,
                           heading="无法重跑", message=str(e),
                           back_href=f"/runs/{run_id}")
         return RedirectResponse(f"/runs/{result['run_id']}", status_code=303)
-
-    @router.get("/graph", response_class=HTMLResponse)
-    async def graph_page():
-        if engine is None:
-            raise HTTPException(501, "未接入引擎")
-        return render("graph.html", "Agent 图", active="/graph")
-
-    @router.get("/graph.json")
-    async def graph_json():
-        if engine is None:
-            raise HTTPException(501, "未接入引擎")
-        return await engine.graph_json()
 
     return router
 

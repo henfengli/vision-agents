@@ -59,8 +59,7 @@ AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 -
 
 Run Viewer（服务端渲染：FastAPI 路由组上下文 + Jinja2 模板，`viewer/templates/`
 一页一模板）：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
-最近失败 + 任务分布）、引擎拓扑 `/graph`（Agent 静态结构，cytoscape 渲染）、
-Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
+最近失败 + 任务分布）、Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
 （**Langfuse trace 页整页内嵌**——打开时自动把 trace 设为公开链接免登；
 自托管需在 Langfuse 反向代理剥 `X-Frame-Options`/CSP 头，未剥时降级为
 说明卡 + 新窗口外链）；**步骤时间线始终渲染，每步

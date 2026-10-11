@@ -72,19 +72,6 @@ class Engine:
             await self._model_http.aclose()
             self._model_http = None
 
-    async def graph_json(self) -> dict:
-        """图拓扑（节点 + 边），供前端 dagre 布局渲染。"""
-        agent = await self.agent()
-        g = agent.get_graph()
-        return {
-            "nodes": [{"id": n.id, "label": n.name or n.id}
-                      for n in g.nodes.values()
-                      if not n.id.startswith("__")],
-            "edges": [{"source": e.source, "target": e.target}
-                      for e in g.edges
-                      if not e.source.startswith("__") and not e.target.startswith("__")],
-        }
-
     async def roles(self) -> dict:
         """当前环境的角色定义（未解析继承）：Langfuse 为源头
         （进程内缓存 → PG 持久缓存兜底）。

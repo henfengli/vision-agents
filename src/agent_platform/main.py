@@ -239,7 +239,7 @@ def build_app(settings: Settings | None = None):
         ):
             app.include_router(r)
         app.include_router(make_viewer_router(
-            rt.submitter, rt.defs, settings.env, engine=rt.engine,
+            rt.submitter, rt.defs, settings.env,
             langfuse=rt.langfuse, token=settings.bearer_token,
             domains=list(settings.domains),
             target_envs=settings.target_envs or None))
