@@ -145,7 +145,7 @@ async function send(q) {
   setStreaming(true);
   scrollEnd();
   const events = [];
-  let runId = "";
+  let runId = "", stepsDet = null;
   ctrl = new AbortController();
   try {
     const resp = await fetch("/v1/chat/stream", {
@@ -172,10 +172,21 @@ async function send(q) {
           $("sess-label").textContent = "session " + sessionId;
           loadSessions();
         } else if (["thought", "tool_call", "tool_result", "note", "llm"].includes(ev.type)) {
+          // 增量追加步骤节点——长 run 不重绘整段 HTML
           events.push({kind: ev.type, tool: ev.tool || "",
             text: ev.content || ev.args || ev.output || ""});
-          block.innerHTML = detailsHtml(events, true)
-            + '<div class="meta" style="margin-top:6px">执行中…</div>';
+          if (!stepsDet) {
+            block.innerHTML = "";
+            stepsDet = document.createElement("details");
+            stepsDet.className = "steps"; stepsDet.open = true;
+            stepsDet.innerHTML = "<summary></summary>";
+            block.appendChild(stepsDet);
+            block.insertAdjacentHTML("beforeend",
+              '<div class="meta exec-hint" style="margin-top:6px">执行中…</div>');
+          }
+          stepsDet.insertAdjacentHTML("beforeend",
+            stepHtml(events[events.length - 1]));
+          stepsDet.querySelector("summary").textContent = `过程 · ${events.length} 步`;
           scrollEnd();
         } else if (ev.type === "final") {
           agentFinal(block, events, ev.output, runId);

@@ -153,12 +153,12 @@ function foldPre(text) {
     + '<button class="fold-btn">展开 ▾</button></div>';
 }
 
-function renderSteps(container, events) {
-  const list = events.filter(e => e.kind !== "graph");
-  const done = parseInt(container.dataset.count || "0", 10);
-  if (list.length <= done) { container.dataset.count = list.length; return; }
-  let prevTs = done > 0 ? Date.parse(container.dataset.lastTs) : NaN;
-  const html = list.slice(done).map(e => {
+function renderSteps(container, newEvents) {
+  // 服务端 ?since= 已保证只回新事件，这里全部追加渲染
+  const list = newEvents.filter(e => e.kind !== "graph");
+  if (!list.length) return;
+  let prevTs = Date.parse(container.dataset.lastTs || "");
+  const html = list.map(e => {
     const label = STEP_LABELS[e.kind] || e.kind;
     const tool = e.tool ? ` <span class="tag">${esc(e.tool)}</span>` : "";
     const node = e.node ? ` <span class="tag">${esc(e.node)}</span>` : "";
@@ -175,7 +175,6 @@ function renderSteps(container, events) {
       ${foldPre(e.text)}</div>`;
   }).join("");
   container.insertAdjacentHTML("beforeend", html);
-  container.dataset.count = list.length;
   if (!isNaN(prevTs)) container.dataset.lastTs = new Date(prevTs).toISOString();
 }
 
@@ -263,14 +262,18 @@ async function watchRun(runId, embedded) {
   const graphEl = document.getElementById("graph");
   const stepsEl = document.getElementById("steps");
   stepsEl.dataset.runId = runId;
+  let lastSeq = -1;   // seq 从 0 起（trace 事件是 seq 0），首拉要全量
+  const allEvents = [];   // 失败横幅/图状态推导要用完整事件，不随增量丢弃
   while (true) {
     let s;
     try {
-      s = await (await fetch(`/runs/${runId}/state.json`)).json();
+      s = await (await fetch(`/runs/${runId}/state.json?since=${lastSeq}`)).json();
     } catch (err) {
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
+    allEvents.push(...s.events);
+    if (s.events.length) lastSeq = Math.max(...s.events.map(e => e.seq));
     renderRunHead(s);
     if (!embedded && s.graph && s.graph.nodes && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";
@@ -281,7 +284,7 @@ async function watchRun(runId, embedded) {
           ? Object.fromEntries(Object.entries(s.graph.statuses).map(([k, v]) =>
               [k, v === "materialized" || v === "reused" ? "executed"
                 : v === "rejected" ? "failed" : ""]))
-          : nodeStatusOf(s.events, s.run.status);
+          : nodeStatusOf(allEvents, s.run.status);
       renderInto(graphEl, s.graph, statuses);
     }
     renderSteps(stepsEl, s.events);
@@ -294,7 +297,7 @@ async function watchRun(runId, embedded) {
       outEl.innerHTML = `<pre>${esc(JSON.stringify(s.run.output, null, 2))}</pre>`;
     // 失败 run：报错从时间线提到顶部横幅，一眼定位
     if (s.run.status === "failed" && !document.getElementById("fail-banner")) {
-      const last = [...s.events].reverse().find(e => e.kind !== "graph");
+      const last = [...allEvents].reverse().find(e => e.kind !== "graph");
       if (last) {
         const head = document.getElementById("run-head");
         head.insertAdjacentHTML("afterend",

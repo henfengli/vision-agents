@@ -29,18 +29,21 @@ def make_router(env: str, langfuse=None,
                       rows=rows, qenv=qenv, target_envs=target_envs or [])
 
     @router.get("/runs/{run_id}/state.json")
-    async def run_state(run_id: str):
+    async def run_state(run_id: str, request: Request):
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
         events = await runs.get_events(run_id)
+        # ?since=<seq> 增量轮询：只回新事件——事件 append-only，长 run
+        # （成百上千步）全量轮询会让 2s 一次的传输量变成 O(N²)
+        since = int(request.query_params.get("since") or 0)
         state = {
             "run": {k: run.get(k) for k in
                     ("run_id", "task_type", "task_version", "role",
                      "role_version", "status", "trigger_source",
                      "target_env", "duration_ms", "output", "session_id")},
             "created_at": str(run["created_at"]),
-            "events": [_event_summary(e) for e in events],
+            "events": [_event_summary(e) for e in events if e["seq"] > since],
             "graph": None,
         }
         # 只有资产图 run 有运行图：拓扑与节点状态来自台账 graph 事件 +
