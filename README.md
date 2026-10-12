@@ -68,7 +68,11 @@ span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step
 终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开
 run 并跳过去重）、审批待办 `/approvals`
 （顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达 `/approvals/{run_id}`
-处理页）、管理页 `/admin`、记忆页 `/memory`、对话页 `/chat`（会话侧栏 +
+处理页）、管理页 `/admin`（角色/任务/策略的**列表 + 编辑器双栏**：左栏带
+版本号与近 24h 用量角标，右栏按已知字段出结构化表单（工具/域/环境给
+复选框），未知字段收进「高级 JSON」保存时合并、不静默丢字段；**版本
+时间线**点击两条即出**内联 diff**，角色可一键回滚到历史版本；保存走
+`/v1/admin/*` 既有 API，即新版本、热生效）、记忆页 `/memory`、对话页 `/chat`（会话侧栏 +
 历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
 run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
 上下文/记忆并回填域/角色/环境；配置了 `target_envs` 时带环境选择器）。
@@ -99,7 +103,7 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 105 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 120 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）

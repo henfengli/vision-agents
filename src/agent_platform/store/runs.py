@@ -169,6 +169,24 @@ async def count_recent_with_version(kind: str, name: str, version: int,
         return (await cur.fetchone())[0]
 
 
+async def usage_24h() -> dict:
+    """近 24h 各角色/任务的 run 数与成功数——管理页列表的影响面列。
+
+    返回 {"role": {名: {"runs": n, "ok": n}}, "task": {...}}。
+    """
+    out = {"role": {}, "task": {}}
+    async with db.pool().connection() as conn:
+        for col, key in (("role", "role"), ("task_type", "task")):
+            cur = await conn.execute(
+                f"SELECT {col}, count(*),"
+                f" count(*) FILTER (WHERE status='success') FROM runs"
+                f" WHERE created_at > now() - interval '24 hours'"
+                f" GROUP BY {col}")
+            out[key] = {name: {"runs": n, "ok": ok}
+                        for name, n, ok in await cur.fetchall()}
+    return out
+
+
 async def trace_id_of(run_id: str) -> str:
     """从台账事件取 Langfuse trace_id（未启用观测时为空串）。"""
     events = await get_events(run_id)

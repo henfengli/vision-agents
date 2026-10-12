@@ -421,6 +421,41 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.get("/admin/diff", params={
             "kind": "task", "name": "nightly", "a": 1, "b": 9}).status_code, 404)
 
+    async def test_admin_console_list_and_history(self):
+        """管理页双栏：列表带版本/影响面；history.json 版本倒序；diff JSON。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        await self.defs.put("task", "test", "nightly", {"role": "ops_analyst"})
+        await self.defs.put("task", "test", "nightly",
+                            {"role": "ops_analyst", "timeout_s": 900})
+        # 一个真实 run 让列表出现「N run/24h」影响面
+        await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test",
+                                              tool_names=["bash", "sql_query"]))
+        client = TestClient(app)
+
+        page = client.get("/admin")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("admin-layout", page.text)          # 双栏布局
+        self.assertIn('"nightly": {', page.text)        # defs JSON 供编辑器
+        self.assertIn("v2", page.text)                    # 当前版本徽章
+        self.assertIn("1 run/24h", page.text)             # 影响面（data-qa 角色）
+        self.assertIn("sql_query", page.text)             # 工具目录
+
+        hist = client.get("/admin/defs/task/nightly/history.json")
+        self.assertEqual([h["version"] for h in hist.json()["history"]], [2, 1])
+        self.assertEqual(client.get(
+            "/admin/defs/task/ghost/history.json").status_code, 404)
+
+        diff = client.get("/admin/diff", params={
+            "kind": "task", "name": "nightly", "a": 1, "b": 2,
+            "format": "json"})
+        self.assertIn("timeout_s", diff.json()["diff"])
+
     async def test_viewer_auth_login_flow(self):
         """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""
         from fastapi.testclient import TestClient

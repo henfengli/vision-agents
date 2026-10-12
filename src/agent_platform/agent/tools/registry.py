@@ -58,6 +58,11 @@ class ToolRegistry:
             self._catalog["update_asset_profile"] = self._build_update_asset_profile
         self._catalog["run_code"] = self._build_run_code_placeholder
 
+    @property
+    def catalog_names(self) -> list[str]:
+        """可选工具名清单（含 MCP 外部工具）——管理页角色编辑器的复选框源。"""
+        return sorted({*self._catalog, *(t.name for t in self._extra_tools)})
+
     # —— 工具定义（唯一的实现出处） ——
 
     def _build_bash(self) -> Callable:

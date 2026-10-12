@@ -58,10 +58,14 @@ class DefinitionStore:
     async def list_active(self, kind: Kind, env: str) -> list[dict]:
         async with pool().connection() as conn:
             cur = await conn.execute(
-                "SELECT DISTINCT ON (name) name, definition FROM definitions"
+                "SELECT DISTINCT ON (name) name, version, definition,"
+                " updated_by, created_at FROM definitions"
                 " WHERE kind=%s AND env=%s ORDER BY name, version DESC", (kind, env))
             rows = await cur.fetchall()
-        return [{"name": name, **_as_dict(d)} for name, d in rows]
+        # name/version 等台账列放展开之后，压住 definition 里的同名键
+        return [{**_as_dict(d), "name": name, "version": v,
+                 "updated_by": u, "created_at": t.isoformat()}
+                for name, v, d, u, t in rows]
 
     async def history(self, kind: Kind, env: str, name: str) -> list[dict]:
         async with pool().connection() as conn:
