@@ -68,8 +68,10 @@ span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step
 终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开
 run 并跳过去重）、审批待办 `/approvals`
 （顶栏「审批」带待办数角标；钉钉卡片 deep-link 直达 `/approvals/{run_id}`
-处理页）、管理页 `/admin`、记忆页 `/memory`、对话页 `/chat`（配置了
-`target_envs` 时带环境选择器）。
+处理页）、管理页 `/admin`、记忆页 `/memory`、对话页 `/chat`（会话侧栏 +
+历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
+run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
+上下文/记忆并回填域/角色/环境；配置了 `target_envs` 时带环境选择器）。
 
 主机监控：配好 `grafana:`（url + Prometheus 数据源 uid + 只读 token）并在域包
 `domain.yaml` 登记 `hosts` 后，角色可用 `host_metrics` 工具查部署机器的

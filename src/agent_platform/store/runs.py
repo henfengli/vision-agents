@@ -90,6 +90,37 @@ async def session_exists(session_id: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def list_sessions(limit: int = 30) -> list[dict]:
+    """最近 web 会话（按最后活动倒序）：预览取会话内第一个问题。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT session_id,"
+            " max(created_at) AS last_at, count(*) AS runs,"
+            " (array_agg(input->>'question' ORDER BY created_at))[1] AS first_q,"
+            " (array_agg(role ORDER BY created_at DESC))[1] AS role,"
+            " (array_agg(domain ORDER BY created_at DESC))[1] AS domain,"
+            " (array_agg(target_env ORDER BY created_at DESC))[1] AS env"
+            " FROM runs WHERE trigger_source = 'web_chat'"
+            " GROUP BY session_id ORDER BY last_at DESC LIMIT %s", (limit,))
+        rows = await cur.fetchall()
+    return [{"session_id": r[0], "last_at": r[1].isoformat(), "runs": r[2],
+             "first_q": r[3] or "", "role": r[4], "domain": r[5], "env": r[6]}
+            for r in rows]
+
+
+async def of_session(session_id: str) -> list[dict]:
+    """会话全部 run（正序）：对话页历史回放用。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id, role, domain, target_env, status, input, output,"
+            " created_at FROM runs WHERE session_id = %s"
+            " ORDER BY created_at", (session_id,))
+        rows = await cur.fetchall()
+    return [{"run_id": r[0], "role": r[1], "domain": r[2], "target_env": r[3],
+             "status": r[4], "input": r[5], "output": r[6],
+             "created_at": r[7].isoformat()} for r in rows]
+
+
 async def log_event(run_id: str, kind: str, payload: dict) -> None:
     """追加事件；seq = 当前 max+1。
 

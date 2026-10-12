@@ -372,6 +372,35 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mem.status_code, 200)
         self.assertIn('name="env"', mem.text)
 
+    async def test_chat_session_endpoints(self):
+        """对话页会话端点：列表按最后活动倒序 + 历史回放 + 配置回填。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        for q in ("毛利率怎么看", "上季度华东呢"):
+            await self.submitter.submit(
+                "data-qa", {"server": "board", "question": q}, "web_chat",
+                session_id="s-chat")
+        await self.submitter.submit(
+            "data-qa", {"server": "dagster", "question": "别的会话"}, "web_chat",
+            session_id="s-other")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        sessions = client.get("/chat/sessions.json").json()["sessions"]
+        self.assertEqual([s["session_id"] for s in sessions],
+                         ["s-other", "s-chat"])  # 最新在前
+        self.assertEqual(sessions[1]["first_q"], "毛利率怎么看")
+        self.assertEqual(sessions[1]["runs"], 2)
+
+        hist = client.get("/chat/sessions/s-chat/history.json").json()
+        self.assertEqual([r["question"] for r in hist["runs"]],
+                         ["毛利率怎么看", "上季度华东呢"])
+        self.assertEqual(hist["config"]["server"], "board")
+        self.assertTrue(all(r["run_id"] for r in hist["runs"]))
+
     async def test_admin_diff_page(self):
         """定义版本对比页：渲染 diff，缺版本 404。"""
         from fastapi.testclient import TestClient

@@ -207,9 +207,14 @@ function renderRunHead(s) {
          style="display:inline;margin-left:10px">
          <button class="inline">${s.run.status === "failed" ? "重跑（断点续跑）" : "重跑"}</button>
        </form>` : "";
+  // 有会话的 run 可跳回对话页续聊：同 session 自动继承上下文/记忆，
+  // 对话页再从该会话最新 run 回填域/角色/环境配置
+  const chatLink = s.run.session_id
+    ? `<a class="btn sm" style="margin-left:10px"
+         href="/chat?session=${esc(s.run.session_id)}">在对话中继续 →</a>` : "";
   document.getElementById("run-head").innerHTML = `
     <div class="eyebrow">RUN · ${esc(s.run.task_type)}</div>
-    <h2>${esc(s.run.run_id)} ${statusPill(s.run.status)}${rerun}</h2>
+    <h2>${esc(s.run.run_id)} ${statusPill(s.run.status)}${rerun}${chatLink}</h2>
     <div class="meta">任务 ${v(s.run.task_type, s.run.task_version)}
       · 角色 ${v(s.run.role, s.run.role_version)} · 来源 ${esc(s.run.trigger_source)}${envTag}
       · 耗时 ${s.run.duration_ms || "-"}ms · ${esc(s.created_at)}</div>`;

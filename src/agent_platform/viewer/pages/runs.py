@@ -38,7 +38,7 @@ def make_router(env: str, langfuse=None,
             "run": {k: run.get(k) for k in
                     ("run_id", "task_type", "task_version", "role",
                      "role_version", "status", "trigger_source",
-                     "target_env", "duration_ms", "output")},
+                     "target_env", "duration_ms", "output", "session_id")},
             "created_at": str(run["created_at"]),
             "events": [_event_summary(e) for e in events],
             "graph": None,
