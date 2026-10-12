@@ -1,14 +1,13 @@
 {% extends "base.html" %}
-{% import "_macros.html" as m %}
+{% block wrap_class %} wrap-chat{% endblock %}
 {% block content %}
-{{ m.page_head("CHAT", "Agent 对话", "流式输出 · 会话可续聊 · 结论可直接反馈") }}
-<div class="chat-layout">
+<div class="chat-page">
   <aside class="chat-side">
-    <button id="new-chat" class="new-chat">+ 新对话</button>
-    <div id="sessions"><div class="meta" style="padding:6px">加载中…</div></div>
+    <button id="new-chat" class="new-chat">＋ 新对话</button>
+    <div class="sess-list" id="sessions"></div>
   </aside>
   <section class="chat-main">
-    <div class="card chat-config">
+    <div class="chat-topbar">
       <select id="server" title="业务系统">
         {% for d in domains %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
       </select>
@@ -21,13 +20,16 @@
         {% for e in target_envs %}<option value="{{ e }}">{{ e }}</option>{% endfor %}
       </select>
       {% endif %}
-      <span class="meta" id="sess-label" style="margin-left:auto"></span>
+      <span class="meta" id="sess-label"></span>
     </div>
-    <div class="chat-log" id="log"></div>
-    <div class="composer">
-      <textarea id="q" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
-      <button id="stop" class="danger" style="display:none">停止</button>
-      <button id="send">发送</button>
+    <div class="chat-scroll" id="scroll"><div class="chat-col" id="log"></div></div>
+    <div class="composer-wrap">
+      <div class="composer">
+        <textarea id="q" rows="1" placeholder="输入问题…"></textarea>
+        <button id="stop" class="danger" title="停止" style="display:none">■</button>
+        <button id="send" title="发送">↑</button>
+      </div>
+      <div class="composer-hint">Enter 发送 · Shift+Enter 换行</div>
     </div>
   </section>
 </div>
@@ -35,12 +37,22 @@
 <script src="/static/dompurify.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-const log = $("log");
+const log = $("log"), scrollBox = $("scroll");
 const esc = t => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 marked.setOptions({breaks: true});
 const md = t => DOMPurify.sanitize(marked.parse(t));
 
 let sessionId = "", lastQuestion = "", ctrl = null, streaming = false;
+
+/* 相对时间：侧栏会话用 */
+function relTime(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return "刚刚";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  if (s < 7 * 86400) return Math.floor(s / 86400) + " 天前";
+  return iso.slice(5, 10);
+}
 
 /* —— 输出渲染：结论优先 answer 字段的 Markdown，否则 JSON 代码块 —— */
 function outputHtml(out) {
@@ -93,9 +105,11 @@ document.addEventListener("click", async e => {
 });
 
 /* —— 消息渲染 —— */
+function clearEmpty() { const e = $("chat-empty"); if (e) e.remove(); }
 function userBubble(q) {
+  clearEmpty();
   log.insertAdjacentHTML("beforeend",
-    `<div class="msg-user"><b>我</b><pre>${esc(q)}</pre></div>`);
+    `<div class="msg-user"><div class="bubble">${esc(q)}</div></div>`);
 }
 function agentBlock() {
   log.insertAdjacentHTML("beforeend", `<div class="msg-agent"></div>`);
@@ -106,16 +120,14 @@ function agentFinal(block, events, output, runId) {
     + detailsHtml(events, false) + (runId ? fbHtml(runId) : "");
 }
 function errorBubble(msg, retry) {
+  clearEmpty();
   log.insertAdjacentHTML("beforeend",
     `<div class="msg-err">${esc(msg)}${retry ? '<button id="retry">重试</button>' : ""}</div>`);
   const r = $("retry");
   if (r) r.onclick = () => { r.parentElement.remove(); send(lastQuestion); };
   scrollEnd();
 }
-function scrollEnd() {
-  if (log.lastElementChild)
-    log.lastElementChild.scrollIntoView({behavior: "smooth", block: "end"});
-}
+function scrollEnd() { scrollBox.scrollTop = scrollBox.scrollHeight; }
 
 /* —— 发送（SSE 流式；可停止；失败可重试） —— */
 function setStreaming(on) {
@@ -196,8 +208,8 @@ async function loadSessions() {
       `<a class="sess-item${s.session_id === sessionId ? " active" : ""}"
           data-sid="${s.session_id}">
         <div class="q">${esc(s.first_q || "（空会话）")}</div>
-        <div class="t">${esc(s.last_at.slice(5, 16).replace("T", " "))} · ${s.runs} 轮</div>
-      </a>`).join("") || '<div class="meta" style="padding:6px">还没有会话</div>';
+        <div class="t">${relTime(s.last_at)} · ${s.runs} 轮</div>
+      </a>`).join("");
   } catch (e) { /* 列表失败不挡对话 */ }
 }
 async function openSession(sid) {
@@ -227,11 +239,18 @@ document.addEventListener("click", e => {
 $("new-chat").onclick = () => {
   sessionId = "";
   localStorage.removeItem("chat.session");
-  log.innerHTML = "";
+  renderEmpty();
   $("sess-label").textContent = "";
   loadSessions();
   $("q").focus();
 };
+
+function renderEmpty() {
+  log.innerHTML = `<div class="chat-empty" id="chat-empty">
+    <h3>有什么想查的？</h3>
+    <div>选择业务系统与角色，直接提问；会话会自动保存，随时续聊。</div>
+  </div>`;
+}
 
 /* —— 输入区：Enter 发送 / Shift+Enter 换行 / 自动增高 —— */
 $("send").onclick = () => { const q = $("q"); send(q.value); q.value = ""; q.style.height = "auto"; };
@@ -247,10 +266,11 @@ $("q").addEventListener("input", e => {
   e.target.style.height = Math.min(e.target.scrollHeight, 180) + "px";
 });
 
-/* —— 入口：URL ?session=（run 详情页跳转继承）> 上次会话 > 空 —— */
+/* —— 入口：URL ?session=（run 详情页跳转继承）> 上次会话 > 空态 —— */
 const want = new URLSearchParams(location.search).get("session")
   || localStorage.getItem("chat.session");
-if (want) openSession(want).catch(() => {});
+if (want) openSession(want).catch(() => renderEmpty());
+else renderEmpty();
 loadSessions();
 </script>
 {% endblock %}

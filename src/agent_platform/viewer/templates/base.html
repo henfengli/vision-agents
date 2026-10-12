@@ -12,7 +12,7 @@
   <span class="meta"><span class="led live"></span>LIVE</span>
   {% if auth_enabled %}<a href="/logout" class="meta">退出</a>{% endif %}
 </header>
-<main class="wrap">
+<main class="wrap{% block wrap_class %}{% endblock %}">
 {% endif %}
 {% block content %}{% endblock %}
 {% if nav %}
