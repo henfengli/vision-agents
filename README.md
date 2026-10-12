@@ -60,9 +60,10 @@ AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 -
 Run Viewer（服务端渲染：FastAPI 路由组上下文 + Jinja2 模板，`viewer/templates/`
 一页一模板）：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
 最近失败 + 任务分布）、Runs 列表 `/runs`（可按目标环境过滤）、详情 `/runs/{run_id}`
-（**Langfuse trace 页整页内嵌**——打开时自动把 trace 设为公开链接免登；
-自托管需在 Langfuse 反向代理剥 `X-Frame-Options`/CSP 头，未剥时降级为
-说明卡 + 新窗口外链）；**步骤时间线始终渲染，每步
+（**Trace 瀑布自绘**——Langfuse observations API 取回 span 树，viewer 手绘
+LangSmith 式瀑布条：生成 span 紫色/普通蓝色/错误红色，点行展开 model/
+token/成本与 input/output，「跳到步骤」与下方时间线联动；右上角保留
+「在 Langfuse 打开 ↗」外链）；**步骤时间线始终渲染，每步
 👍👎 节点级反馈**（kind=step 留痕 + 回写 Langfuse——score 直接挂对应
 span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step#seq`）；
 终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开

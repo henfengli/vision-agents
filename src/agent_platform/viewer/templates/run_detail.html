@@ -5,26 +5,16 @@
 <div class="card pending-banner">⏸ 待审批：<code>{{ pending.command }}</code>
   — 到 <a href="/approvals">审批台</a> 放行或拒绝</div>
 {% endif %}
-{# Langfuse trace 区：embedded=整页内嵌官方 trace 页；blocked=自托管剥头说明；
-   link=外链降级。内嵌成功后时间线仍是唯一步骤反馈载体。 #}
-{% if trace.mode == "embedded" %}
-<div class="card trace-embed">
-  <div class="meta">Langfuse trace（{{ trace.hint }}）
-    <a href="{{ trace.url }}" target="_blank" style="float:right">新窗口打开 ↗</a></div>
-  <iframe src="{{ trace.url }}" class="trace-frame" title="Langfuse trace"></iframe>
-</div>
-{% elif trace.mode == "blocked" %}
+{# Trace 瀑布：Langfuse 是数据源，视图自绘（暗色原生、与步骤时间线联动）。
+   span 数据由 state.json?trace=1 异步填充；官方 UI 只留外链做深操作 #}
+{% if trace.tid %}
 <div class="card">
-  <b>Langfuse 暂不可内嵌</b>
-  <p class="meta">自托管默认带 <code>X-Frame-Options: SAMEORIGIN</code>
-  （或 Langfuse 当前不可达）。在它的反向代理里剥掉限制头：</p>
-  <pre>proxy_hide_header X-Frame-Options;
-proxy_hide_header Content-Security-Policy;</pre>
-  <p class="meta">每次打开本页都会重新探测，剥头后即自动内嵌。现在：
-  <a href="{{ trace.url }}" target="_blank">新窗口打开完整 trace ↗</a></p>
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <b>Trace 瀑布</b> <span class="meta" id="trace-meta"></span>
+    {% if trace.url %}<a href="{{ trace.url }}" target="_blank">在 Langfuse 打开 ↗</a>{% endif %}
+  </div>
+  <div id="trace-falls"><div class="meta">加载中…</div></div>
 </div>
-{% elif trace.mode == "link" %}
-<p class="meta">深度 trace：{{ trace.inner|safe }}</p>
 {% endif %}
 <div class="graph-shell" id="graph-card" style="display:none">
   <div class="cy" id="graph"></div>
@@ -71,5 +61,5 @@ proxy_hide_header Content-Security-Policy;</pre>
 <script src="/static/cytoscape.min.js"></script>
 <script src="/static/cytoscape-dagre.min.js"></script>
 <script src="/static/graph.js"></script>
-<script>watchRun("{{ run_id }}", {{ "true" if trace.embedded else "false" }});</script>
+<script>watchRun("{{ run_id }}");</script>
 {% endblock %}

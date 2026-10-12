@@ -12,7 +12,7 @@ from ...langfuse import match_observation
 from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
-from .base import esc, render
+from .base import render
 
 
 def make_router(env: str, langfuse=None,
@@ -58,6 +58,25 @@ def make_router(env: str, langfuse=None,
             state["graph"] = {**graph_event,
                               "statuses": {a["name"]: a["status"]
                                            for a in arts}}
+        # ?trace=1：trace 瀑布数据（Langfuse 为数据源，viewer 自绘视图）。
+        # 客户端只在首拉与 run 终态各要一次；span→步骤 seq 映射复用
+        # match_observation 的对齐规则，点 span 可跳到对应时间线步骤
+        if request.query_params.get("trace") and langfuse is not None \
+                and langfuse.enabled:
+            tid = await runs.trace_id_of(run_id)
+            if tid:
+                obs = await langfuse.observations(tid)
+                seq_of = {}
+                for e in events:
+                    if e["kind"] in ("tool_call", "tool_result", "llm",
+                                     "final"):
+                        oid = match_observation(events, e["seq"], obs)
+                        if oid and oid not in seq_of:
+                            seq_of[oid] = e["seq"]
+                state["trace"] = {
+                    "url": await langfuse.trace_url(tid),
+                    "spans": [_span_summary(o, seq_of) for o in obs],
+                }
         return state
 
     @router.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -65,30 +84,13 @@ def make_router(env: str, langfuse=None,
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        # Langfuse trace 区：embed 开启时把官方 trace 页整页内嵌（先自动设为
-        # 公开链接免登，再探测网关是否放行 iframe）；任一条件不满足降级外链。
-        trace = {"mode": "", "embedded": False}
+        # trace 瀑布卡：有 trace_id 就渲染容器，span 数据由 state.json?trace=1
+        # 异步填充；右侧外链直达 Langfuse 官方 UI（Annotate 等深操作去那里）
+        trace = {"tid": "", "url": ""}
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
-                url = await langfuse.trace_url(tid)
-                if (url and langfuse.embed
-                        and await langfuse.publish_trace(tid)
-                        and await langfuse.frame_check(url)):
-                    # publish=false：同站点登录态部署，iframe 里是完整登录态
-                    # UI（Annotate 可用）；否则是免登公开链接（只读）
-                    trace = {"mode": "embedded", "embedded": True, "url": url,
-                             "hint": ("公开链接 · 免登" if langfuse.publish
-                                      else "登录会话 · Annotate 可用")}
-                elif url and langfuse.embed:
-                    trace = {"mode": "blocked", "url": url}
-                else:
-                    inner = (f'<a href="{esc(url)}" target="_blank">'
-                             f'在 Langfuse 打开完整 trace ↗</a>'
-                             f'（<code>{esc(tid)}</code>）' if url else
-                             f'<a href="{esc(langfuse.host)}" target="_blank">'
-                             f'Langfuse</a> 中搜索 <code>{esc(tid)}</code>')
-                    trace = {"mode": "link", "inner": inner}
+                trace = {"tid": tid, "url": await langfuse.trace_url(tid)}
         pending = await approvals.find_pending(run_id)
         return render(
             "run_detail.html", f"Run {run_id[:8]}", active="/runs",
@@ -143,6 +145,29 @@ def make_router(env: str, langfuse=None,
         return RedirectResponse(f"/runs/{result['run_id']}", status_code=303)
 
     return router
+
+
+def _clip_io(v, limit: int = 1500) -> str:
+    """span 输入/输出截断为可读文本（瀑布详情面板用，防大 payload 撑爆首屏）。"""
+    if v is None:
+        return ""
+    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False,
+                                                default=str)
+    return s if len(s) <= limit else s[:limit] + " …（截断）"
+
+
+def _span_summary(o: dict, seq_of: dict) -> dict:
+    """Langfuse observation → 瀑布行数据。io 截断；seq = 对应时间线步骤。"""
+    usage = o.get("usage") or {}
+    return {"id": o.get("id"), "name": o.get("name") or "",
+            "type": o.get("type") or "SPAN",
+            "parent": o.get("parentObservationId") or "",
+            "start": o.get("startTime"), "end": o.get("endTime"),
+            "model": o.get("model") or "", "level": o.get("level") or "",
+            "tokens": usage.get("totalTokens"),
+            "cost": o.get("calculatedTotalCost"),
+            "seq": seq_of.get(o.get("id")),
+            "input": _clip_io(o.get("input")), "output": _clip_io(o.get("output"))}
 
 
 def _event_summary(e: dict) -> dict:
