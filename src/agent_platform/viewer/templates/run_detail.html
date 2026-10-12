@@ -40,13 +40,24 @@ proxy_hide_header Content-Security-Policy;</pre>
     <button data-act="fit">fit</button>
   </div>
 </div>
-<div class="card"><b>输入</b><pre>{{ input_json }}</pre></div>
+<div class="card"><b>输入</b>
+  <button class="copy-btn" data-copy="input-pre">复制</button>
+  {% if input_question %}
+  <div class="in-q">{{ input_question }}</div>
+  <details class="steps"><summary>完整输入 JSON</summary>
+    <pre id="input-pre">{{ input_json }}</pre></details>
+  {% else %}
+  <pre id="input-pre">{{ input_json }}</pre>
+  {% endif %}
+</div>
 <div class="page-head" style="margin-top:22px">
   <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
   <div class="meta">每步可 👍👎 留反馈（节点级，回写 Langfuse score）</div>
 </div>
 <div id="steps"></div>
-<div class="card"><b>最终输出</b><pre id="output"></pre></div>
+<div class="card"><b>最终输出</b>
+  <button class="copy-btn" data-copy="output">复制</button>
+  <div id="output" class="md"></div></div>
 <div class="card">
   <b>这个结论有帮助吗？</b>
   <form method="post" action="/runs/{{ run_id }}/feedback" class="filter-bar">
@@ -55,6 +66,8 @@ proxy_hide_header Content-Security-Policy;</pre>
     <input name="comment" class="inline" placeholder="补充说明（可选）">
   </form>
 </div>
+<script src="/static/marked.min.js"></script>
+<script src="/static/dompurify.min.js"></script>
 <script src="/static/cytoscape.min.js"></script>
 <script src="/static/cytoscape-dagre.min.js"></script>
 <script src="/static/graph.js"></script>

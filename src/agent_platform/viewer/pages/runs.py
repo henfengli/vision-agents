@@ -90,6 +90,7 @@ def make_router(env: str, langfuse=None,
         return render(
             "run_detail.html", f"Run {run_id[:8]}", active="/runs",
             run_id=run_id, pending=pending, trace=trace,
+            input_question=(run.get("input") or {}).get("question") or "",
             input_json=json.dumps(run.get("input"),
                                   ensure_ascii=False, indent=2))
 

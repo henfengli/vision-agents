@@ -143,26 +143,62 @@ document.addEventListener("click", e => {
 });
 
 /* —— 步骤时间线：事件 append-only，只增量渲染新步骤 —— */
-/* 每步带 👍👎（节点级反馈）：POST /runs/{runId}/steps/{seq}/feedback */
+/* 每步带 👍👎（节点级反馈）：POST /runs/{runId}/steps/{seq}/feedback；
+   步骤间显示距上步耗时；长输出默认折叠（Claude Code 式，点击展开） */
+function foldPre(text) {
+  const t = String(text || "");
+  if (t.length <= 240 && (t.match(/\n/g) || []).length < 4)
+    return `<pre>${esc(t)}</pre>`;
+  return `<div class="fold"><pre>${esc(t)}</pre>`
+    + '<button class="fold-btn">展开 ▾</button></div>';
+}
+
 function renderSteps(container, events) {
   const list = events.filter(e => e.kind !== "graph");
   const done = parseInt(container.dataset.count || "0", 10);
   if (list.length <= done) { container.dataset.count = list.length; return; }
+  let prevTs = done > 0 ? Date.parse(container.dataset.lastTs) : NaN;
   const html = list.slice(done).map(e => {
     const label = STEP_LABELS[e.kind] || e.kind;
     const tool = e.tool ? ` <span class="tag">${esc(e.tool)}</span>` : "";
     const node = e.node ? ` <span class="tag">${esc(e.node)}</span>` : "";
+    const ts = Date.parse(e.created_at);
+    const delta = !isNaN(prevTs) && !isNaN(ts) && ts > prevTs
+      ? ` <span class="dur">+${((ts - prevTs) / 1000).toFixed(1)}s</span>` : "";
+    if (!isNaN(ts)) prevTs = ts;
     return `<div class="step step-${e.kind}" data-step-node="${esc(e.node || "")}" id="seq-${e.seq}">
-      <div class="meta"><span class="tag">#${e.seq}</span><span class="kind">${label}</span>${tool}${node}
+      <div class="meta"><span class="tag">#${e.seq}</span><span class="kind">${label}</span>${tool}${node}${delta}
         · ${esc(e.created_at)}
         <span class="step-fb" data-seq="${e.seq}">
           <button data-score="1" title="这步做得好">👍</button><button data-score="-1" title="这步有问题">👎</button>
         </span></div>
-      <pre>${esc(e.text)}</pre></div>`;
+      ${foldPre(e.text)}</div>`;
   }).join("");
   container.insertAdjacentHTML("beforeend", html);
   container.dataset.count = list.length;
+  if (!isNaN(prevTs)) container.dataset.lastTs = new Date(prevTs).toISOString();
 }
+
+/* 长步骤折叠 + 卡片复制：事件委托 */
+document.addEventListener("click", async e => {
+  const foldBtn = e.target.closest(".fold-btn");
+  if (foldBtn) {
+    const wrap = foldBtn.closest(".fold");
+    const open = wrap.classList.toggle("open");
+    foldBtn.textContent = open ? "收起 ▴" : "展开 ▾";
+    return;
+  }
+  const copyBtn = e.target.closest(".copy-btn");
+  if (copyBtn) {
+    const el = document.getElementById(copyBtn.dataset.copy);
+    if (!el) return;
+    try {
+      await navigator.clipboard.writeText(el.textContent);
+      copyBtn.textContent = "已复制 ✓";
+      setTimeout(() => { copyBtn.textContent = "复制"; }, 1200);
+    } catch (err) { copyBtn.textContent = "复制失败"; }
+  }
+});
 
 /* 节点级反馈：事件委托，点击后该步按钮锁定并打勾（fetch 不跳页） */
 document.addEventListener("click", async e => {
@@ -249,7 +285,22 @@ async function watchRun(runId, embedded) {
       renderInto(graphEl, s.graph, statuses);
     }
     renderSteps(stepsEl, s.events);
-    document.getElementById("output").textContent = JSON.stringify(s.run.output);
+    // 最终输出：Markdown 渲染（answer 字段），否则 JSON 代码块——与对话页一致
+    const outEl = document.getElementById("output");
+    if (s.run.output && typeof s.run.output.answer === "string")
+      outEl.innerHTML = DOMPurify.sanitize(
+        marked.parse(s.run.output.answer, {breaks: true}));
+    else
+      outEl.innerHTML = `<pre>${esc(JSON.stringify(s.run.output, null, 2))}</pre>`;
+    // 失败 run：报错从时间线提到顶部横幅，一眼定位
+    if (s.run.status === "failed" && !document.getElementById("fail-banner")) {
+      const last = [...s.events].reverse().find(e => e.kind !== "graph");
+      if (last) {
+        const head = document.getElementById("run-head");
+        head.insertAdjacentHTML("afterend",
+          `<div class="alert" id="fail-banner"><b>失败</b>${foldPre(last.text)}</div>`);
+      }
+    }
     if (s.run.status !== "queued" && s.run.status !== "running") break;
     await new Promise(r => setTimeout(r, 2000));
   }
