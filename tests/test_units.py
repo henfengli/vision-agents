@@ -666,6 +666,42 @@ class TestMatchObservation(unittest.TestCase):
 
 
 
+class TestSpanMeta(unittest.TestCase):
+    """_span_meta：模型步骤（thought/llm/final）↔ GENERATION span 的第 n 次对齐。"""
+
+    EVENTS = [
+        {"seq": 0, "kind": "trace", "payload": {"trace_id": "t"}},
+        {"seq": 1, "kind": "thought", "payload": {"content": "..."}},
+        {"seq": 2, "kind": "tool_call", "payload": {"tool": "grep"}},
+        {"seq": 3, "kind": "tool_result", "payload": {"tool": "grep"}},
+        {"seq": 4, "kind": "llm", "payload": {"content": "a"}},
+    ]
+    OBS = [
+        {"id": "g2", "type": "GENERATION", "model": "m",
+         "usage": {"totalTokens": 30}, "calculatedTotalCost": 0.002,
+         "startTime": "2026-01-01T00:00:06Z", "endTime": "2026-01-01T00:00:08Z"},
+        {"id": "g1", "type": "GENERATION", "model": "m",
+         "usage": {"totalTokens": 10}, "calculatedTotalCost": 0.001,
+         "startTime": "2026-01-01T00:00:01Z", "endTime": "2026-01-01T00:00:02.5Z"},
+        {"id": "s1", "type": "SPAN", "name": "grep",
+         "startTime": "2026-01-01T00:00:03Z", "endTime": "2026-01-01T00:00:05Z"},
+    ]
+
+    def test_model_steps_get_meta_by_occurrence(self):
+        from agent_platform.viewer.pages.runs import _span_meta
+        meta = _span_meta(self.EVENTS, self.OBS)
+        self.assertEqual(set(meta), {1, 4})      # 只模型步骤，工具不补
+        self.assertEqual(meta[1]["tokens"], 10)  # 第 1 次模型步 ↔ 早 span（乱序到达）
+        self.assertEqual(meta[1]["ms"], 1500)
+        self.assertEqual(meta[4]["tokens"], 30)
+        self.assertEqual(meta[4]["cost"], 0.002)
+
+    def test_fewer_spans_than_steps(self):
+        from agent_platform.viewer.pages.runs import _span_meta
+        meta = _span_meta(self.EVENTS, self.OBS[:1])  # 只有晚到的那个
+        self.assertEqual(set(meta), {1})              # 剩余步骤无元信息，不报错
+
+
 class TestArtGraph(unittest.TestCase):
     """资产化任务图的纯逻辑面：声明校验 / 拓扑分层 / 闸门求值。"""
 

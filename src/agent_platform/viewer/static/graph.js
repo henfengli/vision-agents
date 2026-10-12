@@ -255,82 +255,37 @@ function renderRunHead(s) {
       · 耗时 ${s.run.duration_ms || "-"}ms · ${esc(s.created_at)}</div>`;
 }
 
-/* —— Trace 瀑布：Langfuse 数据 + 自绘视图（LangSmith/Tempo 式树形 Gantt） —— */
-/* 行 = span（树形缩进 + 类型色点 + 时长条），点击展开输入/输出详情；
-   span 映射到时间线步骤（seq）时给「跳到步骤」联动 */
-function renderTrace(container, metaEl, trace) {
-  const spans = trace.spans || [];
-  if (!spans.length) {
-    container.innerHTML = '<div class="meta">暂无 span 数据（可能还在入库），'
-      + '可点右上外链到 Langfuse 查看</div>';
-    return;
+/* —— Trace 元信息回填：Langfuse span（模型/token/成本/真实耗时）并进 —— */
+/* 时间线步骤行。不另开视图——执行过程已覆盖步骤内容，span 数据只是补充 */
+function annotateSpans(stepsEl, meta) {
+  for (const [seq, m] of Object.entries(meta || {})) {
+    const head = document.querySelector(`#seq-${seq} > .meta`);
+    if (!head || head.querySelector(".span-meta")) continue;
+    const info = [m.model, m.tokens ? `${m.tokens} tok` : "",
+      m.cost ? `$${Number(m.cost).toFixed(4)}` : "",
+      m.ms != null ? `${(m.ms / 1000).toFixed(2)}s` : ""]
+      .filter(Boolean).join(" · ");
+    if (!info) continue;
+    const fb = head.querySelector(".step-fb");
+    const html = ` <span class="span-meta">${esc(info)}</span>`;
+    if (fb) fb.insertAdjacentHTML("beforebegin", html);
+    else head.insertAdjacentHTML("beforeend", html);
   }
-  const t0 = Math.min(...spans.map(s => Date.parse(s.start)));
-  const t1 = Math.max(...spans.map(s => Date.parse(s.end || s.start)));
-  const total = Math.max(t1 - t0, 1);
-  const byId = Object.fromEntries(spans.map(s => [s.id, s]));
-  const depth = s => {
-    let d = 0, p = s.parent;
-    while (p && byId[p] && d < 12) { d++; p = byId[p].parent; }
-    return d;
-  };
-  const ordered = [...spans].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-  const totTokens = spans.reduce((n, s) => n + (s.tokens || 0), 0);
-  metaEl.textContent = `${spans.length} spans · ${(total / 1000).toFixed(1)}s`
-    + (totTokens ? ` · ${totTokens} tokens` : "");
-  container.innerHTML = ordered.map((s, i) => {
-    const start = Date.parse(s.start), end = Date.parse(s.end || s.start);
-    const left = ((start - t0) / total * 100).toFixed(2);
-    const width = Math.max((end - start) / total * 100, 0.8).toFixed(2);
-    const dur = ((end - start) / 1000).toFixed(2) + "s";
-    const cls = s.level === "ERROR" ? "err"
-      : s.type === "GENERATION" ? "gen" : "span";
-    const info = [s.model, s.tokens ? `${s.tokens} tok` : "",
-      s.cost ? `$${Number(s.cost).toFixed(4)}` : ""].filter(Boolean).join(" · ");
-    const jump = s.seq != null
-      ? ` <a href="#seq-${s.seq}" class="wf-jump" data-seq="${s.seq}">步骤 #${s.seq} →</a>` : "";
-    return `<div class="wf-row" data-i="${i}">
-      <div class="wf-name" style="padding-left:${depth(s) * 16}px">
-        <span class="wf-dot ${cls}"></span>${esc(s.name)}</div>
-      <div class="wf-barwrap"><div class="wf-bar ${cls}"
-        style="left:${left}%;width:${width}%"></div></div>
-      <div class="wf-dur">${dur}</div></div>
-    <div class="wf-detail" hidden>
-      <div class="meta">${esc(s.type)}${info ? " · " + esc(info) : ""}${jump}</div>
-      ${s.input ? `<div class="meta wf-io-label">输入</div>${foldPre(s.input)}` : ""}
-      ${s.output ? `<div class="meta wf-io-label">输出</div>${foldPre(s.output)}` : ""}
-    </div>`;
-  }).join("");
-  container._spans = ordered;
 }
 
-/* 瀑布行点击展开/收起详情；「跳到步骤」滚动联动 */
-document.addEventListener("click", e => {
-  const jump = e.target.closest(".wf-jump");
-  if (jump) {
-    e.preventDefault();
-    const el = document.getElementById("seq-" + jump.dataset.seq);
-    if (el) el.scrollIntoView({behavior: "smooth", block: "center"});
-    return;
-  }
-  const row = e.target.closest(".wf-row");
-  if (!row) return;
-  const detail = row.nextElementSibling;
-  if (detail && detail.classList.contains("wf-detail")) detail.hidden = !detail.hidden;
-});
-
 /* —— Run 详情页：轮询 state.json，局部刷新图与步骤 —— */
-/* trace 瀑布数据量大，只在首拉与 run 到终态时各拉一次（?trace=1） */
+/* trace 元信息只在首拉与 run 到终态时各拉一次（?trace=1），回填步骤行 */
 async function watchRun(runId) {
   const graphEl = document.getElementById("graph");
   const stepsEl = document.getElementById("steps");
-  const traceEl = document.getElementById("trace-falls");
+  const wantTrace = document.getElementById("steps-head") &&
+    document.getElementById("steps-head").dataset.traceTid;
   stepsEl.dataset.runId = runId;
   let lastSeq = -1;   // seq 从 0 起（trace 事件是 seq 0），首拉要全量
   let traceDone = false, first = true, prevTerminal = false;
   const allEvents = [];   // 失败横幅/图状态推导要用完整事件，不随增量丢弃
   while (true) {
-    const askTrace = traceEl && !traceDone && (first || prevTerminal);
+    const askTrace = wantTrace && !traceDone && (first || prevTerminal);
     let s;
     try {
       s = await (await fetch(
@@ -343,10 +298,6 @@ async function watchRun(runId) {
     first = false;
     allEvents.push(...s.events);
     if (s.events.length) lastSeq = Math.max(...s.events.map(e => e.seq));
-    if (s.trace) {
-      renderTrace(traceEl, document.getElementById("trace-meta"), s.trace);
-      if (["success", "failed"].includes(s.run.status)) traceDone = true;
-    }
     renderRunHead(s);
     if (s.graph && s.graph.nodes && s.graph.nodes.length) {
       document.getElementById("graph-card").style.display = "";
@@ -359,6 +310,10 @@ async function watchRun(runId) {
       renderInto(graphEl, s.graph, statuses);
     }
     renderSteps(stepsEl, s.events);
+    if (s.trace) {
+      annotateSpans(stepsEl, s.trace.meta);
+      if (["success", "failed"].includes(s.run.status)) traceDone = true;
+    }
     // 最终输出：Markdown 渲染（answer 字段），否则 JSON 代码块——与对话页一致
     const outEl = document.getElementById("output");
     if (s.run.output && typeof s.run.output.answer === "string")
@@ -377,14 +332,13 @@ async function watchRun(runId) {
     }
     prevTerminal = s.run.status !== "queued" && s.run.status !== "running";
     if (prevTerminal) {
-      // 终态补拉一次完整 trace（入库有延迟，运行中拉的可能是部分 span）
-      if (traceEl && !traceDone) {
+      // 终态补拉一次完整 trace 元信息（入库有延迟，运行中拉的可能是部分）
+      if (wantTrace && !traceDone) {
         try {
           const t = await (await fetch(
             `/runs/${runId}/state.json?trace=1`)).json();
-          if (t.trace)
-            renderTrace(traceEl, document.getElementById("trace-meta"), t.trace);
-        } catch (err) { /* 瀑布缺失不挡页面 */ }
+          if (t.trace) annotateSpans(stepsEl, t.trace.meta);
+        } catch (err) { /* 元信息缺失不挡页面 */ }
       }
       break;
     }

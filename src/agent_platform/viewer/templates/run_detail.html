@@ -5,17 +5,6 @@
 <div class="card pending-banner">⏸ 待审批：<code>{{ pending.command }}</code>
   — 到 <a href="/approvals">审批台</a> 放行或拒绝</div>
 {% endif %}
-{# Trace 瀑布：Langfuse 是数据源，视图自绘（暗色原生、与步骤时间线联动）。
-   span 数据由 state.json?trace=1 异步填充；官方 UI 只留外链做深操作 #}
-{% if trace.tid %}
-<div class="card">
-  <div style="display:flex;justify-content:space-between;align-items:baseline">
-    <b>Trace 瀑布</b> <span class="meta" id="trace-meta"></span>
-    {% if trace.url %}<a href="{{ trace.url }}" target="_blank">在 Langfuse 打开 ↗</a>{% endif %}
-  </div>
-  <div id="trace-falls"><div class="meta">加载中…</div></div>
-</div>
-{% endif %}
 <div class="graph-shell" id="graph-card" style="display:none">
   <div class="cy" id="graph"></div>
   <div class="graph-overlay graph-legend">
@@ -40,9 +29,13 @@
   <pre id="input-pre">{{ input_json }}</pre>
   {% endif %}
 </div>
-<div class="page-head" style="margin-top:22px">
+{# data-trace-tid 触发 JS 回填 span 元信息（模型/token/成本）到步骤行；
+   深层排查（Annotate/队列）走官方 UI 外链 #}
+<div class="page-head" id="steps-head" style="margin-top:22px"
+     {% if trace.tid %}data-trace-tid="{{ trace.tid }}"{% endif %}>
   <div class="eyebrow">TIMELINE</div><h3>执行过程</h3>
-  <div class="meta">每步可 👍👎 留反馈（节点级，回写 Langfuse score）</div>
+  <div class="meta">每步可 👍👎 留反馈（节点级，回写 Langfuse score）{% if trace.url %}
+    · <a href="{{ trace.url }}" target="_blank">在 Langfuse 打开 ↗</a>{% endif %}</div>
 </div>
 <div id="steps"></div>
 <div class="card"><b>最终输出</b>

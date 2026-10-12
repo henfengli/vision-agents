@@ -58,24 +58,18 @@ def make_router(env: str, langfuse=None,
             state["graph"] = {**graph_event,
                               "statuses": {a["name"]: a["status"]
                                            for a in arts}}
-        # ?trace=1：trace 瀑布数据（Langfuse 为数据源，viewer 自绘视图）。
-        # 客户端只在首拉与 run 终态各要一次；span→步骤 seq 映射复用
-        # match_observation 的对齐规则，点 span 可跳到对应时间线步骤
+        # ?trace=1：Langfuse span 元信息按步骤 seq 回填（模型名/token/成本/
+        # 真实耗时，时间线步骤行内联展示）。客户端只在首拉与终态各要一次——
+        # span 入库有延迟，终态补拉保证完整。模型步骤与 GENERATION span 按
+        # 各自时序第 n 次对齐（展示用途；反馈写回的精确映射仍走
+        # match_observation）
         if request.query_params.get("trace") and langfuse is not None \
                 and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
-                obs = await langfuse.observations(tid)
-                seq_of = {}
-                for e in events:
-                    if e["kind"] in ("tool_call", "tool_result", "llm",
-                                     "final"):
-                        oid = match_observation(events, e["seq"], obs)
-                        if oid and oid not in seq_of:
-                            seq_of[oid] = e["seq"]
                 state["trace"] = {
                     "url": await langfuse.trace_url(tid),
-                    "spans": [_span_summary(o, seq_of) for o in obs],
+                    "meta": _span_meta(events, await langfuse.observations(tid)),
                 }
         return state
 
@@ -84,8 +78,9 @@ def make_router(env: str, langfuse=None,
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        # trace 瀑布卡：有 trace_id 就渲染容器，span 数据由 state.json?trace=1
-        # 异步填充；右侧外链直达 Langfuse 官方 UI（Annotate 等深操作去那里）
+        # trace 外链：有 trace_id 就在「执行过程」标题行给直达 Langfuse 官方
+        # UI 的链接（Annotate/队列等深操作去那里）；span 元信息由
+        # state.json?trace=1 异步回填到步骤行
         trace = {"tid": "", "url": ""}
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
@@ -147,27 +142,43 @@ def make_router(env: str, langfuse=None,
     return router
 
 
-def _clip_io(v, limit: int = 1500) -> str:
-    """span 输入/输出截断为可读文本（瀑布详情面板用，防大 payload 撑爆首屏）。"""
-    if v is None:
-        return ""
-    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False,
-                                                default=str)
-    return s if len(s) <= limit else s[:limit] + " …（截断）"
+def _span_meta(events: list[dict], observations: list[dict]) -> dict:
+    """模型步骤 seq → Langfuse span 元信息（model/tokens/cost/真实毫秒）。
 
-
-def _span_summary(o: dict, seq_of: dict) -> dict:
-    """Langfuse observation → 瀑布行数据。io 截断；seq = 对应时间线步骤。"""
-    usage = o.get("usage") or {}
-    return {"id": o.get("id"), "name": o.get("name") or "",
-            "type": o.get("type") or "SPAN",
-            "parent": o.get("parentObservationId") or "",
-            "start": o.get("startTime"), "end": o.get("endTime"),
-            "model": o.get("model") or "", "level": o.get("level") or "",
-            "tokens": usage.get("totalTokens"),
+    展示用途的对齐：模型类步骤（thought/llm/final）按 seq 排序、
+    GENERATION span 按 startTime 排序，第 n 个对第 n 个——与反馈写回
+    的 match_observation 同源规则，但覆盖 thought（展示无写副作用，
+    映射不上只是少一行元信息）。
+    """
+    gens = sorted((o for o in observations if o.get("type") == "GENERATION"),
+                  key=lambda o: o.get("startTime") or "")
+    meta = {}
+    i = 0
+    for e in events:
+        if e["kind"] not in ("thought", "llm", "final"):
+            continue
+        if i >= len(gens):
+            break
+        o = gens[i]
+        i += 1
+        ms = None
+        if o.get("startTime") and o.get("endTime"):
+            from datetime import datetime
+            try:
+                ms = int((datetime.fromisoformat(
+                    o["endTime"].replace("Z", "+00:00"))
+                    - datetime.fromisoformat(
+                        o["startTime"].replace("Z", "+00:00"))
+                ).total_seconds() * 1000)
+            except ValueError:  # 时间格式异常就缺省，不挡主流程
+                ms = None
+        meta[e["seq"]] = {
+            "model": o.get("model") or "",
+            "tokens": (o.get("usage") or {}).get("totalTokens"),
             "cost": o.get("calculatedTotalCost"),
-            "seq": seq_of.get(o.get("id")),
-            "input": _clip_io(o.get("input")), "output": _clip_io(o.get("output"))}
+            "ms": ms,
+        }
+    return meta
 
 
 def _event_summary(e: dict) -> dict:

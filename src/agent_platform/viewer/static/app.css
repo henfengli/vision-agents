@@ -430,28 +430,9 @@ details.steps .step pre { white-space: pre-wrap; word-break: break-word;
 .copy-btn:hover { border-color: var(--accent); color: var(--text); }
 .in-q { font-size: 14.5px; line-height: 1.7; padding: 4px 0 6px; }
 
-/* —— Trace 瀑布（Langfuse 数据，自绘 Gantt） —— */
-.wf-row { display: grid; grid-template-columns: minmax(160px, 300px) 1fr 64px;
-  align-items: center; gap: 10px; padding: 4px 0; cursor: pointer;
-  border-radius: 6px; }
-.wf-row:hover { background: var(--panel-2); }
-.wf-name { font-family: var(--mono); font-size: 12px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; display: flex;
-  align-items: center; gap: 7px; }
-.wf-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.wf-dot.gen { background: var(--violet); }
-.wf-dot.span { background: var(--blue); }
-.wf-dot.err { background: var(--err); }
-.wf-barwrap { position: relative; height: 14px; background: var(--panel-2);
-  border-radius: 4px; overflow: hidden; }
-.wf-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 3px;
-  background: var(--blue); opacity: 0.85; }
-.wf-bar.gen { background: var(--violet); }
-.wf-bar.err { background: var(--err); }
-.wf-dur { font-family: var(--mono); font-size: 11px; color: var(--text-dim);
-  text-align: right; }
-.wf-detail { padding: 8px 10px 12px; margin: 0 0 6px; border-left: 2px solid var(--border); }
-.wf-io-label { margin-top: 8px; }
+/* —— 步骤行内联 span 元信息（模型/token/成本/真实耗时，Langfuse 回填） —— */
+.span-meta { font-family: var(--mono); font-size: 11px;
+  color: var(--violet); opacity: 0.9; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
