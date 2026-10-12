@@ -123,5 +123,5 @@ conf/                 base/common.yaml（共享默认）+ env/{dev,test,prod}.ya
 deploy/               systemd unit + install.sh
 sdk/agent_client/     业务方客户端 + agent-chat CLI
 tests/                单测 + PG 集成测试
-docs/                 设计文档
+docs/                 设计文档+预览图
 ```
