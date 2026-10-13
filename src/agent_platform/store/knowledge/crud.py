@@ -61,16 +61,106 @@ async def upsert(env: str, domain: str, key: str, content: str,
 
 
 async def get_entry(entry_id: int) -> dict | None:
+    """整行详情（记忆页抽屉用）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, env, domain, key, content, expired, valid_to"
+            "SELECT id, env, domain, key, content, expired, valid_from, valid_to,"
+            " superseded_by, feedback_score, source_run, code_ref, created_at"
             " FROM knowledge WHERE id=%s", (entry_id,))
         row = await cur.fetchone()
     if not row:
         return None
     return {"id": row[0], "env": row[1], "domain": row[2], "key": row[3],
             "content": row[4], "expired": row[5],
-            "valid_to": row[6].isoformat() if row[6] else None}
+            "valid_from": row[6].isoformat() if row[6] else None,
+            "valid_to": row[7].isoformat() if row[7] else None,
+            "superseded_by": row[8], "feedback_score": row[9],
+            "source_run": row[10], "code_ref": row[11],
+            "created_at": row[12].isoformat() if row[12] else None}
+
+
+async def restore(entry_id: int) -> None:
+    """恢复生效：撤销过期/取代标记（人工判定用）。superseded_by 链断开。"""
+    async with pool().connection() as conn:
+        await conn.execute(
+            "UPDATE knowledge SET expired=false, valid_to=NULL,"
+            " superseded_by=NULL, valid_from=now() WHERE id=%s", (entry_id,))
+
+
+async def domain_stats(env: str) -> dict[str, dict]:
+    """按域聚合条目数：{domain: {active, inactive}}——记忆页侧栏角标。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT domain,"
+            " COUNT(*) FILTER (WHERE NOT expired AND valid_to IS NULL),"
+            " COUNT(*) FILTER (WHERE expired OR valid_to IS NOT NULL)"
+            " FROM knowledge WHERE env=%s GROUP BY domain ORDER BY domain",
+            (env,))
+        rows = await cur.fetchall()
+    return {d: {"active": a, "inactive": i} for d, a, i in rows}
+
+
+async def evolution_chain(env: str, domain: str, key: str) -> list[dict]:
+    """演化链：同域内沿 superseded_by 双向走，返回时间序的整条链
+    （含被取代/过期历史），当前 key 的条目带 current 标记。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, key, expired, valid_to IS NOT NULL, superseded_by,"
+            " feedback_score, created_at FROM knowledge"
+            " WHERE env=%s AND domain=%s ORDER BY created_at", (env, domain))
+        rows = await cur.fetchall()
+    by_key = {r[1]: r for r in rows}
+    if key not in by_key:
+        return []
+    # 反向找链头：谁的 superseded_by 指向当前 key
+    head = key
+    seen = {head}
+    while True:
+        prev = next((r[1] for r in rows if r[4] == head and r[1] not in seen),
+                    None)
+        if prev is None:
+            break
+        head, seen = prev, seen | {prev}
+    chain = []
+    cur_key: str | None = head
+    while cur_key is not None and cur_key in by_key:
+        r = by_key[cur_key]
+        chain.append({"id": r[0], "key": r[1], "expired": r[2],
+                      "superseded": r[3], "feedback_score": r[5],
+                      "created_at": r[6].isoformat() if r[6] else None,
+                      "current": cur_key == key})
+        nxt = r[4]
+        cur_key = nxt if nxt and nxt not in {c["key"] for c in chain} else None
+    return chain
+
+
+async def similar_pairs(env: str, domain: str | None = None,
+                        threshold: float = 0.85, limit: int = 20) -> list[dict]:
+    """疑似矛盾/重复对：同域两条生效条目向量余弦相似度超阈值。
+    pgvector 缺失或无向量时返回空（不造数据）。"""
+    where = "a.env=%s AND a.domain=b.domain AND a.id<b.id" \
+            " AND a.expired=false AND a.valid_to IS NULL" \
+            " AND b.expired=false AND b.valid_to IS NULL" \
+            " AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL"
+    params: list = [env]
+    if domain:
+        where += " AND a.domain=%s"
+        params.append(domain)
+    params += [threshold, limit]
+    try:
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT a.id, a.key, a.content, b.id, b.key, b.content,"
+                " 1 - (a.embedding <=> b.embedding) AS sim"
+                " FROM knowledge a JOIN knowledge b ON " + where +
+                " AND 1 - (a.embedding <=> b.embedding) > %s"
+                " ORDER BY sim DESC LIMIT %s", tuple(params))
+            rows = await cur.fetchall()
+    except Exception:  # noqa: BLE001 —— 无 pgvector 时矛盾检测不可用
+        return []
+    return [{"a": {"id": r[0], "key": r[1], "content": r[2]},
+             "b": {"id": r[3], "key": r[4], "content": r[5]},
+             "similarity": round(float(r[6]), 3)} for r in rows]
 
 
 async def update_content(entry_id: int, content: str) -> None:

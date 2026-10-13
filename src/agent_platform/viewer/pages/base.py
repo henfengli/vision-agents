@@ -61,7 +61,8 @@ def esc(text: str) -> str:
 
 def make_static_router() -> APIRouter:
     router = APIRouter()
-    allowed = {"app.css", "graph.js", "admin.js", "cytoscape.min.js",
+    allowed = {"app.css", "graph.js", "admin.js", "memory.js",
+               "cytoscape.min.js",
                "cytoscape-dagre.min.js", "marked.min.js", "dompurify.min.js"}
 
     # filename:path 才能匹配 fonts/ 子目录（默认 path converter 不吃斜杠，字体曾因此 404）

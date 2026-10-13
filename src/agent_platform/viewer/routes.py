@@ -19,7 +19,9 @@ def make_viewer_router(submitter, defs_store, env: str,
                        langfuse=None, token: str | None = None,
                        domains: list[str] | None = None,
                        target_envs: list[str] | None = None,
-                       tool_names: list[str] | None = None) -> APIRouter:
+                       tool_names: list[str] | None = None,
+                       domain_cfgs: dict | None = None,
+                       embedder=None) -> APIRouter:
     router = APIRouter()
     router.include_router(base.make_static_router())
     # 顶栏"退出"入口仅登录开启时出现
@@ -38,7 +40,9 @@ def make_viewer_router(submitter, defs_store, env: str,
                                            tool_names=tool_names,
                                            domains=domains,
                                            target_envs=target_envs))
-    pages.include_router(memory.make_router(env, target_envs=target_envs))
+    pages.include_router(memory.make_router(env, target_envs=target_envs,
+                                            domain_cfgs=domain_cfgs,
+                                            embedder=embedder))
     router.include_router(pages)
 
     if token:

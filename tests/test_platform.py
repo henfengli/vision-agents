@@ -456,6 +456,62 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             "format": "json"})
         self.assertIn("timeout_s", diff.json()["diff"])
 
+    async def test_memory_console_full_lifecycle(self):
+        """记忆页：域侧栏统计 + 检索试用 + 抽屉明细（演化链/反馈）+ 过期恢复。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.store import cases, feedback, knowledge
+        from agent_platform.viewer import make_viewer_router
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        await knowledge.upsert("test", "board", "GMV 口径", "GMV 含运费（旧口径）。",
+                               source_run=r["run_id"])
+        await knowledge.upsert("test", "board", "GMV 口径 v2",
+                               "GMV 不含运费（新口径）。",
+                               source_run=r["run_id"])
+        await knowledge.supersede_keys("test", "board", ["GMV 口径"],
+                                       "GMV 口径 v2")
+        await feedback.add(r["run_id"], 1, "答得准")
+        await cases.add("test", "board", "psycopg.errors.DeadlockDetected x",
+                        "infra", "并发冲突，重试即可", r["run_id"])
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        page = client.get("/memory")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("mem-layout", page.text)
+        self.assertIn("GMV 口径 v2", page.text)       # 条目卡
+        self.assertIn("1 生效", page.text)            # 侧栏角标
+        self.assertIn("已取代", page.text)            # 失效条目默认列出
+        self.assertIn("并发冲突", page.text)          # 案例 tab
+        self.assertIn("memory.js", page.text)
+
+        hits = client.get("/memory/search.json",
+                          params={"q": "GMV 口径", "domain": "board"})
+        self.assertEqual(hits.status_code, 200)
+        self.assertEqual(hits.json()["hits"][0]["key"], "GMV 口径 v2")
+
+        det = None
+        for it in page.text.split('data-id="')[1:]:
+            eid = int(it.split('"')[0])
+            d = client.get(f"/memory/{eid}/detail.json")
+            if d.json()["key"] == "GMV 口径 v2":
+                det = d.json()
+                break
+        self.assertIsNotNone(det)
+        self.assertEqual([c["key"] for c in det["chain"]],
+                         ["GMV 口径", "GMV 口径 v2"])  # 演化链时间序
+        self.assertTrue(det["chain"][0]["superseded"])
+        self.assertEqual(det["feedback"][0]["comment"], "答得准")
+
+        eid = det["id"]
+        self.assertEqual(client.post(f"/memory/{eid}/expire").status_code, 200)
+        self.assertTrue((await knowledge.get_entry(eid))["expired"])
+        self.assertEqual(client.post(f"/memory/{eid}/restore").status_code, 200)
+        self.assertFalse((await knowledge.get_entry(eid))["expired"])
+
     async def test_viewer_auth_login_flow(self):
         """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""
         from fastapi.testclient import TestClient

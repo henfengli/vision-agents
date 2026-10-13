@@ -92,6 +92,7 @@ class Runtime:
     relay: DingTalkRelay
     langfuse: LangfuseClient
     tool_names: list[str] = field(default_factory=list)  # 管理页角色编辑器复选框
+    embedder: object = None  # 记忆页检索试用（model_pool.embed）
     temporal_client: object = None
     worker: object = None
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
@@ -191,6 +192,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     rt = Runtime(settings=settings, defs=defs, tasks=tasks,
                  submitter=submitter, engine=engine, relay=relay,
                  langfuse=langfuse, tool_names=tool_registry.catalog_names,
+                 embedder=model_pool.embed,
                  temporal_client=temporal_client,
                  worker=worker,
                  _worker_task=asyncio.create_task(worker.run()))
@@ -245,7 +247,8 @@ def build_app(settings: Settings | None = None):
             langfuse=rt.langfuse, token=settings.bearer_token,
             domains=list(settings.domains),
             target_envs=settings.target_envs or None,
-            tool_names=rt.tool_names))
+            tool_names=rt.tool_names, domain_cfgs=settings.domains,
+            embedder=rt.embedder))
         try:
             yield
         finally:

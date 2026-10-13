@@ -1,59 +1,146 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block content %}
-{{ m.page_head("MEMORY", "记忆管理", "按环境分区 · 反馈会影响条目权重 · 编辑保存后重新生效") }}
-<div class="card">
-  <form method="get" class="filter-bar">
+{{ m.page_head("MEMORY", "记忆管理",
+   "写入-召回-演化全程可查 · 检索试用 = 角色实际命中 · 反馈影响召回权重") }}
+<div class="admin-layout mem-layout">
+  <aside class="admin-side">
     {% if target_envs %}
-    <select name="env" class="inline">
-      {% for e in target_envs %}
-      <option value="{{ e }}"{% if e == view_env %} selected{% endif %}>{{ e }}</option>
-      {% endfor %}
-    </select>
+    <form method="get" style="margin-bottom:10px">
+      <select name="env" class="inline" onchange="this.form.submit()"
+              style="width:100%">
+        {% for e in target_envs %}
+        <option value="{{ e }}"{% if e == view_env %} selected{% endif %}>
+          环境 {{ e }}</option>
+        {% endfor %}
+      </select>
+    </form>
     {% endif %}
-    <input name="domain" class="inline" value="{{ domain }}" placeholder="域过滤">
-    <label class="meta"><input type="checkbox" name="include_inactive" value="true"
-      {% if include_inactive %}checked{% endif %}> 含失效</label>
-    <button>筛选</button></form></div>
-<div class="card"><table class="grid">
-  <thead><tr><th>域</th><th>key</th><th>内容</th><th>状态</th><th></th></tr></thead>
-  <tbody>
-    {% for i in items %}
-    <tr><td><span class="tag">{{ i.domain }}</span></td>
-      <td class="meta">{{ i.key }}</td>
-      <td><pre style="max-width:520px">{{ i.content[:500] }}</pre></td>
-      <td>
-        {% if i.superseded %}<span class="pill pill-failed">已取代</span>
-        {% elif i.expired %}<span class="pill pill-queued">已过期</span>
-        {% else %}<span class="pill pill-success"><span class="led"></span>生效中</span>
-          <span class="meta">+{{ i.feedback_score }}</span>{% endif %}
-      </td>
-      <td><button onclick="editEntry({{ i.id }})">编辑</button></td></tr>
-    {% else %}
-    <tr><td colspan="5" class="meta">暂无条目</td></tr>
-    {% endfor %}
-  </tbody></table></div>
-<div class="card" id="edit-card" style="display:none">
-  <b>编辑条目</b> <span id="edit-id" class="meta"></span>
-  <textarea id="edit-content" rows="8"></textarea>
-  <button onclick="saveEntry()">保存（重新生效）</button>
-  <span id="edit-msg" class="meta"></span></div>
+    <div class="admin-tabs" id="mem-tabs">
+      <button data-tab="kb" class="on">知识</button>
+      <button data-tab="cases">案例<span class="meta"> {{ cases|length }}</span></button>
+      <button data-tab="conflicts">矛盾<span class="meta"> {{ conflicts|length }}</span></button>
+    </div>
+    <div class="admin-items" style="display:block; margin-top:10px">
+      {% for d, s in stats.items() %}
+      <a class="admin-item{% if d == domain %} sel{% endif %}"
+         href="/memory?env={{ view_env }}&domain={{ d }}">
+        <div class="ai-name">{{ d }}</div>
+        <div class="ai-meta">{{ s.active }} 生效{% if s.inactive %} · {{ s.inactive }} 失效{% endif %}</div>
+      </a>
+      {% else %}
+      <div class="meta" style="padding:8px">该环境暂无记忆条目</div>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <section class="admin-main">
+    {# —— 知识 tab —— #}
+    <div class="mem-tab" id="tab-kb">
+      <form class="mem-search" id="mem-search-form">
+        <input id="mem-q" placeholder="检索试用：输入业务问题，看角色实际会命中什么（trgm+向量 RRF，同 recall 入口）">
+        <button>检索</button>
+      </form>
+      <div id="mem-search-results"></div>
+      <div id="mem-list">
+        {% for i in items %}
+        <button class="mem-card" data-id="{{ i.id }}">
+          <div class="mc-head">
+            <span class="ai-name">{{ i.key }}</span>
+            {% if i.superseded %}<span class="pill pill-failed">已取代</span>
+            {% elif i.expired %}<span class="pill pill-queued">已过期</span>
+            {% else %}<span class="pill pill-success"><span class="led"></span>生效中</span>{% endif %}
+            {% if i.code_ref %}
+              {% if i.fresh %}<span class="pill pill-success">代码一致</span>
+              {% else %}<span class="pill pill-failed">代码已漂移</span>{% endif %}
+            {% endif %}
+            {% if i.feedback_score %}<span class="meta">反馈 {{ "%+d"|format(i.feedback_score) }}</span>{% endif %}
+          </div>
+          <div class="ai-meta">{{ i.domain }} · {{ i.created_at[:10] }}</div>
+        </button>
+        {% else %}
+        <div class="admin-empty">当前筛选下暂无条目</div>
+        {% endfor %}
+      </div>
+      <label class="meta" style="display:inline-block; margin-top:10px">
+        <input type="checkbox" {% if include_inactive %}checked{% endif %}
+          onchange="location.search='?env={{ view_env }}&domain={{ domain }}&include_inactive='+(this.checked?'true':'false')">
+        含失效条目</label>
+    </div>
+
+    {# —— 案例 tab —— #}
+    <div class="mem-tab" id="tab-cases" style="display:none">
+      {% for c in cases %}
+      <div class="mem-case">
+        <div class="mc-head">
+          <span class="tag">{{ c.category or "未分类" }}</span>
+          <span class="mono meta">{{ c.fingerprint }}</span>
+          {% if c.superseded %}<span class="pill pill-failed">已取代</span>{% endif %}
+          <span class="meta">👍{{ c.thumbs_up }} 👎{{ c.thumbs_down }}</span>
+        </div>
+        <pre>{{ c.conclusion }}</pre>
+        <div class="ai-meta">{{ c.domain or "-" }} · {{ c.created_at[:10] }}
+          {% if c.source_run %} · <a href="/runs/{{ c.source_run }}">来源 run</a>{% endif %}
+        </div>
+      </div>
+      {% else %}
+      <div class="admin-empty">暂无报错案例——失败 run 归因后会沉淀在这里</div>
+      {% endfor %}
+    </div>
+
+    {# —— 矛盾 tab —— #}
+    <div class="mem-tab" id="tab-conflicts" style="display:none">
+      {% for p in conflicts %}
+      <div class="mem-conflict">
+        <div class="mc-head"><span class="pill pill-queued">相似度 {{ p.similarity }}</span>
+          <span class="meta">两条都生效且语义高度相似，人工仲裁</span></div>
+        <div class="cf-pair">
+          <div class="cf-side">
+            <div class="ai-name">{{ p.a.key }}</div>
+            <pre>{{ p.a.content }}</pre>
+            <button class="ver-rb" data-keep="{{ p.a.id }}" data-drop="{{ p.b.id }}">保留这条</button>
+            <button class="ver-rb" data-open="{{ p.a.id }}">编辑</button>
+          </div>
+          <div class="cf-side">
+            <div class="ai-name">{{ p.b.key }}</div>
+            <pre>{{ p.b.content }}</pre>
+            <button class="ver-rb" data-keep="{{ p.b.id }}" data-drop="{{ p.a.id }}">保留这条</button>
+            <button class="ver-rb" data-open="{{ p.b.id }}">编辑</button>
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="admin-empty">无疑似矛盾对（向量余弦 ≥ 0.85 的生效条目对会列在这里）</div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+{# 右侧抽屉：明细 + 编辑 + 演化链 + 反馈 #}
+<div class="mem-drawer" id="mem-drawer">
+  <div class="md-head">
+    <b id="md-key"></b>
+    <span id="md-pills"></span>
+    <button class="md-close" id="md-close">×</button>
+  </div>
+  <div class="md-meta" id="md-meta"></div>
+  <textarea id="md-content" rows="10" class="mono"></textarea>
+  <div class="af-actions">
+    <button id="md-save" class="admin-new" style="width:auto">保存（重新生效）</button>
+    <button id="md-expire" class="ver-rb">标记过期</button>
+    <button id="md-restore" class="ver-rb">恢复生效</button>
+    <span id="md-msg" class="meta"></span>
+  </div>
+  <div class="md-sec">演化链（superseded_by）</div>
+  <div id="md-chain" class="af-vers"></div>
+  <div class="md-sec">来源反馈</div>
+  <div id="md-feedback"></div>
+</div>
+<div class="mem-scrim" id="mem-scrim"></div>
+
 <script>
-// id → 当前内容，点"编辑"时回填 textarea，避免凭记忆重写
-const ENTRIES = {{ entries_json|safe }};
-let editId = null;
-function editEntry(id) {
-  editId = id;
-  document.getElementById("edit-card").style.display = "block";
-  document.getElementById("edit-id").textContent = "#" + id;
-  document.getElementById("edit-content").value = ENTRIES[id] || "";
-}
-async function saveEntry() {
-  const resp = await fetch(`/memory/${editId}`, {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({content: document.getElementById("edit-content").value})});
-  document.getElementById("edit-msg").textContent = resp.ok ? "已保存" : "失败";
-  if (resp.ok) setTimeout(() => location.reload(), 600);
-}
+window.MEMORY = {env: {{ view_env|tojson }}, domain: {{ domain|tojson }},
+                 items: {{ items_json|safe }}};
 </script>
+<script src="/static/memory.js"></script>
 {% endblock %}

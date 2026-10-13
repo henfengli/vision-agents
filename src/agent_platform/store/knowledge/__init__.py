@@ -5,7 +5,9 @@
 - profiles   资产档案与 session 交接摘要
 """
 
-from .crud import get_entry, list_all, list_by_domain, update_content, upsert
+from .crud import (domain_stats, evolution_chain, get_entry, list_all,
+                   list_by_domain, restore, similar_pairs, update_content,
+                   upsert)
 from .profiles import asset_profiles, latest_session_summaries
 from .retrieval import current_commit, is_entry_fresh, search
 from .temporal import mark_expired, supersede_by_runs, supersede_keys
@@ -15,4 +17,5 @@ __all__ = [
     "search", "current_commit", "is_entry_fresh",
     "supersede_by_runs", "supersede_keys", "mark_expired",
     "latest_session_summaries", "asset_profiles",
+    "domain_stats", "evolution_chain", "similar_pairs", "restore",
 ]

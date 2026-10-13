@@ -70,3 +70,27 @@ async def supersede_by_runs(env: str, run_ids: list[str],
             " WHERE env=%s AND source_run = ANY(%s) AND valid_to IS NULL",
             (superseded_by, env, run_ids))
         return cur.rowcount
+
+
+async def list_all(env: str, domain: str | None = None,
+                   limit: int = 200) -> list[dict]:
+    """记忆页案例 tab：全量列出（含失效，状态列展示）。"""
+    where = "WHERE env=%s"
+    params: list = [env]
+    if domain:
+        where += " AND domain=%s"
+        params.append(domain)
+    params.append(limit)
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, domain, fingerprint, category, conclusion, source_run,"
+            " thumbs_up, thumbs_down, valid_to IS NOT NULL, superseded_by,"
+            " created_at FROM cases " + where +
+            " ORDER BY created_at DESC LIMIT %s", tuple(params))
+        rows = await cur.fetchall()
+    return [{"id": r[0], "domain": r[1], "fingerprint": r[2],
+             "category": r[3], "conclusion": r[4], "source_run": r[5],
+             "thumbs_up": r[6], "thumbs_down": r[7], "superseded": r[8],
+             "superseded_by": r[9],
+             "created_at": r[10].isoformat() if r[10] else None}
+            for r in rows]

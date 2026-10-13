@@ -70,3 +70,16 @@ async def correction_counts(min_count: int = 3) -> list[dict]:
         rows = await cur.fetchall()
     return [{"session_id": r[0], "count": r[1], "last_at": r[2].isoformat()}
             for r in rows]
+
+
+async def for_run(run_id: str) -> list[dict]:
+    """某 run 的全部反馈留痕（记忆抽屉的来源反馈用）。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT kind, score, step_seq, comment, created_at FROM feedback"
+            " WHERE run_id=%s ORDER BY created_at", (run_id,))
+        rows = await cur.fetchall()
+    return [{"kind": r[0], "score": r[1], "step_seq": r[2],
+             "comment": r[3],
+             "created_at": r[4].isoformat() if r[4] else None}
+            for r in rows]
