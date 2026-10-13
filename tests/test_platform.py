@@ -475,6 +475,12 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         await feedback.add(r["run_id"], 1, "答得准")
         await cases.add("test", "board", "psycopg.errors.DeadlockDetected x",
                         "infra", "并发冲突，重试即可", r["run_id"])
+        # 真实召回一次：recall_block 应写 recall_hits 埋点
+        from agent_platform.memory import recall_block
+        block = await recall_block("test", "board", "GMV 口径是多少",
+                                   run_id=r["run_id"])
+        self.assertIn("GMV 口径 v2", block)
+        self.assertNotIn("旧口径", block)  # 被取代条目不召回
         app = create_app(self.settings)
         app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
         client = TestClient(app)
@@ -505,6 +511,22 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                          ["GMV 口径", "GMV 口径 v2"])  # 演化链时间序
         self.assertTrue(det["chain"][0]["superseded"])
         self.assertEqual(det["feedback"][0]["comment"], "答得准")
+        self.assertEqual(det["usage"]["hits"], 1)       # recall 埋点进抽屉
+        real = [h for h in det["recent_hits"] if h["source"] == "recall"]
+        self.assertEqual(real[0]["run_id"], r["run_id"])
+        self.assertTrue(any(h["source"] == "playground"  # 试用也留痕但不计使用
+                            for h in det["recent_hits"]))
+
+        # 健康度汇总与零召回过滤：v2 被召回过，手动新增的没有
+        page2 = client.get("/memory")
+        self.assertIn("近30天命中 1 次", page2.text)
+        self.assertIn("<b>0</b> 零召回", page2.text)
+        created = client.post("/memory/entries", json={
+            "domain": "board", "key": "退货口径", "content": "退货冲减 GMV。"})
+        self.assertEqual(created.status_code, 200)
+        page3 = client.get("/memory", params={"filter": "zero_recall"})
+        self.assertIn("退货口径", page3.text)
+        self.assertNotIn("GMV 口径 v2", page3.text)
 
         eid = det["id"]
         self.assertEqual(client.post(f"/memory/{eid}/expire").status_code, 200)

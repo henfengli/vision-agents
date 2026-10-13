@@ -61,6 +61,14 @@ document.getElementById("mem-search-form").addEventListener("submit",
 const drawer = document.getElementById("mem-drawer");
 const scrim = document.getElementById("mem-scrim");
 let curId = null;
+let mode = "edit";          // edit / create
+let dirty = false;
+
+const $ = id => document.getElementById(id);
+$("md-content").addEventListener("input", () => { dirty = true; });
+window.addEventListener("beforeunload", e => {
+  if (dirty && drawer.classList.contains("open")) e.preventDefault();
+});
 
 function pillHtml(e) {
   if (e.superseded || e.valid_to)
@@ -69,10 +77,36 @@ function pillHtml(e) {
   return '<span class="pill pill-success"><span class="led"></span>生效中</span>';
 }
 
-async function openDrawer(id) {
-  curId = id;
+function openCreate() {
+  mode = "create";
+  curId = null;
+  dirty = false;
   drawer.classList.add("open");
   scrim.classList.add("open");
+  $("md-key").textContent = "新增条目";
+  $("md-pills").innerHTML = "";
+  $("md-meta").innerHTML = "手动写入，立即生效并参与召回";
+  $("md-create-fields").style.display = "";
+  $("md-hint").style.display = "none";
+  $("md-content").value = "";
+  $("md-msg").textContent = "";
+  $("md-expire").style.display = "none";
+  $("md-restore").style.display = "none";
+  $("md-save").textContent = "保存（立即生效）";
+  $("md-usage-sec").style.display = "none";
+  $("md-chain-sec").style.display = "none";
+  $("md-feedback-sec").style.display = "none";
+}
+
+async function openDrawer(id) {
+  mode = "edit";
+  curId = id;
+  dirty = false;
+  drawer.classList.add("open");
+  scrim.classList.add("open");
+  $("md-create-fields").style.display = "none";
+  ["md-usage-sec", "md-chain-sec", "md-feedback-sec"]
+    .forEach(s => $(s).style.display = "");
   const resp = await fetch(`/memory/${id}/detail.json`);
   if (!resp.ok) {
     document.getElementById("md-key").textContent = "加载失败";
@@ -89,11 +123,22 @@ async function openDrawer(id) {
     pills += `<span class="meta"> 反馈 ${e.feedback_score > 0 ? "+" : ""}${e.feedback_score}</span>`;
   document.getElementById("md-pills").innerHTML = pills;
 
+  // 负反馈闭环提示：看到 👎 就知道下一步该干嘛
+  const hint = $("md-hint");
+  if ((e.feedback_score || 0) < 0 && !e.expired && !e.valid_to) {
+    hint.style.display = "";
+    hint.textContent = "⚠ 该条目反馈为负且仍在参与召回——建议编辑修正内容，"
+      + "或直接标记过期止损。";
+  } else {
+    hint.style.display = "none";
+  }
+
   const meta = [];
   meta.push(`#${e.id} · 生效自 ${esc((e.valid_from || "").slice(0, 16))}`);
   if (e.valid_to) meta.push(`失效于 ${esc(e.valid_to.slice(0, 16))}`);
-  if (e.source_run)
+  if (e.source_run && e.source_run !== "manual")
     meta.push(`来源 <a href="/runs/${esc(e.source_run)}">run</a>`);
+  else if (e.source_run === "manual") meta.push("手动新增");
   if (e.code_ref && e.code_ref.path)
     meta.push(`出处 <span class="mono">${esc(e.code_ref.path)}` +
       (e.code_ref.commit ? `@${esc(String(e.code_ref.commit).slice(0, 7))}` : "") +
@@ -105,6 +150,19 @@ async function openDrawer(id) {
     (e.expired || e.valid_to) ? "none" : "";
   document.getElementById("md-restore").style.display =
     (e.expired || e.valid_to) ? "" : "none";
+  $("md-save").textContent = "保存（重新生效）";
+
+  const u = e.usage;
+  document.getElementById("md-usage").innerHTML =
+    (u ? `<div class="meta">近 30 天命中 <b>${u.hits}</b> 次`
+       + `（${u.runs} 个不同 run），最后命中 ${esc((u.last_hit || "").slice(0, 16))}</div>`
+       : '<div class="meta">近 30 天零召回——若长期如此，考虑过期或改写</div>')
+    + (e.recent_hits.length
+       ? e.recent_hits.map(h => `<div class="md-fb meta">
+          #${h.rank ?? "-"} ${h.source === "playground" ? "（试用）" : ""}
+          ${h.run_id ? `<a href="/runs/${esc(h.run_id)}">run</a>` : "-"}
+          · ${esc((h.created_at || "").slice(0, 16))}</div>`).join("")
+       : "");
 
   document.getElementById("md-chain").innerHTML = e.chain.length > 1
     ? e.chain.map(c => `
@@ -132,9 +190,11 @@ async function openDrawer(id) {
 }
 
 function closeDrawer() {
+  if (dirty && !confirm("有未保存的修改，确定关闭？")) return;
   drawer.classList.remove("open");
   scrim.classList.remove("open");
   curId = null;
+  dirty = false;
 }
 
 document.getElementById("md-close").addEventListener("click", closeDrawer);
@@ -142,6 +202,7 @@ scrim.addEventListener("click", closeDrawer);
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") closeDrawer();
 });
+document.getElementById("mem-add").addEventListener("click", openCreate);
 
 document.addEventListener("click", async e => {
   const card = e.target.closest(".mem-card");
@@ -161,6 +222,7 @@ document.addEventListener("click", async e => {
 });
 
 async function post(url, body) {
+  dirty = false;
   const resp = await fetch(url, {
     method: "POST",
     headers: body ? {"Content-Type": "application/json"} : {},
@@ -168,9 +230,17 @@ async function post(url, body) {
   document.getElementById("md-msg").textContent = resp.ok ? "已保存" : "失败";
   if (resp.ok) setTimeout(() => location.reload(), 600);
 }
-document.getElementById("md-save").addEventListener("click",
-  () => post(`/memory/${curId}`,
-             {content: document.getElementById("md-content").value}));
+document.getElementById("md-save").addEventListener("click", () => {
+  if (mode === "create") {
+    post(`/memory/entries?env=${encodeURIComponent(MEM.env)}`, {
+      domain: document.getElementById("md-domain").value,
+      key: document.getElementById("md-new-key").value,
+      content: document.getElementById("md-content").value});
+    return;
+  }
+  post(`/memory/${curId}`,
+       {content: document.getElementById("md-content").value});
+});
 document.getElementById("md-expire").addEventListener("click",
   () => post(`/memory/${curId}/expire`));
 document.getElementById("md-restore").addEventListener("click",

@@ -29,6 +29,12 @@ class MemoryUpdateRequest(BaseModel):
     content: str
 
 
+class MemoryCreateRequest(BaseModel):
+    domain: str
+    key: str
+    content: str
+
+
 def make_router(env: str, target_envs: list[str] | None = None,
                 domain_cfgs: dict | None = None, embedder=None) -> APIRouter:
     router = APIRouter()
@@ -46,7 +52,8 @@ def make_router(env: str, target_envs: list[str] | None = None,
 
     @router.get("/memory", response_class=HTMLResponse)
     async def memory_page(request: Request, domain: str = "",
-                          include_inactive: bool = True):
+                          include_inactive: bool = True,
+                          filter: str = ""):
         # 记忆按目标环境分区：?env=xxx 切换查看；缺省看实例默认环境
         view_env = request.query_params.get("env") or env
         stats = await knowledge_store.domain_stats(view_env)
@@ -54,20 +61,49 @@ def make_router(env: str, target_envs: list[str] | None = None,
             domain = next(iter(stats))  # 缺省落第一个有数据的域
         items = await knowledge_store.list_all(
             view_env, domain or None, include_inactive=include_inactive)
+        usage = await knowledge_store.usage_map(view_env)
         fresh = await _fresh_flags(items)
+        active = lambda it: not it["expired"] and not it["superseded"]
         for it in items:
             it["fresh"] = fresh[it["id"]]
+            u = usage.get(it["id"])
+            it["usage"] = u  # None = 近 30 天零召回
             it.pop("content", None)  # 内容走抽屉按需加载，列表页不扛全文
+        # 健康度汇总（当前域视角）：一眼判断这个域要不要管
+        health = {
+            "active": sum(1 for i in items if active(i)),
+            "zero_recall": sum(1 for i in items
+                               if active(i) and i["usage"] is None),
+            "negative": sum(1 for i in items
+                            if active(i) and (i["feedback_score"] or 0) < 0),
+            "drift": sum(1 for i in items if active(i) and not i["fresh"]),
+        }
+        if filter == "zero_recall":
+            items = [i for i in items if active(i) and i["usage"] is None]
         cases = await cases_store.list_all(view_env, domain or None)
         conflicts = await knowledge_store.similar_pairs(view_env, domain or None)
+        health["conflicts"] = len(conflicts)
         return render("memory.html", "记忆管理", active="/memory",
                       items=items, domain=domain, stats=stats,
-                      include_inactive=include_inactive,
+                      include_inactive=include_inactive, filter=filter,
+                      health=health, usage_days=30,
                       cases=cases, conflicts=conflicts,
                       domains=list(stats) or list(code_paths),
                       view_env=view_env, target_envs=target_envs or [],
                       items_json=json.dumps(items, ensure_ascii=False)
                       .replace("</", "<\\/"))
+
+    @router.post("/memory/entries")
+    async def memory_create(request: Request, req: MemoryCreateRequest):
+        """手动新增条目：运营直接把结论写死，不必等 distill 沉淀。"""
+        view_env = request.query_params.get("env") or env
+        if not req.domain.strip() or not req.key.strip() \
+                or not req.content.strip():
+            raise HTTPException(422, "域/key/内容均不能为空")
+        await knowledge_store.upsert(view_env, req.domain.strip(),
+                                     req.key.strip(), req.content,
+                                     source_run="manual", embedder=embedder)
+        return {"status": "ok"}
 
     @router.get("/memory/search.json")
     async def memory_search(request: Request, q: str = "", domain: str = ""):
@@ -82,7 +118,7 @@ def make_router(env: str, target_envs: list[str] | None = None,
             raise HTTPException(422, "没有可用域")
         block = await recall_block(view_env, dom, q,
                                    domain_code_paths=code_paths.get(dom, []),
-                                   embedder=embedder)
+                                   embedder=embedder, source="playground")
         # recall_block 已把漂移条目标过期并过滤，这里重新查命中序
         # （过滤后的），保证列表与 prompt 块一致
         hits = await knowledge_store.search(view_env, dom, q, limit=8,
@@ -108,7 +144,10 @@ def make_router(env: str, target_envs: list[str] | None = None,
             entry["env"], entry["domain"], entry["key"])
         fb = (await feedback_store.for_run(entry["source_run"])
               if entry.get("source_run") else [])
-        return {**entry, "fresh": fresh, "chain": chain, "feedback": fb}
+        usage = await knowledge_store.usage_map(entry["env"])
+        hits = await knowledge_store.recent_hits(entry_id)
+        return {**entry, "fresh": fresh, "chain": chain, "feedback": fb,
+                "usage": usage.get(entry_id), "recent_hits": hits}
 
     @router.post("/memory/{entry_id}")
     async def memory_update(entry_id: int, req: MemoryUpdateRequest):

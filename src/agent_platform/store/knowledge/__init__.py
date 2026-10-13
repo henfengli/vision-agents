@@ -11,6 +11,7 @@ from .crud import (domain_stats, evolution_chain, get_entry, list_all,
 from .profiles import asset_profiles, latest_session_summaries
 from .retrieval import current_commit, is_entry_fresh, search
 from .temporal import mark_expired, supersede_by_runs, supersede_keys
+from .usage import record_hits, recent_hits, usage_map
 
 __all__ = [
     "upsert", "get_entry", "update_content", "list_by_domain", "list_all",
@@ -18,4 +19,5 @@ __all__ = [
     "supersede_by_runs", "supersede_keys", "mark_expired",
     "latest_session_summaries", "asset_profiles",
     "domain_stats", "evolution_chain", "similar_pairs", "restore",
+    "record_hits", "recent_hits", "usage_map",
 ]

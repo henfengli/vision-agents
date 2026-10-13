@@ -145,6 +145,44 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         await knowledge.update_content(eid, "再次编辑", embedder=fake_embed)
         self.assertEqual((await knowledge.get_entry(eid))["content"], "再次编辑")
 
+    async def test_recall_hits_usage_map(self):
+        """召回埋点 → 使用统计：命中次数/去重 run/最后命中；playground 不算。"""
+        from agent_platform.store import knowledge
+        await knowledge.upsert("test", "board", "k_used", "被用到的知识")
+        entries = await knowledge.list_all("test", "board")
+        eid = next(e["id"] for e in entries if e["key"] == "k_used")
+        await knowledge.record_hits("test", "board", [{"id": eid}],
+                                    run_id="r1")
+        await knowledge.record_hits("test", "board", [{"id": eid}],
+                                    run_id="r2")
+        await knowledge.record_hits("test", "board", [{"id": eid}],
+                                    source="playground")  # 试用不算使用
+        usage = await knowledge.usage_map("test")
+        self.assertEqual(usage[eid]["hits"], 2)
+        self.assertEqual(usage[eid]["runs"], 2)
+        self.assertIsNotNone(usage[eid]["last_hit"])
+        recent = await knowledge.recent_hits(eid)
+        self.assertEqual(len(recent), 3)  # recent_hits 全量含试用
+        self.assertEqual(recent[0]["source"], "playground")
+
+    async def test_search_feedback_weighting(self):
+        """反馈加权：同候选里负反馈条目排到最后（trgm 路径统一公式）。"""
+        from agent_platform.store import knowledge
+        from agent_platform.store.db import pool
+        await knowledge.upsert("test", "board", "权重A", "加权实验锚点甲")
+        await knowledge.upsert("test", "board", "权重B", "加权实验锚点乙")
+        entries = await knowledge.list_all("test", "board")
+        id_a = next(e["id"] for e in entries if e["key"] == "权重A")
+        id_b = next(e["id"] for e in entries if e["key"] == "权重B")
+        async with pool().connection() as conn:
+            await conn.execute(
+                "UPDATE knowledge SET feedback_score=-5 WHERE id=%s", (id_a,))
+            await conn.execute(
+                "UPDATE knowledge SET feedback_score=5 WHERE id=%s", (id_b,))
+        hits = await knowledge.search("test", "board", "加权实验锚点")
+        keys = [h["key"] for h in hits]
+        self.assertLess(keys.index("权重B"), keys.index("权重A"))
+
     async def test_knowledge_supersede_hides_from_search(self):
         from agent_platform.store import knowledge
         await knowledge.upsert("test", "board", "k1", "旧结论", source_run="r1")

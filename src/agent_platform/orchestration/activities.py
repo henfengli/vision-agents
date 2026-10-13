@@ -123,7 +123,8 @@ async def prepare_run(raw: dict) -> dict:
         recalled = await recall_block(
             t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
-            embedder=d.model_pool.embed, session_id=spec.session_id)
+            embedder=d.model_pool.embed, session_id=spec.session_id,
+            run_id=spec.run_id)
         if recalled:
             spec.prompt = f"{recalled}\n\n{spec.question}"
             await runs.log_event(spec.run_id, "note",

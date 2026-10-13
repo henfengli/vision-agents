@@ -37,8 +37,21 @@
   <section class="admin-main">
     {# —— 知识 tab —— #}
     <div class="mem-tab" id="tab-kb">
+      <div class="mem-health">
+        <span><b>{{ health.active }}</b> 生效</span>
+        <a href="/memory?env={{ view_env }}&domain={{ domain }}&filter=zero_recall"
+           {% if filter == "zero_recall" %}class="on"{% endif %}>
+          <b>{{ health.zero_recall }}</b> 零召回</a>
+        <span {% if health.negative %}class="warn"{% endif %}>
+          <b>{{ health.negative }}</b> 负反馈</span>
+        <span {% if health.drift %}class="warn"{% endif %}>
+          <b>{{ health.drift }}</b> 代码漂移</span>
+        <span {% if health.conflicts %}class="warn"{% endif %}>
+          <b>{{ health.conflicts }}</b> 待仲裁</span>
+        <button class="admin-new" id="mem-add" style="width:auto">+ 新增条目</button>
+      </div>
       <form class="mem-search" id="mem-search-form">
-        <input id="mem-q" placeholder="检索试用：输入业务问题，看角色实际会命中什么（trgm+向量 RRF，同 recall 入口）">
+        <input id="mem-q" placeholder="检索试用：输入业务问题，看角色实际注入的 prompt 与命中（recall 同一入口）">
         <button>检索</button>
       </form>
       <div id="mem-search-results"></div>
@@ -55,6 +68,10 @@
               {% else %}<span class="pill pill-failed">代码已漂移</span>{% endif %}
             {% endif %}
             {% if i.feedback_score %}<span class="meta">反馈 {{ "%+d"|format(i.feedback_score) }}</span>{% endif %}
+            {% if not i.superseded and not i.expired %}
+              {% if i.usage %}<span class="meta">近{{ usage_days }}天命中 {{ i.usage.hits }} 次</span>
+              {% else %}<span class="pill pill-queued">零召回</span>{% endif %}
+            {% endif %}
           </div>
           <div class="ai-meta">{{ i.domain }} · {{ i.created_at[:10] }}</div>
         </button>
@@ -116,7 +133,7 @@
   </section>
 </div>
 
-{# 右侧抽屉：明细 + 编辑 + 演化链 + 反馈 #}
+{# 右侧抽屉：明细 + 编辑 + 演化链 + 反馈；新增模式复用（域/key 可填） #}
 <div class="mem-drawer" id="mem-drawer">
   <div class="md-head">
     <b id="md-key"></b>
@@ -124,6 +141,15 @@
     <button class="md-close" id="md-close">×</button>
   </div>
   <div class="md-meta" id="md-meta"></div>
+  <div id="md-create-fields" style="display:none">
+    <div class="af-field"><label class="af-label">域</label>
+      <select id="md-domain">
+        {% for d in domains %}<option{% if d == domain %} selected{% endif %}>{{ d }}</option>{% endfor %}
+      </select></div>
+    <div class="af-field"><label class="af-label">Key（同 key 会整替换，幂等）</label>
+      <input id="md-new-key" class="mono" placeholder="如：毛利率口径"></div>
+  </div>
+  <div id="md-hint" class="md-hint" style="display:none"></div>
   <textarea id="md-content" rows="10" class="mono"></textarea>
   <div class="af-actions">
     <button id="md-save" class="admin-new" style="width:auto">保存（重新生效）</button>
@@ -131,10 +157,18 @@
     <button id="md-restore" class="ver-rb">恢复生效</button>
     <span id="md-msg" class="meta"></span>
   </div>
-  <div class="md-sec">演化链（superseded_by）</div>
-  <div id="md-chain" class="af-vers"></div>
-  <div class="md-sec">来源反馈</div>
-  <div id="md-feedback"></div>
+  <div id="md-usage-sec">
+    <div class="md-sec">使用情况（近 30 天真实召回）</div>
+    <div id="md-usage"></div>
+  </div>
+  <div id="md-chain-sec">
+    <div class="md-sec">演化链（superseded_by）</div>
+    <div id="md-chain" class="af-vers"></div>
+  </div>
+  <div id="md-feedback-sec">
+    <div class="md-sec">来源反馈</div>
+    <div id="md-feedback"></div>
+  </div>
 </div>
 <div class="mem-scrim" id="mem-scrim"></div>
 

@@ -125,11 +125,27 @@ CREATE TABLE IF NOT EXISTS approvals (
     id          BIGSERIAL PRIMARY KEY,
     run_id      TEXT NOT NULL,
     command     TEXT NOT NULL,
+
     status      TEXT NOT NULL DEFAULT 'pending',  -- pending/approved/rejected
     decided_by  TEXT,
     created_at  TIMESTAMPTZ DEFAULT now(),
     decided_at  TIMESTAMPTZ
 );
+
+-- 召回埋点：哪些条目被哪些 run 实际命中（记忆运营的事实源——
+-- 零召回识别/负反馈治理/衰减的数据基础；playground 试用单独标 source）
+CREATE TABLE IF NOT EXISTS recall_hits (
+    id         BIGSERIAL PRIMARY KEY,
+    env        TEXT NOT NULL,
+    domain     TEXT NOT NULL,
+    entry_id   BIGINT NOT NULL,
+    run_id     TEXT,
+    source     TEXT NOT NULL DEFAULT 'recall',  -- recall / playground
+    rank       INT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_recall_hits_entry
+    ON recall_hits(env, entry_id, created_at);
 
 -- pg_trgm：知识/案例的关键词相似度检索（无 pg_trgm 时跳过，退化 ILIKE）
 DO $$ BEGIN
@@ -155,6 +171,14 @@ MIGRATIONS = [
     "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS embedding vector(1024)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding "
     "ON knowledge USING hnsw (embedding vector_cosine_ops)",
+    # 召回埋点（老库补建；新库 SCHEMA 已含，幂等）
+    """CREATE TABLE IF NOT EXISTS recall_hits (
+    id BIGSERIAL PRIMARY KEY, env TEXT NOT NULL, domain TEXT NOT NULL,
+    entry_id BIGINT NOT NULL, run_id TEXT,
+    source TEXT NOT NULL DEFAULT 'recall', rank INT,
+    created_at TIMESTAMPTZ DEFAULT now())""",
+    "CREATE INDEX IF NOT EXISTS idx_recall_hits_entry"
+    " ON recall_hits(env, entry_id, created_at)",
 ]
 
 _dsn: str | None = None
