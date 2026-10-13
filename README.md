@@ -12,7 +12,8 @@
 编排层    Temporal：任务三形态 = 单 agent / 资产化任务图 / 内建处理器；
           提交闸门链（env_gate → DB 策略）在提交路径上统一收口
 agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工具层（tools）
-记忆层    recall（运行前召回）/ distill（运行后沉淀）/ gardener（夜间维护口子）
+记忆层    recall（运行前召回）/ distill（运行后沉淀）/ assets（任务资产：
+          方法/脚本/查询/基线，save_asset 沉淀、prepare 自动召回）/ gardener（夜间维护口子）
 存储层    Postgres：runs(含定义版本谱系)/run_events/definitions(角色/任务/策略)/
           knowledge/cases/feedback/approvals/artifacts(产物血缘)
 观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ Run Viewer（自托管页面）
@@ -41,10 +42,17 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
   （资产档案逐字保留 → 前序交接摘要四节模板 → 历史知识 RRF 混合检索 → 同类案例）。
 - **纠正式反馈**：`POST /v1/sessions/{sid}/feedback` 从 session 最近 run 继承任务上下文
   重判，finalize 时只取代最近一次 run 沉淀的记忆，不误伤历史。
+- **任务资产**：知识记事实、案例记教训、**资产记方法**——run 用 `save_asset`
+  沉淀可复用的方法（procedure）/脚本/查询/基线；prepare 按 环境+域+任务 召回
+  注入 prompt 并记复用数，首跑的调度任务会被引导探索后沉淀。**确定性靠资产
+  复用收敛出来，不靠平台写死**——扩展新任务仍是零成本自然语言。
+- **定时任务热生效**：管理页/API 保存任务定义即重同步 Temporal Schedule，
+  另有 5 分钟周期对账兜底。
 - **工具分层**：L0 bash（bwrap 沙箱：全盘只读/仅 scratch 可写/默认断网——
   出网访问全部收口成薄工具，命令是 LLM 现场拼的，正则审批管不住 API 语义）/
   L2 run_code（CodeAct，一次编排多工具）/
-  薄工具（sql_query、host_metrics、dingtalk_send、update_asset_profile）/
+  薄工具（sql_query、host_metrics、dingtalk_send、update_asset_profile、
+  save_asset）/
   MCP 桥（内部服务类型化接口；browser / datahub 直接用官方实现
   @playwright/mcp、mcp-server-datahub，仓库只自带 dagster server，见 `mcp_servers/`）。
 - **安全**：systemd 物理收口 + bwrap 沙箱 + 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
@@ -82,7 +90,9 @@ run 并跳过去重）、审批待办 `/approvals`
 闭环**——反馈分统一加权所有召回路径终排，负反馈条目抽屉内给出
 处置提示；条目点开右抽屉（编辑/来源 run/演化链/反馈留痕/过期恢复）；
 **案例 tab** 报错案例库；**矛盾 tab** 向量相似度 ≥0.85 的生效条目对，
-一键保留其一）、对话页 `/chat`（会话侧栏 +
+一键保留其一；**资产 tab**（save_asset 沉淀的方法/脚本/查询/基线——
+卡片带复用数/最近复用/生效状态，可手动登记、抽屉编辑、过期止损）、
+对话页 `/chat`（会话侧栏 +
 历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
 run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
 上下文/记忆并回填域/角色/环境；配置了 `target_envs` 时带环境选择器）。

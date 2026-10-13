@@ -4,7 +4,7 @@
 - host_tools(names)：给 run_code 桩函数的原生 callable（同一实现，无壳）
 
 分层：L0 bash（bwrap 沙箱兜底）/ L2 run_code（CodeAct 编排）/
-薄工具（sql_query、dingtalk_send、update_asset_profile）。
+薄工具（sql_query、dingtalk_send、update_asset_profile、save_asset）。
 审查层（review）与工具解耦：bash 命令与 run_code 代码走同一组危险模式审批。
 """
 
@@ -31,6 +31,7 @@ class ToolRegistry:
     def __init__(self, scratch_dir: str, relay: Any = None,
                  review: ReviewFn | None = None,
                  profile_writer: Callable[..., Awaitable[None]] | None = None,
+                 asset_writer: Callable[..., Awaitable[str]] | None = None,
                  sql_dsn: Callable[[str | None], str | None] | None = None,
                  host_resolver: Callable[[str | None, str | None],
                                          tuple[list[str], Any]] | None = None,
@@ -39,6 +40,7 @@ class ToolRegistry:
         self._relay = relay
         self._review = review
         self._profile_writer = profile_writer
+        self._asset_writer = asset_writer
         self._sql_dsn = sql_dsn               # domain → 只读 DSN
         self._host_resolver = host_resolver   # (domain, env) → (主机列表, GrafanaConfig)
         self._extra_tools = extra_tools or []  # MCP 等外部加载的 LangChain 工具
@@ -56,6 +58,8 @@ class ToolRegistry:
             self._catalog["dingtalk_send"] = self._build_dingtalk_send
         if profile_writer is not None:
             self._catalog["update_asset_profile"] = self._build_update_asset_profile
+        if asset_writer is not None:
+            self._catalog["save_asset"] = self._build_save_asset
         self._catalog["run_code"] = self._build_run_code_placeholder
 
     @property
@@ -150,6 +154,19 @@ class ToolRegistry:
             return f"asset:{asset_key}:profile 已更新"
         return update_asset_profile
 
+    def _build_save_asset(self) -> Callable:
+        writer = self._asset_writer
+
+        async def save_asset(name: str, kind: str, summary: str, content: str,
+                             domain: str = "", task: str = "") -> str:
+            """沉淀任务资产：可复用的方法/产物，后续 run 自动召回并优先遵循。
+            kind: procedure(方法/SOP，最有价值) | script(脚本) | query(查询) | baseline(基线数据)。
+            name 为同类下唯一标识（重复保存即整替换更新）；summary 一句话说明何时用；
+            content 逐字保存、永不摘要。domain/task 缺省取当前 run 上下文，task 空=域级通用。"""
+            assert writer is not None
+            return await writer(name, kind, summary, content, domain, task)
+        return save_asset
+
     def _build_run_code_placeholder(self) -> Callable:
         # run_code 需要角色白名单（桩函数范围），只能在 resolve() 时构建；
         # 占位保证 catalog 完整。直接取 host_tools 里的 run_code 会拿到拒绝实现。
@@ -163,7 +180,7 @@ class ToolRegistry:
 
         async def run_code(code: str, timeout: int = 120) -> str:
             """写 Python 代码一次编排多个工具：桩函数直接调用角色白名单内的工具
-            （bash/sql_query/host_metrics/dingtalk_send/update_asset_profile/MCP 工具），
+            （bash/sql_query/host_metrics/dingtalk_send/update_asset_profile/save_asset/MCP 工具），
             可循环/分支/并发；中间数据不进上下文，只有 print 输出返回。代码在沙箱内执行。"""
             if review is not None:
                 await review(code)

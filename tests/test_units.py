@@ -374,6 +374,54 @@ class TestSpec(unittest.TestCase):
                          "prod")
 
 
+class TestAssetBlock(unittest.TestCase):
+    """prepare_run 的任务资产注入块（纯函数）：结构/范围标注/截断保护。"""
+
+    def _asset(self, **kw):
+        base = {"id": 1, "task": "", "kind": "procedure", "name": "巡检SOP",
+                "summary": "每日巡检方法", "content": "第一步…", "use_count": 3,
+                "feedback_score": 0, "source_run": None}
+        return {**base, **kw}
+
+    def test_structure_and_scope(self):
+        from agent_platform.orchestration.activities import _asset_block
+        block = _asset_block([self._asset(),
+                              self._asset(id=2, task="daily-inspection",
+                                          kind="query", name="行数对比")])
+        self.assertTrue(block.startswith("[任务资产——历史运行沉淀，优先遵循"))
+        self.assertIn("procedure:巡检SOP（域级通用，已复用 3 次）", block)
+        self.assertIn("query:行数对比（任务 daily-inspection，已复用 3 次）", block)
+        self.assertIn("第一步…", block)
+
+    def test_content_clip(self):
+        from agent_platform.orchestration.activities import _asset_block
+        block = _asset_block([self._asset(content="x" * 9000)])
+        self.assertIn("…[内容过长已截断]", block)
+        self.assertNotIn("x" * 9000, block)
+
+
+class TestSaveAssetTool(unittest.IsolatedAsyncioTestCase):
+    """save_asset 是有 asset_writer 才注册的条件工具，调用直通 writer。"""
+
+    async def test_catalog_and_call(self):
+        from agent_platform.agent.tools.registry import ToolRegistry
+        reg = ToolRegistry("/tmp/scratch")
+        self.assertNotIn("save_asset", reg.catalog_names)
+        got = {}
+
+        async def writer(name, kind, summary, content, domain, task):
+            got.update(name=name, kind=kind, summary=summary, content=content,
+                       domain=domain, task=task)
+            return "已沉淀"
+        reg2 = ToolRegistry("/tmp/scratch", asset_writer=writer)
+        self.assertIn("save_asset", reg2.catalog_names)
+        fn = reg2.host_tools(["save_asset"])["save_asset"]
+        self.assertEqual(await fn("巡检SOP", "procedure", "每日巡检", "步骤"), "已沉淀")
+        self.assertEqual(got, {"name": "巡检SOP", "kind": "procedure",
+                               "summary": "每日巡检", "content": "步骤",
+                               "domain": "", "task": ""})
+
+
 class TestModelPool(unittest.IsolatedAsyncioTestCase):
     def test_rotating_token_auth_per_request(self):
         """主 agent 的 httpx 客户端：每个请求换下一个 token（含 429 重试）。"""

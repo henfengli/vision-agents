@@ -22,6 +22,8 @@ from contextvars import ContextVar
 from ..store.db import dsn, notify, pool
 
 current_run_id: ContextVar[str] = ContextVar("current_run_id", default="")
+# run 的目标环境/域/任务：prepare_run 注入，save_asset 等工具取默认值用
+current_run_ctx: ContextVar[dict] = ContextVar("current_run_ctx", default={})
 
 
 class ApprovalRejected(PermissionError):

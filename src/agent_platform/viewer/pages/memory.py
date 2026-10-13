@@ -2,7 +2,8 @@
 
 布局参照管理页：左栏域分组（带生效/失效角标），主区检索试用 + 条目卡，
 点开进右侧抽屉（完整内容编辑 / 来源 run / code_ref 新鲜度 / 反馈留痕 /
-superseded_by 演化链）。案例库与疑似矛盾对是同页的另两个 tab。
+superseded_by 演化链）。案例库、疑似矛盾对、任务资产是同页的另三个 tab
+（资产 = save_asset 沉淀的方法/脚本/查询/基线，复用数直接记行上）。
 检索试用直接调线上 recall 同款 knowledge.search（trgm+向量 RRF），
 看到的就是角色实际会命中的。
 """
@@ -17,12 +18,15 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from ...store import assets as assets_store
 from ...store import cases as cases_store
 from ...store import feedback as feedback_store
 from ...store import knowledge as knowledge_store
 from .base import render
 
 log = logging.getLogger(__name__)
+
+ASSET_KINDS = ("procedure", "script", "query", "baseline")
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -32,6 +36,20 @@ class MemoryUpdateRequest(BaseModel):
 class MemoryCreateRequest(BaseModel):
     domain: str
     key: str
+    content: str
+
+
+class AssetCreateRequest(BaseModel):
+    domain: str
+    task: str = ""
+    kind: str
+    name: str
+    summary: str = ""
+    content: str
+
+
+class AssetUpdateRequest(BaseModel):
+    summary: str
     content: str
 
 
@@ -83,11 +101,13 @@ def make_router(env: str, target_envs: list[str] | None = None,
         cases = await cases_store.list_all(view_env, domain or None)
         conflicts = await knowledge_store.similar_pairs(view_env, domain or None)
         health["conflicts"] = len(conflicts)
+        assets = await assets_store.list_all(view_env, domain or None)
         return render("memory.html", "记忆管理", active="/memory",
                       items=items, domain=domain, stats=stats,
                       include_inactive=include_inactive, filter=filter,
                       health=health, usage_days=30,
                       cases=cases, conflicts=conflicts,
+                      assets=assets,
                       domains=list(stats) or list(code_paths),
                       view_env=view_env, target_envs=target_envs or [],
                       items_json=json.dumps(items, ensure_ascii=False)
@@ -130,6 +150,53 @@ def make_router(env: str, target_envs: list[str] | None = None,
             h["fresh"] = fresh[h["id"]]
             h["domain"] = dom
         return {"domain": dom, "block": block, "hits": hits}
+
+    # —— 任务资产 tab（/memory/assets/* 必须先于 /memory/{entry_id} 注册） ——
+
+    @router.post("/memory/assets")
+    async def asset_create(request: Request, req: AssetCreateRequest):
+        """手动登记资产：运营直接补方法/基线，不必等 agent 沉淀。"""
+        view_env = request.query_params.get("env") or env
+        if req.kind not in ASSET_KINDS:
+            raise HTTPException(422, f"kind 必须是 {'/'.join(ASSET_KINDS)}")
+        if not req.domain.strip() or not req.name.strip() \
+                or not req.content.strip():
+            raise HTTPException(422, "域/名称/内容均不能为空")
+        await assets_store.upsert(view_env, req.domain.strip(),
+                                  req.task.strip(), req.kind,
+                                  req.name.strip(), req.summary.strip(),
+                                  req.content, source_run="manual")
+        return {"status": "ok"}
+
+    @router.get("/memory/assets/{asset_id}/detail.json")
+    async def asset_detail(asset_id: int):
+        entry = await assets_store.get_entry(asset_id)
+        if entry is None:
+            raise HTTPException(404, "资产不存在")
+        return entry
+
+    @router.post("/memory/assets/{asset_id}")
+    async def asset_update(asset_id: int, req: AssetUpdateRequest):
+        if not req.content.strip():
+            raise HTTPException(422, "内容不能为空")
+        if await assets_store.get_entry(asset_id) is None:
+            raise HTTPException(404, "资产不存在")
+        await assets_store.update(asset_id, req.summary.strip(), req.content)
+        return {"status": "ok"}
+
+    @router.post("/memory/assets/{asset_id}/expire")
+    async def asset_expire(asset_id: int):
+        if await assets_store.get_entry(asset_id) is None:
+            raise HTTPException(404, "资产不存在")
+        await assets_store.mark_expired(asset_id)
+        return {"status": "ok"}
+
+    @router.post("/memory/assets/{asset_id}/restore")
+    async def asset_restore(asset_id: int):
+        if await assets_store.get_entry(asset_id) is None:
+            raise HTTPException(404, "资产不存在")
+        await assets_store.restore(asset_id)
+        return {"status": "ok"}
 
     @router.get("/memory/{entry_id}/detail.json")
     async def memory_detail(entry_id: int):

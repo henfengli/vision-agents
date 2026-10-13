@@ -147,6 +147,28 @@ CREATE TABLE IF NOT EXISTS recall_hits (
 CREATE INDEX IF NOT EXISTS idx_recall_hits_entry
     ON recall_hits(env, entry_id, created_at);
 
+-- 任务资产：run 产出的可复用方法/脚本/查询/基线。与知识同套生命周期
+-- （时序/取代/反馈/usage），复用计数直接记在行上
+CREATE TABLE IF NOT EXISTS assets (
+    id           BIGSERIAL PRIMARY KEY,
+    env          TEXT NOT NULL,
+    domain       TEXT NOT NULL DEFAULT '',
+    task         TEXT NOT NULL DEFAULT '',   -- 空 = 域级通用
+    kind         TEXT NOT NULL,              -- procedure/script/query/baseline/…
+    name         TEXT NOT NULL,
+    summary      TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL,
+    source_run   TEXT,
+    use_count    INT NOT NULL DEFAULT 0,
+    last_used_at TIMESTAMPTZ,
+    feedback_score INT DEFAULT 0,
+    valid_from   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    valid_to     TIMESTAMPTZ,
+    superseded_by TEXT,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(env, domain, task, kind, name)
+);
+
 -- pg_trgm：知识/案例的关键词相似度检索（无 pg_trgm 时跳过，退化 ILIKE）
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -179,6 +201,17 @@ MIGRATIONS = [
     created_at TIMESTAMPTZ DEFAULT now())""",
     "CREATE INDEX IF NOT EXISTS idx_recall_hits_entry"
     " ON recall_hits(env, entry_id, created_at)",
+    # 任务资产（老库补建；新库 SCHEMA 已含，幂等）
+    """CREATE TABLE IF NOT EXISTS assets (
+    id BIGSERIAL PRIMARY KEY, env TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '', task TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL, name TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '', content TEXT NOT NULL,
+    source_run TEXT, use_count INT NOT NULL DEFAULT 0,
+    last_used_at TIMESTAMPTZ, feedback_score INT DEFAULT 0,
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT now(), valid_to TIMESTAMPTZ,
+    superseded_by TEXT, created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(env, domain, task, kind, name))""",
 ]
 
 _dsn: str | None = None

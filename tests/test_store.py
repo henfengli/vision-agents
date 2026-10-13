@@ -39,7 +39,7 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         async with db.pool().connection() as conn:
             await conn.execute(
                 "TRUNCATE run_events, feedback, approvals, knowledge,"
-                " cases, definitions, runs CASCADE")
+                " cases, definitions, runs, assets CASCADE")
 
     async def test_schema_idempotent(self):
         from agent_platform.store import db
@@ -257,6 +257,52 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
             await feedback.add_correction("s1", f"纠正{i}", by="u")
         rows = await feedback.correction_counts(min_count=3)
         self.assertEqual(rows[0]["count"], 3)
+
+    # ---- 任务资产 ----
+
+    async def test_assets_lifecycle(self):
+        from agent_platform.store import assets
+        # upsert 幂等：同 (env,domain,task,kind,name) 整替换刷新
+        await assets.upsert("test", "board", "daily-inspection", "procedure",
+                            "ods-巡检方法", "每日 ods 表异常巡检 SOP", "步骤 v1")
+        await assets.upsert("test", "board", "daily-inspection", "procedure",
+                            "ods-巡检方法", "每日 ods 表异常巡检 SOP", "步骤 v2")
+        found = await assets.search_active("test", "board", "daily-inspection")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["content"], "步骤 v2")
+        # 排序：任务级优先于域级通用；同范围 procedure 先于 script
+        await assets.upsert("test", "board", "", "script",
+                            "通用清理脚本", "清 scratch", "rm ...")
+        await assets.upsert("test", "board", "daily-inspection", "script",
+                            "行数对比", "比上下游行数", "select ...")
+        found = await assets.search_active("test", "board", "daily-inspection")
+        self.assertEqual([(a["kind"], a["name"]) for a in found], [
+            ("procedure", "ods-巡检方法"),
+            ("script", "行数对比"),
+            ("script", "通用清理脚本")])
+        # 复用统计直接记行上
+        ids = [a["id"] for a in found]
+        await assets.mark_used([ids[0]])
+        top = (await assets.search_active("test", "board",
+                                          "daily-inspection"))[0]
+        self.assertEqual(top["use_count"], 1)
+        # 过期即退出召回；恢复即回来
+        await assets.mark_expired(ids[0])
+        names = [a["name"] for a in
+                 await assets.search_active("test", "board", "daily-inspection")]
+        self.assertNotIn("ods-巡检方法", names)
+        await assets.restore(ids[0])
+        entry = await assets.get_entry(ids[0])
+        self.assertIsNone(entry["valid_to"])
+        # 网页编辑：改摘要/内容并重新生效
+        await assets.update(ids[0], "新摘要", "步骤 v3")
+        entry = await assets.get_entry(ids[0])
+        self.assertEqual((entry["summary"], entry["content"]),
+                         ("新摘要", "步骤 v3"))
+        all_rows = await assets.list_all("test", "board")
+        self.assertEqual(len(all_rows), 3)
+        stats = await assets.kind_stats("test")
+        self.assertEqual(stats, {"procedure": 1, "script": 2})
 
     # ---- approvals ----
 

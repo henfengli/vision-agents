@@ -43,7 +43,8 @@ def create_app(settings, lifespan=None) -> FastAPI:
 
 
 def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
-                    defs: DefinitionStore, langfuse=None) -> APIRouter:
+                    defs: DefinitionStore, langfuse=None,
+                    schedule_sync=None) -> APIRouter:
     auth = make_auth_dependency(settings.bearer_token)
     router = APIRouter(dependencies=[Depends(auth)])
 
@@ -178,7 +179,12 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             raise HTTPException(422, f"任务定义不合法：{e}")
         await defs.put("task", settings.env, req.name,
                        req.definition, req.updated_by)
-        return {"name": req.name, **(await usage_hint("task", req.name) or {})}
+        # 定时任务热生效：保存后立即重同步 Temporal Schedules（不必等重启；
+        # 失败只留痕，由周期对账兜底）
+        synced = await schedule_sync() if schedule_sync is not None else None
+        return {"name": req.name,
+                **({"schedule_resynced": True} if synced is not None else {}),
+                **(await usage_hint("task", req.name) or {})}
 
     @router.get("/v1/admin/tasks")
     async def list_tasks():

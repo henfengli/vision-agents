@@ -45,7 +45,8 @@ SEED_ROLES = [
     {"name": "data_searcher",
      "description": "数据口径查询：先查知识库，再读代码分析口径，再查只读库",
      "domains": ["board", "config-center"],
-     "tools": ["bash", "run_code", "sql_query", "read_file", "grep"],
+     "tools": ["bash", "run_code", "sql_query", "save_asset", "read_file",
+              "grep"],
      "prompt": "你是数据查询助手。工作约定：\n"
                "1. 先查知识库是否已有该指标口径；命中直接回答并附来源。\n"
                "2. 未命中：在业务域代码目录检索指标定义（grep），读懂计算逻辑。\n"
@@ -55,7 +56,7 @@ SEED_ROLES = [
      "description": "Dagster 报错分析：区分代码/数据/基础设施/上游问题",
      "domains": ["dagster", "board"],
      "tools": ["bash", "run_code", "sql_query", "host_metrics", "read_file",
-              "grep", "dingtalk_send"],
+              "grep", "dingtalk_send", "save_asset"],
      "prompt": "你是运维分析助手。分析步骤：\n"
                "1. 参考同类案例（如 prompt 中已注入）。\n"
                "2. 用 curl 查 Dagster GraphQL 拿报错堆栈与上游状态。\n"
@@ -93,15 +94,19 @@ class Runtime:
     langfuse: LangfuseClient
     tool_names: list[str] = field(default_factory=list)  # 管理页角色编辑器复选框
     embedder: object = None  # 记忆页检索试用（model_pool.embed）
+    resync_schedules: object = None  # 任务保存后热同步 Temporal Schedules
     temporal_client: object = None
     worker: object = None
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
+    _sync_task: asyncio.Task | None = field(default=None, repr=False)
 
     async def stop(self) -> None:
         if self.worker is not None:
             await self.worker.shutdown()
         if self._worker_task is not None:
             self._worker_task.cancel()
+        if self._sync_task is not None:
+            self._sync_task.cancel()
         await self.langfuse.flush()  # 冲刷 SDK 的 score 批量队列
         await self.engine.close()
         await db.close_db()
@@ -141,6 +146,30 @@ async def assemble_runtime(settings: Settings) -> Runtime:
             settings.env, dom, f"asset:{asset_key}:profile", content,
             source_run="agent-tool", embedder=model_pool.embed)
 
+    # save_asset 工具：上下文默认值由 prepare_run 注入的 ContextVar 提供，
+    # 模型只需给 name/kind/summary/content 四要素
+    _ASSET_KINDS = ("procedure", "script", "query", "baseline")
+
+    async def write_asset(name: str, kind: str, summary: str, content: str,
+                          domain: str = "", task: str = "") -> str:
+        from .agent.approvals import current_run_ctx, current_run_id
+        from .store import assets as assets_store
+        if kind not in _ASSET_KINDS:
+            return f"[失败] kind 必须是 {'/'.join(_ASSET_KINDS)}"
+        if not name.strip() or not content.strip():
+            return "[失败] name 与 content 不能为空"
+        ctx = current_run_ctx.get({})
+        dom = domain or ctx.get("domain") or next(iter(settings.domains), "")
+        if not dom:
+            return "[失败] 无可用 domain，请显式指定"
+        tsk = task or ctx.get("task") or ""
+        await assets_store.upsert(
+            ctx.get("env") or settings.env, dom, tsk, kind,
+            name.strip(), summary.strip(), content,
+            source_run=current_run_id.get() or None)
+        scope = f"{dom}/{tsk}" if tsk else f"{dom}（域级通用）"
+        return f"已沉淀资产 {kind}:{name}（{scope}），后续 run 将自动召回"
+
     extra_tools = await load_mcp_tools(settings.mcp_servers)
 
     def sql_dsn(domain: str | None) -> str | None:
@@ -160,6 +189,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     tool_registry = ToolRegistry(settings.scratch_dir, relay=relay,
                                  review=review_hook,
                                  profile_writer=write_asset_profile,
+                                 asset_writer=write_asset,
                                  sql_dsn=sql_dsn,
                                  host_resolver=(host_resolver
                                                 if settings.grafana else None),
@@ -189,13 +219,31 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                         langfuse=langfuse),
         settings.temporal.task_queue)
 
+    async def resync_schedules() -> int:
+        """任务定义保存后立即重同步 Temporal Schedules（热生效）；
+        失败只留痕——周期对账兜底，不阻断保存。"""
+        try:
+            return await sync_schedules(temporal_client, await tasks.list(),
+                                        settings.temporal.task_queue)
+        except Exception:  # noqa: BLE001 — Temporal 抖动不应让定义保存失败
+            log.exception("热同步 Temporal Schedule 失败")
+            return 0
+
+    async def _schedule_reconcile() -> None:
+        # 兜底对账：热同步失败/外部改库时，5 分钟内自愈到与任务定义一致
+        while True:
+            await asyncio.sleep(300)
+            await resync_schedules()
+
     rt = Runtime(settings=settings, defs=defs, tasks=tasks,
                  submitter=submitter, engine=engine, relay=relay,
                  langfuse=langfuse, tool_names=tool_registry.catalog_names,
                  embedder=model_pool.embed,
+                 resync_schedules=resync_schedules,
                  temporal_client=temporal_client,
                  worker=worker,
-                 _worker_task=asyncio.create_task(worker.run()))
+                 _worker_task=asyncio.create_task(worker.run()),
+                 _sync_task=asyncio.create_task(_schedule_reconcile()))
 
     n = await sync_schedules(temporal_client, await tasks.list(),
                              settings.temporal.task_queue)
@@ -232,7 +280,8 @@ def build_app(settings: Settings | None = None):
         dagster_pack = settings.domains.get("dagster")
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
-                            langfuse=rt.langfuse),
+                            langfuse=rt.langfuse,
+                            schedule_sync=rt.resync_schedules),
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 rules=dagster_pack.rules if dagster_pack else [],

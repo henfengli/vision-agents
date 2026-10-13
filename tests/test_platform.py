@@ -60,7 +60,7 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         async with db.pool().connection() as conn:
             await conn.execute(
                 "TRUNCATE run_events, feedback, approvals, knowledge,"
-                " cases, definitions, artifacts, runs CASCADE")
+                " cases, definitions, artifacts, runs, assets CASCADE")
 
         self.defs = DefinitionStore()
         from agent_platform.config import DomainConfig
@@ -533,6 +533,101 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await knowledge.get_entry(eid))["expired"])
         self.assertEqual(client.post(f"/memory/{eid}/restore").status_code, 200)
         self.assertFalse((await knowledge.get_entry(eid))["expired"])
+
+    async def test_memory_assets_tab(self):
+        """资产 tab：页面渲染 + 手动登记 + 抽屉编辑 + 过期/恢复退出召回。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.store import assets
+        from agent_platform.viewer import make_viewer_router
+        await assets.upsert("test", "board", "daily-inspection", "procedure",
+                            "ods-巡检方法", "每日巡检 SOP", "先比行数再抽查。")
+        await assets.upsert("test", "board", "", "baseline",
+                            "ods-orders-基线", "昨日行数基线", "4200 万")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        page = client.get("/memory", params={"domain": "board"})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("tab-assets", page.text)
+        self.assertIn("ods-巡检方法", page.text)
+        self.assertIn("任务 daily-inspection", page.text)
+        self.assertIn("域级通用", page.text)
+
+        created = client.post("/memory/assets", json={
+            "domain": "board", "kind": "query", "name": "行数对比",
+            "task": "", "summary": "比上下游行数", "content": "select ..."})
+        self.assertEqual(created.status_code, 200)
+        bad = client.post("/memory/assets", json={
+            "domain": "board", "kind": "bogus", "name": "x", "content": "y"})
+        self.assertEqual(bad.status_code, 422)
+
+        rows = await assets.list_all("test", "board")
+        self.assertEqual(len(rows), 3)
+        aid = next(r["id"] for r in rows if r["name"] == "ods-巡检方法")
+        det = client.get(f"/memory/assets/{aid}/detail.json")
+        self.assertEqual(det.status_code, 200)
+        self.assertEqual(det.json()["content"], "先比行数再抽查。")
+        self.assertEqual(det.json()["use_count"], 0)
+        edited = client.post(f"/memory/assets/{aid}",
+                             json={"summary": "新摘要", "content": "步骤 v2"})
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual((await assets.get_entry(aid))["content"], "步骤 v2")
+        self.assertEqual(
+            client.post(f"/memory/assets/{aid}/expire").status_code, 200)
+        names = [a["name"] for a in
+                 await assets.search_active("test", "board", "daily-inspection")]
+        self.assertNotIn("ods-巡检方法", names)
+        self.assertEqual(
+            client.post(f"/memory/assets/{aid}/restore").status_code, 200)
+        self.assertIn("ods-巡检方法", [a["name"] for a in await assets.search_active(
+            "test", "board", "daily-inspection")])
+
+    async def test_prepare_injects_assets_and_counts_use(self):
+        """prepare_run：任务资产置顶注入 prompt + 记复用 + 事件留痕。"""
+        from agent_platform.store import assets, runs
+        await assets.upsert("test", "board", "data-qa", "procedure",
+                            "口径查询方法", "先查知识库再读代码", "步骤全文。")
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        events = await runs.get_events(r["run_id"])
+        notes = [e["payload"] for e in events
+                 if e["kind"] == "note"
+                 and e["payload"].get("stage") == "assets"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("procedure:口径查询方法", notes[0]["content"])
+        self.assertIn("步骤全文。", notes[0]["content"])
+        top = (await assets.search_active("test", "board", "data-qa"))[0]
+        self.assertEqual(top["use_count"], 1)  # 注入即记一次复用
+
+    async def test_put_task_triggers_schedule_resync(self):
+        """定时任务热生效：保存任务定义后立即重同步 Temporal Schedules。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app, make_api_router
+        calls = []
+
+        async def fake_sync():
+            calls.append(1)
+            return 0
+        app = create_app(self.settings)
+        app.include_router(make_api_router(self.settings, self.submitter,
+                                           self.tasks, self.defs,
+                                           schedule_sync=fake_sync))
+        client = TestClient(app)
+        resp = client.post("/v1/admin/tasks",
+                           headers={"Authorization": "Bearer test-token"},
+                           json={"name": "nightly-check",
+                                 "definition": {"role": "ops_analyst",
+                                                "triggers": ["schedule"],
+                                                "schedule": "0 3 * * *",
+                                                "output_channel": "dingtalk"},
+                                 "updated_by": "t"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["schedule_resynced"])
+        self.assertEqual(len(calls), 1)
 
     async def test_viewer_auth_login_flow(self):
         """P1 回归：给了 token 后页面 307 跳登录；登录写 cookie 后放行。"""

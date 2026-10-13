@@ -38,10 +38,11 @@ async def _with_heartbeat(awaitable, interval_s: float = 30.0):
         except Exception:  # noqa: BLE001 —— 不在 activity 上下文时静默
             pass
 
-from ..agent.approvals import current_run_id
+from ..agent.approvals import current_run_ctx, current_run_id
 from ..agent.roles import resolve
 from ..memory import distill, recall_block
 from ..store import artifacts as artifacts_store
+from ..store import assets as assets_store
 from ..store import cases as cases_store
 from ..store import definitions as definitions_store
 from ..store import knowledge as knowledge_store
@@ -117,16 +118,36 @@ async def prepare_run(raw: dict) -> dict:
     t_env = spec.effective_env(d.settings.env)
     if spec.domain and spec.domain in d.settings.domains:
         spec.code_paths = d.settings.domains[spec.domain].for_env(t_env).code_paths
+    # save_asset 等工具的默认值上下文（域/任务/目标环境）
+    current_run_ctx.set({"env": t_env, "domain": spec.domain or "",
+                         "task": spec.task_type})
 
     spec.prompt = spec.question
     if not spec.resume:
+        # 任务资产：历史运行沉淀的方法/产物——先占位，召回块随后压到它前面，
+        # 最终顺序 = 记忆召回 → 任务资产 → 问题（资产贴着问题，最贴近执行）
+        assets = await assets_store.search_active(
+            t_env, spec.domain or "", spec.task_type)
+        if assets:
+            block = _asset_block(assets)
+            spec.prompt = f"{block}\n\n{spec.prompt}"
+            await assets_store.mark_used([a["id"] for a in assets])
+            await runs.log_event(spec.run_id, "note",
+                                 {"stage": "assets", "content": block})
+        elif spec.trigger == "schedule" and "save_asset" in role.tools:
+            # 首跑提示：调度任务没有既定方法时，引导探索后沉淀——
+            # 确定性不靠平台写死，靠资产复用收敛出来
+            spec.prompt = ("[任务资产] 本任务暂无既定方法沉淀。探索完成后请用 "
+                           "save_asset 把可复用的方法(procedure)/查询(query)/"
+                           "基线(baseline)沉淀下来，后续调度将自动召回遵循。\n\n"
+                           + spec.prompt)
         recalled = await recall_block(
             t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
             embedder=d.model_pool.embed, session_id=spec.session_id,
             run_id=spec.run_id)
         if recalled:
-            spec.prompt = f"{recalled}\n\n{spec.question}"
+            spec.prompt = f"{recalled}\n\n{spec.prompt}"
             await runs.log_event(spec.run_id, "note",
                                  {"stage": "recall", "content": recalled})
     return spec.to_dict()
@@ -201,6 +222,22 @@ async def mark_failed(raw: dict, error: str) -> None:
 
 
 # ==================== 内部工具 ====================
+
+
+def _asset_block(assets: list[dict], content_limit: int = 4000) -> str:
+    """任务资产注入块（纯函数）：历史运行沉淀的方法/产物，置顶注入要求优先遵循。
+    单条内容截断保护 prompt 体积——截断说明写进块里，模型知道它看到的是片段。"""
+    lines = ["[任务资产——历史运行沉淀，优先遵循；发现已过时请用 save_asset 更新]"]
+    for a in assets:
+        scope = f"任务 {a['task']}" if a["task"] else "域级通用"
+        content = a["content"]
+        if len(content) > content_limit:
+            content = content[:content_limit] + "\n…[内容过长已截断]"
+        lines.append(f"### {a['kind']}:{a['name']}"
+                     f"（{scope}，已复用 {a['use_count']} 次）\n"
+                     f"{a['summary']}\n{content}")
+    return "\n\n".join(lines)
+
 
 class _NullSpan:
     def __enter__(self):
