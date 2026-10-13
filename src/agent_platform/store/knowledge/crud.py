@@ -163,9 +163,29 @@ async def similar_pairs(env: str, domain: str | None = None,
              "similarity": round(float(r[6]), 3)} for r in rows]
 
 
-async def update_content(entry_id: int, content: str) -> None:
-    """网页编辑：改内容并刷新有效期（视为人工纠正，重新生效）。"""
+async def update_content(entry_id: int, content: str,
+                         embedder=None) -> None:
+    """网页编辑：改内容并刷新有效期（视为人工纠正，重新生效）。
+
+    embedder 存在时同步重算向量——只改文本不改向量会让语义召回/矛盾
+    检测继续按旧内容匹配（静默错配）。向量写失败退化纯文本更新。
+    """
+    vec = None
+    if embedder is not None:
+        vecs = await embedder([content])
+        if vecs:
+            vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
     async with pool().connection() as conn:
+        if vec is not None:
+            try:
+                await conn.execute(
+                    "UPDATE knowledge SET content=%s, valid_from=now(),"
+                    " valid_to=NULL, expired=false, created_at=now(),"
+                    " embedding=%s::vector WHERE id=%s",
+                    (content, vec, entry_id))
+                return
+            except Exception as e:  # noqa: BLE001 —— 无 pgvector 退化
+                log.warning("编辑重算向量失败，退化为纯文本更新：%s", e)
         await conn.execute(
             "UPDATE knowledge SET content=%s, valid_from=now(), valid_to=NULL,"
             " expired=false, created_at=now() WHERE id=%s", (content, entry_id))

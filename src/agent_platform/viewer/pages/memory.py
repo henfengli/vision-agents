@@ -71,13 +71,20 @@ def make_router(env: str, target_envs: list[str] | None = None,
 
     @router.get("/memory/search.json")
     async def memory_search(request: Request, q: str = "", domain: str = ""):
-        """检索试用：与 recall 同一入口，返回实际命中序。"""
+        """检索试用：返回角色实际注入的 prompt 块（recall_block 同款，
+        含资产档案/知识/案例分层与 freshness 过滤）+ 历史知识命中序。"""
+        from ...memory.recall import recall_block
         view_env = request.query_params.get("env") or env
         dom = domain or next(iter(code_paths), "")
         if not q.strip():
             raise HTTPException(422, "请输入检索问题")
         if not dom:
             raise HTTPException(422, "没有可用域")
+        block = await recall_block(view_env, dom, q,
+                                   domain_code_paths=code_paths.get(dom, []),
+                                   embedder=embedder)
+        # recall_block 已把漂移条目标过期并过滤，这里重新查命中序
+        # （过滤后的），保证列表与 prompt 块一致
         hits = await knowledge_store.search(view_env, dom, q, limit=8,
                                             embedder=embedder)
         fresh = await _fresh_flags(
@@ -86,7 +93,7 @@ def make_router(env: str, target_envs: list[str] | None = None,
         for h in hits:
             h["fresh"] = fresh[h["id"]]
             h["domain"] = dom
-        return {"domain": dom, "hits": hits}
+        return {"domain": dom, "block": block, "hits": hits}
 
     @router.get("/memory/{entry_id}/detail.json")
     async def memory_detail(entry_id: int):
@@ -109,7 +116,8 @@ def make_router(env: str, target_envs: list[str] | None = None,
             raise HTTPException(422, "内容不能为空")
         if await knowledge_store.get_entry(entry_id) is None:
             raise HTTPException(404, "条目不存在")
-        await knowledge_store.update_content(entry_id, req.content)
+        await knowledge_store.update_content(entry_id, req.content,
+                                             embedder=embedder)
         return {"status": "ok"}
 
     @router.post("/memory/{entry_id}/expire")

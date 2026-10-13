@@ -35,13 +35,17 @@ document.getElementById("mem-search-form").addEventListener("submit",
       return;
     }
     const data = await resp.json();
-    if (!data.hits.length) {
-      box.innerHTML = '<div class="meta">未命中（角色此时也查不到任何记忆）</div>';
-      return;
-    }
-    box.innerHTML = '<div class="md-sec">命中 ' + data.hits.length +
-      ' 条（域 ' + esc(data.domain) + '，按召回序）</div>' +
-      data.hits.map((h, i) => `
+    let html = "";
+    if (data.block)
+      html += '<div class="md-sec">角色实际注入的 prompt 块（recall 全文，'
+        + '含档案/知识/案例分层）</div>'
+        + `<pre class="mem-block">${esc(data.block)}</pre>`;
+    else
+      html += '<div class="meta">未命中（角色此时也查不到任何记忆）</div>';
+    if (data.hits.length)
+      html += '<div class="md-sec">历史知识命中 ' + data.hits.length +
+        ' 条（域 ' + esc(data.domain) + '，按召回序；漂移条目已被过滤并标记过期）</div>' +
+        data.hits.map((h, i) => `
         <button class="mem-card" data-id="${h.id}">
           <div class="mc-head">
             <span class="meta mono">#${i + 1}</span>
@@ -50,6 +54,7 @@ document.getElementById("mem-search-form").addEventListener("submit",
           </div>
           <pre>${esc(h.content.slice(0, 300))}</pre>
         </button>`).join("");
+    box.innerHTML = html;
   });
 
 /* —— 抽屉 —— */
@@ -112,7 +117,8 @@ async function openDrawer(id) {
         ${c.current ? '<span class="ver-cur">当前查看</span>' : ""}
         <span class="meta">${esc((c.created_at || "").slice(0, 10))}</span>
       </div>`).join("")
-    : '<div class="meta">无演化历史（从未被取代）</div>';
+    : '<div class="meta">无演化链——同 key 的修改是原地覆盖不留历史；'
+      + '仅「新 key 取代旧 key」才形成链</div>';
 
   document.getElementById("md-feedback").innerHTML = e.feedback.length
     ? e.feedback.map(f => `

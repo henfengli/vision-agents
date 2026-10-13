@@ -123,6 +123,28 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["content"], "口径v2")
 
+    async def test_update_content_recomputes_embedding(self):
+        """网页编辑必须重算向量：只改文本不改向量会让语义召回按旧内容匹配。"""
+        from agent_platform.store import knowledge
+        calls = []
+
+        async def fake_embed(texts):
+            calls.append(texts)
+            return [[0.01] * 1024]
+
+        await knowledge.upsert("test", "board", "k_embed", "旧内容")
+        entries = await knowledge.list_all("test", "board")
+        eid = next(e["id"] for e in entries if e["key"] == "k_embed")
+        await knowledge.update_content(eid, "新内容", embedder=fake_embed)
+        self.assertEqual(calls, [["新内容"]])
+        entry = await knowledge.get_entry(eid)
+        self.assertEqual(entry["content"], "新内容")
+
+        # 无 pgvector 环境：向量写失败也要退化为纯文本更新，不报错
+        calls.clear()
+        await knowledge.update_content(eid, "再次编辑", embedder=fake_embed)
+        self.assertEqual((await knowledge.get_entry(eid))["content"], "再次编辑")
+
     async def test_knowledge_supersede_hides_from_search(self):
         from agent_platform.store import knowledge
         await knowledge.upsert("test", "board", "k1", "旧结论", source_run="r1")

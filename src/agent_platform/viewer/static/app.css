@@ -529,3 +529,6 @@ details.steps .step pre { white-space: pre-wrap; word-break: break-word;
 .md-chain-jump { cursor: pointer; }
 .mem-drawer textarea { width: 100%; }
 @media (max-width: 900px) { .cf-pair { grid-template-columns: 1fr; } }
+.mem-block { background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px; white-space: pre-wrap;
+  font-size: 12px; max-height: 320px; overflow-y: auto; }
