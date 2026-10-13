@@ -31,6 +31,7 @@ def _settings(**over):
         viewer_base_url="http://viewer",
         bearer_token="test-token",
         scratch_dir=tempfile.mkdtemp(),
+        assets_dir=tempfile.mkdtemp(),
         domains={"board": {"code_paths": ["/tmp/board"]},
                  "dagster": {"code_paths": ["/tmp/dagster"]}},
     )
@@ -534,8 +535,11 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.post(f"/memory/{eid}/restore").status_code, 200)
         self.assertFalse((await knowledge.get_entry(eid))["expired"])
 
-    async def test_memory_assets_tab(self):
-        """资产 tab：页面渲染 + 手动登记 + 抽屉编辑 + 过期/恢复退出召回。"""
+    async def test_assets_page(self):
+        """资产页：渲染 + 手动登记文本资产 + 抽屉编辑 + 过期/恢复退出召回
+        + 文件类资产的在线查看。"""
+        import tempfile
+
         from fastapi.testclient import TestClient
 
         from agent_platform.api.app import create_app
@@ -549,41 +553,59 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
         client = TestClient(app)
 
-        page = client.get("/memory", params={"domain": "board"})
+        page = client.get("/assets", params={"domain": "board"})
         self.assertEqual(page.status_code, 200)
-        self.assertIn("tab-assets", page.text)
+        self.assertIn("资产库", page.text)
         self.assertIn("ods-巡检方法", page.text)
         self.assertIn("任务 daily-inspection", page.text)
         self.assertIn("域级通用", page.text)
 
-        created = client.post("/memory/assets", json={
+        created = client.post("/assets", json={
             "domain": "board", "kind": "query", "name": "行数对比",
             "task": "", "summary": "比上下游行数", "content": "select ..."})
         self.assertEqual(created.status_code, 200)
-        bad = client.post("/memory/assets", json={
+        bad = client.post("/assets", json={
             "domain": "board", "kind": "bogus", "name": "x", "content": "y"})
         self.assertEqual(bad.status_code, 422)
+        empty = client.post("/assets", json={
+            "domain": "board", "kind": "query", "name": "x", "content": "  "})
+        self.assertEqual(empty.status_code, 422)
 
         rows = await assets.list_all("test", "board")
         self.assertEqual(len(rows), 3)
         aid = next(r["id"] for r in rows if r["name"] == "ods-巡检方法")
-        det = client.get(f"/memory/assets/{aid}/detail.json")
+        det = client.get(f"/assets/{aid}/detail.json")
         self.assertEqual(det.status_code, 200)
         self.assertEqual(det.json()["content"], "先比行数再抽查。")
         self.assertEqual(det.json()["use_count"], 0)
-        edited = client.post(f"/memory/assets/{aid}",
+        edited = client.post(f"/assets/{aid}",
                              json={"summary": "新摘要", "content": "步骤 v2"})
         self.assertEqual(edited.status_code, 200)
         self.assertEqual((await assets.get_entry(aid))["content"], "步骤 v2")
         self.assertEqual(
-            client.post(f"/memory/assets/{aid}/expire").status_code, 200)
+            client.post(f"/assets/{aid}/expire").status_code, 200)
         names = [a["name"] for a in
                  await assets.search_active("test", "board", "daily-inspection")]
         self.assertNotIn("ods-巡检方法", names)
         self.assertEqual(
-            client.post(f"/memory/assets/{aid}/restore").status_code, 200)
+            client.post(f"/assets/{aid}/restore").status_code, 200)
         self.assertIn("ods-巡检方法", [a["name"] for a in await assets.search_active(
             "test", "board", "daily-inspection")])
+
+        # 文件类资产：元数据在 PG，文件本体落盘，页面上逐文件查看
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/run.sql", "w") as fh:
+                fh.write("select 1;")
+            await assets.upsert("test", "board", "daily-inspection", "script",
+                                "行数脚本", "行数对比脚本", "用法说明", path=d)
+            fid = next(r["id"] for r in await assets.list_all("test", "board")
+                       if r["name"] == "行数脚本")
+            fdet = client.get(f"/assets/{fid}/detail.json").json()
+            self.assertEqual([f["name"] for f in fdet["files"]], ["run.sql"])
+            fresp = client.get(f"/assets/{fid}/file", params={"path": "run.sql"})
+            self.assertEqual(fresp.text, "select 1;")
+            self.assertEqual(client.get(
+                f"/assets/{fid}/file", params={"path": "../x"}).status_code, 404)
 
     async def test_prepare_injects_assets_and_counts_use(self):
         """prepare_run：任务资产置顶注入 prompt + 记复用 + 事件留痕。"""

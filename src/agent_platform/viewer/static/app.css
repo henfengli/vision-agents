@@ -542,3 +542,15 @@ details.steps .step pre { white-space: pre-wrap; word-break: break-word;
 .md-hint { background: rgba(251, 113, 133, 0.08); border: 1px solid var(--err);
   border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--err);
   margin-bottom: 10px; }
+/* 资产库页 */
+.mem-health #asset-add { margin-left: auto; }
+.ad-file { display: flex; justify-content: space-between; gap: 10px;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 4px; cursor: pointer; font-size: 12px; }
+.ad-file:hover { border-color: var(--accent); }
+.ad-file-name { font-family: var(--mono); word-break: break-all; }
+.ad-file-size { color: var(--text-dim); white-space: nowrap; }
+.ad-file-view { background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px; white-space: pre-wrap;
+  font-size: 12px; max-height: 320px; overflow: auto; margin: 8px 0 0; }
+#ad-meta span { margin-right: 14px; }

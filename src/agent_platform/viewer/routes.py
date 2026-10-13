@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..api.auth import make_viewer_auth_dependency
-from .pages import admin, approvals, base, chat, memory, overview, runs
+from .pages import admin, approvals, assets, base, chat, memory, overview, runs
 
 
 def make_viewer_router(submitter, defs_store, env: str,
@@ -43,6 +43,8 @@ def make_viewer_router(submitter, defs_store, env: str,
     pages.include_router(memory.make_router(env, target_envs=target_envs,
                                             domain_cfgs=domain_cfgs,
                                             embedder=embedder))
+    pages.include_router(assets.make_router(env, target_envs=target_envs,
+                                            domain_cfgs=domain_cfgs))
     router.include_router(pages)
 
     if token:

@@ -108,6 +108,7 @@ class Settings(BaseModel):
     bearer_token: str                      # 固定 token 鉴权（内网无用户体系）
     viewer_base_url: str
     scratch_dir: str = "/var/lib/agent-platform/scratch"
+    assets_dir: str = "/var/lib/agent-platform/assets"  # 任务资产库（文件载体；元数据在 PG）
     domains: dict[str, DomainConfig] = Field(default_factory=dict)
     temporal: TemporalConfig = TemporalConfig()
     langfuse: LangfuseConfig = LangfuseConfig()

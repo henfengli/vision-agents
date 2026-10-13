@@ -380,7 +380,7 @@ class TestAssetBlock(unittest.TestCase):
     def _asset(self, **kw):
         base = {"id": 1, "task": "", "kind": "procedure", "name": "巡检SOP",
                 "summary": "每日巡检方法", "content": "第一步…", "use_count": 3,
-                "feedback_score": 0, "source_run": None}
+                "feedback_score": 0, "source_run": None, "path": None}
         return {**base, **kw}
 
     def test_structure_and_scope(self):
@@ -388,7 +388,7 @@ class TestAssetBlock(unittest.TestCase):
         block = _asset_block([self._asset(),
                               self._asset(id=2, task="daily-inspection",
                                           kind="query", name="行数对比")])
-        self.assertTrue(block.startswith("[任务资产——历史运行沉淀，优先遵循"))
+        self.assertTrue(block.startswith("[任务资产——历史运行沉淀"))
         self.assertIn("procedure:巡检SOP（域级通用，已复用 3 次）", block)
         self.assertIn("query:行数对比（任务 daily-inspection，已复用 3 次）", block)
         self.assertIn("第一步…", block)
@@ -398,6 +398,79 @@ class TestAssetBlock(unittest.TestCase):
         block = _asset_block([self._asset(content="x" * 9000)])
         self.assertIn("…[内容过长已截断]", block)
         self.assertNotIn("x" * 9000, block)
+
+    def test_file_asset_reference_card(self):
+        """文件类资产只进引用卡：路径+文件清单，文件内容不进 prompt。"""
+        import tempfile
+        from agent_platform.orchestration.activities import _asset_block
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/run.py", "w") as fh:
+                fh.write("print('秘密脚本本体不应进 prompt')")
+            with open(f"{d}/README.md", "w") as fh:
+                fh.write("使用说明文件")
+            block = _asset_block([self._asset(
+                kind="script", name="前端巡检", path=d, content="")])
+        self.assertIn(f"路径：{d}", block)
+        self.assertIn("run.py", block)
+        self.assertIn("README.md", block)
+        self.assertNotIn("秘密脚本本体", block)
+
+
+class TestAssetFiles(unittest.TestCase):
+    """资产文件库助手（纯文件系统）：收编护栏/整替换/清单/在线读。"""
+
+    def test_asset_dir_sanitizes(self):
+        from agent_platform.store.assets import asset_dir
+        p = asset_dir("/root", "prod", "数仓", "a/b", "script", "../x.py")
+        self.assertEqual(p, "/root/prod/数仓/a_b/script___x.py")
+        self.assertEqual(asset_dir("/root", "prod", "d", "", "query", "n"),
+                         "/root/prod/d/_shared/query__n")
+
+    def test_collect_replace_and_guard(self):
+        import tempfile
+        from agent_platform.store.assets import collect_files, list_files
+        with tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as scratch:
+            os.makedirs(f"{scratch}/qa")
+            with open(f"{scratch}/qa/run.py", "w") as fh:
+                fh.write("print(1)")
+            with open(f"{scratch}/note.md", "w") as fh:
+                fh.write("说明")
+            dest, n, size = collect_files(root, "prod", "d", "t", "script",
+                                          "前端巡检", ["qa", "note.md"], scratch)
+            self.assertEqual((n, list(sorted(f["name"] for f in list_files(dest)))),
+                             (2, ["note.md", "qa/run.py"]))
+            self.assertGreater(size, 0)
+            # 整替换：旧文件清掉，只留新收编的
+            with open(f"{scratch}/note.md", "w") as fh:
+                fh.write("说明v2")
+            dest2, n2, _ = collect_files(root, "prod", "d", "t", "script",
+                                         "前端巡检", ["note.md"], scratch)
+            self.assertEqual(dest2, dest)
+            self.assertEqual(n2, 1)
+            self.assertEqual([f["name"] for f in list_files(dest)], ["note.md"])
+            # 护栏：越出 scratch / 不存在
+            with self.assertRaises(ValueError):
+                collect_files(root, "prod", "d", "t", "script", "x",
+                              ["../escape"], scratch)
+            with self.assertRaises(ValueError):
+                collect_files(root, "prod", "d", "t", "script", "x",
+                              ["missing.py"], scratch)
+
+    def test_read_asset_file(self):
+        import tempfile
+        from agent_platform.store.assets import read_asset_file
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/a.sql", "w") as fh:
+                fh.write("select 1;")
+            with open(f"{d}/bin.dat", "wb") as fh:
+                fh.write(b"\x00\x01\xff")
+            self.assertEqual(read_asset_file(d, "a.sql"), "select 1;")
+            self.assertIn("二进制文件", read_asset_file(d, "bin.dat"))
+            with self.assertRaises(FileNotFoundError):
+                read_asset_file(d, "../outside")
+            with self.assertRaises(FileNotFoundError):
+                read_asset_file(d, "nope")
 
 
 class TestSaveAssetTool(unittest.IsolatedAsyncioTestCase):
@@ -409,17 +482,21 @@ class TestSaveAssetTool(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("save_asset", reg.catalog_names)
         got = {}
 
-        async def writer(name, kind, summary, content, domain, task):
+        async def writer(name, kind, summary, content, files, domain, task):
             got.update(name=name, kind=kind, summary=summary, content=content,
-                       domain=domain, task=task)
+                       files=files, domain=domain, task=task)
             return "已沉淀"
         reg2 = ToolRegistry("/tmp/scratch", asset_writer=writer)
         self.assertIn("save_asset", reg2.catalog_names)
         fn = reg2.host_tools(["save_asset"])["save_asset"]
-        self.assertEqual(await fn("巡检SOP", "procedure", "每日巡检", "步骤"), "已沉淀")
+        self.assertEqual(await fn("巡检SOP", "procedure", "每日巡检", "步骤"),
+                         "已沉淀")
         self.assertEqual(got, {"name": "巡检SOP", "kind": "procedure",
                                "summary": "每日巡检", "content": "步骤",
-                               "domain": "", "task": ""})
+                               "files": [], "domain": "", "task": ""})
+        got.clear()
+        await fn("前端巡检脚本", "script", "playwright 巡检", files=["qa/run.py"])
+        self.assertEqual(got["files"], ["qa/run.py"])
 
 
 class TestModelPool(unittest.IsolatedAsyncioTestCase):

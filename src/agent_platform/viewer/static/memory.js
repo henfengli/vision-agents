@@ -1,8 +1,7 @@
-/* 记忆页：检索试用 + 条目卡 + 右抽屉明细（编辑/演化链/反馈）+ 矛盾仲裁
-   + 任务资产 tab（save_asset 沉淀的可复用方法/脚本/查询/基线）。
+/* 记忆页：检索试用 + 条目卡 + 右抽屉明细（编辑/演化链/反馈）+ 矛盾仲裁。
    数据源：window.MEMORY（列表内嵌，内容不内嵌）+ /memory/search.json +
-   /memory/{id}/detail.json + /memory/assets/{id}/detail.json；
-   写操作：编辑 /memory/{id}|/memory/assets/{id}、expire、restore。 */
+   /memory/{id}/detail.json；写操作：编辑 /memory/{id}、expire、restore。
+   （任务资产是独立概念，在 /assets 页。） */
 "use strict";
 
 const MEM = window.MEMORY;
@@ -63,12 +62,11 @@ document.getElementById("mem-search-form").addEventListener("submit",
 const drawer = document.getElementById("mem-drawer");
 const scrim = document.getElementById("mem-scrim");
 let curId = null;
-let mode = "edit";          // edit / create / asset-edit / asset-create
+let mode = "edit";          // edit / create
 let dirty = false;
 
 const $ = id => document.getElementById(id);
 $("md-content").addEventListener("input", () => { dirty = true; });
-$("md-summary").addEventListener("input", () => { dirty = true; });
 window.addEventListener("beforeunload", e => {
   if (dirty && drawer.classList.contains("open")) e.preventDefault();
 });
@@ -90,8 +88,6 @@ function openCreate() {
   $("md-pills").innerHTML = "";
   $("md-meta").innerHTML = "手动写入，立即生效并参与召回";
   $("md-create-fields").style.display = "";
-  $("md-asset-fields").style.display = "none";
-  $("md-summary-field").style.display = "none";
   $("md-hint").style.display = "none";
   $("md-content").value = "";
   $("md-msg").textContent = "";
@@ -103,62 +99,6 @@ function openCreate() {
   $("md-feedback-sec").style.display = "none";
 }
 
-/* —— 资产抽屉：与知识抽屉复用骨架，但无演化链/召回埋点（复用数直接记行上） —— */
-
-function openAssetCreate() {
-  openCreate();  // 复用重置逻辑，再切到资产形态
-  mode = "asset-create";
-  $("md-key").textContent = "新增资产";
-  $("md-meta").innerHTML = "手动登记方法/基线，立即生效并参与后续 run 的召回注入";
-  $("md-create-fields").style.display = "";
-  $("md-asset-fields").style.display = "";
-  $("md-summary-field").style.display = "";
-  $("md-summary").value = "";
-}
-
-async function openAssetDrawer(id) {
-  mode = "asset-edit";
-  curId = id;
-  dirty = false;
-  drawer.classList.add("open");
-  scrim.classList.add("open");
-  $("md-create-fields").style.display = "none";
-  $("md-asset-fields").style.display = "none";  // 域/任务/类型/名称是身份，不可改
-  $("md-summary-field").style.display = "";
-  $("md-hint").style.display = "none";
-  ["md-usage-sec", "md-chain-sec", "md-feedback-sec"]
-    .forEach(s => $(s).style.display = "none");
-  const resp = await fetch(`/memory/assets/${id}/detail.json`);
-  if (!resp.ok) {
-    $("md-key").textContent = "加载失败";
-    return;
-  }
-  const e = await resp.json();
-  $("md-key").textContent = `${e.domain} / ${e.kind}:${e.name}`;
-  let pills = e.valid_to
-    ? '<span class="pill pill-queued">已过期</span>'
-    : '<span class="pill pill-success"><span class="led"></span>生效中</span>';
-  if (e.feedback_score)
-    pills += `<span class="meta"> 反馈 ${e.feedback_score > 0 ? "+" : ""}${e.feedback_score}</span>`;
-  $("md-pills").innerHTML = pills;
-
-  const meta = [];
-  meta.push(e.task ? `任务 ${esc(e.task)}` : "域级通用");
-  meta.push(`复用 <b>${e.use_count}</b> 次`);
-  if (e.last_used_at) meta.push(`最近复用 ${esc(e.last_used_at.slice(0, 16))}`);
-  if (e.source_run && e.source_run !== "manual")
-    meta.push(`来源 <a href="/runs/${esc(e.source_run)}">run</a>`);
-  else if (e.source_run === "manual") meta.push("手动登记");
-  meta.push(`#${e.id} · 创建于 ${esc((e.created_at || "").slice(0, 16))}`);
-  $("md-meta").innerHTML = meta.join(" · ");
-  $("md-summary").value = e.summary || "";
-  $("md-content").value = e.content;
-  $("md-msg").textContent = "";
-  $("md-expire").style.display = e.valid_to ? "none" : "";
-  $("md-restore").style.display = e.valid_to ? "" : "none";
-  $("md-save").textContent = "保存（重新生效）";
-}
-
 async function openDrawer(id) {
   mode = "edit";
   curId = id;
@@ -166,8 +106,6 @@ async function openDrawer(id) {
   drawer.classList.add("open");
   scrim.classList.add("open");
   $("md-create-fields").style.display = "none";
-  $("md-asset-fields").style.display = "none";
-  $("md-summary-field").style.display = "none";
   ["md-usage-sec", "md-chain-sec", "md-feedback-sec"]
     .forEach(s => $(s).style.display = "");
   const resp = await fetch(`/memory/${id}/detail.json`);
@@ -266,12 +204,8 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") closeDrawer();
 });
 document.getElementById("mem-add").addEventListener("click", openCreate);
-document.getElementById("mem-add-asset")
-  .addEventListener("click", openAssetCreate);
 
 document.addEventListener("click", async e => {
-  const assetCard = e.target.closest(".asset-card");
-  if (assetCard) { openAssetDrawer(assetCard.dataset.id); return; }
   const card = e.target.closest(".mem-card");
   if (card) { openDrawer(card.dataset.id); return; }
   const jump = e.target.closest(".md-chain-jump");
@@ -305,28 +239,10 @@ document.getElementById("md-save").addEventListener("click", () => {
       content: document.getElementById("md-content").value});
     return;
   }
-  if (mode === "asset-create") {
-    post(`/memory/assets?env=${encodeURIComponent(MEM.env)}`, {
-      domain: document.getElementById("md-domain").value,
-      kind: document.getElementById("md-asset-kind").value,
-      task: document.getElementById("md-asset-task").value,
-      name: document.getElementById("md-asset-name").value,
-      summary: document.getElementById("md-summary").value,
-      content: document.getElementById("md-content").value});
-    return;
-  }
-  if (mode === "asset-edit") {
-    post(`/memory/assets/${curId}`, {
-      summary: document.getElementById("md-summary").value,
-      content: document.getElementById("md-content").value});
-    return;
-  }
   post(`/memory/${curId}`,
        {content: document.getElementById("md-content").value});
 });
 document.getElementById("md-expire").addEventListener("click",
-  () => post(mode.startsWith("asset")
-    ? `/memory/assets/${curId}/expire` : `/memory/${curId}/expire`));
+  () => post(`/memory/${curId}/expire`));
 document.getElementById("md-restore").addEventListener("click",
-  () => post(mode.startsWith("asset")
-    ? `/memory/assets/${curId}/restore` : `/memory/${curId}/restore`));
+  () => post(`/memory/${curId}/restore`));

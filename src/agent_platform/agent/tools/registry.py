@@ -157,14 +157,20 @@ class ToolRegistry:
     def _build_save_asset(self) -> Callable:
         writer = self._asset_writer
 
-        async def save_asset(name: str, kind: str, summary: str, content: str,
+        async def save_asset(name: str, kind: str, summary: str,
+                             content: str = "", files: list[str] | None = None,
                              domain: str = "", task: str = "") -> str:
-            """沉淀任务资产：可复用的方法/产物，后续 run 自动召回并优先遵循。
+            """沉淀任务资产：可复用的方法/产出，后续 run 自动召回复用。
             kind: procedure(方法/SOP，最有价值) | script(脚本) | query(查询) | baseline(基线数据)。
-            name 为同类下唯一标识（重复保存即整替换更新）；summary 一句话说明何时用；
-            content 逐字保存、永不摘要。domain/task 缺省取当前 run 上下文，task 空=域级通用。"""
+            name 为同类下唯一标识（重复保存即整替换更新）；summary 一句话说明何时用（召回触发全靠它）；
+            content 为说明/方法正文（文本资产的全文；文件资产的使用说明）。
+            files：把 scratch 里已写好的文件/目录收编进资产库（相对路径列表，
+            保持原名）——脚本等大产出用 files 收编，不要把内容粘进 content；
+            收编后得到稳定路径，后续 run 直接执行/读取，不要重写。
+            domain/task 缺省取当前 run 上下文，task 空=域级通用。"""
             assert writer is not None
-            return await writer(name, kind, summary, content, domain, task)
+            return await writer(name, kind, summary, content,
+                                files or [], domain, task)
         return save_asset
 
     def _build_run_code_placeholder(self) -> Callable:

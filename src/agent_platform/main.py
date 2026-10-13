@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
@@ -116,6 +117,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     """全部真实装配。必须在目标事件循环内调用（lifespan 或测试的 loop）。"""
     setup_observability(settings.langfuse)  # Langfuse OTEL（空操作可关）
     await db.open_db(settings.db_dsn)
+    os.makedirs(settings.assets_dir, exist_ok=True)  # 资产库目录（文件载体）
 
     defs = DefinitionStore()
     await seed_if_empty(defs, settings.env, domains=settings.domains)
@@ -151,23 +153,37 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     _ASSET_KINDS = ("procedure", "script", "query", "baseline")
 
     async def write_asset(name: str, kind: str, summary: str, content: str,
-                          domain: str = "", task: str = "") -> str:
+                          files: list[str], domain: str, task: str) -> str:
         from .agent.approvals import current_run_ctx, current_run_id
         from .store import assets as assets_store
         if kind not in _ASSET_KINDS:
             return f"[失败] kind 必须是 {'/'.join(_ASSET_KINDS)}"
-        if not name.strip() or not content.strip():
-            return "[失败] name 与 content 不能为空"
+        if not name.strip():
+            return "[失败] name 不能为空"
+        if not content.strip() and not files:
+            return "[失败] content 与 files 至少给一样"
         ctx = current_run_ctx.get({})
         dom = domain or ctx.get("domain") or next(iter(settings.domains), "")
         if not dom:
             return "[失败] 无可用 domain，请显式指定"
         tsk = task or ctx.get("task") or ""
+        env = ctx.get("env") or settings.env
+        path = None
+        if files:  # 收编 scratch 文件进资产库（整替换），拿稳定路径
+            try:
+                path, n_files, n_bytes = await asyncio.to_thread(
+                    assets_store.collect_files, settings.assets_dir,
+                    env, dom, tsk, kind, name.strip(), files,
+                    settings.scratch_dir)
+            except ValueError as e:
+                return f"[失败] {e}"
         await assets_store.upsert(
-            ctx.get("env") or settings.env, dom, tsk, kind,
-            name.strip(), summary.strip(), content,
-            source_run=current_run_id.get() or None)
+            env, dom, tsk, kind, name.strip(), summary.strip(), content,
+            source_run=current_run_id.get() or None, path=path)
         scope = f"{dom}/{tsk}" if tsk else f"{dom}（域级通用）"
+        if path:
+            return (f"已沉淀资产 {kind}:{name}（{scope}，{n_files} 个文件 "
+                    f"{n_bytes // 1024}KB）→ {path}，后续 run 直接引用该路径")
         return f"已沉淀资产 {kind}:{name}（{scope}），后续 run 将自动召回"
 
     extra_tools = await load_mcp_tools(settings.mcp_servers)

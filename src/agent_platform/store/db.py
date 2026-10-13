@@ -148,7 +148,8 @@ CREATE INDEX IF NOT EXISTS idx_recall_hits_entry
     ON recall_hits(env, entry_id, created_at);
 
 -- 任务资产：run 产出的可复用方法/脚本/查询/基线。与知识同套生命周期
--- （时序/取代/反馈/usage），复用计数直接记在行上
+-- （时序/取代/反馈/usage），复用计数直接记在行上；
+-- path 非空 = 文件类资产（内容载体在 assets_dir 下的目录，PG 只管元数据）
 CREATE TABLE IF NOT EXISTS assets (
     id           BIGSERIAL PRIMARY KEY,
     env          TEXT NOT NULL,
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS assets (
     name         TEXT NOT NULL,
     summary      TEXT NOT NULL DEFAULT '',
     content      TEXT NOT NULL,
+    path         TEXT,
     source_run   TEXT,
     use_count    INT NOT NULL DEFAULT 0,
     last_used_at TIMESTAMPTZ,
@@ -212,6 +214,7 @@ MIGRATIONS = [
     valid_from TIMESTAMPTZ NOT NULL DEFAULT now(), valid_to TIMESTAMPTZ,
     superseded_by TEXT, created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE(env, domain, task, kind, name))""",
+    "ALTER TABLE assets ADD COLUMN IF NOT EXISTS path TEXT",
 ]
 
 _dsn: str | None = None

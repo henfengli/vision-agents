@@ -2,7 +2,7 @@
 {% import "_macros.html" as m %}
 {% block content %}
 {{ m.page_head("MEMORY", "记忆管理",
-   "写入-召回-演化全程可查 · 检索试用 = 角色实际命中 · 资产方法自动召回复用") }}
+   "写入-召回-演化全程可查 · 检索试用 = 角色实际命中 · 反馈影响召回权重") }}
 <div class="admin-layout mem-layout">
   <aside class="admin-side">
     {% if target_envs %}
@@ -20,7 +20,6 @@
       <button data-tab="kb" class="on">知识</button>
       <button data-tab="cases">案例<span class="meta"> {{ cases|length }}</span></button>
       <button data-tab="conflicts">矛盾<span class="meta"> {{ conflicts|length }}</span></button>
-      <button data-tab="assets">资产<span class="meta"> {{ assets|length }}</span></button>
     </div>
     <div class="admin-items" style="display:block; margin-top:10px">
       {% for d, s in stats.items() %}
@@ -131,34 +130,6 @@
       <div class="admin-empty">无疑似矛盾对（向量余弦 ≥ 0.85 的生效条目对会列在这里）</div>
       {% endfor %}
     </div>
-
-    {# —— 资产 tab —— #}
-    <div class="mem-tab" id="tab-assets" style="display:none">
-      <div class="mem-health">
-        <span><b>{{ assets|rejectattr('expired')|list|length }}</b> 生效</span>
-        <span class="meta">方法/脚本/查询/基线——run 用 save_asset 沉淀，后续 run 自动召回遵循</span>
-        <button class="admin-new" id="mem-add-asset" style="width:auto">+ 新增资产</button>
-      </div>
-      {% for a in assets %}
-      <button class="mem-card asset-card" data-id="{{ a.id }}">
-        <div class="mc-head">
-          <span class="tag">{{ a.kind }}</span>
-          <span class="ai-name">{{ a.name }}</span>
-          {% if a.task %}<span class="meta">任务 {{ a.task }}</span>
-          {% else %}<span class="meta">域级通用</span>{% endif %}
-          {% if a.expired %}<span class="pill pill-queued">已过期</span>
-          {% else %}<span class="pill pill-success"><span class="led"></span>生效中</span>{% endif %}
-          {% if a.feedback_score %}<span class="meta">反馈 {{ "%+d"|format(a.feedback_score) }}</span>{% endif %}
-          <span class="meta">复用 {{ a.use_count }} 次</span>
-        </div>
-        <div class="ai-meta">{{ a.summary or "（无摘要）" }}</div>
-        <div class="ai-meta">{{ a.domain }} · {{ a.created_at[:10] }}
-          {% if a.last_used_at %} · 最近复用 {{ a.last_used_at[:10] }}{% endif %}</div>
-      </button>
-      {% else %}
-      <div class="admin-empty">暂无任务资产——run 用 save_asset 沉淀的方法/脚本/查询/基线会出现在这里，后续 run 自动召回</div>
-      {% endfor %}
-    </div>
   </section>
 </div>
 
@@ -177,23 +148,6 @@
       </select></div>
     <div class="af-field"><label class="af-label">Key（同 key 会整替换，幂等）</label>
       <input id="md-new-key" class="mono" placeholder="如：毛利率口径"></div>
-  </div>
-  <div id="md-asset-fields" style="display:none">
-    <div class="af-field"><label class="af-label">类型</label>
-      <select id="md-asset-kind">
-        <option value="procedure">procedure 方法/SOP（最有价值）</option>
-        <option value="script">script 脚本</option>
-        <option value="query">query 查询</option>
-        <option value="baseline">baseline 基线</option>
-      </select></div>
-    <div class="af-field"><label class="af-label">任务（空 = 域级通用）</label>
-      <input id="md-asset-task" class="mono" placeholder="如：daily-inspection"></div>
-    <div class="af-field"><label class="af-label">名称（同 域/任务/类型/名称 整替换，幂等）</label>
-      <input id="md-asset-name" class="mono" placeholder="如：ods-orders-巡检方法"></div>
-  </div>
-  <div class="af-field" id="md-summary-field" style="display:none">
-    <label class="af-label">摘要（一句话：何时该用它）</label>
-    <input id="md-summary">
   </div>
   <div id="md-hint" class="md-hint" style="display:none"></div>
   <textarea id="md-content" rows="10" class="mono"></textarea>

@@ -225,17 +225,29 @@ async def mark_failed(raw: dict, error: str) -> None:
 
 
 def _asset_block(assets: list[dict], content_limit: int = 4000) -> str:
-    """任务资产注入块（纯函数）：历史运行沉淀的方法/产物，置顶注入要求优先遵循。
-    单条内容截断保护 prompt 体积——截断说明写进块里，模型知道它看到的是片段。"""
-    lines = ["[任务资产——历史运行沉淀，优先遵循；发现已过时请用 save_asset 更新]"]
+    """任务资产注入块（渐进式披露）：文本资产全文给（它就是指令）；
+    文件资产只给引用卡（路径+清单），agent 用 bash 直接读/执行——
+    代码不进上下文，只有执行输出进。单条说明截断保护 prompt 体积。"""
+    lines = ["[任务资产——历史运行沉淀；文件类直接用路径读取/执行，不要重写；"
+             "发现已过时请用 save_asset 更新]"]
     for a in assets:
         scope = f"任务 {a['task']}" if a["task"] else "域级通用"
+        head = (f"### {a['kind']}:{a['name']}"
+                f"（{scope}，已复用 {a['use_count']} 次）")
+        if a.get("path"):
+            files = assets_store.list_files(a["path"])
+            listing = "、".join(f["name"] for f in files[:8])
+            if len(files) > 8:
+                listing += f" …（共 {len(files)} 个）"
+            body = (f"{a['summary']}\n路径：{a['path']}"
+                    + (f"\n说明：{a['content']}" if a["content"] else "")
+                    + (f"\n文件：{listing}" if listing else ""))
+            lines.append(head + "\n" + body)
+            continue
         content = a["content"]
         if len(content) > content_limit:
             content = content[:content_limit] + "\n…[内容过长已截断]"
-        lines.append(f"### {a['kind']}:{a['name']}"
-                     f"（{scope}，已复用 {a['use_count']} 次）\n"
-                     f"{a['summary']}\n{content}")
+        lines.append(f"{head}\n{a['summary']}\n{content}")
     return "\n\n".join(lines)
 
 
