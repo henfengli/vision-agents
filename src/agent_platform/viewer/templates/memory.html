@@ -49,6 +49,8 @@
         <span {% if health.conflicts %}class="warn"{% endif %}>
           <b>{{ health.conflicts }}</b> 待仲裁</span>
         <button class="admin-new" id="mem-add" style="width:auto">+ 新增条目</button>
+        <span class="meta">本域 {{ items|length }} 条
+          {%- if items|length >= 500 %}（已达上限，请用检索定位）{% endif %}</span>
       </div>
       <form class="mem-search" id="mem-search-form">
         <input id="mem-q" placeholder="检索试用：输入业务问题，看角色实际注入的 prompt 与命中（recall 同一入口）">
@@ -73,7 +75,7 @@
               {% else %}<span class="pill pill-queued">零召回</span>{% endif %}
             {% endif %}
           </div>
-          <div class="ai-meta">{{ i.domain }} · {{ i.created_at[:10] }}</div>
+          <div class="ai-meta">{{ i.domain }} · {{ m.ts(i.created_at) }}</div>
         </button>
         {% else %}
         <div class="admin-empty">当前筛选下暂无条目</div>
@@ -96,7 +98,7 @@
           <span class="meta">👍{{ c.thumbs_up }} 👎{{ c.thumbs_down }}</span>
         </div>
         <pre>{{ c.conclusion }}</pre>
-        <div class="ai-meta">{{ c.domain or "-" }} · {{ c.created_at[:10] }}
+        <div class="ai-meta">{{ c.domain or "-" }} · {{ m.ts(c.created_at) }}
           {% if c.source_run %} · <a href="/runs/{{ c.source_run }}">来源 run</a>{% endif %}
         </div>
       </div>
@@ -176,5 +178,6 @@
 window.MEMORY = {env: {{ view_env|tojson }}, domain: {{ domain|tojson }},
                  items: {{ items_json|safe }}};
 </script>
+<script src="/static/ts.js"></script>
 <script src="/static/memory.js"></script>
 {% endblock %}

@@ -80,6 +80,68 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         await runs.create("rc3", "t", "r", None, "sdk", " board-svc ", {})
         self.assertEqual((await runs.get("rc3"))["caller"], "board-svc")
 
+    async def test_runs_list_filtered(self):
+        """列表页查询：过滤 + 总数 + keyset 双向翻页不重不漏。"""
+        from agent_platform.store import db, runs
+        specs = [("f1", "success", "board", "sdk", {"question": "毛利率"}),
+                 ("f2", "failed", "board", "schedule", {"question": "巡检"}),
+                 ("f3", "failed", "dagster", "sensor", {"question": "报错"}),
+                 ("f4", "success", "dagster", "sdk", {"question": "口径"}),
+                 ("f5", "running", "board", "schedule", {"question": "毛利率"})]
+        for rid, st, dom, src, inp in specs:
+            await runs.create(rid, "task-x", "role-y", dom, src, "", inp)
+            await runs.set_status(rid, st, {})
+        # 让 created_at 可区分（秒级）：f1 最旧 → f5 最新
+        async with db.pool().connection() as conn:
+            for i, (rid, *_rest) in enumerate(specs):
+                await conn.execute(
+                    "UPDATE runs SET created_at = now() - interval '1 hour'"
+                    " * %s WHERE run_id = %s", (len(specs) - i, rid))
+
+        rows, total, _, _ = await runs.list_filtered(status="failed")
+        self.assertEqual(([r["run_id"] for r in rows], total), (["f3", "f2"], 2))
+        rows, total, _, _ = await runs.list_filtered(domain="board",
+                                                     source="schedule")
+        self.assertEqual([r["run_id"] for r in rows], ["f5", "f2"])
+        rows, total, _, _ = await runs.list_filtered(q="毛利")
+        self.assertEqual([r["run_id"] for r in rows], ["f5", "f1"])
+        rows, total, _, _ = await runs.list_filtered(hours=3)
+        self.assertEqual(total, 2)  # f5(1h) f4(2h)；f3 在 3h 边界外
+
+        # keyset 翻页：页大小 2 向前走完全部 5 条，不重不漏；再翻回第一页
+        seen, cursor, pages = [], None, 0
+        while True:
+            rows, total, next_c, prev_c = await runs.list_filtered(
+                limit=2, after=cursor)
+            seen += [r["run_id"] for r in rows]
+            pages += 1
+            if not next_c:
+                last_prev = prev_c
+                break
+            cursor = next_c
+        self.assertEqual(seen, ["f5", "f4", "f3", "f2", "f1"])
+        self.assertEqual((total, pages), (5, 3))
+        rows, _, next_c, prev_c = await runs.list_filtered(limit=2,
+                                                           before=last_prev)
+        self.assertEqual([r["run_id"] for r in rows], ["f3", "f2"])
+        self.assertIsNotNone(prev_c)  # 还能继续往前
+        rows, _, _, prev_c = await runs.list_filtered(limit=2, before=prev_c)
+        self.assertEqual([r["run_id"] for r in rows], ["f5", "f4"])
+        self.assertIsNone(prev_c)      # 已到第一页
+
+        # 排序：按时长/tokens 排（NULL 垫底），光标分页仍稳定
+        async with db.pool().connection() as conn:
+            for rid, ms in (("f1", 9000), ("f2", 100), ("f3", 5000)):
+                await conn.execute(
+                    "UPDATE runs SET duration_ms=%s WHERE run_id=%s",
+                    (ms, rid))
+        rows, _, next_c, _ = await runs.list_filtered(sort="duration_ms",
+                                                      limit=2)
+        self.assertEqual([r["run_id"] for r in rows], ["f1", "f3"])
+        rows, _, _, _ = await runs.list_filtered(sort="duration_ms", limit=2,
+                                                 after=next_c)
+        self.assertEqual([r["run_id"] for r in rows][0], "f2")
+
     async def test_latest_of_session(self):
         from agent_platform.store import runs
         await runs.create("r1", "t", "r", "dagster", "sdk", "", {"i": 1},

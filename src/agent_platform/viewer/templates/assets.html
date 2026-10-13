@@ -37,6 +37,17 @@
       <span class="meta">run 里 save_asset 沉淀；procedure 是方法/SOP（最有价值）</span>
       <button class="admin-new" id="asset-add" style="width:auto">+ 登记文本资产</button>
     </div>
+    <div class="filter-bar" style="margin-bottom:10px">
+      {{ m.chips(u, "kind", kind_chips, f_kind) }}
+      {{ m.chips(u, "state", state_chips, f_state) }}
+      <form method="get" action="/assets" style="display:contents">
+        <input type="hidden" name="env" value="{{ view_env }}">
+        <input type="hidden" name="domain" value="{{ domain }}">
+        {% if f_kind %}<input type="hidden" name="kind" value="{{ f_kind }}">{% endif %}
+        {% if f_state %}<input type="hidden" name="state" value="{{ f_state }}">{% endif %}
+        <input name="q" class="inline" placeholder="名称 / 摘要关键词" value="{{ f_q }}">
+      </form>
+    </div>
     {% for a in assets %}
     <button class="mem-card asset-card" data-id="{{ a.id }}">
       <div class="mc-head">
@@ -51,13 +62,18 @@
         {% if a.path %}<span class="meta">{{ a.files|length }} 个文件</span>{% endif %}
       </div>
       <div class="ai-meta">{{ a.summary or "（无摘要）" }}</div>
-      <div class="ai-meta">{{ a.domain }} · {{ a.created_at[:10] }}
-        {% if a.last_used_at %} · 最近复用 {{ a.last_used_at[:10] }}{% endif %}
+      <div class="ai-meta">{{ a.domain }} · 登记 {{ m.ts(a.created_at) }}
+        {% if a.last_used_at %} · 最近复用 {{ m.ts(a.last_used_at) }}{% endif %}
         {% if a.path %} · <span class="mono">{{ a.path }}</span>{% endif %}</div>
     </button>
     {% else %}
-    <div class="admin-empty">暂无资产——run 里用 save_asset 沉淀的方法/脚本/查询/基线会出现在这里；文件类按路径直接被后续 run 执行，不重写</div>
+    <div class="admin-empty">
+      {% if f_q or f_kind or f_state %}当前过滤条件下没有资产 ——
+        <a href="/assets?env={{ view_env }}&domain={{ domain }}">清除过滤</a>
+      {% else %}暂无资产——run 里用 save_asset 沉淀的方法/脚本/查询/基线会出现在这里；文件类按路径直接被后续 run 执行，不重写{% endif %}
+    </div>
     {% endfor %}
+    {{ m.pager(pager) }}
   </section>
 </div>
 
@@ -106,5 +122,6 @@
 <script>
 window.ASSETS = {env: {{ view_env|tojson }}, domain: {{ domain|tojson }}};
 </script>
+<script src="/static/ts.js"></script>
 <script src="/static/assets.js"></script>
 {% endblock %}

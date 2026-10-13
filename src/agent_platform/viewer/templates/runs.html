@@ -1,31 +1,75 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block content %}
-{{ m.page_head("EXECUTIONS", "最近 Runs", "近 100 条 · 点击 run id 查看执行过程与运行图") }}
-{% if target_envs %}
-<form method="get" action="/runs" class="filter-bar">
-  <select name="env" class="inline" onchange="this.form.submit()">
-    <option value="">全部环境</option>
-    {% for e in target_envs %}
-    <option value="{{ e }}"{% if e == qenv %} selected{% endif %}>{{ e }}</option>
-    {% endfor %}
-  </select>
-</form>
-{% endif %}
+{{ m.page_head("EXECUTIONS", "Runs", "执行台账 · 过滤/排序/翻页全部走 URL，可分享") }}
+
+<div class="filter-bar">
+  {{ m.chips(u, "status", statuses, f_status) }}
+  {{ m.chips(u, "range", ranges, f_range) }}
+  <form method="get" action="/runs" class="filter-bar" style="display:contents">
+    {% if f_status %}<input type="hidden" name="status" value="{{ f_status }}">{% endif %}
+    {% if f_range %}<input type="hidden" name="range" value="{{ f_range }}">{% endif %}
+    {% if sort != "created_at" %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+    {% if dir != "desc" %}<input type="hidden" name="dir" value="{{ dir }}">{% endif %}
+    {% if target_envs %}
+    <select name="env" class="inline" onchange="this.form.submit()">
+      <option value="">全部环境</option>
+      {% for e in target_envs %}
+      <option value="{{ e }}"{% if e == f_env %} selected{% endif %}>{{ e }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    {% if domains %}
+    <select name="domain" class="inline" onchange="this.form.submit()">
+      <option value="">全部域</option>
+      {% for d in domains %}
+      <option value="{{ d }}"{% if d == f_domain %} selected{% endif %}>{{ d }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
+    <select name="source" class="inline" onchange="this.form.submit()">
+      {% for v, label in sources %}
+      <option value="{{ v }}"{% if v == f_source %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <input name="task" class="inline" placeholder="任务名" value="{{ f_task }}"
+           style="width:130px">
+    <input name="q" class="inline" placeholder="run id / 问题关键词" value="{{ f_q }}">
+    <button type="submit" style="display:none"></button>
+  </form>
+  {% if pager %}<span class="meta fcount">共 {{ pager.total }} 条</span>{% endif %}
+</div>
+
 <div class="card"><table class="grid">
-  <thead><tr><th>run</th><th>任务</th><th>角色</th><th>目标环境</th>
-    <th>状态</th><th>来源</th><th>时间</th></tr></thead>
+  <thead><tr>
+    <th>run</th><th>任务</th><th>角色</th><th>环境</th><th>状态</th>
+    <th>来源</th><th>调用方</th>
+    {{ m.sort_th(u, "tokens", "tokens", sort, dir) }}
+    {{ m.sort_th(u, "duration_ms", "时长", sort, dir) }}
+    {{ m.sort_th(u, "created_at", "时间", sort, dir) }}
+  </tr></thead>
   <tbody>
     {% for r in rows %}
-    <tr><td><a class="run-link" href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
-      <td>{{ r.task_type }}</td><td>{{ r.role }}</td>
+    <tr class="rowlink" onclick="location.href='/runs/{{ r.run_id }}'">
+      <td><a class="run-link" href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
+      <td>{{ r.task_type }}{% if r.domain %}<span class="meta"> · {{ r.domain }}</span>{% endif %}</td>
+      <td>{{ r.role }}</td>
       <td>{{ r.target_env or "-" }}</td>
       <td>{{ m.pill(r.status) }}</td>
       <td>{{ r.trigger_source }}</td>
-      <td class="meta">{{ r.created_at }}</td></tr>
+      <td class="meta">{{ r.caller or "-" }}</td>
+      <td class="meta">{{ r.tokens or "-" }}</td>
+      <td class="meta">{{ r.duration_ms|dur }}</td>
+      <td>{{ m.ts(r.created_at) }}</td>
+    </tr>
     {% else %}
-    <tr><td colspan="7" class="meta">暂无</td></tr>
+    <tr><td colspan="10" class="meta" style="padding:18px">
+      {% if f_status or f_range or f_env or f_domain or f_source or f_task or f_q %}
+        当前过滤条件下没有 run —— <a href="/runs">清除全部过滤</a>
+      {% else %}暂无 run{% endif %}
+    </td></tr>
     {% endfor %}
   </tbody>
 </table></div>
+{{ m.pager(pager) }}
 {% endblock %}

@@ -8,7 +8,9 @@ static/app.css（设计系统），图渲染在 static/graph.js（cytoscape）�
 from __future__ import annotations
 
 import hmac
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -23,6 +25,72 @@ _env = Environment(
     loader=FileSystemLoader(_DIR / "templates"),
     autoescape=select_autoescape(("html",)),
     trim_blocks=True, lstrip_blocks=True)
+
+
+def _parse_ts(t) -> datetime | None:
+    """接受 datetime 或 ISO 字符串；解析不了返回 None（模板显示 '-'）。"""
+    if t is None or t == "":
+        return None
+    if isinstance(t, datetime):
+        return t
+    try:
+        return datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _reltime(t) -> str:
+    """相对时间（全站时间显示的唯一口径）：刚刚/N 分钟前/N 小时前/N 天前/日期。"""
+    dt = _parse_ts(t)
+    if dt is None:
+        return "-"
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    secs = max(0.0, (now - dt).total_seconds())
+    if secs < 90:
+        return "刚刚"
+    if secs < 3600:
+        return f"{int(secs // 60)} 分钟前"
+    if secs < 86400:
+        return f"{int(secs // 3600)} 小时前"
+    if secs < 7 * 86400:
+        return f"{int(secs // 86400)} 天前"
+    return dt.strftime("%Y-%m-%d")
+
+
+def _abstime(t) -> str:
+    dt = _parse_ts(t)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def _dur(ms) -> str:
+    """毫秒 → 人类可读时长（820ms / 2.3s / 3.2 min / 1.2 h）。"""
+    if ms is None:
+        return "-"
+    ms = int(ms)
+    if ms < 1000:
+        return f"{ms}ms"
+    secs = ms / 1000
+    if secs < 60:
+        return f"{secs:.1f}s"
+    if secs < 3600:
+        return f"{secs / 60:.1f} min"
+    return f"{secs / 3600:.1f} h"
+
+
+_env.filters.update({"reltime": _reltime, "abstime": _abstime, "dur": _dur})
+
+
+def page_url(request: Request, **over) -> str:
+    """列表页「URL 即状态」助手：当前 query + 覆盖项（空值=删除该参数）。
+
+    过滤/排序变化由调用方传 cursor 清空（c="" / p=""），分页则带上光标。
+    模板里以 u(...) 调用（handler 里 functools.partial(page_url, request)）。
+    """
+    params = dict(request.query_params)
+    params.update(over)
+    params = {k: v for k, v in params.items() if v not in ("", None)}
+    qs = urlencode(params)
+    return request.url.path + ("?" + qs if qs else "")
 
 # 由 routes.py 装配时设置：是否开启令牌登录（决定顶栏显不显示"退出"）
 _AUTH_ENABLED = False
@@ -63,7 +131,7 @@ def esc(text: str) -> str:
 def make_static_router() -> APIRouter:
     router = APIRouter()
     allowed = {"app.css", "graph.js", "admin.js", "memory.js", "assets.js",
-               "cytoscape.min.js",
+               "ts.js", "cytoscape.min.js",
                "cytoscape-dagre.min.js", "marked.min.js", "dompurify.min.js"}
 
     # filename:path 才能匹配 fonts/ 子目录（默认 path converter 不吃斜杠，字体曾因此 404）

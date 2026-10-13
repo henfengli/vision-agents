@@ -1,8 +1,14 @@
-"""Run 详情页 + 状态 JSON + 图拓扑（运行图 2s 轮询局部刷新）。"""
+"""Run 列表/详情页：列表页是全套过滤（chips+下拉+关键词+时间范围）+
+可排序表头 + keyset 分页；详情页状态 JSON + 图拓扑（2s 轮询局部刷新）。
+
+列表页交互遵守「URL 即状态」：所有过滤/排序/光标都在 query string，
+可分享、刷新不丢（page_url 助手，见 base.py）。
+"""
 
 from __future__ import annotations
 
 import json
+from functools import partial
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,21 +18,53 @@ from ...langfuse import match_observation
 from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
-from .base import render
+from .base import page_url, render
+
+_PAGE = 50
+_STATUSES = [("", "全部"), ("running", "运行中"), ("queued", "排队"),
+             ("success", "成功"), ("failed", "失败")]
+_SOURCES = [("", "全部来源"), ("web_chat", "对话"), ("schedule", "调度"),
+            ("sensor", "传感器"), ("sdk", "SDK"), ("webhook", "Webhook")]
+_RANGES = [("", "全部时间"), ("24", "24 小时"), ("168", "7 天"),
+           ("720", "30 天")]
 
 
 def make_router(env: str, langfuse=None,
                 target_envs: list[str] | None = None,
-                submitter=None) -> APIRouter:
+                submitter=None, domains: list[str] | None = None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/runs", response_class=HTMLResponse)
     async def runs_list(request: Request):
-        # 目标环境过滤：?env=xxx；单环境部署（无 target_envs）不出过滤器
-        qenv = request.query_params.get("env") or None
-        rows = await runs.list_recent(target_env=qenv, limit=100)
+        p = request.query_params
+        status = p.get("status") or ""
+        hours = p.get("range") or ""
+        rows, total, next_c, prev_c = await runs.list_filtered(
+            target_env=p.get("env") or None, status=status or None,
+            domain=p.get("domain") or None, task=p.get("task") or None,
+            source=p.get("source") or None, q=p.get("q") or None,
+            hours=int(hours) if hours else None,
+            sort=p.get("sort") or "created_at", asc=p.get("dir") == "asc",
+            after=p.get("c") or None, before=p.get("b") or None,
+            limit=_PAGE)
+        u = partial(page_url, request)
+        pager = None
+        if total:
+            pager = {
+                "total": total, "count": len(rows),
+                "prev_url": u(b=prev_c, c="") if prev_c else None,
+                "next_url": u(c=next_c, b="") if next_c else None,
+            }
         return render("runs.html", "Runs", active="/runs",
-                      rows=rows, qenv=qenv, target_envs=target_envs or [])
+                      rows=rows, pager=pager, u=u,
+                      f_status=status, f_range=hours,
+                      f_env=p.get("env") or "", f_domain=p.get("domain") or "",
+                      f_task=p.get("task") or "", f_q=p.get("q") or "",
+                      f_source=p.get("source") or "",
+                      sort=p.get("sort") or "created_at",
+                      dir=p.get("dir") or "desc",
+                      statuses=_STATUSES, sources=_SOURCES, ranges=_RANGES,
+                      target_envs=target_envs or [], domains=domains or [])
 
     @router.get("/runs/{run_id}/state.json")
     async def run_state(run_id: str, request: Request):

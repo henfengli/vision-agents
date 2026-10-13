@@ -10,3 +10,40 @@
   {% if meta %}<div class="meta">{{ meta|safe }}</div>{% endif %}
 </div>
 {%- endmacro %}
+
+{# 时间显示唯一口径：相对时间 + hover 出绝对时间 #}
+{% macro ts(t) -%}
+{%- if t %}<span class="ts" title="{{ t|abstime }}">{{ t|reltime }}</span>{% else %}-{% endif -%}
+{%- endmacro %}
+
+{# 分页器：p = {total, count, prev_url, next_url}（cursor/offset 由页面决定） #}
+{% macro pager(p) -%}
+{% if p and p.total %}
+<div class="pager">
+  <span class="meta">本页 {{ p.count }} 条 · 共 {{ p.total }} 条</span>
+  <span class="pager-btns">
+    {% if p.prev_url %}<a class="pager-btn" href="{{ p.prev_url }}">‹ 上一页</a>{% endif %}
+    {% if p.next_url %}<a class="pager-btn" href="{{ p.next_url }}">下一页 ›</a>{% endif %}
+  </span>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{# 单值切换 chips（全部/各取值）；cur=当前值，items=[(值, 文案)]，u=page_url #}
+{% macro chips(u, key, items, cur) -%}
+<span class="fchips">
+  {% for v, label in items %}
+  <a class="fchip{% if v == cur %} on{% endif %}"
+     href="{{ u(**{key: v, 'c': '', 'b': '', 'p': ''}) }}">{{ label }}</a>
+  {% endfor %}
+</span>
+{%- endmacro %}
+
+{# 可排序表头：当前列显示方向箭头，点击切换/翻转 #}
+{% macro sort_th(u, key, label, sort, dir) -%}
+<th class="sortable{% if sort == key %} on{% endif %}">
+  <a href="{{ u(sort=key, dir=('asc' if (sort == key and dir == 'desc') else 'desc'), c='', b='') }}">{{ label }}
+    {%- if sort == key %}{{ " ↑" if dir == "asc" else " ↓" }}{% endif -%}
+  </a>
+</th>
+{%- endmacro %}

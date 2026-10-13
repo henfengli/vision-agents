@@ -62,18 +62,52 @@ async def find_pending(run_id: str) -> dict | None:
 
 
 async def list_pending(limit: int = 50) -> list[dict]:
-    """审批收件箱：全部待办（viewer 列表页）。钉钉 deep-link 之外的兜底入口。"""
+    """审批收件箱：全部待办（viewer 列表页）。钉钉 deep-link 之外的兜底入口。
+
+    按发起时间升序：待办的本质是 SLA，等待最久的排最前。
+    """
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT a.id, a.run_id, a.command, a.created_at,"
-            "       r.task_type, r.trigger_source"
+            "       r.task_type, r.trigger_source, r.caller, r.target_env"
             " FROM approvals a LEFT JOIN runs r ON r.run_id = a.run_id"
-            " WHERE a.status='pending' ORDER BY a.id DESC LIMIT %s", (limit,))
+            " WHERE a.status='pending' ORDER BY a.created_at ASC LIMIT %s",
+            (limit,))
         rows = await cur.fetchall()
     return [{"id": r[0], "run_id": r[1], "command": r[2],
              "created_at": r[3].isoformat(),
-             "task_type": r[4] or "", "trigger_source": r[5] or ""}
+             "task_type": r[4] or "", "trigger_source": r[5] or "",
+             "caller": r[6] or "", "target_env": r[7] or ""}
             for r in rows]
+
+
+async def list_decided(status: str | None = None, offset: int = 0,
+                       limit: int = 30) -> tuple[list[dict], int]:
+    """已处理审批历史（审计）：按决定时间倒序，可按结果过滤。"""
+    conds = ["a.status <> 'pending'"]
+    params: list = []
+    if status in ("approved", "rejected"):
+        conds.append("a.status=%s")
+        params.append(status)
+    where = " WHERE " + " AND ".join(conds)
+    cols = ("a.id, a.run_id, a.command, a.status, a.decided_by, a.decided_at,"
+            " a.created_at, r.task_type, r.trigger_source, r.caller")
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM approvals a" + where, params)
+        total = (await cur.fetchone())[0]
+        cur = await conn.execute(
+            f"SELECT {cols} FROM approvals a"
+            " LEFT JOIN runs r ON r.run_id = a.run_id" + where +
+            " ORDER BY a.decided_at DESC LIMIT %s OFFSET %s",
+            (*params, limit, offset))
+        rows = await cur.fetchall()
+    return ([{"id": r[0], "run_id": r[1], "command": r[2], "status": r[3],
+              "decided_by": r[4] or "",
+              "decided_at": r[5].isoformat() if r[5] else None,
+              "created_at": r[6].isoformat(),
+              "task_type": r[7] or "", "trigger_source": r[8] or "",
+              "caller": r[9] or ""} for r in rows], total)
 
 
 async def pending_count() -> int:

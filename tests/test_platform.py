@@ -373,6 +373,73 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mem.status_code, 200)
         self.assertIn('name="env"', mem.text)
 
+    async def test_runs_list_page_filters(self):
+        """Runs 列表页：状态/域/关键词过滤 + 分页器 + 可排序表头 + 相对时间。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.store import runs
+        from agent_platform.viewer import make_viewer_router
+        await runs.create("lf1", "data-qa", "data_searcher", "board",
+                          "sdk", "svc-a", {"question": "毛利率口径"})
+        await runs.set_status("lf1", "failed", {})
+        await runs.create("lf2", "daily-inspection", "ops_analyst", "board",
+                          "schedule", "", {"scope": "nightly"})
+        await runs.set_status("lf2", "success", {})
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(
+            self.submitter, self.defs, "test", domains=["board", "dagster"]))
+        client = TestClient(app)
+
+        page = client.get("/runs")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("fchips", page.text)          # 状态/时间 chips
+        self.assertIn("共 2 条", page.text)          # 总数
+        self.assertIn("sort=created_at", page.text)  # 可排序表头
+        self.assertIn("刚刚", page.text)             # 相对时间
+        self.assertIn("svc-a", page.text)            # caller 列
+        failed = client.get("/runs", params={"status": "failed"})
+        self.assertIn("lf1"[:8], failed.text)
+        self.assertNotIn('lf2'[:8] + "<", failed.text)
+        self.assertIn("共 1 条", failed.text)
+        byq = client.get("/runs", params={"q": "毛利率"})
+        self.assertIn("共 1 条", byq.text)
+        empty = client.get("/runs", params={"q": "不存在的词"})
+        self.assertIn("清除全部过滤", empty.text)    # 过滤后空态
+
+    async def test_approvals_done_tab(self):
+        """审批页：待办 SLA 升序 + 已处理历史（结果过滤/操作人/决定时间）。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.agent import approvals as appr
+        from agent_platform.api.app import create_app
+        from agent_platform.store import runs
+        from agent_platform.viewer import make_viewer_router
+        await runs.create("ap1", "daily-inspection", "ops_analyst", "board",
+                          "schedule", "", {"scope": "n"})
+        aid = await appr.request_approval("ap1", "rm -rf /tmp/x")
+        await appr.decide(aid, True, decided_by="张三")
+        await runs.create("ap2", "data-qa", "data_searcher", "board",
+                          "sdk", "svc-a", {"question": "q"})
+        await appr.request_approval("ap2", "systemctl restart x")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        inbox = client.get("/approvals")
+        self.assertEqual(inbox.status_code, 200)
+        self.assertIn("待办（1）", inbox.text)
+        self.assertIn("systemctl restart x", inbox.text)
+        self.assertNotIn("rm -rf /tmp/x", inbox.text)  # 已处理的不混在待办
+        done = client.get("/approvals", params={"tab": "done"})
+        self.assertIn("rm -rf /tmp/x", done.text)
+        self.assertIn("已放行", done.text)
+        self.assertIn("张三", done.text)
+        rejected = client.get("/approvals",
+                              params={"tab": "done", "status": "rejected"})
+        self.assertIn("当前过滤下没有记录", rejected.text)  # 过滤后空态
+        self.assertNotIn("rm -rf", rejected.text)
+
     async def test_chat_session_endpoints(self):
         """对话页会话端点：列表按最后活动倒序 + 历史回放 + 配置回填。"""
         from fastapi.testclient import TestClient

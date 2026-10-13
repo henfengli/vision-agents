@@ -10,17 +10,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from ...store import assets as assets_store
-from .base import render
+from .base import page_url, render
 
 log = logging.getLogger(__name__)
 
 ASSET_KINDS = ("procedure", "script", "query", "baseline")
+_PAGE = 50
+_KIND_CHIPS = [("", "全部类型"), ("procedure", "方法"), ("script", "脚本"),
+               ("query", "查询"), ("baseline", "基线")]
+_STATE_CHIPS = [("", "全部状态"), ("on", "生效中"), ("off", "已过期")]
 
 
 class AssetCreateRequest(BaseModel):
@@ -46,22 +51,34 @@ def make_router(env: str, target_envs: list[str] | None = None,
     async def assets_page(request: Request, domain: str = ""):
         # 资产按目标环境分区：?env=xxx 切换查看；缺省看实例默认环境
         view_env = request.query_params.get("env") or env
-        all_assets = await assets_store.list_all(view_env)
-        # 侧栏域计数（生效/失效角标），与域筛选解耦
-        side: dict[str, dict] = {}
-        for a in all_assets:
-            s = side.setdefault(a["domain"], {"active": 0, "inactive": 0})
-            s["inactive" if a["expired"] else "active"] += 1
-        if not domain and all_assets:
-            domain = all_assets[0]["domain"]
-        assets = [a for a in all_assets if not domain or a["domain"] == domain]
+        p = request.query_params
+        q = p.get("q") or ""
+        kind = p.get("kind") or ""
+        active = {"on": True, "off": False}.get(p.get("state") or "")
+        page = max(1, int(p.get("p") or 1))
+        # 侧栏域计数与列表过滤解耦：侧栏永远显示全域分布
+        side = await assets_store.domain_counts(view_env)
+        if not domain and side:
+            domain = next(iter(side))
+        assets, total, offset = await assets_store.list_filtered(
+            view_env, domain=domain or None, q=q or None, kind=kind or None,
+            active=active, offset=(page - 1) * _PAGE, limit=_PAGE)
         for a in assets:  # 文件类补文件清单（本地目录，微秒级）
             a["files"] = (await asyncio.to_thread(
                 assets_store.list_files, a["path"]) if a.get("path") else [])
         stats = await assets_store.kind_stats(view_env)
+        u = partial(page_url, request)
+        pager = None
+        if total:
+            pager = {"total": total, "count": len(assets),
+                     "prev_url": u(p=page - 1) if page > 1 else None,
+                     "next_url": (u(p=page + 1)
+                                  if offset + _PAGE < total else None)}
         return render("assets.html", "资产库", active="/assets",
                       assets=assets, domain=domain, side=side, stats=stats,
-                      domains=domains, view_env=view_env,
+                      domains=domains, view_env=view_env, pager=pager, u=u,
+                      f_q=q, f_kind=kind, f_state=p.get("state") or "",
+                      kind_chips=_KIND_CHIPS, state_chips=_STATE_CHIPS,
                       target_envs=target_envs or [])
 
     @router.post("/assets")

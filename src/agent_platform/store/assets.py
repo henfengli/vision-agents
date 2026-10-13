@@ -73,21 +73,62 @@ async def mark_used(ids: list[int]) -> None:
 
 async def list_all(env: str, domain: str | None = None,
                    include_inactive: bool = True) -> list[dict]:
-    where = "WHERE env=%s"
-    params: list = [env]
+    rows, _, _ = await list_filtered(env, domain=domain,
+                                     active=None if include_inactive else True,
+                                     limit=500)
+    return rows
+
+
+async def list_filtered(env: str, domain: str | None = None,
+                        q: str | None = None, kind: str | None = None,
+                        active: bool | None = None, offset: int = 0,
+                        limit: int = 50) -> tuple[list[dict], int, int]:
+    """资产页列表：过滤（域/关键词/类型/生效状态）+ offset 分页。
+
+    返回 (rows, total, offset)。资产是低频小表，offset 足够；
+    高 churn 的 runs 表才用 keyset（见 store/runs.py）。
+    """
+    conds, params = ["env=%s"], [env]
     if domain:
-        where += " AND domain=%s"
+        conds.append("domain=%s")
         params.append(domain)
-    if not include_inactive:
-        where += " AND valid_to IS NULL"
+    if kind:
+        conds.append("kind=%s")
+        params.append(kind)
+    if active is True:
+        conds.append("valid_to IS NULL")
+    elif active is False:
+        conds.append("valid_to IS NOT NULL")
+    if q:
+        conds.append("(name ILIKE %s OR summary ILIKE %s)")
+        params += ["%" + q + "%", "%" + q + "%"]
+    where = " WHERE " + " AND ".join(conds)
+    cols = ("id, domain, task, kind, name, summary, use_count, last_used_at,"
+            " feedback_score, valid_to IS NOT NULL, superseded_by, source_run,"
+            " created_at, path")
+    async with pool().connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM assets" + where, params)
+        total = (await cur.fetchone())[0]
+        cur = await conn.execute(
+            f"SELECT {cols} FROM assets" + where +
+            " ORDER BY valid_to IS NOT NULL, kind, task, name"
+            " LIMIT %s OFFSET %s", (*params, limit, offset))
+        rows = await cur.fetchall()
+    return [{**_row_meta(r)} for r in rows], total, offset
+
+
+async def domain_counts(env: str) -> dict[str, dict]:
+    """侧栏域计数（生效/失效），与列表过滤解耦。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, task, kind, name, summary, use_count,"
-            " last_used_at, feedback_score, valid_to IS NOT NULL,"
-            " superseded_by, source_run, created_at, path FROM assets " + where +
-            " ORDER BY kind, task, name LIMIT 500", tuple(params))
+            "SELECT domain, valid_to IS NOT NULL, count(*) FROM assets"
+            " WHERE env=%s GROUP BY domain, valid_to IS NOT NULL", (env,))
         rows = await cur.fetchall()
-    return [{**_row_meta(r)} for r in rows]
+    side: dict[str, dict] = {}
+    for dom, expired, n in rows:
+        s = side.setdefault(dom, {"active": 0, "inactive": 0})
+        s["inactive" if expired else "active"] += n
+    return side
 
 
 async def kind_stats(env: str) -> dict[str, int]:

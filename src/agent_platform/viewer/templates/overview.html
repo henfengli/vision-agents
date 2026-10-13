@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import pill, page_head %}
+{% from "_macros.html" import pill, page_head, ts %}
 {% block content %}
 {{ page_head("OVERVIEW", "总览", "近 " ~ stats.hours ~ "h 平台运行状况 · 数据来自执行台账") }}
 <div class="stat-grid">
@@ -17,7 +17,7 @@
       <tr><td><a class="run-link" href="/runs/{{ r.run_id }}">{{ r.run_id[:8] }}</a></td>
         <td>{{ r.task_type }}</td><td>{{ pill(r.status) }}</td>
         <td>{{ r.target_env or "-" }}</td>
-        <td class="meta">{{ r.created_at[5:19]|replace("T", " ") }}</td></tr>
+        <td class="meta">{{ ts(r.created_at) }}</td></tr>
       {% else %}<tr><td class="meta">暂无</td></tr>
       {% endfor %}
     </tbody></table></div>
@@ -25,14 +25,14 @@
     {% for p in pending %}
     <div class="pend-row"><a class="run-link" href="/approvals/{{ p.run_id }}">{{ p.run_id[:8] }}</a>
       <pre>{{ p.command[:80] }}</pre>
-      <span class="meta">{{ p.task_type or "—" }} · {{ p.created_at[5:19]|replace("T", " ") }}</span></div>
+      <span class="meta">{{ p.task_type or "—" }} · {{ ts(p.created_at) }}</span></div>
     {% else %}<div class="meta" style="padding:14px 0">没有待办审批 ✓</div>
     {% endfor %}
     <h3 style="margin-top:18px">最近失败</h3>
     {% for f in stats.failed %}
     <div class="pend-row"><a class="run-link" href="/runs/{{ f.run_id }}">{{ f.run_id[:8] }}</a>
       <span>{{ f.task_type }}<span class="meta"> · {{ f.role }} · {{ f.target_env or "-" }}</span></span>
-      <span class="meta">{{ f.created_at[5:19]|replace("T", " ") }}</span></div>
+      <span class="meta">{{ ts(f.created_at) }}</span></div>
     {% else %}<div class="meta" style="padding:14px 0">近期无失败 ✓</div>
     {% endfor %}
   </div>

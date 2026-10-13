@@ -78,9 +78,9 @@
         document.getElementById("ad-meta").innerHTML =
           "<span>" + esc(a.domain) + " / " + (a.task ? esc(a.task) : "域级通用") + "</span>" +
           "<span>复用 " + a.use_count + " 次</span>" +
-          "<span>最近复用 " + esc((a.last_used_at || "—").slice(0, 10)) + "</span>" +
+          "<span>最近复用 " + (a.last_used_at ? TS.span(a.last_used_at) : "—") + "</span>" +
           (a.source_run ? '<span>来源 run <span class="mono">' + esc(a.source_run.slice(0, 8)) + "</span></span>" : "") +
-          "<span>登记于 " + esc((a.created_at || "").slice(0, 10)) + "</span>";
+          "<span>登记于 " + TS.span(a.created_at) + "</span>";
         document.getElementById("ad-summary").value = a.summary;
         document.getElementById("ad-content").value = a.content;
         document.getElementById("ad-content").placeholder = a.path

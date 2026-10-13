@@ -1,29 +1,52 @@
-"""审批页：危险操作的人工放行/拒绝，外加待办收件箱。
+"""审批页：危险操作的人工放行/拒绝，待办收件箱 + 已处理历史（审计）。
 
 入口有两条：钉钉 actionCard 的「去审批」deep-link 直达 /approvals/{run_id}；
 Viewer 顶栏「审批」进 /approvals 收件箱列表（兜底，脱离钉钉也能找到待办）。
 /approvals/pending.json 给顶栏角标供数，必须先于 /{run_id} 注册，
 否则 "pending.json" 会被路由变量吞掉。
+
+待办按发起时间升序（SLA：等待最久排最前）；已处理按决定时间倒序 +
+结果过滤 + offset 分页——「上周谁批了那条 rm -rf」必须答得上来。
 """
 
 from __future__ import annotations
+
+from functools import partial
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from ...agent import approvals
 from ...orchestration import policies
-from .base import render
+from .base import page_url, render
+
+_PAGE = 30
+_RESULT_CHIPS = [("", "全部"), ("approved", "已放行"), ("rejected", "已拒绝")]
 
 
 def make_router(submitter=None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/approvals", response_class=HTMLResponse)
-    async def inbox():
-        rows = await approvals.list_pending()
-        return render("approvals.html", "审批待办", active="/approvals",
-                      rows=rows)
+    async def inbox(request: Request):
+        tab = request.query_params.get("tab") or "pending"
+        u = partial(page_url, request)
+        pending = await approvals.list_pending()
+        done, total, pager = [], 0, None
+        status = ""
+        if tab == "done":
+            status = request.query_params.get("status") or ""
+            page = max(1, int(request.query_params.get("p") or 1))
+            done, total = await approvals.list_decided(
+                status=status or None, offset=(page - 1) * _PAGE, limit=_PAGE)
+            if total:
+                pager = {"total": total, "count": len(done),
+                         "prev_url": u(p=page - 1) if page > 1 else None,
+                         "next_url": (u(p=page + 1)
+                                      if page * _PAGE < total else None)}
+        return render("approvals.html", "审批", active="/approvals",
+                      tab=tab, rows=pending, done=done, pager=pager, u=u,
+                      f_status=status, result_chips=_RESULT_CHIPS)
 
     @router.get("/approvals/pending.json")
     async def pending_json():

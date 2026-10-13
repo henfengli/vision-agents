@@ -32,7 +32,8 @@ def make_viewer_router(submitter, defs_store, env: str,
     pages.include_router(overview.make_router())
     pages.include_router(runs.make_router(env, langfuse=langfuse,
                                           target_envs=target_envs,
-                                          submitter=submitter))
+                                          submitter=submitter,
+                                          domains=domains))
     pages.include_router(approvals.make_router(submitter))
     pages.include_router(chat.make_router(domains or [], target_envs=target_envs,
                                           defs_store=defs_store, env=env))

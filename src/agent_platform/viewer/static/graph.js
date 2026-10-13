@@ -168,7 +168,7 @@ function renderSteps(container, newEvents) {
     if (!isNaN(ts)) prevTs = ts;
     return `<div class="step step-${e.kind}" data-step-node="${esc(e.node || "")}" id="seq-${e.seq}">
       <div class="meta"><span class="tag">#${e.seq}</span><span class="kind">${label}</span>${tool}${node}${delta}
-        · ${esc(e.created_at)}
+        · ${TS.span(e.created_at)}
         <span class="step-fb" data-seq="${e.seq}">
           <button data-score="1" title="这步做得好">👍</button><button data-score="-1" title="这步有问题">👎</button>
         </span></div>
@@ -252,7 +252,7 @@ function renderRunHead(s) {
     <h2>${esc(s.run.run_id)} ${statusPill(s.run.status)}${rerun}${chatLink}</h2>
     <div class="meta">任务 ${v(s.run.task_type, s.run.task_version)}
       · 角色 ${v(s.run.role, s.run.role_version)} · 来源 ${esc(s.run.trigger_source)}${envTag}
-      · 耗时 ${s.run.duration_ms || "-"}ms · ${esc(s.created_at)}</div>`;
+      · 耗时 ${TS.dur(s.run.duration_ms)} · ${TS.span(s.created_at)}</div>`;
 }
 
 /* —— Trace 元信息回填：Langfuse span（模型/token/成本/真实耗时）并进 —— */

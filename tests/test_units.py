@@ -374,6 +374,51 @@ class TestSpec(unittest.TestCase):
                          "prod")
 
 
+class TestListKit(unittest.TestCase):
+    """列表页套件：时间/时长过滤器口径 + page_url 的 URL 即状态。"""
+
+    def test_reltime(self):
+        from datetime import datetime, timedelta
+        from agent_platform.viewer.pages.base import _abstime, _reltime
+        now = datetime.now()
+        self.assertEqual(_reltime(now - timedelta(seconds=30)), "刚刚")
+        self.assertEqual(_reltime(now - timedelta(minutes=5)), "5 分钟前")
+        self.assertEqual(_reltime(now - timedelta(hours=3)), "3 小时前")
+        self.assertEqual(_reltime(now - timedelta(days=2)), "2 天前")
+        old = now - timedelta(days=40)
+        self.assertEqual(_reltime(old), old.strftime("%Y-%m-%d"))
+        self.assertEqual(_reltime(None), "-")
+        self.assertEqual(_reltime("垃圾"), "-")
+        self.assertEqual(_abstime(now)[:19], now.strftime("%Y-%m-%d %H:%M:%S"))
+        # ISO 字符串输入（含 Z）
+        self.assertEqual(_reltime((now - timedelta(minutes=1))
+                                  .isoformat().replace("+00:00", "Z")),
+                         "刚刚")
+
+    def test_dur(self):
+        from agent_platform.viewer.pages.base import _dur
+        self.assertEqual(_dur(None), "-")
+        self.assertEqual(_dur(820), "820ms")
+        self.assertEqual(_dur(2300), "2.3s")
+        self.assertEqual(_dur(192000), "3.2 min")
+        self.assertEqual(_dur(4320000), "1.2 h")
+
+    def test_page_url(self):
+        from starlette.requests import Request
+        from agent_platform.viewer.pages.base import page_url
+        req = Request({"type": "http", "http_version": "1.1", "method": "GET",
+                       "scheme": "http", "server": ("t", 80), "path": "/runs",
+                       "query_string": b"status=failed&c=abc&domain=board",
+                       "headers": []})
+        # 覆盖一个、清空一个（空值=删参数）、保留其余
+        u = page_url(req, status="success", c="")
+        from urllib.parse import parse_qs, urlparse
+        parts = urlparse(u)
+        self.assertEqual(parts.path, "/runs")
+        self.assertEqual(parse_qs(parts.query),
+                         {"status": ["success"], "domain": ["board"]})
+
+
 class TestAssetBlock(unittest.TestCase):
     """prepare_run 的任务资产注入块（纯函数）：结构/范围标注/截断保护。"""
 

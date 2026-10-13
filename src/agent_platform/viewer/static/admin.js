@@ -207,7 +207,7 @@ async function loadVersions(kind, name) {
   list.innerHTML = history.map((h, i) => `
     <div class="ver-row" data-v="${h.version}">
       <span class="tag">v${h.version}</span>${i === 0 ? ' <span class="ver-cur">当前</span>' : ""}
-      <span class="meta">${esc(h.updated_by || "?")} · ${esc((h.created_at || "").slice(0, 16))}</span>
+      <span class="meta">${esc(h.updated_by || "?")} · ${TS.span(h.created_at)}</span>
       ${kind === "role" && i > 0
         ? `<button class="inline ver-rb" data-v="${h.version}">回滚到此版</button>` : ""}
     </div>`).join("");
@@ -246,6 +246,15 @@ async function showDiff(kind, name, a, b) {
 }
 
 /* —— 列表交互 —— */
+
+// 名称即时过滤：本地定位器（不进 URL——这不是可分享的视图状态）
+document.getElementById("admin-q").addEventListener("input", e => {
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll(".admin-item").forEach(btn => {
+    btn.style.display =
+      !q || btn.dataset.name.toLowerCase().includes(q) ? "" : "none";
+  });
+});
 
 document.getElementById("admin-tabs").addEventListener("click", e => {
   const btn = e.target.closest("button[data-kind]");

@@ -6,7 +6,7 @@
 <div class="alert warn"><b>升舱提示</b>（同一 session 被纠正 ≥3 次）<ul>
   {% for e in escalations %}
   <li><code>{{ e.session_id }}</code> 被纠正 {{ e.count }} 次
-    （最近 {{ e.last_at[:10] }}）——记忆层反复兜不住，建议人工升舱为角色 prompt</li>
+    （最近 {{ m.ts(e.last_at) }}）——记忆层反复兜不住，建议人工升舱为角色 prompt</li>
   {% endfor %}
 </ul></div>
 {% endif %}
@@ -20,6 +20,8 @@
       <button data-kind="policy">策略</button>
     </div>
     <button id="admin-new" class="admin-new">＋ 新建</button>
+    <input id="admin-q" class="inline" placeholder="过滤名称…"
+           style="width:100%;margin-bottom:8px">
     {% for kind in ("role", "task", "policy") %}
     <div class="admin-items" data-kind="{{ kind }}"{% if kind != "role" %} hidden{% endif %}>
       {% for it in items[kind] %}
@@ -48,5 +50,6 @@ window.ADMIN = {
   source: {{ source|tojson }},
 };
 </script>
+<script src="/static/ts.js"></script>
 <script src="/static/admin.js"></script>
 {% endblock %}

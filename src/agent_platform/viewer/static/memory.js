@@ -135,8 +135,8 @@ async function openDrawer(id) {
   }
 
   const meta = [];
-  meta.push(`#${e.id} · 生效自 ${esc((e.valid_from || "").slice(0, 16))}`);
-  if (e.valid_to) meta.push(`失效于 ${esc(e.valid_to.slice(0, 16))}`);
+  meta.push(`#${e.id} · 生效自 ${TS.span(e.valid_from)}`);
+  if (e.valid_to) meta.push(`失效于 ${TS.span(e.valid_to)}`);
   if (e.source_run && e.source_run !== "manual")
     meta.push(`来源 <a href="/runs/${esc(e.source_run)}">run</a>`);
   else if (e.source_run === "manual") meta.push("手动新增");
@@ -156,13 +156,13 @@ async function openDrawer(id) {
   const u = e.usage;
   document.getElementById("md-usage").innerHTML =
     (u ? `<div class="meta">近 30 天命中 <b>${u.hits}</b> 次`
-       + `（${u.runs} 个不同 run），最后命中 ${esc((u.last_hit || "").slice(0, 16))}</div>`
+       + `（${u.runs} 个不同 run），最后命中 ${TS.span(u.last_hit)}</div>`
        : '<div class="meta">近 30 天零召回——若长期如此，考虑过期或改写</div>')
     + (e.recent_hits.length
        ? e.recent_hits.map(h => `<div class="md-fb meta">
           #${h.rank ?? "-"} ${h.source === "playground" ? "（试用）" : ""}
           ${h.run_id ? `<a href="/runs/${esc(h.run_id)}">run</a>` : "-"}
-          · ${esc((h.created_at || "").slice(0, 16))}</div>`).join("")
+          · ${TS.span(h.created_at)}</div>`).join("")
        : "");
 
   document.getElementById("md-chain").innerHTML = e.chain.length > 1
@@ -174,7 +174,7 @@ async function openDrawer(id) {
           : c.expired ? '<span class="pill pill-queued">已过期</span>'
           : '<span class="pill pill-success">生效中</span>'}
         ${c.current ? '<span class="ver-cur">当前查看</span>' : ""}
-        <span class="meta">${esc((c.created_at || "").slice(0, 10))}</span>
+        <span class="meta">${TS.span(c.created_at)}</span>
       </div>`).join("")
     : '<div class="meta">无演化链——同 key 的修改是原地覆盖不留历史；'
       + '仅「新 key 取代旧 key」才形成链</div>';
@@ -185,7 +185,7 @@ async function openDrawer(id) {
         ${f.kind === "step" ? `步骤#${f.step_seq} ` : ""}
         ${f.score === 1 ? "👍" : f.score === -1 ? "👎" : "·"}
         ${f.comment ? " " + esc(f.comment) : ""}
-        <span> · ${esc((f.created_at || "").slice(0, 16))}</span>
+        <span> · ${TS.span(f.created_at)}</span>
       </div>`).join("")
     : '<div class="meta">来源 run 尚无反馈留痕</div>';
 }

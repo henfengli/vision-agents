@@ -2,7 +2,7 @@
 {% import "_macros.html" as m %}
 {% block content %}
 {{ m.page_head("APPROVAL", "危险操作审批",
-  "run <code>" ~ run_id ~ "</code> · 发起 " ~ pending.created_at[:19]) }}
+  "run <code>" ~ run_id ~ "</code> · 发起于 " ~ (pending.created_at|reltime)) }}
 <p style="margin-bottom:14px">
   <a class="btn sm" href="/approvals">← 待办列表</a></p>
 <div class="alert"><b>待执行命令</b><pre>{{ pending.command }}</pre></div>

@@ -74,21 +74,104 @@ async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
             "domain": row[3], "input": row[4], "target_env": row[5]}
 
 
-async def list_recent(target_env: str | None = None, limit: int = 100) -> list[dict]:
-    """run 列表（Viewer 列表页）；可按目标环境过滤。"""
-    where, params = "", []
-    if target_env:
-        where, params = " WHERE target_env=%s", [target_env]
+# 允许排序的列 → SQL 表达式（duration/tokens 可能 NULL，COALESCE 垫底）
+_SORTS = {"created_at": "created_at", "duration_ms": "COALESCE(duration_ms,-1)",
+          "tokens": "COALESCE(tokens,-1)"}
+
+_LIST_COLS = ("run_id, session_id, task_type, role, domain, target_env,"
+              " status, trigger_source, caller, tokens, duration_ms,"
+              " created_at")
+
+
+async def list_filtered(*, target_env: str | None = None,
+                        status: str | None = None, domain: str | None = None,
+                        task: str | None = None, source: str | None = None,
+                        q: str | None = None, hours: int | None = None,
+                        sort: str = "created_at", asc: bool = False,
+                        after: str | None = None, before: str | None = None,
+                        limit: int = 50) -> tuple[list[dict], int, str | None,
+                                                  str | None]:
+    """Runs 列表页查询：显式过滤 + keyset 双向翻页 + 同条件总数。
+
+    返回 (rows, total, next_cursor, prev_cursor)。keyset 而非 OFFSET：
+    runs 持续追加，OFFSET 深翻页会漏/重行。光标 = 排序值|created_at|run_id
+    （后两者决胜保证稳定序），after=下一页 / before=上一页。
+    """
+    sortcol = _SORTS.get(sort, "created_at")
+    conds: list[str] = []
+    params: list = []
+    for clause, val in (("target_env=%s", target_env), ("status=%s", status),
+                        ("domain=%s", domain), ("task_type=%s", task),
+                        ("trigger_source=%s", source)):
+        if val:
+            conds.append(clause)
+            params.append(val)
+    if hours:
+        conds.append("created_at > now() - make_interval(hours => %s)")
+        params.append(hours)
+    if q:
+        conds.append("(run_id ILIKE %s OR input->>'question' ILIKE %s)")
+        params += [q + "%", "%" + q + "%"]
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+
     async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM runs" + where, params)
+        total = (await cur.fetchone())[0]
+
+        page_conds, page_params = list(conds), list(params)
+        cursor = after or before
+        going_forward = before is None       # before=翻回上一页：反向取再翻转
+        natural_desc = not asc               # 排序方向（默认 desc）
+        if cursor:
+            sv, ts, rid = cursor.split("|", 2)
+            # 取「更大」还是「更小」由 排序方向×翻页方向 共同决定：
+            # after 沿排序方向继续（desc 取更小），before 取另一侧
+            take_gt = (asc == going_forward)
+            op = ">" if take_gt else "<"
+            page_conds.append(f"({sortcol}, created_at, run_id) {op}"
+                              " (%s, %s::timestamptz, %s)")
+            page_params += [sv, ts, rid]
+        pwhere = (" WHERE " + " AND ".join(page_conds)) if page_conds else ""
+        order = "DESC" if natural_desc == going_forward else "ASC"
         cur = await conn.execute(
-            "SELECT run_id, session_id, task_type, role, domain, target_env,"
-            " status, trigger_source, created_at FROM runs" + where +
-            " ORDER BY created_at DESC LIMIT %s", (*params, limit))
+            f"SELECT {_LIST_COLS} FROM runs{pwhere}"
+            f" ORDER BY {sortcol} {order}, created_at {order}, run_id {order}"
+            " LIMIT %s", (*page_params, limit + 1))
         rows = await cur.fetchall()
-    return [{"run_id": r[0], "session_id": r[1], "task_type": r[2],
-             "role": r[3], "domain": r[4], "target_env": r[5], "status": r[6],
-             "trigger_source": r[7], "created_at": r[8].isoformat()}
-            for r in rows]
+
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    if not going_forward:
+        rows.reverse()
+
+    def _cursor(r) -> str:
+        sv = {"duration_ms": r[10], "tokens": r[9]}.get(sort)
+        if sv is None:  # NULL 与 COALESCE 对齐；created_at 用 isoformat
+            sv = -1 if sort in ("duration_ms", "tokens") else r[11].isoformat()
+        return f"{sv}|{r[11].isoformat()}|{r[0]}"
+
+    next_c = prev_c = None
+    if rows:
+        if going_forward:
+            next_c = _cursor(rows[-1]) if has_more else None
+            prev_c = _cursor(rows[0]) if (after or before) else None
+        else:
+            prev_c = _cursor(rows[0]) if has_more else None
+            next_c = _cursor(rows[-1])
+    return ([_list_row(r) for r in rows], total, next_c, prev_c)
+
+
+def _list_row(r) -> dict:
+    return {"run_id": r[0], "session_id": r[1], "task_type": r[2],
+            "role": r[3], "domain": r[4], "target_env": r[5], "status": r[6],
+            "trigger_source": r[7], "caller": r[8], "tokens": r[9],
+            "duration_ms": r[10], "created_at": r[11].isoformat()}
+
+
+async def list_recent(target_env: str | None = None, limit: int = 100) -> list[dict]:
+    """最近 run 概要（总览面板/API）；列表页请用 list_filtered。"""
+    rows, _, _, _ = await list_filtered(target_env=target_env, limit=limit)
+    return rows
 
 
 async def session_exists(session_id: str) -> bool:
