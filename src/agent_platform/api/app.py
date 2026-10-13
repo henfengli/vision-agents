@@ -96,7 +96,10 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     async def feedback(run_id: str, req: FeedbackRequest):
         """打分反馈：回写知识/案例评分 + Langfuse score。"""
         await feedback_store.add(run_id, req.score, req.comment)
-        await feedback_store.propagate_to_memory(settings.env, run_id, req.score)
+        # 记忆按目标环境分区：传播到该 run 实际操作的环境（与 Viewer 同源）
+        run = await runs.get(run_id)
+        await feedback_store.propagate_to_memory(
+            (run or {}).get("target_env") or settings.env, run_id, req.score)
         if langfuse is not None and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             await langfuse.score(tid, "user_feedback",

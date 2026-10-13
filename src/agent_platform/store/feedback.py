@@ -29,7 +29,8 @@ async def add_step(run_id: str, seq: int, score: int, comment: str = "") -> None
 
 
 async def propagate_to_memory(env: str, run_id: str, score: int) -> None:
-    """反馈闭环：run 的 👍👎 同步到它沉淀的知识条目与案例，影响后续召回排序。"""
+    """反馈闭环：run 的 👍👎 同步到它沉淀的知识条目、案例与任务资产，
+    影响后续召回排序。"""
     delta = 1 if score == 1 else -1
     async with pool().connection() as conn:
         await conn.execute(
@@ -39,6 +40,9 @@ async def propagate_to_memory(env: str, run_id: str, score: int) -> None:
         await conn.execute(
             f"UPDATE cases SET {col}={col}+1 WHERE env=%s AND source_run=%s",
             (env, run_id))
+        await conn.execute(
+            "UPDATE assets SET feedback_score=COALESCE(feedback_score,0)+%s"
+            " WHERE env=%s AND source_run=%s", (delta, env, run_id))
 
 
 async def add_correction(session_id: str, correction: str, by: str = "") -> None:

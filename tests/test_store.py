@@ -240,16 +240,24 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
     # ---- feedback ----
 
     async def test_feedback_propagates_to_memory(self):
-        from agent_platform.store import cases, feedback, knowledge, runs
+        from agent_platform.store import assets, cases, feedback, knowledge, runs
         await runs.create("r1", "t", "r", None, "sdk", "", {})
         await knowledge.upsert("test", "board", "k1", "内容", source_run="r1")
         await cases.add("test", "dagster", "fp error", "code", "c", "r1")
+        await assets.upsert("test", "board", "t", "procedure", "方法A",
+                            "s", "c", source_run="r1")
         await feedback.add("r1", 1)
         await feedback.propagate_to_memory("test", "r1", 1)
         case = await cases.search_by_error("test", "fp error")
         self.assertEqual(case["thumbs_up"], 1)
         entries = await knowledge.list_all("test")
         self.assertEqual(entries[0]["feedback_score"], 1)
+        # run 的 👍 同样回写它沉淀的任务资产（feedback_score 参与召回排序）
+        asset_rows = await assets.list_all("test", "board")
+        self.assertEqual(asset_rows[0]["feedback_score"], 1)
+        await feedback.propagate_to_memory("test", "r1", -1)  # 反向可冲销
+        self.assertEqual(
+            (await assets.list_all("test", "board"))[0]["feedback_score"], 0)
 
     async def test_correction_counts(self):
         from agent_platform.store import feedback
