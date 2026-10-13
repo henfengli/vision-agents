@@ -2,6 +2,12 @@
 
 session_id 是会话唯一标识（LangGraph thread 是它的实现细节，不出 engine 层）。
 run 状态机：queued → running → success / failed。
+
+caller 约定（粒度总则见设计文档 §3.0）：caller 记「身份」、trigger_source
+记「来源通道」，两列各管一件事。caller 永不为空——调用方没给身份时在本
+模块漏斗里回退为 trigger_source（调度跑的 caller 就是 "schedule"），
+审计查询不需要 COALESCE。有身份时调用方给纯身份（服务名/用户名），
+不要在 caller 里重复来源前缀。
 """
 from __future__ import annotations
 
@@ -14,6 +20,8 @@ async def create(run_id: str, task_type: str, role: str, domain: str | None,
                  trigger_source: str, caller: str, input_data: dict,
                  dedup_key: str = "", session_id: str | None = None,
                  target_env: str = "") -> None:
+    # 唯一建行漏斗：身份缺失回退来源通道，保证 caller 非空
+    caller = (caller or "").strip() or trigger_source
     async with db.pool().connection() as conn:
         await conn.execute(
             "INSERT INTO runs (run_id, session_id, task_type, role, domain,"

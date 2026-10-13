@@ -70,6 +70,16 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await runs.find_by_dedup("dk", 0))  # 窗口外
         self.assertIsNone(await runs.find_by_dedup("", 600))  # 空键不查
 
+    async def test_caller_fallback(self):
+        """caller 约定：身份缺失时回退 trigger_source，永不落空串/空白。"""
+        from agent_platform.store import runs
+        await runs.create("rc1", "t", "r", None, "schedule", "", {})
+        self.assertEqual((await runs.get("rc1"))["caller"], "schedule")
+        await runs.create("rc2", "t", "r", None, "sensor", "  ", {})
+        self.assertEqual((await runs.get("rc2"))["caller"], "sensor")
+        await runs.create("rc3", "t", "r", None, "sdk", " board-svc ", {})
+        self.assertEqual((await runs.get("rc3"))["caller"], "board-svc")
+
     async def test_latest_of_session(self):
         from agent_platform.store import runs
         await runs.create("r1", "t", "r", "dagster", "sdk", "", {"i": 1},
