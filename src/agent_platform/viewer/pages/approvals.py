@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 
 from ...agent import approvals
 from ...orchestration import policies
-from .base import page_url, render
+from .base import page_url, qint, render
 
 _PAGE = 30
 _RESULT_CHIPS = [("", "全部"), ("approved", "已放行"), ("rejected", "已拒绝")]
@@ -36,7 +36,7 @@ def make_router(submitter=None) -> APIRouter:
         status = ""
         if tab == "done":
             status = request.query_params.get("status") or ""
-            page = max(1, int(request.query_params.get("p") or 1))
+            page = max(1, qint(request.query_params.get("p"), 1, "p"))
             done, total = await approvals.list_decided(
                 status=status or None, offset=(page - 1) * _PAGE, limit=_PAGE)
             if total:
@@ -66,8 +66,20 @@ def make_router(submitter=None) -> APIRouter:
     async def approval_decide(run_id: str, request: Request):
         form = await request.form()
         approved = form["decision"] == "approved"
-        await approvals.decide(int(form["approval_id"]), approved,
-                               decided_by="viewer")
+        approval_id = qint(str(form.get("approval_id") or ""), 0,
+                           "approval_id")
+        # 归属校验：审批单必须属于 URL 里的 run（防跨 run 误操作/手改表单）
+        pending = await approvals.find_pending(run_id)
+        if pending is None or pending["id"] != approval_id:
+            return render("msg.html", "审批", active="/approvals",
+                          heading="没有待审批项", message="可能已被处理。",
+                          back_href="/approvals")
+        if not await approvals.decide(approval_id, approved,
+                                      decided_by="viewer"):
+            # 条件更新 0 行：并发审批被别人抢先，回执不能说谎
+            return render("msg.html", "审批", active="/approvals",
+                          heading="已被他人处理", message="该审批项已被处理。",
+                          back_href="/approvals")
         verb = "放行" if approved else "拒绝"
         extra = ""
         if submitter is not None:

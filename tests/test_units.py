@@ -37,7 +37,6 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(s.env, "dev")
                 self.assertEqual(s.model.tokens, ["secret"])
                 self.assertIn("board", s.domains)
-                self.assertEqual(s.port, 8100)  # 默认值
                 # 深合并：env 覆盖 enabled，common 的 patterns 保留
                 self.assertTrue(s.approvals.enabled)
                 self.assertEqual(s.approvals.danger_patterns, ["rm -rf"])
@@ -248,6 +247,24 @@ class TestRunCode(unittest.IsolatedAsyncioTestCase):
                 {}, scratch, timeout=30)
             self.assertIn("ok", out)
             self.assertIn("stderr", out)
+
+    async def test_env_whitelists_secrets(self):
+        """子进程环境白名单：宿主 secrets 不进沙箱（agent 代码读不到，
+        否则 print(os.environ) 会把模型 token/DB 口令泄进上下文与台账）。"""
+        from agent_platform.agent.tools.run_code import execute_code
+        os.environ["AGENT_TEST_SECRET"] = "s3cr3t"
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                out = await execute_code(
+                    "import os\n"
+                    "print('secret:', os.environ.get('AGENT_TEST_SECRET'))\n"
+                    "print('path ok:', bool(os.environ.get('PATH')))",
+                    {}, scratch)
+            self.assertIn("secret: None", out)
+            self.assertNotIn("s3cr3t", out)
+            self.assertIn("path ok: True", out)  # 白名单项仍在
+        finally:
+            del os.environ["AGENT_TEST_SECRET"]
 
 
 class TestReviewHook(unittest.IsolatedAsyncioTestCase):
@@ -516,6 +533,55 @@ class TestAssetFiles(unittest.TestCase):
                 read_asset_file(d, "../outside")
             with self.assertRaises(FileNotFoundError):
                 read_asset_file(d, "nope")
+
+    def test_collect_preserves_same_basenames(self):
+        """回归：不同子目录的同名文件收编后都在（拍平 basename 会静默互覆）。"""
+        import tempfile
+        from agent_platform.store.assets import collect_files, list_files
+        with tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as scratch:
+            os.makedirs(f"{scratch}/a")
+            os.makedirs(f"{scratch}/b")
+            with open(f"{scratch}/a/run.sh", "w") as fh:
+                fh.write("A")
+            with open(f"{scratch}/b/run.sh", "w") as fh:
+                fh.write("B")
+            dest, n, _ = collect_files(root, "prod", "d", "t", "script",
+                                       "x", ["a/run.sh", "b/run.sh"], scratch)
+            self.assertEqual(n, 2)
+            names = sorted(f["name"] for f in list_files(dest))
+            self.assertEqual(names, ["a/run.sh", "b/run.sh"])
+            with open(f"{dest}/a/run.sh") as fh:
+                self.assertEqual(fh.read(), "A")
+            with open(f"{dest}/b/run.sh") as fh:
+                self.assertEqual(fh.read(), "B")
+
+
+class TestCodeRef(unittest.TestCase):
+    """code_ref 的仓库选择与 HEAD 缓存（distill 记 commit 与召回校验同源）。"""
+
+    def test_code_base_longest_prefix(self):
+        from agent_platform.store.knowledge import code_base
+        paths = ["/srv/board", "/srv/board-etl"]
+        # 最长前缀：/srv/board-etl/x.py 属于 board-etl，不是 board
+        self.assertEqual(code_base("/srv/board-etl/x.py", paths),
+                         "/srv/board-etl")
+        self.assertEqual(code_base("/srv/board/a.sql", paths), "/srv/board")
+        self.assertIsNone(code_base("/elsewhere/x.py", paths))
+        self.assertIsNone(code_base("/srv/board/x.py", []))
+
+    def test_current_commit_cached_within_ttl(self):
+        """TTL 内第二调用不重复起 git 子进程（记忆页逐条校验的扇出收敛）。"""
+        import time
+
+        from agent_platform.store.knowledge import retrieval
+        retrieval._head_cache.clear()
+        retrieval._head_cache["/x"] = (time.monotonic(), "cached-head")
+        self.assertEqual(retrieval.current_commit("/x"), "cached-head")
+        # 过期条目重新查（/nonexistent 非 git 仓库 → None）
+        retrieval._head_cache["/x"] = (time.monotonic() - 999, "stale")
+        self.assertIsNone(retrieval.current_commit("/nonexistent"))
+        retrieval._head_cache.clear()
 
 
 class TestSaveAssetTool(unittest.IsolatedAsyncioTestCase):

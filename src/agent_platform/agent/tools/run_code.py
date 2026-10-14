@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from . import sandbox
+from .bash import build_safe_env
 from .driver import DRIVER
 
 _MAX_OUTPUT_CHARS = 200_000   # 用户输出累计上限
@@ -49,6 +50,10 @@ async def execute_code(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # 与 bash 工具同一道防线：环境白名单，secrets.env 注入的密钥
+        # （模型 token/DB 口令/bearer token）不进子进程——agent 代码
+        # print(os.environ) 也摸不到，否则密钥会泄进模型上下文与台账
+        env=build_safe_env(),
     )
 
     output: list[str] = []

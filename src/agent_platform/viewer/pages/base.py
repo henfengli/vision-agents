@@ -92,6 +92,16 @@ def page_url(request: Request, **over) -> str:
     qs = urlencode(params)
     return request.url.path + ("?" + qs if qs else "")
 
+
+def qint(value: str | None, default: int, name: str) -> int:
+    """query/form 里的整数参数：解析不了给 400 而不是 500（手改 URL 是常态）。"""
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"参数 {name} 必须是整数") from None
+
 # 由 routes.py 装配时设置：是否开启令牌登录（决定顶栏显不显示"退出"）
 _AUTH_ENABLED = False
 

@@ -1,6 +1,4 @@
 # 三环境共享的默认配置；env/{ENV}.yaml 只写与这里的差异（深合并，dict 递归覆盖）。
-host: 127.0.0.1
-port: 8100
 
 model:
   url: https://internal-llm/v1

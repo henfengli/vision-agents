@@ -50,6 +50,22 @@ _SUMMARY_PROMPT = """把以下这次任务记录整理成"交接摘要"，供下
 结论：{output}"""
 
 
+def _parse_items(raw: str | None, run_id: str) -> list:
+    """模型输出 → 条目列表。模型常给 ```json 围栏，先剥再解析；
+    解析失败记 warning（静默 return 会让记忆层悄悄漏沉淀，无从排查）。"""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```")
+        text = text.removesuffix("```").strip()
+    try:
+        items = json.loads(text)
+    except json.JSONDecodeError:
+        log.warning("run %s 沉淀输出解析失败，跳过（原文 %d 字符）",
+                    run_id, len(text))
+        return []
+    return items if isinstance(items, list) else []
+
+
 async def distill(pool: ModelPool, env: str, domain: str | None, run_id: str,
                   task_type: str, run_input: dict, run_output: dict,
                   code_paths: list[str], session_id: str | None = None) -> None:
@@ -62,18 +78,23 @@ async def distill(pool: ModelPool, env: str, domain: str | None, run_id: str,
             output=json.dumps(run_output, ensure_ascii=False)[:4000]),
     }])
     try:
-        items = json.loads(resp.choices[0].message.content)
-    except (json.JSONDecodeError, AttributeError, IndexError):
-        return  # 沉淀失败不影响主流程
+        raw = resp.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        raw = None
+    items = _parse_items(raw, run_id)
 
-    for item in items if isinstance(items, list) else []:
+    for item in items:
         if item.get("kind") == "knowledge" and domain:
             code_ref = None
             if item.get("code_path"):
+                # commit 必须记在 path 实际所属的代码目录上（多代码目录的域，
+                # 记错仓库的 HEAD 会让召回侧 is_entry_fresh 误判漂移）；
+                # 选目录与校验共用 code_base（唯一出处）
+                base = knowledge_store.code_base(item["code_path"], code_paths)
                 # current_commit 跑 git subprocess，to_thread 避免阻塞事件循环
                 commit = (await asyncio.to_thread(
-                    knowledge_store.current_commit, code_paths[0])
-                    if code_paths else None)
+                    knowledge_store.current_commit, base)
+                    if base else None)
                 code_ref = {"path": item["code_path"], "commit": commit}
             await knowledge_store.upsert(env, domain, item["key"], item["content"],
                                          source_run=run_id, code_ref=code_ref,

@@ -18,7 +18,7 @@ from ...langfuse import match_observation
 from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
-from .base import page_url, render
+from .base import page_url, qint, render
 
 _PAGE = 50
 _STATUSES = [("", "全部"), ("running", "运行中"), ("queued", "排队"),
@@ -38,15 +38,18 @@ def make_router(env: str, langfuse=None,
     async def runs_list(request: Request):
         p = request.query_params
         status = p.get("status") or ""
-        hours = p.get("range") or ""
-        rows, total, next_c, prev_c = await runs.list_filtered(
-            target_env=p.get("env") or None, status=status or None,
-            domain=p.get("domain") or None, task=p.get("task") or None,
-            source=p.get("source") or None, q=p.get("q") or None,
-            hours=int(hours) if hours else None,
-            sort=p.get("sort") or "created_at", asc=p.get("dir") == "asc",
-            after=p.get("c") or None, before=p.get("b") or None,
-            limit=_PAGE)
+        hours = qint(p.get("range"), 0, "range")
+        try:
+            rows, total, next_c, prev_c = await runs.list_filtered(
+                target_env=p.get("env") or None, status=status or None,
+                domain=p.get("domain") or None, task=p.get("task") or None,
+                source=p.get("source") or None, q=p.get("q") or None,
+                hours=hours or None,
+                sort=p.get("sort") or "created_at", asc=p.get("dir") == "asc",
+                after=p.get("c") or None, before=p.get("b") or None,
+                limit=_PAGE)
+        except ValueError as e:  # 手改的非法分页光标
+            raise HTTPException(400, str(e)) from None
         u = partial(page_url, request)
         pager = None
         if total:
@@ -57,7 +60,7 @@ def make_router(env: str, langfuse=None,
             }
         return render("runs.html", "Runs", active="/runs",
                       rows=rows, pager=pager, u=u,
-                      f_status=status, f_range=hours,
+                      f_status=status, f_range=p.get("range") or "",
                       f_env=p.get("env") or "", f_domain=p.get("domain") or "",
                       f_task=p.get("task") or "", f_q=p.get("q") or "",
                       f_source=p.get("source") or "",
@@ -71,25 +74,25 @@ def make_router(env: str, langfuse=None,
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        events = await runs.get_events(run_id)
-        # ?since=<seq> 增量轮询：只回新事件——事件 append-only，长 run
-        # （成百上千步）全量轮询会让 2s 一次的传输量变成 O(N²)
-        since = int(request.query_params.get("since") or 0)
+        # ?since=<seq> 增量轮询：只回新事件——事件 append-only，过滤推进
+        # SQL（get_events 的 after_seq），长 run（成百上千步）的 2s 轮询
+        # 不再每轮全量搬运事件表。缺省 -1 = 全量（seq>−1 含直插的 seq=0）
+        since = qint(request.query_params.get("since"), -1, "since")
+        events = await runs.get_events(run_id, after_seq=since)
         state = {
             "run": {k: run.get(k) for k in
                     ("run_id", "task_type", "task_version", "role",
                      "role_version", "status", "trigger_source",
                      "target_env", "duration_ms", "output", "session_id")},
             "created_at": str(run["created_at"]),
-            "events": [_event_summary(e) for e in events if e["seq"] > since],
+            "events": [_event_summary(e) for e in events],
             "graph": None,
         }
         # 只有资产图 run 有运行图：拓扑与节点状态来自台账 graph 事件 +
         # artifacts 表。普通 agent run 的深层观测一律走 Langfuse（硬依赖，
-        # 整套栈一起部署），不再自研降级轨迹图
-        graph_event = next((e["payload"] for e in reversed(events)
-                            if e["kind"] == "graph"
-                            and isinstance(e["payload"], dict)), None)
+        # 整套栈一起部署），不再自研降级轨迹图。graph 事件单独查（一行），
+        # 与事件增量拉取解耦
+        graph_event = await runs.get_graph_event(run_id)
         if graph_event is not None:
             from ...store import artifacts as artifacts_store
             arts = await artifacts_store.list_by_run(run_id)
@@ -105,9 +108,13 @@ def make_router(env: str, langfuse=None,
                 and langfuse.enabled:
             tid = await runs.trace_id_of(run_id)
             if tid:
+                # span 对齐按同类事件的第 n 次出现计算，需要全量事件
+                # （低频路径：客户端只在首拉与终态各要一次）
+                full_events = await runs.get_events(run_id)
                 state["trace"] = {
                     "url": await langfuse.trace_url(tid),
-                    "meta": _span_meta(events, await langfuse.observations(tid)),
+                    "meta": _span_meta(full_events,
+                                       await langfuse.observations(tid)),
                 }
         return state
 
@@ -135,7 +142,9 @@ def make_router(env: str, langfuse=None,
     @router.post("/runs/{run_id}/feedback")
     async def run_feedback(run_id: str, request: Request):
         form = await request.form()
-        score = int(form["score"])
+        score = qint(form.get("score"), 0, "score")
+        if score not in (1, -1):
+            raise HTTPException(400, "score 只能是 +1 或 -1")
         await feedback_store.add(run_id, score, str(form.get("comment", "")))
         # 记忆按目标环境分区：反馈传播到该 run 实际操作的环境
         run = await runs.get(run_id)
@@ -151,7 +160,9 @@ def make_router(env: str, langfuse=None,
         （match_observation：seq → observation id，等价 Annotate）；映射不上
         降级为 trace 级 score（名字带 step#seq 定位）。"""
         form = await request.form()
-        score = int(form["score"])
+        score = qint(form.get("score"), 0, "score")
+        if score not in (1, -1):
+            raise HTTPException(400, "score 只能是 +1 或 -1")
         comment = str(form.get("comment", ""))
         await feedback_store.add_step(run_id, seq, score, comment)
         if langfuse is not None and langfuse.enabled:

@@ -118,17 +118,23 @@ async def pending_count() -> int:
         return (await cur.fetchone())[0]
 
 
-async def decide(approval_id: int, approved: bool, decided_by: str = "") -> None:
+async def decide(approval_id: int, approved: bool,
+                 decided_by: str = "") -> bool:
+    """落决定。返回 False = 条件更新 0 行（已被他人并发处理）——
+    调用方据此给出真实回执，不能让审批人看到"已放行"而实际没生效。"""
     async with pool().connection() as conn:
-        await conn.execute(
+        cur = await conn.execute(
             "UPDATE approvals SET status=%s, decided_by=%s, decided_at=now()"
             " WHERE id=%s AND status='pending'",
             ("approved" if approved else "rejected", decided_by, approval_id))
+    if not cur.rowcount:
+        return False
     # 毫秒级唤醒等待中的 review hook；notify 丢失由轮询兜底
     try:
         await notify("approvals", str(approval_id))
     except Exception:  # noqa: BLE001
         pass
+    return True
 
 
 async def reject_pending(run_id: str, decided_by: str) -> None:

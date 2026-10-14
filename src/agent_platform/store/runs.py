@@ -12,6 +12,7 @@ caller 约定（粒度总则见设计文档 §3.0）：caller 记「身份」、
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from . import db
 
@@ -123,7 +124,15 @@ async def list_filtered(*, target_env: str | None = None,
         going_forward = before is None       # before=翻回上一页：反向取再翻转
         natural_desc = not asc               # 排序方向（默认 desc）
         if cursor:
-            sv, ts, rid = cursor.split("|", 2)
+            # 手改 URL 的光标不送到 PG（cast 失败是 500）：格式不对就 400
+            parts = cursor.split("|", 2)
+            if len(parts) != 3:
+                raise ValueError("非法分页光标")
+            sv, ts, rid = parts
+            try:
+                datetime.fromisoformat(ts)
+            except ValueError:
+                raise ValueError("非法分页光标（时间戳无法解析）") from None
             # 取「更大」还是「更小」由 排序方向×翻页方向 共同决定：
             # after 沿排序方向继续（desc 取更小），before 取另一侧
             take_gt = (asc == going_forward)
@@ -228,14 +237,49 @@ async def log_event(run_id: str, kind: str, payload: dict) -> None:
             " %s, %s)", (run_id, run_id, kind, json.dumps(payload)))
 
 
-async def get_events(run_id: str) -> list[dict]:
+async def get_events(run_id: str, after_seq: int = -1) -> list[dict]:
+    """run 的事件流。after_seq 推进 SQL：SSE/详情页按 seq 增量轮询，
+    全量拉取再内存过滤会让长 run 的轮询总量变成 O(N²)。
+
+    默认 -1 = 全量：log_event 的 seq 从 1 起，但直插/种子里存在 seq=0
+    的事件（如 trace），过滤条件必须写成 seq > after_seq 且默认 -1，
+    调用方传 0 会恰好丢掉 seq=0。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "SELECT seq, kind, payload, created_at FROM run_events"
-            " WHERE run_id = %s ORDER BY seq", (run_id,))
+            " WHERE run_id = %s AND seq > %s ORDER BY seq",
+            (run_id, after_seq))
         rows = await cur.fetchall()
     return [{"seq": r[0], "kind": r[1], "payload": r[2],
              "created_at": r[3].isoformat()} for r in rows]
+
+
+async def get_graph_event(run_id: str) -> dict | None:
+    """资产图 run 的最新拓扑事件（详情页每轮都要，与事件增量拉取解耦）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT payload FROM run_events WHERE run_id = %s AND kind = 'graph'"
+            " ORDER BY seq DESC LIMIT 1", (run_id,))
+        row = await cur.fetchone()
+    return row[0] if row and isinstance(row[0], dict) else None
+
+
+async def events_of_runs(run_ids: list[str]) -> dict[str, list[dict]]:
+    """批量取多个 run 的事件（会话历史回放）：一次查询，按 run 分组。
+    逐 run 调 get_events 是 N+1。"""
+    if not run_ids:
+        return {}
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id, seq, kind, payload, created_at FROM run_events"
+            " WHERE run_id = ANY(%s) ORDER BY run_id, seq", (run_ids,))
+        rows = await cur.fetchall()
+    out: dict[str, list[dict]] = {}
+    for rid, seq, kind, payload, created in rows:
+        out.setdefault(rid, []).append(
+            {"seq": seq, "kind": kind, "payload": payload,
+             "created_at": created.isoformat()})
+    return out
 
 
 async def set_def_versions(run_id: str, task_version: int | None,

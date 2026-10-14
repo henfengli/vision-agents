@@ -40,14 +40,16 @@ def make_router(domains: list[str] | None = None,
     @router.get("/chat/sessions/{session_id}/history.json")
     async def history_json(session_id: str):
         items = await runs.of_session(session_id)
+        # 事件批量取（ANY 一次查询），逐 run 取是 N+1
+        by_run = await runs.events_of_runs([r["run_id"] for r in items])
         out = []
         for r in items:
-            events = await runs.get_events(r["run_id"])
             out.append({
                 "run_id": r["run_id"], "status": r["status"],
                 "question": (r["input"] or {}).get("question", ""),
                 "output": r["output"], "created_at": r["created_at"],
-                "events": [_event_summary(e) for e in events
+                "events": [_event_summary(e)
+                           for e in by_run.get(r["run_id"], [])
                            if e["kind"] != "graph"],
             })
         # 最新 run 的配置回填选择器（续聊自动继承域/角色/环境）

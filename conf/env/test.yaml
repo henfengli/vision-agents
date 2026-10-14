@@ -1,5 +1,4 @@
 # 测试环境：贴近生产但审批宽松，用于联调（继承 common.yaml，只写差异）
-host: 0.0.0.0
 
 model:
   tokens: ["${MODEL_TOKEN_A}"]

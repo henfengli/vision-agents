@@ -59,10 +59,12 @@ def make_router(submitter, auth=None):
         async def events():
             yield _sse({"type": "run", "run_id": submitted["run_id"],
                         "session_id": session_id})
-            last_seq, waited = 0, 0.0
+            last_seq, waited = -1, 0.0
             while waited < _SSE_TIMEOUT_S:
-                new = [e for e in await runs.get_events(submitted["run_id"])
-                       if e["seq"] > last_seq]
+                # after_seq 推进 SQL：长 run 的 0.3s 轮询不再全量搬事件表。
+                # -1 起：seq>−1 覆盖首事件（seq 从 1 起，但直插可能有 0）
+                new = await runs.get_events(submitted["run_id"],
+                                            after_seq=last_seq)
                 for e in new:
                     last_seq = e["seq"]
                     yield _sse({"type": e["kind"], **e["payload"]})

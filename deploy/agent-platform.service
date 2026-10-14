@@ -16,7 +16,9 @@ RestartSec=5
 
 # —— 文件系统收口 ——
 ProtectSystem=strict
-ReadWritePaths=/var/lib/agent-platform/scratch /var/log/agent-platform
+# scratch=agent 工作区；assets=任务资产库（save_asset 收编的文件载体）；
+# 缺了哪个，哪个在 ProtectSystem=strict 下就是只读的
+ReadWritePaths=/var/lib/agent-platform/scratch /var/lib/agent-platform/assets /var/log/agent-platform
 ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true

@@ -162,6 +162,43 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         events = await runs.get_events("r1")
         self.assertEqual([e["seq"] for e in events], [1, 2])
 
+    async def test_get_events_after_seq(self):
+        """增量拉取推进 SQL：SSE/详情页轮询的数据源（不再全量搬事件表）。"""
+        from agent_platform.store import runs
+        from agent_platform.store import db
+        await runs.create("r1", "t", "r", None, "sdk", "", {})
+        for i in range(5):
+            await runs.log_event("r1", "note", {"n": i})
+        events = await runs.get_events("r1", after_seq=3)
+        self.assertEqual([e["seq"] for e in events], [4, 5])
+        self.assertEqual(await runs.get_events("r1", after_seq=5), [])
+        # 回归：直插的 seq=0 事件（trace/种子）不能被默认全量拉取漏掉——
+        # 截图巡检抓到：默认 after_seq=0 把 seq=0 的 trace 事件滤没，
+        # 详情页 Langfuse 内嵌整条断掉
+        async with db.pool().connection() as conn:
+            await conn.execute(
+                "INSERT INTO run_events(run_id, seq, kind, payload)"
+                " VALUES ('r1', 0, 'trace', '{\"trace_id\": \"t0\"}')")
+        self.assertEqual((await runs.get_events("r1"))[0]["seq"], 0)
+        self.assertEqual(await runs.trace_id_of("r1"), "t0")
+        # 图事件独立查询（与增量拉取解耦）
+        self.assertIsNone(await runs.get_graph_event("r1"))
+        await runs.log_event("r1", "graph", {"nodes": [], "edges": []})
+        g = await runs.get_graph_event("r1")
+        self.assertEqual(g, {"nodes": [], "edges": []})
+
+    async def test_events_of_runs_batch(self):
+        """会话历史回放批量取事件：一次查询按 run 分组（替代逐 run N+1）。"""
+        from agent_platform.store import runs
+        for rid in ("r1", "r2"):
+            await runs.create(rid, "t", "r", None, "sdk", "", {})
+            await runs.log_event(rid, "note", {"n": rid})
+        grouped = await runs.events_of_runs(["r1", "r2"])
+        self.assertEqual([e["payload"]["n"] for e in grouped["r1"]], ["r1"])
+        self.assertEqual([e["payload"]["n"] for e in grouped["r2"]], ["r2"])
+        self.assertEqual(await runs.events_of_runs([]), {})
+        self.assertEqual(await runs.events_of_runs(["ghost"]), {})
+
     # ---- definitions ----
 
     async def test_definitions_versioning_and_rollback(self):
@@ -391,8 +428,79 @@ class TestStore(unittest.IsolatedAsyncioTestCase):
         aid = await approvals.request_approval("r1", "rm -rf /tmp/x")
         pending = await approvals.find_pending("r1")
         self.assertEqual(pending["id"], aid)
-        await approvals.decide(aid, True, decided_by="ops")
+        self.assertTrue(await approvals.decide(aid, True, decided_by="ops"))
         self.assertIsNone(await approvals.find_pending("r1"))
+
+    async def test_approval_double_decide_returns_false(self):
+        """并发审批：第二次 decide 条件更新 0 行 → False（回执不能说谎）。"""
+        from agent_platform.agent import approvals
+        aid = await approvals.request_approval("r1", "drop table x")
+        self.assertTrue(await approvals.decide(aid, True, decided_by="甲"))
+        self.assertFalse(await approvals.decide(aid, False, decided_by="乙"))
+        # 第一次的决定未被覆盖
+        rows = await approvals.list_decided()
+        self.assertEqual(rows[0][0]["decided_by"], "甲")
+        self.assertEqual(rows[0][0]["status"], "approved")
+
+    # ---- 记忆沉淀与召回（distill/recall 的组装路径） ----
+
+    async def test_distill_parses_fenced_json(self):
+        """模型给 ```json 围栏也能沉淀（剥围栏再解析）；解析失败不炸只告警。"""
+        from agent_platform.memory.distill import distill
+        from agent_platform.store import knowledge as knowledge_store
+        from fakes import FakePool
+
+        fenced = ('```json\n[{"kind": "knowledge", "key": "metric:fee",'
+                  ' "content": "含税口径"}]\n```')
+        pool = FakePool(fenced)
+        await distill(pool, "test", "board", "r1", "data-qa",
+                      {"question": "q"}, {"answer": "a"}, [])
+        rows = await knowledge_store.list_all("test", "board")
+        self.assertEqual([r["key"] for r in rows], ["metric:fee"])
+
+        # 不可解析输出：不抛异常、不落库（warning 留痕）
+        await distill(FakePool("这不是 JSON"), "test", "board", "r2",
+                      "data-qa", {"question": "q"}, {"answer": "a"}, [])
+        rows = await knowledge_store.list_all("test", "board")
+        self.assertEqual(len(rows), 1)  # 仍只有第一次沉淀的条目
+
+    async def test_distill_records_commit_of_matching_base(self):
+        """code_ref 的 commit 记在 path 实际所属目录上（多代码目录不记错仓库）。"""
+        from agent_platform.memory.distill import distill
+        from agent_platform.store import knowledge as knowledge_store
+        from fakes import FakePool
+
+        content = ('[{"kind": "knowledge", "key": "k1", "content": "c",'
+                   ' "code_path": "/repo-b/metrics/x.sql"}]')
+        await distill(FakePool(content), "test", "board", "r1", "data-qa",
+                      {"question": "q"}, {"answer": "a"},
+                      ["/repo-a", "/repo-b"])
+        rows = await knowledge_store.list_all("test", "board")
+        # 两个目录都不是 git 仓库 → commit 为 None；关键是按 code_base 选中
+        # /repo-b 而非恒取 code_paths[0]（选错仓库的 HEAD 会误判漂移）
+        self.assertEqual(rows[0]["code_ref"],
+                         {"path": "/repo-b/metrics/x.sql", "commit": None})
+
+    async def test_recall_block_layering(self):
+        """召回块分层序：资产档案 → 前序交接摘要 → 历史知识（同域命中）。"""
+        from agent_platform.memory.recall import recall_block
+        from agent_platform.store import knowledge as knowledge_store
+
+        await knowledge_store.upsert("test", "board", "asset:srv-x:profile",
+                                     "负责人：张三")
+        await knowledge_store.upsert("test", "board",
+                                     "session:s:1:summary", "## 结论\n上次结论")
+        await knowledge_store.upsert("test", "board", "metric:fee",
+                                     "fee 为含税口径")
+        block = await recall_block("test", "board", "srv-x 的 fee 口径",
+                                   session_id="s:2", run_id="r1")
+        # 层次齐全且顺序固定（档案优先级最高，置顶）
+        i_profile = block.index("资产档案")
+        i_summary = block.index("前序会话交接摘要")
+        i_knowledge = block.index("历史知识")
+        self.assertTrue(i_profile < i_summary < i_knowledge)
+        self.assertIn("负责人：张三", block)
+        self.assertIn("fee 为含税口径", block)
 
 
 if __name__ == "__main__":

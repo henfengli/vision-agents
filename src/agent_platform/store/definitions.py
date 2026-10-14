@@ -25,16 +25,32 @@ class DefinitionStore:
 
     async def put(self, kind: Kind, env: str, name: str, definition: dict,
                   updated_by: str = "") -> int:
-        """写入新版本，返回版本号。"""
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM definitions"
-                " WHERE kind=%s AND env=%s AND name=%s", (kind, env, name))
-            version = (await cur.fetchone())[0]
-            await conn.execute(
-                "INSERT INTO definitions (kind, env, name, version, definition, updated_by)"
-                " VALUES (%s,%s,%s,%s,%s,%s)",
-                (kind, env, name, version, json.dumps(definition), updated_by))
+        """写入新版本，返回版本号。
+
+        版本号 = MAX+1：并发写同一定义时后手的 INSERT 撞 PK
+        (kind,env,name,version)，捕获唯一冲突重试一次（重取 MAX）——
+        撞库不会让数据出错，但没有重试会把并发保存变成用户的 500。
+        """
+        import psycopg
+
+        for attempt in (1, 2):
+            try:
+                async with pool().connection() as conn:
+                    cur = await conn.execute(
+                        "SELECT COALESCE(MAX(version), 0) + 1 FROM definitions"
+                        " WHERE kind=%s AND env=%s AND name=%s",
+                        (kind, env, name))
+                    version = (await cur.fetchone())[0]
+                    await conn.execute(
+                        "INSERT INTO definitions (kind, env, name, version,"
+                        " definition, updated_by)"
+                        " VALUES (%s,%s,%s,%s,%s,%s)",
+                        (kind, env, name, version, json.dumps(definition),
+                         updated_by))
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
         self._cache.pop((kind, env, name), None)
         return version
 

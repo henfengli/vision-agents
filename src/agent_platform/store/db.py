@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_dedup ON runs(dedup_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at);
+-- 列表页/总览页：runs 是 append-only 增长表，默认 created_at 排序 +
+-- status 过滤不能一直靠 seq scan + sort
+CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_status_created ON runs(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS run_events (
     id         BIGSERIAL PRIMARY KEY,

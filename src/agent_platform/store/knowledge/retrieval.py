@@ -4,20 +4,42 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 
 from ..db import pool
+
+# HEAD 短 TTL 缓存：记忆页/召回对每条目做一次新鲜度校验，同一仓库的
+# rev-parse 会被反复发起（git subprocess 不便宜）。commit 漂移是分钟级
+# 以上的事，30s 内的旧值无害——巡检/召回下一轮自然拿到新值。
+_HEAD_TTL_S = 30.0
+_head_cache: dict[str, tuple[float, str | None]] = {}
 
 
 def current_commit(code_path: str) -> str | None:
     """业务代码目录当前 commit；非 git 仓库返回 None（跳过校验，不退化）。"""
+    hit = _head_cache.get(code_path)
+    if hit and time.monotonic() - hit[0] < _HEAD_TTL_S:
+        return hit[1]
     try:
         out = subprocess.run(
             ["git", "-C", code_path, "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=5,
         )
-        return out.stdout.strip() if out.returncode == 0 else None
+        head = out.stdout.strip() if out.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        head = None
+    _head_cache[code_path] = (time.monotonic(), head)
+    return head
+
+
+def code_base(path: str, domain_code_paths: list[str]) -> str | None:
+    """code_ref 的路径属于哪个代码目录：最长前缀匹配（嵌套目录取最具体的）。
+
+    沉淀（distill 记 commit）与校验（is_entry_fresh）共用本函数选仓库——
+    两边各选各的会在多代码目录的域里记错 commit、误判漂移。
+    """
+    matches = [b for b in domain_code_paths if str(path).startswith(b)]
+    return max(matches, key=len) if matches else None
 
 
 def is_entry_fresh(code_ref: dict | None, domain_code_paths: list[str]) -> bool:
@@ -27,12 +49,12 @@ def is_entry_fresh(code_ref: dict | None, domain_code_paths: list[str]) -> bool:
     recorded = code_ref.get("commit")
     if not recorded:
         return True
-    for base in domain_code_paths:
-        if str(code_ref["path"]).startswith(base):
-            head = current_commit(base)
-            # 非 git 仓库（head 为 None）无法校验，按新鲜处理——不退化
-            return head is None or head == recorded
-    return True
+    base = code_base(code_ref["path"], domain_code_paths)
+    if base is None:
+        return True
+    head = current_commit(base)
+    # 非 git 仓库（head 为 None）无法校验，按新鲜处理——不退化
+    return head is None or head == recorded
 
 
 async def search(env: str, domain: str, query: str, limit: int = 5,

@@ -217,7 +217,10 @@ def collect_files(root: str, env: str, domain: str, task: str, kind: str,
                 raise ValueError(f"路径越出 scratch：{rel}")
             if not os.path.exists(src):
                 raise ValueError(f"scratch 里不存在：{rel}")
-            target = os.path.join(staging, os.path.basename(src.rstrip("/")))
+            # 按相对路径保目录结构落 staging：basename 拍平会让
+            # files=["a/run.sh","b/run.sh"] 静默互相覆盖
+            target = os.path.join(staging, os.path.relpath(src, scratch))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.isdir(src):
                 shutil.copytree(src, target)
             else:

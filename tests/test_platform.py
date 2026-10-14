@@ -469,6 +469,85 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hist["config"]["server"], "board")
         self.assertTrue(all(r["run_id"] for r in hist["runs"]))
 
+    async def test_chat_stream_sse(self):
+        """SSE 流式对话：首帧 run 标识 + 事件帧 + final 帧；无令牌 401。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.api.auth import make_auth_dependency
+        from agent_platform.triggers import chat as chat_trigger
+        app = create_app(self.settings)
+        app.include_router(chat_trigger.make_router(
+            self.submitter, auth=make_auth_dependency("test-token")))
+        client = TestClient(app)
+
+        resp = client.post("/v1/chat/stream", json={
+            "server": "board", "role": "data_searcher", "question": "毛利率"})
+        self.assertEqual(resp.status_code, 401)
+
+        resp = client.post("/v1/chat/stream",
+                           headers={"Authorization": "Bearer test-token"},
+                           json={"server": "board", "role": "data_searcher",
+                                 "question": "毛利率"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.text
+        self.assertIn('"type": "run"', body)
+        self.assertIn('"type": "final"', body)
+        self.assertIn('"status": "success"', body)
+
+    async def test_viewer_bad_params_are_400(self):
+        """手改 URL 参数 → 400 而非 500：非法光标/非整数页码/时间范围/非法 since。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        self.assertEqual(client.get("/runs?c=garbage").status_code, 400)
+        self.assertEqual(client.get("/runs?c=a|b|c").status_code, 400)
+        self.assertEqual(client.get("/runs?range=abc").status_code, 400)
+        self.assertEqual(client.get("/assets?p=x").status_code, 400)
+        self.assertEqual(
+            client.get("/approvals?tab=done&p=x").status_code, 400)
+        self.assertEqual(
+            client.get(f"/runs/{r['run_id']}/state.json?since=abc")
+            .status_code, 400)
+        # 正常参数不受影响
+        self.assertEqual(client.get("/runs").status_code, 200)
+        self.assertEqual(
+            client.get(f"/runs/{r['run_id']}/state.json").status_code, 200)
+
+    async def test_viewer_approval_cross_run_rejected(self):
+        """审批表单与 URL 的 run 不匹配时不落决定（防跨 run 误操作）。"""
+        from fastapi.testclient import TestClient
+
+        from agent_platform.agent import approvals
+        from agent_platform.api.app import create_app
+        from agent_platform.viewer import make_viewer_router
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        aid = await approvals.request_approval(r["run_id"], "rm -rf /tmp/x")
+        app = create_app(self.settings)
+        app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        client = TestClient(app)
+
+        resp = client.post("/approvals/other-run/decide",
+                           data={"decision": "approved", "approval_id": aid})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("没有待审批项", resp.text)
+        # 审批单仍未决（未误落决定）
+        self.assertIsNotNone(await approvals.find_pending(r["run_id"]))
+
+        # 正常路径：匹配 run 的决定生效
+        resp = client.post(f"/approvals/{r['run_id']}/decide",
+                           data={"decision": "approved", "approval_id": aid})
+        self.assertIn("已放行", resp.text)
+        self.assertIsNone(await approvals.find_pending(r["run_id"]))
+
     async def test_admin_diff_page(self):
         """定义版本对比页：渲染 diff，缺版本 404。"""
         from fastapi.testclient import TestClient

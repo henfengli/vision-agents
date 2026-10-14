@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from ...store import assets as assets_store
-from .base import page_url, render
+from .base import page_url, qint, render
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def make_router(env: str, target_envs: list[str] | None = None,
         q = p.get("q") or ""
         kind = p.get("kind") or ""
         active = {"on": True, "off": False}.get(p.get("state") or "")
-        page = max(1, int(p.get("p") or 1))
+        page = max(1, qint(p.get("p"), 1, "p"))
         # 侧栏域计数与列表过滤解耦：侧栏永远显示全域分布
         side = await assets_store.domain_counts(view_env)
         if not domain and side:

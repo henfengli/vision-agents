@@ -87,7 +87,10 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         pending = await approvals.find_pending(run_id)
         if pending is None:
             raise HTTPException(404, "该 run 没有待审批项")
-        await approvals.decide(pending["id"], req.approved, req.decided_by)
+        if not await approvals.decide(pending["id"], req.approved,
+                                      req.decided_by):
+            # 并发审批：已被他人抢先处理，回执不能说谎
+            raise HTTPException(409, "该审批项已被处理")
         # 任务级提交闸门：放行即启动 workflow；拒绝则 run 置失败
         await policies.settle_submit_gate(run_id, req.approved, submitter)
         return {"status": "approved" if req.approved else "rejected"}
@@ -95,7 +98,10 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.post("/v1/feedback/{run_id}")
     async def feedback(run_id: str, req: FeedbackRequest):
         """打分反馈：回写知识/案例评分 + Langfuse score。"""
-        await feedback_store.add(run_id, req.score, req.comment)
+        try:
+            await feedback_store.add(run_id, req.score, req.comment)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
         # 记忆按目标环境分区：传播到该 run 实际操作的环境（与 Viewer 同源）
         run = await runs.get(run_id)
         await feedback_store.propagate_to_memory(

@@ -99,8 +99,6 @@ class Settings(BaseModel):
     env: str                               # 实例标签：本套部署自己是谁（定义/种子按它存取）
     target_envs: list[str] = Field(default_factory=list)  # 可操作的业务环境；空=单环境(=env)
     default_target_env: str | None = None  # 缺省目标环境（缺省=target_envs[0] 或 env）
-    host: str = "127.0.0.1"
-    port: int = 8100
     db_dsn: str
     model: ModelConfig
     dingtalk_relay_url: str

@@ -9,13 +9,13 @@ from .crud import (domain_stats, evolution_chain, get_entry, list_all,
                    list_by_domain, restore, similar_pairs, update_content,
                    upsert)
 from .profiles import asset_profiles, latest_session_summaries
-from .retrieval import current_commit, is_entry_fresh, search
+from .retrieval import code_base, current_commit, is_entry_fresh, search
 from .temporal import mark_expired, supersede_by_runs, supersede_keys
 from .usage import record_hits, recent_hits, usage_map
 
 __all__ = [
     "upsert", "get_entry", "update_content", "list_by_domain", "list_all",
-    "search", "current_commit", "is_entry_fresh",
+    "search", "current_commit", "is_entry_fresh", "code_base",
     "supersede_by_runs", "supersede_keys", "mark_expired",
     "latest_session_summaries", "asset_profiles",
     "domain_stats", "evolution_chain", "similar_pairs", "restore",
