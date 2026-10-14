@@ -5,24 +5,22 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
-class AskRequest(BaseModel):
-    server: str                      # 业务域（映射 domains 配置）
-    question: str
-    role: str | None = None          # 可选：覆盖任务默认角色
-    session_id: str | None = None
-    env: str | None = None           # 目标业务环境（缺省 = 实例默认）
-
-
 class TaskSubmitRequest(BaseModel):
     task_type: str
     input: dict
     caller: str | None = None
+    role: str | None = None          # 可选：覆盖任务默认角色（与 /v1/chat 对齐）
     env: str | None = None           # 目标业务环境（缺省 = 实例默认）
+    # 调用方幂等键走 Idempotency-Key 请求头，不进 body（Stripe 同款）
 
 
 class ApprovalRequest(BaseModel):
     approved: bool
     decided_by: str = ""
+
+
+class CancelRequest(BaseModel):
+    by: str = ""                     # 操作人留痕
 
 
 class FeedbackRequest(BaseModel):

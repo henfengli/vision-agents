@@ -53,11 +53,15 @@ class FakeHandle:
     def __init__(self, result=None, error: Exception | None = None):
         self._result = result
         self._error = error
+        self.terminated: str | None = None   # terminate 的 reason（取消测试断言用）
 
     async def result(self):
         if self._error is not None:
             raise self._error
         return self._result
+
+    async def terminate(self, reason: str = "") -> None:
+        self.terminated = reason
 
 
 class FakeTemporalClient:
@@ -85,11 +89,14 @@ class FakeTemporalClient:
 
         try:
             if spec.get("handler"):
-                # 内建任务：单 activity 完成整个作业
-                handle = FakeHandle(
-                    await activities.run_builtin_task(dict(spec)))
+                # 内建任务：单 activity 完成整个作业 + 投递
+                try:
+                    output = await activities.run_builtin_task(dict(spec))
+                    handle = FakeHandle(output)
+                finally:
+                    await activities.deliver_output(dict(spec))
             elif spec.get("artifacts"):
-                # 资产图：prepare → 解释执行（层内并行）→ finalize
+                # 资产图：prepare → 解释执行（层内并行）→ finalize → 投递
                 prepared = await activities.prepare_run(dict(spec))
                 merged = {**spec, **prepared}
                 try:
@@ -99,6 +106,7 @@ class FakeTemporalClient:
                 except Exception as e:
                     await activities.mark_failed(merged, str(e))
                     handle = FakeHandle(error=e)
+                await activities.deliver_output(merged)
             else:
                 prepared = await activities.prepare_run(dict(spec))
                 merged = {**spec, **prepared}
@@ -109,6 +117,7 @@ class FakeTemporalClient:
                 except Exception as e:
                     await activities.mark_failed(merged, str(e))
                     handle = FakeHandle(error=e)
+                await activities.deliver_output(merged)
         except Exception as e:
             handle = FakeHandle(error=e)
         self._handles[id] = handle
@@ -118,7 +127,8 @@ class FakeTemporalClient:
         return self._handles.get(run_id, FakeHandle(None))
 
 
-def configure_fake_deps(settings, defs, model_content: str = "[]"):
+def configure_fake_deps(settings, defs, model_content: str = "[]",
+                        notifier=None):
     """把 fake 依赖注入 activities（worker 进程里由 configure() 做同样的事）。"""
     from agent_platform.agent.roles import parse_defs
     from agent_platform.orchestration import activities
@@ -129,4 +139,4 @@ def configure_fake_deps(settings, defs, model_content: str = "[]"):
 
     activities.configure(activities.Deps(
         settings=settings, engine=_Engine({}), model_pool=FakePool(model_content),
-        notifier=None, langfuse=None))
+        notifier=notifier, langfuse=None))

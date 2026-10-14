@@ -161,6 +161,9 @@ a.stat-card:hover { border-color: var(--accent); text-decoration: none; }
                background: rgba(248, 113, 113, 0.08); }
 .pill-running, .pill-queued { color: var(--warn); border-color: rgba(251, 191, 36, 0.4);
                background: rgba(251, 191, 36, 0.08); }
+.pill-cancelled { color: var(--text-dim); border-color: var(--border);
+                  background: var(--panel-2); }
+.pill-cancelled .led { color: var(--text-dim); }
 .pill-running .led { color: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
 .pill-success .led { color: var(--ok); }
 .pill-failed .led { color: var(--err); }

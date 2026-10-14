@@ -7,7 +7,7 @@ make_api_router：全部 /v1 业务端点——在 lifespan 内、依赖（Submi
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..agent import approvals
@@ -15,15 +15,30 @@ from ..agent.roles import RoleDef
 from ..orchestration import policies
 from ..orchestration.policies import PolicyDef
 from ..orchestration.submitter import OverloadedError, Submitter, TaskRejected
-from ..orchestration.tasks import DEFAULT_CHAT_TASK, TaskDef, TaskRegistry
+from ..orchestration.tasks import TaskDef, TaskRegistry
 from ..store import definitions as definitions_store
 from ..store import feedback as feedback_store
 from ..store import runs
 from ..store.definitions import DefinitionStore
 from .auth import make_auth_dependency
-from .schemas import (ApprovalRequest, AskRequest, DefinitionPutRequest,
+from .schemas import (ApprovalRequest, CancelRequest, DefinitionPutRequest,
                       FeedbackRequest, SessionFeedbackRequest,
                       TaskSubmitRequest)
+
+# 对外暴露的 run 字段白名单：DB 行结构是内部实现，API 契约以这里为准
+# （加列/改列不再波及调用方）
+_RUN_VIEW = ("run_id", "session_id", "task_type", "task_version", "role",
+             "role_version", "domain", "target_env", "trigger_source",
+             "caller", "input", "output", "status", "tokens", "duration_ms",
+             "created_at")
+
+
+def run_view(row: dict) -> dict:
+    """run 台账行 → 对外视图（字段显式枚举，created_at 归一为字符串）。"""
+    view = {k: row.get(k) for k in _RUN_VIEW}
+    if view.get("created_at") is not None:
+        view["created_at"] = str(view["created_at"])
+    return view
 
 
 def create_app(settings, lifespan=None) -> FastAPI:
@@ -32,7 +47,14 @@ def create_app(settings, lifespan=None) -> FastAPI:
 
     @app.exception_handler(OverloadedError)
     async def _overloaded(_req, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=429)
+        return JSONResponse({"detail": str(exc), "error_code": "overloaded"},
+                            status_code=429)
+
+    @app.exception_handler(TaskRejected)
+    async def _rejected(_req, exc):
+        # 客户端错误不冒泡成 500：未知任务/闸门拒绝/终态冲突统一 400
+        return JSONResponse({"detail": str(exc), "error_code": "task_rejected"},
+                            status_code=400)
 
     @app.get("/health")
     async def health():
@@ -48,31 +70,65 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     auth = make_auth_dependency(settings.bearer_token)
     router = APIRouter(dependencies=[Depends(auth)])
 
-    @router.post("/v1/ask")
-    async def ask(req: AskRequest):
-        return await submitter.run_sync(
-            DEFAULT_CHAT_TASK,
-            {"server": req.server, "question": req.question},
-            trigger_source="sdk", session_id=req.session_id, role=req.role,
-            target_env=req.env)
-
     @router.post("/v1/tasks")
-    async def submit_task(req: TaskSubmitRequest):
+    async def submit_task(req: TaskSubmitRequest,
+                          idempotency_key: str | None = Header(None)):
+        """异步提交任务。Idempotency-Key 头：24h 内同键重提返回首个 run
+        （排队/运行中/成功均命中；失败允许同键重提）。"""
         return await submitter.submit(req.task_type, req.input,
                                       trigger_source="sdk", caller=req.caller,
-                                      target_env=req.env)
+                                      role=req.role, target_env=req.env,
+                                      idempotency_key=idempotency_key)
 
     @router.get("/v1/tasks/{run_id}")
     async def get_task(run_id: str):
         run = await runs.get(run_id)
         if run is None:
             raise HTTPException(404, "run 不存在")
-        return run
+        return run_view(run)
 
     @router.get("/v1/runs")
-    async def list_runs(env: str | None = None, limit: int = 100):
-        """run 列表；env 按目标业务环境过滤。"""
-        return await runs.list_recent(target_env=env, limit=min(limit, 500))
+    async def list_runs(env: str | None = None, status: str | None = None,
+                        task: str | None = None, source: str | None = None,
+                        domain: str | None = None, q: str | None = None,
+                        hours: int | None = None, after: str | None = None,
+                        limit: int = 100):
+        """run 列表：平面过滤 + keyset 游标（与 Viewer 同一查询实现）。
+
+        after = 上一页响应里的 next_cursor；hours = 最近 N 小时。
+        """
+        rows, total, next_cursor, _ = await runs.list_filtered(
+            target_env=env, status=status, task=task, source=source,
+            domain=domain, q=q, hours=hours, after=after,
+            limit=min(limit, 500))
+        return {"runs": rows, "total": total, "next_cursor": next_cursor}
+
+    @router.get("/v1/runs/{run_id}/events")
+    async def run_events(run_id: str, after_seq: int = -1):
+        """run 事件流：after_seq 增量拉取（调用方观测执行进度的通道）。"""
+        if await runs.get(run_id) is None:
+            raise HTTPException(404, "run 不存在")
+        return {"run_id": run_id,
+                "events": await runs.get_events(run_id, after_seq=after_seq)}
+
+    @router.post("/v1/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, req: CancelRequest):
+        """取消 run：terminate workflow + 落 cancelled 终态（终态重复取消 409）。"""
+        try:
+            return await submitter.cancel_run(run_id, by=req.by)
+        except TaskRejected as e:
+            raise HTTPException(404 if "不存在" in str(e) else 409,
+                                str(e)) from None
+
+    @router.get("/v1/approvals")
+    async def list_approvals(status: str = "pending", limit: int = 50):
+        """审批查询：pending=待办收件箱；approved/rejected/空=已处理历史。"""
+        if status == "pending":
+            return {"approvals": await approvals.list_pending(
+                limit=min(limit, 200))}
+        items, total = await approvals.list_decided(
+            status or None, limit=min(limit, 200))
+        return {"approvals": items, "total": total}
 
     @router.post("/v1/runs/{run_id}/resume")
     async def resume_run(run_id: str):

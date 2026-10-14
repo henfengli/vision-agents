@@ -26,6 +26,9 @@ class RunSpec:
     # —— 任务形态（三选一，空 = 单 agent 问答） ——
     artifacts: dict | None = None   # 资产化任务图快照（提交时从任务定义固化）
     handler: str | None = None      # 内建任务处理器（如 memory-gardener）
+    # —— 结果投递（提交时从任务定义固化；caller = 不投递，调用方轮询） ——
+    output_channel: str = "caller"
+    output_callback: str | None = None  # output_channel=http 时的回调地址
     # —— prepare_run 回填 ——
     prompt: str = ""                # 召回块 + question 拼好的最终 prompt
     domain: str | None = None

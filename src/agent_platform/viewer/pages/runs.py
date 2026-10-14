@@ -22,7 +22,7 @@ from .base import page_url, qint, render
 
 _PAGE = 50
 _STATUSES = [("", "全部"), ("running", "运行中"), ("queued", "排队"),
-             ("success", "成功"), ("failed", "失败")]
+             ("success", "成功"), ("failed", "失败"), ("cancelled", "已取消")]
 _SOURCES = [("", "全部来源"), ("web_chat", "对话"), ("schedule", "调度"),
             ("sensor", "传感器"), ("sdk", "SDK"), ("webhook", "Webhook")]
 _RANGES = [("", "全部时间"), ("24", "24 小时"), ("168", "7 天"),

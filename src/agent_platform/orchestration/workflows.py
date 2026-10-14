@@ -21,8 +21,8 @@ from .tasks import question_text
 log = logging.getLogger(__name__)
 
 with workflow.unsafe.imports_passed_through():
-    from .activities import (finalize_run, mark_failed, prepare_run,
-                             run_agent, run_builtin_task)
+    from .activities import (deliver_output, finalize_run, mark_failed,
+                             prepare_run, run_agent, run_builtin_task)
     from .artgraph import run_graph
 
 # agent 步骤不自动重试：模型/工具错误由人工或恢复路径处理；
@@ -50,14 +50,24 @@ class AgentRunWorkflow:
                 start_to_close_timeout=timedelta(seconds=timeout_s),
                 heartbeat_timeout=timedelta(seconds=120),
                 retry_policy=_RETRY_NONE)
-            return await workflow.execute_activity(
+            result = await workflow.execute_activity(
                 finalize_run, args=[spec, output],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=_RETRY_LIGHT)
+            # 结果投递（http 回调/钉钉）：内部自吞最终失败，不翻案 run 状态
+            await workflow.execute_activity(
+                deliver_output, spec,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_RETRY_LIGHT)
+            return result
         except Exception as e:
             if spec.get("run_id"):
                 await workflow.execute_activity(
                     mark_failed, args=[spec, str(e)],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=_RETRY_LIGHT)
+                await workflow.execute_activity(
+                    deliver_output, spec,
                     start_to_close_timeout=timedelta(seconds=60),
                     retry_policy=_RETRY_LIGHT)
             raise
@@ -148,14 +158,23 @@ class ArtifactRunWorkflow:
                 retry_policy=_RETRY_LIGHT)
             spec = {**spec, **prepared}
             output = await run_graph(spec, call)
-            return await workflow.execute_activity(
+            result = await workflow.execute_activity(
                 finalize_run, args=[spec, output],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=_RETRY_LIGHT)
+            await workflow.execute_activity(
+                deliver_output, spec,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_RETRY_LIGHT)
+            return result
         except Exception as e:
             if spec.get("run_id"):
                 await workflow.execute_activity(
                     mark_failed, args=[spec, str(e)],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=_RETRY_LIGHT)
+                await workflow.execute_activity(
+                    deliver_output, spec,
                     start_to_close_timeout=timedelta(seconds=60),
                     retry_policy=_RETRY_LIGHT)
             raise
@@ -168,7 +187,23 @@ class BuiltinTaskWorkflow:
     @workflow.run
     async def run(self, spec: dict) -> dict:
         timeout_s = min(int(spec.get("timeout_s") or 1800), 7200)
-        return await workflow.execute_activity(
-            run_builtin_task, spec,
-            start_to_close_timeout=timedelta(seconds=timeout_s),
+        if not spec.get("run_id"):
+            # 调度触发时 workflow 侧先生成 id（workflow.uuid4 是确定性安全的），
+            # 否则投递步骤拿不到 run_id（run_builtin_task 内部生成的传不出来）
+            spec = {**spec, "run_id": workflow.uuid4().hex[:16]}
+        try:
+            output = await workflow.execute_activity(
+                run_builtin_task, spec,
+                start_to_close_timeout=timedelta(seconds=timeout_s),
+                retry_policy=_RETRY_LIGHT)
+        except Exception:
+            await workflow.execute_activity(
+                deliver_output, spec,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_RETRY_LIGHT)
+            raise
+        await workflow.execute_activity(
+            deliver_output, spec,
+            start_to_close_timeout=timedelta(seconds=60),
             retry_policy=_RETRY_LIGHT)
+        return output

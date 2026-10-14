@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+import httpx
 from temporalio import activity
 
 log = logging.getLogger(__name__)
@@ -219,6 +220,54 @@ async def mark_failed(raw: dict, error: str) -> None:
                          {"stage": "error", "error": error[:2000]})
     await runs.set_status(spec.run_id, "failed",
                           output={"error": error[:4000]})
+
+
+@activity.defn
+async def deliver_output(raw: dict) -> None:
+    """步骤 4（可选）：按任务声明的 output_channel 投递终态结果。
+
+    caller = 不投递（调用方轮询）；http = POST 回调（run_id/status/output）；
+    dingtalk = 中继 markdown 卡。投递走独立 activity 白嫖 Temporal 重试；
+    最终失败只留 deliver_failed 事件——结果已在台账，投递失败不翻案。
+    """
+    d = _d()
+    spec = RunSpec.from_dict(raw)
+    channel = spec.output_channel or "caller"
+    if channel == "caller":
+        return
+    run = await runs.get(spec.run_id)
+    if run is None:
+        return
+    output = run.get("output") or {}
+    try:
+        if channel == "http":
+            if not spec.output_callback:
+                return
+            payload = {"run_id": spec.run_id, "task_type": spec.task_type,
+                       "status": run["status"], "output": output}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(spec.output_callback, json=payload)
+                resp.raise_for_status()
+        elif channel == "dingtalk":
+            if d.notifier is None:
+                return
+            text = output.get("answer") or json.dumps(
+                output, ensure_ascii=False, default=str)[:1500]
+            await d.notifier.send_markdown(
+                f"[{spec.task_type}] {run['status']}", text[:1500])
+        else:
+            return  # 未知通道按不投递处理（写入期已校验，这里是双保险）
+    except Exception as e:  # noqa: BLE001
+        try:
+            final = activity.info().attempt >= 3
+        except Exception:  # noqa: BLE001 —— 非 activity 上下文（测试内联）
+            final = True
+        if not final:
+            raise  # 交给 Temporal 重试
+        log.exception("run %s 结果投递失败（channel=%s）", spec.run_id, channel)
+        await runs.log_event(spec.run_id, "note", {
+            "stage": "deliver_failed", "channel": channel,
+            "error": str(e)[:500]})
 
 
 # ==================== 内部工具 ====================

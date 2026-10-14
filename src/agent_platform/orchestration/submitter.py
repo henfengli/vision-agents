@@ -86,12 +86,22 @@ class Submitter:
                      correction: bool, run_id: str | None = None,
                      resume: bool = False, row_exists: bool = False,
                      skip_dedup: bool = False,
-                     domain: str | None = None, target_env: str = "") -> dict:
+                     domain: str | None = None, target_env: str = "",
+                     idempotency_key: str | None = None) -> dict:
         run_id = run_id or uuid.uuid4().hex[:16]
         session_id = session_id or run_id
         if not resume and not row_exists:
-            dedup_key = task.compute_dedup_key(input_data)
-            if dedup_key and not skip_dedup:
+            # 幂等键优先于任务声明的 dedup：调用方显式要"同键不重跑"时，
+            # 排队/运行中的 run 也命中（任务级 dedup 只对成功 run 生效）
+            if idempotency_key:
+                existing = await runs.find_by_idempotency(idempotency_key)
+                if existing:
+                    return {"run_id": existing["run_id"], "status": "dedup_hit",
+                            "dedup_hit": True}
+                dedup_key = runs.idempotency_dedup_key(idempotency_key)
+            else:
+                dedup_key = task.compute_dedup_key(input_data)
+            if dedup_key and not skip_dedup and not idempotency_key:
                 existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
                 if existing:
                     return {"run_id": existing["run_id"], "status": "dedup_hit",
@@ -109,7 +119,9 @@ class Submitter:
                        artifacts=({k: v.model_dump() for k, v in
                                    task.artifacts.items()}
                                   if task.artifacts else None),
-                       handler=task.handler).to_dict()
+                       handler=task.handler,
+                       output_channel=task.output_channel,
+                       output_callback=task.output_callback).to_dict()
         # 任务形态分发：资产图 / 内建处理器 / 单 agent（默认）
         wf = (BuiltinTaskWorkflow.run if task.handler else
               ArtifactRunWorkflow.run if task.artifacts else
@@ -188,7 +200,8 @@ class Submitter:
                      trigger_source: str, caller: str | None = None,
                      session_id: str | None = None, role: str | None = None,
                      correction: bool = False,
-                     target_env: str | None = None) -> dict:
+                     target_env: str | None = None,
+                     idempotency_key: str | None = None) -> dict:
         target_env = self._resolve_target_env(target_env)
         task = await self._resolve_task(task_name, role, target_env)
         # 提交闸门链（policies.py）：env_gate 之外的 DB 声明策略都在这里过
@@ -203,7 +216,8 @@ class Submitter:
                                         caller, session_id, verdict,
                                         target_env)
         return await self._start(task, input_data, trigger_source, caller,
-                                 session_id, correction, target_env=target_env)
+                                 session_id, correction, target_env=target_env,
+                                 idempotency_key=idempotency_key)
 
     async def correct(self, session_id: str, correction_text: str,
                       by: str = "") -> dict:
@@ -291,6 +305,38 @@ class Submitter:
                                  correction=False, skip_dedup=True,
                                  domain=run.get("domain"),
                                  target_env=target_env)
+
+    async def cancel_run(self, run_id: str, by: str = "") -> dict:
+        """取消 run：终止 workflow + 落 cancelled 终态。
+
+        三种形态：闸门挂起（queued、从未 start workflow）直接落终态；
+        运行中 terminate（terminate 不会给 workflow 抛异常，mark_failed
+        不会执行，终态必须在这里落）；终态幂等报错（重复取消是调用方的
+        信号，不该静默成功）。挂起的工具级审批一并拒掉，否则它永远 pending。
+        """
+        from ..agent import approvals
+        from temporalio.service import RPCError, RPCStatusCode
+
+        run = await runs.get(run_id)
+        if run is None:
+            raise TaskRejected(f"run {run_id} 不存在")
+        if run["status"] in ("success", "failed", "cancelled"):
+            raise TaskRejected(f"run 已终态（{run['status']}），无需取消")
+        pending = await approvals.find_pending(run_id)
+        if pending is not None:
+            await approvals.decide(pending["id"], False, by or "cancel")
+        try:
+            handle = self._client.get_workflow_handle(run_id)
+            await handle.terminate(reason=f"人工取消（{by or 'api'}）")
+        except RPCError as e:
+            # 闸门挂起的 run 从未 start workflow：NOT_FOUND 属预期
+            if e.status != RPCStatusCode.NOT_FOUND:
+                raise
+        await runs.log_event(run_id, "note",
+                             {"stage": "cancelled", "by": by or "api"})
+        await runs.set_status(run_id, "cancelled",
+                              output={"error": "已取消，未产出结果"})
+        return {"run_id": run_id, "status": "cancelled"}
 
 
 def _to_question(task: TaskDef, input_data: dict) -> str:

@@ -337,6 +337,220 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                            json={"correction": "x"})
         self.assertEqual(resp.status_code, 404)
 
+    def _api_client(self, submitter=None):
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api.app import create_app, make_api_router
+        app = create_app(self.settings)
+        app.include_router(make_api_router(self.settings,
+                                           submitter or self.submitter,
+                                           self.tasks, self.defs))
+        return TestClient(app), {"Authorization": "Bearer test-token"}
+
+    async def test_api_rejections_are_4xx(self):
+        """客户端错误（未知任务/env_gate 拒绝）返 400 + error_code，不是 500。"""
+        client, headers = self._api_client()
+        resp = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "no-such-task", "input": {}})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error_code"], "task_rejected")
+        # env_gate：failure-analysis 只允许 prod/test
+        resp = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "failure-analysis", "env": "staging",
+            "input": {"run_id": "r", "asset_key": "a", "error": "x"}})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error_code"], "task_rejected")
+
+    async def test_run_view_and_list_filters(self):
+        """单 run 走字段白名单视图；列表透传过滤 + keyset 游标信封。"""
+        client, headers = self._api_client()
+        resp = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa",
+            "input": {"server": "board", "question": "q"}})
+        run_id = resp.json()["run_id"]
+        run = client.get(f"/v1/tasks/{run_id}", headers=headers).json()
+        self.assertEqual(run["status"], "success")
+        self.assertEqual(run["run_id"], run_id)
+        self.assertNotIn("dedup_key", run)      # 内部字段不外泄
+        listed = client.get("/v1/runs?status=success&task=data-qa",
+                            headers=headers).json()
+        self.assertEqual(listed["total"], 1)
+        self.assertEqual(listed["runs"][0]["run_id"], run_id)
+        self.assertIn("next_cursor", listed)     # 信封字段齐
+        self.assertEqual(client.get(
+            "/v1/runs?status=failed", headers=headers).json()["total"], 0)
+
+    async def test_run_events_endpoint(self):
+        """事件流端点：全量 + after_seq 增量。"""
+        client, headers = self._api_client()
+        resp = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa",
+            "input": {"server": "board", "question": "q"}})
+        run_id = resp.json()["run_id"]
+        body = client.get(f"/v1/runs/{run_id}/events",
+                          headers=headers).json()
+        self.assertEqual(body["run_id"], run_id)
+        self.assertGreater(len(body["events"]), 0)
+        last = body["events"][-1]["seq"]
+        inc = client.get(f"/v1/runs/{run_id}/events?after_seq={last}",
+                         headers=headers).json()
+        self.assertEqual(inc["events"], [])
+        self.assertEqual(client.get("/v1/runs/nope/events",
+                                    headers=headers).status_code, 404)
+
+    async def test_cancel_run(self):
+        """取消：queued 的 run 落 cancelled；重复取消 409；不存在 404。"""
+        from agent_platform.orchestration.submitter import Submitter
+        from fakes import FakeTemporalClient
+        sub = Submitter(FakeTemporalClient(execute=False), self.tasks,
+                        "tq", "test", defs=self.defs)
+        client, headers = self._api_client(submitter=sub)
+        run_id = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa",
+            "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        resp = client.post(f"/v1/runs/{run_id}/cancel", headers=headers,
+                           json={"by": "tester"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "cancelled")
+        run = client.get(f"/v1/tasks/{run_id}", headers=headers).json()
+        self.assertEqual(run["status"], "cancelled")
+        # terminate 语义传达给了 workflow handle
+        handle = sub._client.get_workflow_handle(run_id)
+        self.assertIn("tester", handle.terminated)
+        # 终态重复取消 → 409；不存在 → 404
+        self.assertEqual(client.post(f"/v1/runs/{run_id}/cancel",
+                                     headers=headers, json={}).status_code, 409)
+        self.assertEqual(client.post("/v1/runs/nope/cancel",
+                                     headers=headers, json={}).status_code, 404)
+
+    async def test_idempotency_key(self):
+        """Idempotency-Key：同键重提命中首个 run（dedup_hit）。"""
+        client, headers = self._api_client()
+        payload = {"task_type": "data-qa",
+                   "input": {"server": "board", "question": "幂等"}}
+        h = {**headers, "Idempotency-Key": "req-123"}
+        r1 = client.post("/v1/tasks", headers=h, json=payload).json()
+        r2 = client.post("/v1/tasks", headers=h, json=payload).json()
+        self.assertEqual(r2["run_id"], r1["run_id"])
+        self.assertTrue(r2["dedup_hit"])
+        # 不同键 = 新 run
+        r3 = client.post("/v1/tasks", headers={
+            **headers, "Idempotency-Key": "req-456"}, json=payload).json()
+        self.assertNotEqual(r3["run_id"], r1["run_id"])
+
+    async def test_role_override_on_tasks(self):
+        """POST /v1/tasks 支持 role 覆盖（与 /v1/chat 对齐）。"""
+        client, headers = self._api_client()
+        resp = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa", "role": "ops_analyst",
+            "input": {"server": "board", "question": "q"}})
+        run = client.get(f"/v1/tasks/{resp.json()['run_id']}",
+                         headers=headers).json()
+        self.assertEqual(run["role"], "ops_analyst")
+
+    async def test_approvals_list_endpoint(self):
+        """审批查询：pending 收件箱 + 已处理历史。"""
+        from agent_platform.agent import approvals
+        client, headers = self._api_client()
+        run_id = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa",
+            "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        aid = await approvals.request_approval(run_id, "rm -rf /tmp/x")
+        pending = client.get("/v1/approvals?status=pending",
+                             headers=headers).json()["approvals"]
+        self.assertEqual([a["id"] for a in pending], [aid])
+        await approvals.decide(aid, True, "tester")
+        done = client.get("/v1/approvals?status=approved",
+                          headers=headers).json()
+        self.assertEqual(done["total"], 1)
+        self.assertEqual(done["approvals"][0]["decided_by"], "tester")
+        self.assertEqual(client.get("/v1/approvals?status=pending",
+                                    headers=headers).json()["approvals"], [])
+
+    async def test_deliver_http_callback(self):
+        """output_channel=http：终态后回调收到 {run_id, task_type, status, output}。"""
+        from unittest.mock import patch
+
+        import httpx
+        posts = []
+
+        def handler(request):
+            posts.append(__import__("json").loads(request.content))
+            return httpx.Response(200)
+
+        await self.defs.put("task", "test", "cb-task",
+                            {"role": "data_searcher", "output_channel": "http",
+                             "output_callback": "http://caller.test/hook"},
+                            updated_by="test")
+        client, headers = self._api_client()
+        real_client = httpx.AsyncClient
+        with patch.object(httpx, "AsyncClient",
+                          side_effect=lambda **kw: real_client(
+                              transport=httpx.MockTransport(handler), **kw)):
+            run_id = client.post("/v1/tasks", headers=headers, json={
+                "task_type": "cb-task",
+                "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["run_id"], run_id)
+        self.assertEqual(posts[0]["status"], "success")
+        self.assertIn("output", posts[0])
+
+    async def test_deliver_failure_logged_not_raised(self):
+        """回调失败：run 仍是 success，留 deliver_failed 事件（不翻案）。"""
+        from unittest.mock import patch
+
+        import httpx
+
+        def handler(request):
+            return httpx.Response(502)
+
+        await self.defs.put("task", "test", "cb-bad",
+                            {"role": "data_searcher", "output_channel": "http",
+                             "output_callback": "http://caller.test/down"},
+                            updated_by="test")
+        client, headers = self._api_client()
+        real_client = httpx.AsyncClient
+        with patch.object(httpx, "AsyncClient",
+                          side_effect=lambda **kw: real_client(
+                              transport=httpx.MockTransport(handler), **kw)):
+            run_id = client.post("/v1/tasks", headers=headers, json={
+                "task_type": "cb-bad",
+                "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        run = client.get(f"/v1/tasks/{run_id}", headers=headers).json()
+        self.assertEqual(run["status"], "success")
+        events = client.get(f"/v1/runs/{run_id}/events",
+                            headers=headers).json()["events"]
+        self.assertTrue(any(e["payload"].get("stage") == "deliver_failed"
+                            for e in events))
+
+    async def test_deliver_dingtalk(self):
+        """output_channel=dingtalk：平台经中继投递（不再靠 agent 自觉）。"""
+        from agent_platform.orchestration import activities
+        from fakes import configure_fake_deps
+
+        class _Notifier:
+            def __init__(self):
+                self.sent = []
+
+            async def send_markdown(self, title, text):
+                self.sent.append((title, text))
+                return {}
+
+        notifier = _Notifier()
+        configure_fake_deps(self.settings, self.defs, notifier=notifier)
+        await self.defs.put("task", "test", "dt-task",
+                            {"role": "data_searcher",
+                             "output_channel": "dingtalk"}, updated_by="test")
+        client, headers = self._api_client()
+        run_id = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "dt-task",
+            "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        self.assertEqual(len(notifier.sent), 1)
+        self.assertIn("dt-task", notifier.sent[0][0])
+        # 还原默认 deps（notifier=None），不影响后续用例
+        configure_fake_deps(self.settings, self.defs)
+        self.assertIsNotNone(run_id)
+
     async def test_viewer_pages_render(self):
         from fastapi.testclient import TestClient
 
@@ -1087,10 +1301,11 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         await sub.submit("data-qa", {"server": "board", "question": "q2"},
                          "sdk", target_env="test")
         all_runs = client.get("/v1/runs", headers=headers).json()
-        self.assertEqual(len(all_runs), 2)
-        prod_runs = client.get("/v1/runs?env=prod", headers=headers).json()
-        self.assertEqual(len(prod_runs), 1)
-        self.assertEqual(prod_runs[0]["target_env"], "prod")
+        self.assertEqual(all_runs["total"], 2)
+        self.assertEqual(len(all_runs["runs"]), 2)
+        prod = client.get("/v1/runs?env=prod", headers=headers).json()
+        self.assertEqual(len(prod["runs"]), 1)
+        self.assertEqual(prod["runs"][0]["target_env"], "prod")
 
     # ---- 资产化任务图（#1） ----
 

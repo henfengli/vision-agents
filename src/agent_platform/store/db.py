@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS runs (
     caller        TEXT,
     input         JSONB,
     output        JSONB,
-    status        TEXT NOT NULL,             -- queued/running/success/failed
+    status        TEXT NOT NULL,             -- queued/running/success/failed/cancelled
     dedup_key     TEXT,
     tokens        INT,
     duration_ms   INT,

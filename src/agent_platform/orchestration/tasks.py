@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from ..store.definitions import DefinitionStore
 from .artgraph import NodeDef
 
-# 对话入口（/v1/ask、/v1/chat*）默认路由到的任务类型；
+# 对话入口（/v1/chat、/v1/chat/stream）默认路由到的任务类型；
 # 与 main.SEED_TASKS 中的种子任务同名，改名需同步。
 DEFAULT_CHAT_TASK = "data-qa"
 
@@ -20,7 +20,7 @@ class TaskDef(BaseModel):
     role: str = ""                     # 单 agent 任务的角色；artifacts/handler 任务可空
     triggers: list[str] = Field(default_factory=list)
     input_schema: dict[str, str] = Field(default_factory=dict)
-    output_channel: str = "caller"           # caller/dingtalk/http
+    output_channel: str = "caller"           # caller(不投递)/dingtalk/http（平台投递，见 activities.deliver_output）
     output_callback: str | None = None       # output_channel=http 时的回调地址
     dedup_key: str | None = None             # input 中作为去重键的字段（+连接）
     dedup_window_s: int = 600

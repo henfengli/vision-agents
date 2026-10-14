@@ -61,6 +61,33 @@ async def find_by_dedup(dedup_key: str, window_s: int) -> dict | None:
     return _row_to_dict(cur, row) if row else None
 
 
+_IDEM_PREFIX = "idem:"
+_IDEM_WINDOW_S = 86400  # 幂等键 24h 有效（Stripe 同款窗口）
+
+
+def idempotency_dedup_key(key: str) -> str:
+    """调用方幂等键 → dedup_key 列的存储形态（复用 idx_runs_dedup 索引）。"""
+    return f"{_IDEM_PREFIX}{key}"
+
+
+async def find_by_idempotency(key: str) -> dict | None:
+    """幂等键查重：命中排队/运行中/成功的 run。
+
+    与任务级 dedup 的差异：提交重试场景要拦住"第一个 run 还在跑"的
+    重复提交，所以非终态也命中；失败的 run 允许同键重提（修正后重试是
+    合理用法，Stripe 幂等键同款语义）。
+    """
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT * FROM runs WHERE dedup_key = %s"
+            " AND status IN ('queued','running','success')"
+            " AND created_at > now() - make_interval(secs => %s)"
+            " ORDER BY created_at DESC LIMIT 1",
+            (idempotency_dedup_key(key), _IDEM_WINDOW_S))
+        row = await cur.fetchone()
+    return _row_to_dict(cur, row) if row else None
+
+
 async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
     """会话最近一个 run 的概要（correction 继承 task_type/role/domain/env 用）。"""
     async with db.pool().connection() as conn:
