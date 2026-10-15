@@ -143,7 +143,7 @@ document.addEventListener("click", e => {
 });
 
 /* —— 步骤时间线：事件 append-only，只增量渲染新步骤 —— */
-/* 每步带 👍👎（节点级反馈）：POST /runs/{runId}/steps/{seq}/feedback；
+/* 每步带 👍👎（节点级反馈）：POST /v1/runs/{runId}/steps/{seq}/feedback；
    步骤间显示距上步耗时；长输出默认折叠（Claude Code 式，点击展开） */
 function foldPre(text) {
   const t = String(text || "");
@@ -207,10 +207,10 @@ document.addEventListener("click", async e => {
   const runId = document.getElementById("steps").dataset.runId;
   wrap.querySelectorAll("button").forEach(b => b.disabled = true);
   try {
-    const resp = await fetch(`/runs/${runId}/steps/${wrap.dataset.seq}/feedback`, {
+    const resp = await fetch(`/v1/runs/${runId}/steps/${wrap.dataset.seq}/feedback`, {
       method: "POST",
-      headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: `score=${btn.dataset.score}`,
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({score: Number(btn.dataset.score)}),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     wrap.insertAdjacentHTML("beforeend", '<span class="fb-done">✓ 已记录</span>');

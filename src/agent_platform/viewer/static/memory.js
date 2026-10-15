@@ -1,6 +1,6 @@
 /* 记忆页：检索试用 + 条目卡 + 右抽屉明细（编辑/演化链/反馈）+ 矛盾仲裁。
-   数据源：window.MEMORY（列表内嵌，内容不内嵌）+ /memory/search.json +
-   /memory/{id}/detail.json；写操作：编辑 /memory/{id}、expire、restore。
+   数据源：window.MEMORY（列表内嵌，内容不内嵌）+ /v1/knowledge/*（与外部
+   调用方同一套 API，同源 cookie 鉴权）。
    （任务资产是独立概念，在 /assets 页。） */
 "use strict";
 
@@ -29,7 +29,7 @@ document.getElementById("mem-search-form").addEventListener("submit",
     if (!q) return;
     box.innerHTML = '<div class="meta">检索中…</div>';
     const resp = await fetch(
-      `/memory/search.json?env=${encodeURIComponent(MEM.env)}` +
+      `/v1/knowledge/search?env=${encodeURIComponent(MEM.env)}` +
       `&domain=${encodeURIComponent(MEM.domain)}&q=${encodeURIComponent(q)}`);
     if (!resp.ok) {
       box.innerHTML = `<div class="meta">检索失败：${esc(await resp.text())}</div>`;
@@ -108,7 +108,7 @@ async function openDrawer(id) {
   $("md-create-fields").style.display = "none";
   ["md-usage-sec", "md-chain-sec", "md-feedback-sec"]
     .forEach(s => $(s).style.display = "");
-  const resp = await fetch(`/memory/${id}/detail.json`);
+  const resp = await fetch(`/v1/knowledge/${id}`);
   if (!resp.ok) {
     document.getElementById("md-key").textContent = "加载失败";
     return;
@@ -216,7 +216,7 @@ document.addEventListener("click", async e => {
   if (keep) {  // 矛盾仲裁：保留一条 = 另一条标记过期
     if (!confirm(`保留 #${keep.dataset.keep}，把 #${keep.dataset.drop} 标记过期？`))
       return;
-    const resp = await fetch(`/memory/${keep.dataset.drop}/expire`,
+    const resp = await fetch(`/v1/knowledge/${keep.dataset.drop}/expire`,
                              {method: "POST"});
     if (resp.ok) location.reload(); else alert("操作失败");
   }
@@ -233,16 +233,16 @@ async function post(url, body) {
 }
 document.getElementById("md-save").addEventListener("click", () => {
   if (mode === "create") {
-    post(`/memory/entries?env=${encodeURIComponent(MEM.env)}`, {
+    post(`/v1/knowledge?env=${encodeURIComponent(MEM.env)}`, {
       domain: document.getElementById("md-domain").value,
       key: document.getElementById("md-new-key").value,
       content: document.getElementById("md-content").value});
     return;
   }
-  post(`/memory/${curId}`,
+  post(`/v1/knowledge/${curId}`,
        {content: document.getElementById("md-content").value});
 });
 document.getElementById("md-expire").addEventListener("click",
-  () => post(`/memory/${curId}/expire`));
+  () => post(`/v1/knowledge/${curId}/expire`));
 document.getElementById("md-restore").addEventListener("click",
-  () => post(`/memory/${curId}/restore`));
+  () => post(`/v1/knowledge/${curId}/restore`));

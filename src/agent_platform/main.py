@@ -22,7 +22,7 @@ from .agent.approvals import make_review_hook
 from .agent.engine import Engine
 from .agent.tools.mcp_bridge import load_mcp_tools
 from .agent.tools.registry import ToolRegistry
-from .api import create_app, make_api_router
+from .api import create_app, make_api_router, make_ops_router
 from .api.auth import make_auth_dependency
 from .config import Settings, load_settings
 from .langfuse import LangfuseClient, setup_observability
@@ -298,6 +298,8 @@ def build_app(settings: Settings | None = None):
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse,
                             schedule_sync=rt.resync_schedules),
+            make_ops_router(settings, embedder=rt.embedder,
+                            domain_cfgs=settings.domains),
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 rules=dagster_pack.rules if dagster_pack else [],
@@ -312,8 +314,7 @@ def build_app(settings: Settings | None = None):
             langfuse=rt.langfuse, token=settings.bearer_token,
             domains=list(settings.domains),
             target_envs=settings.target_envs or None,
-            tool_names=rt.tool_names, domain_cfgs=settings.domains,
-            embedder=rt.embedder))
+            tool_names=rt.tool_names, domain_cfgs=settings.domains))
         try:
             yield
         finally:

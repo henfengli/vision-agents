@@ -4,8 +4,9 @@
 点开进右侧抽屉（完整内容编辑 / 来源 run / code_ref 新鲜度 / 反馈留痕 /
 superseded_by 演化链）。案例库与疑似矛盾对是同页的另两个 tab。
 （任务资产是独立概念，在顶级「资产」页。）
-检索试用直接调线上 recall 同款 knowledge.search（trgm+向量 RRF），
-看到的就是角色实际会命中的。
+
+本页只剩 HTML 渲染；所有数据/写操作走 /v1/knowledge/*（页内 JS 同源
+cookie 直接调，与外部调用方共用一套 API）。
 """
 
 from __future__ import annotations
@@ -14,30 +15,18 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 
 from ...store import cases as cases_store
-from ...store import feedback as feedback_store
 from ...store import knowledge as knowledge_store
 from .base import render
 
 log = logging.getLogger(__name__)
 
 
-class MemoryUpdateRequest(BaseModel):
-    content: str
-
-
-class MemoryCreateRequest(BaseModel):
-    domain: str
-    key: str
-    content: str
-
-
 def make_router(env: str, target_envs: list[str] | None = None,
-                domain_cfgs: dict | None = None, embedder=None) -> APIRouter:
+                domain_cfgs: dict | None = None) -> APIRouter:
     router = APIRouter()
     # 域 → code_paths（code_ref 新鲜度校验用；git subprocess，全部 to_thread）
     code_paths = {name: list(getattr(cfg, "code_paths", []) or [])
@@ -93,85 +82,5 @@ def make_router(env: str, target_envs: list[str] | None = None,
                       view_env=view_env, target_envs=target_envs or [],
                       items_json=json.dumps(items, ensure_ascii=False)
                       .replace("</", "<\\/"))
-
-    @router.post("/memory/entries")
-    async def memory_create(request: Request, req: MemoryCreateRequest):
-        """手动新增条目：运营直接把结论写死，不必等 distill 沉淀。"""
-        view_env = request.query_params.get("env") or env
-        if not req.domain.strip() or not req.key.strip() \
-                or not req.content.strip():
-            raise HTTPException(422, "域/key/内容均不能为空")
-        await knowledge_store.upsert(view_env, req.domain.strip(),
-                                     req.key.strip(), req.content,
-                                     source_run="manual", embedder=embedder)
-        return {"status": "ok"}
-
-    @router.get("/memory/search.json")
-    async def memory_search(request: Request, q: str = "", domain: str = ""):
-        """检索试用：返回角色实际注入的 prompt 块（recall_block 同款，
-        含资产档案/知识/案例分层与 freshness 过滤）+ 历史知识命中序。"""
-        from ...memory.recall import recall_block
-        view_env = request.query_params.get("env") or env
-        dom = domain or next(iter(code_paths), "")
-        if not q.strip():
-            raise HTTPException(422, "请输入检索问题")
-        if not dom:
-            raise HTTPException(422, "没有可用域")
-        block = await recall_block(view_env, dom, q,
-                                   domain_code_paths=code_paths.get(dom, []),
-                                   embedder=embedder, source="playground")
-        # recall_block 已把漂移条目标过期并过滤，这里重新查命中序
-        # （过滤后的），保证列表与 prompt 块一致
-        hits = await knowledge_store.search(view_env, dom, q, limit=8,
-                                            embedder=embedder)
-        fresh = await _fresh_flags(
-            [{"id": h["id"], "domain": dom, "code_ref": h.get("code_ref")}
-             for h in hits])
-        for h in hits:
-            h["fresh"] = fresh[h["id"]]
-            h["domain"] = dom
-        return {"domain": dom, "block": block, "hits": hits}
-
-    @router.get("/memory/{entry_id}/detail.json")
-    async def memory_detail(entry_id: int):
-        """抽屉明细：整行 + 来源 run 的反馈留痕 + 演化链 + 新鲜度。"""
-        entry = await knowledge_store.get_entry(entry_id)
-        if entry is None:
-            raise HTTPException(404, "条目不存在")
-        fresh = await asyncio.to_thread(
-            knowledge_store.is_entry_fresh, entry.get("code_ref"),
-            code_paths.get(entry["domain"], []))
-        chain = await knowledge_store.evolution_chain(
-            entry["env"], entry["domain"], entry["key"])
-        fb = (await feedback_store.for_run(entry["source_run"])
-              if entry.get("source_run") else [])
-        usage = await knowledge_store.usage_map(entry["env"])
-        hits = await knowledge_store.recent_hits(entry_id)
-        return {**entry, "fresh": fresh, "chain": chain, "feedback": fb,
-                "usage": usage.get(entry_id), "recent_hits": hits}
-
-    @router.post("/memory/{entry_id}")
-    async def memory_update(entry_id: int, req: MemoryUpdateRequest):
-        if not req.content.strip():
-            raise HTTPException(422, "内容不能为空")
-        if await knowledge_store.get_entry(entry_id) is None:
-            raise HTTPException(404, "条目不存在")
-        await knowledge_store.update_content(entry_id, req.content,
-                                             embedder=embedder)
-        return {"status": "ok"}
-
-    @router.post("/memory/{entry_id}/expire")
-    async def memory_expire(entry_id: int):
-        if await knowledge_store.get_entry(entry_id) is None:
-            raise HTTPException(404, "条目不存在")
-        await knowledge_store.mark_expired(entry_id)
-        return {"status": "ok"}
-
-    @router.post("/memory/{entry_id}/restore")
-    async def memory_restore(entry_id: int):
-        if await knowledge_store.get_entry(entry_id) is None:
-            raise HTTPException(404, "条目不存在")
-        await knowledge_store.restore(entry_id)
-        return {"status": "ok"}
 
     return router

@@ -1,5 +1,6 @@
 /* 资产库页交互：列表筛选 + 抽屉（登记/编辑文本资产、查看文件资产内容与清单）。
-   文件资产正文不入库——抽屉里逐个文件在线查看（走 /assets/{id}/file）。 */
+   数据/写操作全部走 /v1/assets/*（与外部调用方同一套 API，同源 cookie 鉴权）。
+   文件资产正文不入库——抽屉里逐个文件在线查看（走 /v1/assets/{id}/file）。 */
 (function () {
   "use strict";
   var esc = function (s) {
@@ -56,7 +57,7 @@
         var view = document.getElementById("ad-file-view");
         view.hidden = false;
         view.textContent = "加载中…";
-        fetch("/assets/" + id + "/file?path=" + encodeURIComponent(el.dataset.rel))
+        fetch("/v1/assets/" + id + "/file?path=" + encodeURIComponent(el.dataset.rel))
           .then(function (r) { return r.text(); })
           .then(function (t) { view.textContent = t; })
           .catch(function () { view.textContent = "加载失败"; });
@@ -70,7 +71,7 @@
     document.getElementById("ad-content").readOnly = false;
     document.getElementById("ad-expire").hidden = false;
     document.getElementById("ad-restore").hidden = false;
-    fetch("/assets/" + curId + "/detail.json")
+    fetch("/v1/assets/" + curId)
       .then(function (r) { return r.json(); })
       .then(function (a) {
         document.getElementById("ad-key").textContent = (KIND_NAMES[a.kind] || a.kind) + " · " + a.name;
@@ -132,7 +133,7 @@
   document.getElementById("ad-save").addEventListener("click", function () {
     var msg = document.getElementById("ad-msg");
     if (isCreate) {
-      post("/assets?env=" + encodeURIComponent(ST.env), {
+      post("/v1/assets?env=" + encodeURIComponent(ST.env), {
         domain: document.getElementById("ad-domain").value,
         kind: document.getElementById("ad-kind").value,
         task: document.getElementById("ad-task").value.trim(),
@@ -143,16 +144,16 @@
       return;
     }
     if (!curId) return;
-    post("/assets/" + curId, {
+    post("/v1/assets/" + curId, {
       summary: document.getElementById("ad-summary").value.trim(),
       content: document.getElementById("ad-content").value
     }, msg);
   });
   document.getElementById("ad-expire").addEventListener("click", function () {
     if (curId && confirm("标记为过期？之后召回不再注入（可恢复）。"))
-      post("/assets/" + curId + "/expire", {}, document.getElementById("ad-msg"));
+      post("/v1/assets/" + curId + "/expire", {}, document.getElementById("ad-msg"));
   });
   document.getElementById("ad-restore").addEventListener("click", function () {
-    if (curId) post("/assets/" + curId + "/restore", {}, document.getElementById("ad-msg"));
+    if (curId) post("/v1/assets/" + curId + "/restore", {}, document.getElementById("ad-msg"));
   });
 })();

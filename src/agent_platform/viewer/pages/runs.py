@@ -14,7 +14,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...agent import approvals
-from ...langfuse import match_observation
 from ...orchestration.submitter import TaskRejected
 from ...store import feedback as feedback_store
 from ...store import runs
@@ -153,27 +152,6 @@ def make_router(env: str, langfuse=None,
         return render("msg.html", "反馈", active="/runs",
                       heading="已记录，感谢。",
                       back_href="javascript:history.back()")
-
-    @router.post("/runs/{run_id}/steps/{seq}/feedback")
-    async def step_feedback(run_id: str, seq: int, request: Request):
-        """节点级反馈：时间线某一步的 👍👎。Langfuse 回写优先挂到对应 span
-        （match_observation：seq → observation id，等价 Annotate）；映射不上
-        降级为 trace 级 score（名字带 step#seq 定位）。"""
-        form = await request.form()
-        score = qint(form.get("score"), 0, "score")
-        if score not in (1, -1):
-            raise HTTPException(400, "score 只能是 +1 或 -1")
-        comment = str(form.get("comment", ""))
-        await feedback_store.add_step(run_id, seq, score, comment)
-        if langfuse is not None and langfuse.enabled:
-            tid = await runs.trace_id_of(run_id)
-            if tid:
-                events = await runs.get_events(run_id)
-                obs = await langfuse.observations(tid)
-                oid = match_observation(events, seq, obs)
-                await langfuse.score(tid, f"step#{seq}", float(score), comment,
-                                     observation_id=oid)
-        return {"ok": True}
 
     @router.post("/runs/{run_id}/rerun")
     async def run_rerun(run_id: str):

@@ -23,7 +23,7 @@ from ..store.definitions import DefinitionStore
 from .auth import make_auth_dependency
 from .schemas import (ApprovalRequest, CancelRequest, DefinitionPutRequest,
                       FeedbackRequest, SessionFeedbackRequest,
-                      TaskSubmitRequest)
+                      StepFeedbackRequest, TaskSubmitRequest)
 
 # 对外暴露的 run 字段白名单：DB 行结构是内部实现，API 契约以这里为准
 # （加列/改列不再波及调用方）
@@ -137,6 +137,31 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             return await submitter.resume_run(run_id)
         except TaskRejected as e:
             raise HTTPException(409, str(e))
+
+    @router.post("/v1/runs/{run_id}/rerun")
+    async def rerun_run(run_id: str):
+        """重跑：失败/终止 → 断点续跑（同 id）；成功 → 同输入新开 run。"""
+        return await submitter.rerun(run_id)  # TaskRejected 走全局 400
+
+    @router.post("/v1/runs/{run_id}/steps/{seq}/feedback")
+    async def step_feedback(run_id: str, seq: int, req: StepFeedbackRequest):
+        """单步反馈：Langfuse 优先挂对应 span（等价 Annotate），映射不上
+        降级为 trace 级 score（名字带 step#seq 定位）。"""
+        if req.score not in (1, -1):
+            raise HTTPException(422, "score 只能是 +1 或 -1")
+        if await runs.get(run_id) is None:
+            raise HTTPException(404, "run 不存在")
+        await feedback_store.add_step(run_id, seq, req.score, req.comment)
+        if langfuse is not None and langfuse.enabled:
+            tid = await runs.trace_id_of(run_id)
+            if tid:
+                from ..langfuse import match_observation
+                obs = await langfuse.observations(tid)
+                oid = match_observation(
+                    await runs.get_events(run_id), seq, obs)
+                await langfuse.score(tid, f"step#{seq}", float(req.score),
+                                     req.comment, observation_id=oid)
+        return {"status": "ok"}
 
     @router.post("/v1/approvals/{run_id}")
     async def approve(run_id: str, req: ApprovalRequest):
@@ -270,5 +295,54 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.get("/v1/admin/policies")
     async def list_policies():
         return await defs.list_active("policy", settings.env)
+
+    # —— Admin：单条读取 / 历史 / 回滚（三类补齐，AI 的 read-modify-write 闭环） ——
+
+    async def _get_def(kind: str, name: str) -> dict:
+        definition = await defs.get_active(kind, settings.env, name)
+        if definition is None:
+            raise HTTPException(404, f"{kind}:{name} 不存在")
+        version = await definitions_store.active_version(
+            kind, settings.env, name)
+        return {**definition, "name": name, "version": version}
+
+    @router.get("/v1/admin/roles/{name}")
+    async def get_role(name: str):
+        return await _get_def("role", name)
+
+    @router.get("/v1/admin/tasks/{name}")
+    async def get_task_def(name: str):
+        return await _get_def("task", name)
+
+    @router.get("/v1/admin/policies/{name}")
+    async def get_policy(name: str):
+        return await _get_def("policy", name)
+
+    @router.get("/v1/admin/tasks/{name}/history")
+    async def task_history(name: str):
+        return await defs.history("task", settings.env, name)
+
+    @router.get("/v1/admin/policies/{name}/history")
+    async def policy_history(name: str):
+        return await defs.history("policy", settings.env, name)
+
+    @router.post("/v1/admin/tasks/{name}/rollback/{version}")
+    async def rollback_task(name: str, version: int):
+        """回滚 = 旧版本内容重新 put 为新版本；定时任务随即重同步 Schedule。"""
+        try:
+            await defs.rollback("task", settings.env, name, version)
+        except KeyError as e:
+            raise HTTPException(404, str(e)) from None
+        synced = await schedule_sync() if schedule_sync is not None else None
+        return {"name": name,
+                **({"schedule_resynced": True} if synced is not None else {})}
+
+    @router.post("/v1/admin/policies/{name}/rollback/{version}")
+    async def rollback_policy(name: str, version: int):
+        try:
+            await defs.rollback("policy", settings.env, name, version)
+        except KeyError as e:
+            raise HTTPException(404, str(e)) from None
+        return {"name": name}
 
     return router

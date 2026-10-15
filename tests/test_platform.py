@@ -551,6 +551,183 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         configure_fake_deps(self.settings, self.defs)
         self.assertIsNotNone(run_id)
 
+    def _ops_client(self):
+        from fastapi.testclient import TestClient
+
+        from agent_platform.api import create_app, make_ops_router
+        app = create_app(self.settings)
+        app.include_router(make_ops_router(self.settings))
+        return TestClient(app), {"Authorization": "Bearer test-token"}
+
+    async def test_knowledge_api(self):
+        """/v1/knowledge 全套：upsert 幂等、清单不扛正文、明细/改/过期/恢复。"""
+        client, headers = self._ops_client()
+        # 未带 token 401
+        self.assertEqual(client.get("/v1/knowledge").status_code, 401)
+        # 空字段 422
+        self.assertEqual(client.post("/v1/knowledge", headers=headers, json={
+            "domain": "board", "key": " ", "content": "x"}).status_code, 422)
+        # 建 + 同 key 覆盖（upsert 幂等：不产生第二条）
+        for content in ("口径 v1", "口径 v2"):
+            resp = client.post("/v1/knowledge", headers=headers, json={
+                "domain": "board", "key": "毛利率口径", "content": content})
+            self.assertEqual(resp.status_code, 201)
+        data = client.get("/v1/knowledge?domain=board",
+                          headers=headers).json()
+        rows = [i for i in data["items"] if i["key"] == "毛利率口径"]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("content", rows[0])  # 清单不扛正文
+        # 明细：正文 + 演化链/反馈/用量字段齐全
+        entry = client.get(f"/v1/knowledge/{rows[0]['id']}",
+                           headers=headers).json()
+        self.assertEqual(entry["content"], "口径 v2")
+        for k in ("fresh", "chain", "feedback", "usage", "recent_hits"):
+            self.assertIn(k, entry)
+        # 改内容
+        resp = client.post(f"/v1/knowledge/{rows[0]['id']}", headers=headers,
+                           json={"content": "口径 v3"})
+        self.assertEqual(resp.status_code, 200)
+        entry = client.get(f"/v1/knowledge/{rows[0]['id']}",
+                           headers=headers).json()
+        self.assertEqual(entry["content"], "口径 v3")
+        # 过期 → 默认清单消失；恢复 → 回来
+        client.post(f"/v1/knowledge/{rows[0]['id']}/expire", headers=headers)
+        items = client.get("/v1/knowledge?domain=board",
+                           headers=headers).json()["items"]
+        self.assertNotIn("毛利率口径", [i["key"] for i in items])
+        items = client.get("/v1/knowledge?domain=board&include_inactive=true",
+                           headers=headers).json()["items"]
+        self.assertIn("毛利率口径", [i["key"] for i in items])
+        client.post(f"/v1/knowledge/{rows[0]['id']}/restore", headers=headers)
+        items = client.get("/v1/knowledge?domain=board",
+                           headers=headers).json()["items"]
+        self.assertIn("毛利率口径", [i["key"] for i in items])
+        # 不存在 404；检索 q 空 422、有 q 出 block/hits
+        self.assertEqual(client.get("/v1/knowledge/999999",
+                                    headers=headers).status_code, 404)
+        self.assertEqual(client.get("/v1/knowledge/search?domain=board",
+                                    headers=headers).status_code, 422)
+        data = client.get("/v1/knowledge/search?domain=board&q=毛利率",
+                          headers=headers).json()
+        self.assertIn("block", data)
+        self.assertIn("hits", data)
+
+    async def test_assets_api(self):
+        """/v1/assets 全套：登记（kind 校验）/列表过滤/明细/改/过期/恢复。"""
+        client, headers = self._ops_client()
+        self.assertEqual(client.post("/v1/assets", headers=headers, json={
+            "domain": "board", "kind": "bad-kind", "name": "x",
+            "content": "x"}).status_code, 422)
+        resp = client.post("/v1/assets", headers=headers, json={
+            "domain": "board", "kind": "procedure", "name": "重启手册",
+            "summary": "board 服务重启步骤", "content": "1. ..."})
+        self.assertEqual(resp.status_code, 201)
+        rows = client.get("/v1/assets?domain=board&kind=procedure",
+                          headers=headers).json()["assets"]
+        row = next(a for a in rows if a["name"] == "重启手册")
+        entry = client.get(f"/v1/assets/{row['id']}", headers=headers).json()
+        self.assertEqual(entry["content"], "1. ...")
+        self.assertEqual(entry["files"], [])
+        # 改 + 过期/恢复 + 状态过滤
+        client.post(f"/v1/assets/{row['id']}", headers=headers,
+                    json={"summary": "v2", "content": "2. ..."})
+        entry = client.get(f"/v1/assets/{row['id']}", headers=headers).json()
+        self.assertEqual(entry["summary"], "v2")
+        client.post(f"/v1/assets/{row['id']}/expire", headers=headers)
+        names = [a["name"] for a in client.get(
+            "/v1/assets?domain=board&state=off", headers=headers)
+            .json()["assets"]]
+        self.assertIn("重启手册", names)
+        client.post(f"/v1/assets/{row['id']}/restore", headers=headers)
+        names = [a["name"] for a in client.get(
+            "/v1/assets?domain=board&state=on", headers=headers)
+            .json()["assets"]]
+        self.assertIn("重启手册", names)
+        # 文本类资产没有文件可度：file 端点 404
+        self.assertEqual(client.get(f"/v1/assets/{row['id']}/file?path=x",
+                                    headers=headers).status_code, 404)
+        self.assertEqual(client.get("/v1/assets/999999",
+                                    headers=headers).status_code, 404)
+
+    async def test_admin_def_read_and_rollback(self):
+        """定义读取闭环：三类单条 GET + 任务/策略 history + rollback。"""
+        client, headers = self._api_client()
+        role = client.get("/v1/admin/roles/data_searcher",
+                          headers=headers).json()
+        self.assertEqual(role["name"], "data_searcher")
+        self.assertGreaterEqual(role["version"], 1)
+        task = client.get("/v1/admin/tasks/data-qa", headers=headers).json()
+        self.assertEqual(task["role"], "data_searcher")
+        self.assertEqual(client.get("/v1/admin/policies/no-such",
+                                    headers=headers).status_code, 404)
+        # 任务：put 出 v2 → history 两条 → rollback v1 → 内容回到 v1 且版本+1
+        client.post("/v1/admin/tasks", headers=headers, json={
+            "name": "rb-task", "definition": {"role": "ops_analyst"}})
+        client.post("/v1/admin/tasks", headers=headers, json={
+            "name": "rb-task",
+            "definition": {"role": "ops_analyst", "timeout_s": 600}})
+        history = client.get("/v1/admin/tasks/rb-task/history",
+                             headers=headers).json()
+        self.assertEqual([h["version"] for h in history], [2, 1])
+        client.post("/v1/admin/tasks/rb-task/rollback/1", headers=headers)
+        cur = client.get("/v1/admin/tasks/rb-task", headers=headers).json()
+        self.assertEqual(cur["version"], 3)
+        self.assertNotIn("timeout_s", cur)
+        self.assertEqual(client.post("/v1/admin/tasks/rb-task/rollback/99",
+                                     headers=headers).status_code, 404)
+        # 策略同款
+        client.post("/v1/admin/policies", headers=headers, json={
+            "name": "rb-pol", "definition": {"match_regex": "rm -rf"}})
+        client.post("/v1/admin/policies", headers=headers, json={
+            "name": "rb-pol", "definition": {"match_regex": "rm -rf",
+                                             "action": "require_approval"}})
+        history = client.get("/v1/admin/policies/rb-pol/history",
+                             headers=headers).json()
+        self.assertEqual(len(history), 2)
+        client.post("/v1/admin/policies/rb-pol/rollback/1", headers=headers)
+        cur = client.get("/v1/admin/policies/rb-pol", headers=headers).json()
+        # 存的是原始定义（默认值不落库）：v1 没给 action，评估时默认 deny
+        self.assertNotIn("action", cur)
+        self.assertEqual(cur["match_regex"], "rm -rf")
+
+    async def test_rerun_and_step_feedback_api(self):
+        """/v1/runs/{id}/rerun 与单步反馈（含参数校验）。"""
+        from agent_platform.store import feedback as feedback_store
+
+        client, headers = self._api_client()
+        run_id = client.post("/v1/tasks", headers=headers, json={
+            "task_type": "data-qa",
+            "input": {"server": "board", "question": "q"}}).json()["run_id"]
+        # 成功 run 重跑 = 同输入新开 run
+        resp = client.post(f"/v1/runs/{run_id}/rerun", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotEqual(resp.json()["run_id"], run_id)
+        # 单步反馈：合法 200；score 非法 422；未知 run 404
+        resp = client.post(f"/v1/runs/{run_id}/steps/1/feedback",
+                           headers=headers, json={"score": 1})
+        self.assertEqual(resp.status_code, 200)
+        fb = await feedback_store.for_run(run_id)
+        self.assertEqual([(f["kind"], f["step_seq"], f["score"])
+                          for f in fb], [("step", 1, 1)])
+        self.assertEqual(client.post(f"/v1/runs/{run_id}/steps/1/feedback",
+                                     headers=headers,
+                                     json={"score": 3}).status_code, 422)
+        self.assertEqual(client.post("/v1/runs/nope/steps/1/feedback",
+                                     headers=headers,
+                                     json={"score": 1}).status_code, 404)
+
+    async def test_stats_api(self):
+        """/v1/stats：状态计数 + 任务分布 + 待审批数。"""
+        client, headers = self._ops_client()
+        await self.submitter.submit("data-qa",
+                                    {"server": "board", "question": "q"}, "sdk")
+        data = client.get("/v1/stats", headers=headers).json()
+        self.assertGreaterEqual(data["by_status"].get("success", 0), 1)
+        self.assertEqual(data["hours"], 24)
+        for k in ("tasks", "failed", "pending_approvals"):
+            self.assertIn(k, data)
+        self.assertEqual(client.get("/v1/stats").status_code, 401)
+
     async def test_viewer_pages_render(self):
         from fastapi.testclient import TestClient
 
@@ -818,10 +995,11 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertIn("timeout_s", diff.json()["diff"])
 
     async def test_memory_console_full_lifecycle(self):
-        """记忆页：域侧栏统计 + 检索试用 + 抽屉明细（演化链/反馈）+ 过期恢复。"""
+        """记忆页：域侧栏统计 + 检索试用 + 抽屉明细（演化链/反馈）+ 过期恢复。
+        数据/写操作走 /v1/knowledge/*（页面只留 HTML 渲染）。"""
         from fastapi.testclient import TestClient
 
-        from agent_platform.api.app import create_app
+        from agent_platform.api import create_app, make_ops_router
         from agent_platform.store import cases, feedback, knowledge
         from agent_platform.viewer import make_viewer_router
         r = await self.submitter.submit(
@@ -844,7 +1022,9 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("旧口径", block)  # 被取代条目不召回
         app = create_app(self.settings)
         app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        app.include_router(make_ops_router(self.settings))
         client = TestClient(app)
+        headers = {"Authorization": "Bearer test-token"}
 
         page = client.get("/memory")
         self.assertEqual(page.status_code, 200)
@@ -855,7 +1035,7 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertIn("并发冲突", page.text)          # 案例 tab
         self.assertIn("memory.js", page.text)
 
-        hits = client.get("/memory/search.json",
+        hits = client.get("/v1/knowledge/search", headers=headers,
                           params={"q": "GMV 口径", "domain": "board"})
         self.assertEqual(hits.status_code, 200)
         self.assertEqual(hits.json()["hits"][0]["key"], "GMV 口径 v2")
@@ -863,7 +1043,7 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         det = None
         for it in page.text.split('data-id="')[1:]:
             eid = int(it.split('"')[0])
-            d = client.get(f"/memory/{eid}/detail.json")
+            d = client.get(f"/v1/knowledge/{eid}", headers=headers)
             if d.json()["key"] == "GMV 口径 v2":
                 det = d.json()
                 break
@@ -882,27 +1062,29 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         page2 = client.get("/memory")
         self.assertIn("近30天命中 1 次", page2.text)
         self.assertIn("<b>0</b> 零召回", page2.text)
-        created = client.post("/memory/entries", json={
+        created = client.post("/v1/knowledge", headers=headers, json={
             "domain": "board", "key": "退货口径", "content": "退货冲减 GMV。"})
-        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.status_code, 201)
         page3 = client.get("/memory", params={"filter": "zero_recall"})
         self.assertIn("退货口径", page3.text)
         self.assertNotIn("GMV 口径 v2", page3.text)
 
         eid = det["id"]
-        self.assertEqual(client.post(f"/memory/{eid}/expire").status_code, 200)
+        self.assertEqual(client.post(f"/v1/knowledge/{eid}/expire",
+                                     headers=headers).status_code, 200)
         self.assertTrue((await knowledge.get_entry(eid))["expired"])
-        self.assertEqual(client.post(f"/memory/{eid}/restore").status_code, 200)
+        self.assertEqual(client.post(f"/v1/knowledge/{eid}/restore",
+                                     headers=headers).status_code, 200)
         self.assertFalse((await knowledge.get_entry(eid))["expired"])
 
     async def test_assets_page(self):
-        """资产页：渲染 + 手动登记文本资产 + 抽屉编辑 + 过期/恢复退出召回
-        + 文件类资产的在线查看。"""
+        """资产页：渲染 + 登记文本资产 + 抽屉明细/编辑 + 过期/恢复退出召回
+        + 文件类资产的在线查看。数据/写操作走 /v1/assets/*。"""
         import tempfile
 
         from fastapi.testclient import TestClient
 
-        from agent_platform.api.app import create_app
+        from agent_platform.api import create_app, make_ops_router
         from agent_platform.store import assets
         from agent_platform.viewer import make_viewer_router
         await assets.upsert("test", "board", "daily-inspection", "procedure",
@@ -911,7 +1093,9 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                             "ods-orders-基线", "昨日行数基线", "4200 万")
         app = create_app(self.settings)
         app.include_router(make_viewer_router(self.submitter, self.defs, "test"))
+        app.include_router(make_ops_router(self.settings))
         client = TestClient(app)
+        headers = {"Authorization": "Bearer test-token"}
 
         page = client.get("/assets", params={"domain": "board"})
         self.assertEqual(page.status_code, 200)
@@ -920,35 +1104,37 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertIn("任务 daily-inspection", page.text)
         self.assertIn("域级通用", page.text)
 
-        created = client.post("/assets", json={
+        created = client.post("/v1/assets", headers=headers, json={
             "domain": "board", "kind": "query", "name": "行数对比",
             "task": "", "summary": "比上下游行数", "content": "select ..."})
-        self.assertEqual(created.status_code, 200)
-        bad = client.post("/assets", json={
+        self.assertEqual(created.status_code, 201)
+        bad = client.post("/v1/assets", headers=headers, json={
             "domain": "board", "kind": "bogus", "name": "x", "content": "y"})
         self.assertEqual(bad.status_code, 422)
-        empty = client.post("/assets", json={
+        empty = client.post("/v1/assets", headers=headers, json={
             "domain": "board", "kind": "query", "name": "x", "content": "  "})
         self.assertEqual(empty.status_code, 422)
 
         rows = await assets.list_all("test", "board")
         self.assertEqual(len(rows), 3)
         aid = next(r["id"] for r in rows if r["name"] == "ods-巡检方法")
-        det = client.get(f"/assets/{aid}/detail.json")
+        det = client.get(f"/v1/assets/{aid}", headers=headers)
         self.assertEqual(det.status_code, 200)
         self.assertEqual(det.json()["content"], "先比行数再抽查。")
         self.assertEqual(det.json()["use_count"], 0)
-        edited = client.post(f"/assets/{aid}",
+        edited = client.post(f"/v1/assets/{aid}", headers=headers,
                              json={"summary": "新摘要", "content": "步骤 v2"})
         self.assertEqual(edited.status_code, 200)
         self.assertEqual((await assets.get_entry(aid))["content"], "步骤 v2")
         self.assertEqual(
-            client.post(f"/assets/{aid}/expire").status_code, 200)
+            client.post(f"/v1/assets/{aid}/expire",
+                        headers=headers).status_code, 200)
         names = [a["name"] for a in
                  await assets.search_active("test", "board", "daily-inspection")]
         self.assertNotIn("ods-巡检方法", names)
         self.assertEqual(
-            client.post(f"/assets/{aid}/restore").status_code, 200)
+            client.post(f"/v1/assets/{aid}/restore",
+                        headers=headers).status_code, 200)
         self.assertIn("ods-巡检方法", [a["name"] for a in await assets.search_active(
             "test", "board", "daily-inspection")])
 
@@ -960,12 +1146,14 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                                 "行数脚本", "行数对比脚本", "用法说明", path=d)
             fid = next(r["id"] for r in await assets.list_all("test", "board")
                        if r["name"] == "行数脚本")
-            fdet = client.get(f"/assets/{fid}/detail.json").json()
+            fdet = client.get(f"/v1/assets/{fid}", headers=headers).json()
             self.assertEqual([f["name"] for f in fdet["files"]], ["run.sql"])
-            fresp = client.get(f"/assets/{fid}/file", params={"path": "run.sql"})
+            fresp = client.get(f"/v1/assets/{fid}/file", headers=headers,
+                               params={"path": "run.sql"})
             self.assertEqual(fresp.text, "select 1;")
             self.assertEqual(client.get(
-                f"/assets/{fid}/file", params={"path": "../x"}).status_code, 404)
+                f"/v1/assets/{fid}/file", headers=headers,
+                params={"path": "../x"}).status_code, 404)
 
     async def test_prepare_injects_assets_and_counts_use(self):
         """prepare_run：任务资产置顶注入 prompt + 记复用 + 事件留痕。"""

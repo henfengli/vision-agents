@@ -38,3 +38,35 @@ class DefinitionPutRequest(BaseModel):
     name: str
     definition: dict
     updated_by: str = ""
+
+
+class StepFeedbackRequest(BaseModel):
+    """单步（节点级）反馈：时间线某一步的 👍👎。"""
+    score: int                       # +1 / -1
+    comment: str = ""
+
+
+class KnowledgeCreateRequest(BaseModel):
+    """手动/API 写入知识条目（upsert：同 env+domain+key 整替换）。"""
+    domain: str
+    key: str
+    content: str
+
+
+class KnowledgeUpdateRequest(BaseModel):
+    content: str
+
+
+class AssetCreateRequest(BaseModel):
+    """登记文本类资产（文件类由 run 内 save_asset 收编，不走这里）。"""
+    domain: str
+    task: str = ""
+    kind: str                        # procedure/script/query/baseline
+    name: str
+    summary: str = ""
+    content: str
+
+
+class AssetUpdateRequest(BaseModel):
+    summary: str
+    content: str
