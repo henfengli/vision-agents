@@ -649,6 +649,26 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.get("/v1/assets/999999",
                                     headers=headers).status_code, 404)
 
+    async def test_cases_and_conflicts_api(self):
+        """案例清单 + 矛盾对读口（AI 仲裁的读侧；仲裁动作 = knowledge/expire）。"""
+        from agent_platform.store import cases
+
+        client, headers = self._ops_client()
+        r = await self.submitter.submit(
+            "data-qa", {"server": "board", "question": "q"}, "sdk")
+        await cases.add("test", "board", "psycopg.errors.DeadlockDetected x",
+                        "infra", "并发冲突，重试即可", r["run_id"])
+        data = client.get("/v1/cases?domain=board", headers=headers).json()
+        case = next(c for c in data["cases"] if c["category"] == "infra")
+        self.assertEqual(case["conclusion"], "并发冲突，重试即可")
+        self.assertEqual(case["source_run"], r["run_id"])
+        self.assertFalse(case["superseded"])
+        # 无向量时矛盾对为空（不造数据），但路由不能被 {entry_id} 吃掉
+        conf = client.get("/v1/knowledge/conflicts?domain=board",
+                          headers=headers)
+        self.assertEqual(conf.status_code, 200)
+        self.assertEqual(conf.json(), {"conflicts": [], "total": 0})
+
     async def test_admin_def_read_and_rollback(self):
         """定义读取闭环：三类单条 GET + 任务/策略 history + rollback。"""
         client, headers = self._api_client()

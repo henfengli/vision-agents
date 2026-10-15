@@ -16,6 +16,7 @@ from fastapi.responses import PlainTextResponse
 
 from ..agent import approvals
 from ..store import assets as assets_store
+from ..store import cases as cases_store
 from ..store import feedback as feedback_store
 from ..store import knowledge as knowledge_store
 from ..store import runs
@@ -92,6 +93,16 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
                                      source_run="manual", embedder=embedder)
         return {"status": "ok"}
 
+    @router.get("/v1/knowledge/conflicts")
+    async def knowledge_conflicts(env: str | None = None,
+                                  domain: str | None = None):
+        """疑似矛盾/重复对（向量余弦 > 0.85）：AI 仲裁的读侧——
+        仲裁动作 = 对其中一条 POST /v1/knowledge/{id}/expire。
+        无 pgvector 或无向量时返回空（不造数据）。"""
+        pairs = await knowledge_store.similar_pairs(
+            env or settings.env, domain or None)
+        return {"conflicts": pairs, "total": len(pairs)}
+
     @router.get("/v1/knowledge/{entry_id}")
     async def knowledge_detail(entry_id: int):
         """条目明细：整行 + 新鲜度 + 演化链 + 来源 run 反馈 + 使用统计。"""
@@ -133,6 +144,17 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
             raise HTTPException(404, "条目不存在")
         await knowledge_store.restore(entry_id)
         return {"status": "ok"}
+
+    # ---- 案例库（失败 run 归因沉淀；只读——写入只有 distill 一条路径） ----
+
+    @router.get("/v1/cases")
+    async def cases_list(env: str | None = None, domain: str | None = None,
+                         limit: int = 200):
+        """案例清单（含失效，superseded/superseded_by 标状态）。"""
+        items = await cases_store.list_all(env or settings.env,
+                                           domain or None,
+                                           limit=min(limit, 500))
+        return {"cases": items, "total": len(items)}
 
     # ---- 资产 ----
 
