@@ -206,6 +206,24 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(argv, ["echo", "hi"])
         sandbox._HAS_BWRAP = None
 
+    def test_wrap_flags(self):
+        """沙箱旗标完整性：进程清理三件套一个不能少（--die-with-parent 只杀
+        直接子进程，--unshare-pid + --as-pid-1 才是后台进程必死的保证，
+        见 sandbox.py 模块注释 / bubblewrap#529）。"""
+        from agent_platform.agent.tools import sandbox
+        sandbox._HAS_BWRAP = True  # 强制可用路径
+        try:
+            argv = sandbox.wrap_argv(["echo", "hi"], "/scratch")
+        finally:
+            sandbox._HAS_BWRAP = None
+        self.assertEqual(argv[-3:], ["--", "echo", "hi"])
+        for flag in ("--die-with-parent", "--unshare-pid", "--as-pid-1",
+                     "--unshare-net", "--new-session"):
+            self.assertIn(flag, argv)
+        self.assertIn("--bind", argv)  # scratch 可写
+        net = sandbox.wrap_argv(["echo"], "/scratch", allow_net=True)
+        self.assertNotIn("--unshare-net", net)
+
 
 class TestRunCode(unittest.IsolatedAsyncioTestCase):
     async def test_rpc_roundtrip(self):

@@ -60,7 +60,8 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
   save_asset）/
   MCP 桥（内部服务类型化接口；browser / datahub 直接用官方实现
   @playwright/mcp、mcp-server-datahub，仓库只自带 dagster server，见 `mcp_servers/`）。
-- **安全**：systemd 物理收口 + bwrap 沙箱 + 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
+- **安全**：systemd 物理收口 + bwrap 沙箱（含 `--unshare-pid --as-pid-1`：
+  调用结束沙箱内进程全灭，run 里 `&` 起的后台服务零泄漏）+ 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
 
 ## 快速开始
 

@@ -20,6 +20,10 @@ chown -R root:root /opt/agent-platform          # 代码包 root 所有，agent-
 # 3. 依赖
 python3 -m venv /opt/agent-platform/venv
 /opt/agent-platform/venv/bin/pip install /opt/agent-platform
+# 沙箱依赖：bwrap 缺失则 bash/run_code 退化为无隔离执行——且 run 里
+# 后台起的进程没有任何清理保证（pid ns 兜底失效），必须装
+command -v bwrap >/dev/null || \
+  echo "!! 缺少 bubblewrap：apt-get install -y bubblewrap（否则沙箱与进程清理全部失效）"
 
 # 4. 环境配置（secrets.env 需提前手工放置，权限 640 root:agent-svc）
 [ -f /etc/agent-platform/secrets.env ] || {
