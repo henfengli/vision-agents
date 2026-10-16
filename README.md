@@ -119,6 +119,7 @@ run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承
 
 生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
 Temporal server 见 `deploy/temporal-server.service`。
+**完整步骤（前置条件/密钥/反代/升级回滚/备份/排障）见 `docs/部署指南.md`。**
 
 ## 同机业务服务：按需启动（svcrun）
 
