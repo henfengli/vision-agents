@@ -65,6 +65,40 @@
     });
   }
 
+  function renderRevisions(id, revs) {
+    var sec = document.getElementById("ad-revs-sec"), box = document.getElementById("ad-revs");
+    if (!revs || !revs.length) { sec.hidden = true; box.innerHTML = ""; return; }
+    sec.hidden = false;
+    box.innerHTML = revs.map(function (r) {
+      return '<div class="ad-file"><span class="ad-file-name mono">' + esc(r.ts) + "</span>" +
+        '<span class="ad-file-size">' + r.files + " 文件 · " + (r.bytes / 1024).toFixed(1) + " KB</span>" +
+        '<button class="ver-rb ad-rev-rb" data-ts="' + esc(r.ts) + '">回滚到此版</button></div>';
+    }).join("");
+    box.querySelectorAll(".ad-rev-rb").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm("回滚到 " + btn.dataset.ts + "？当前版会自动留档，可再回滚回来。")) return;
+        fetch("/v1/assets/" + id + "/rollback/" + encodeURIComponent(btn.dataset.ts), {method: "POST"})
+          .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+          .then(function (res) {
+            var msg = document.getElementById("ad-msg");
+            if (!res.ok) { msg.textContent = res.d.detail || "回滚失败"; msg.style.color = "#b91c1c"; return; }
+            msg.textContent = "已回滚到 " + res.d.restored; msg.style.color = "#047857";
+            refreshBody(id);  // 文件清单也随版本换了
+          })
+          .catch(function () {
+            var msg = document.getElementById("ad-msg");
+            msg.textContent = "网络错误"; msg.style.color = "#b91c1c";
+          });
+      });
+    });
+  }
+
+  function refreshBody(id) {
+    fetch("/v1/assets/" + id)
+      .then(function (r) { return r.json(); })
+      .then(function (a) { renderFiles(a.id, a.files); renderRevisions(a.id, a.revisions); });
+  }
+
   function openDetail(card) {
     isCreate = false; curId = card.dataset.id; curCard = card;
     document.getElementById("ad-create-fields").hidden = true;
@@ -88,6 +122,7 @@
           ? "文件类资产的说明文字（正文在文件里，不入库）" : "";
         document.getElementById("ad-msg").textContent = "";
         renderFiles(a.id, a.files);
+        renderRevisions(a.id, a.revisions);
         drawer.classList.add("open"); scrim.classList.add("open");
       });
   }
@@ -107,6 +142,8 @@
     document.getElementById("ad-restore").hidden = true;
     document.getElementById("ad-files-sec").hidden = true;
     document.getElementById("ad-files").innerHTML = "";
+    document.getElementById("ad-revs-sec").hidden = true;
+    document.getElementById("ad-revs").innerHTML = "";
     drawer.classList.add("open"); scrim.classList.add("open");
   }
 

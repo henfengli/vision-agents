@@ -198,6 +198,23 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
             assets_store.list_revisions, entry.get("path"))
         return entry
 
+    @router.post("/v1/assets/{asset_id}/rollback/{ts}")
+    async def asset_rollback(asset_id: int, ts: str):
+        """文件类资产回滚到指定留档版本（当前版自动留档，回滚可逆）。"""
+        entry = await assets_store.get_entry(asset_id)
+        if entry is None or not entry.get("path"):
+            raise HTTPException(404, "资产不存在或无文件载体")
+        try:
+            await asyncio.to_thread(assets_store.restore_revision,
+                                    entry["path"], ts)
+        except FileNotFoundError:
+            raise HTTPException(404, f"留档版本不存在：{ts}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "restored": ts,
+                "revisions": await asyncio.to_thread(
+                    assets_store.list_revisions, entry["path"])}
+
     @router.get("/v1/assets/{asset_id}/file")
     async def asset_file(asset_id: int, path: str):
         """读文件类资产目录里的单个文件（限 100KB 文本回显）。"""

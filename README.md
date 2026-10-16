@@ -100,7 +100,9 @@ run 并跳过去重）、审批 `/approvals`（待办/已处理双 tab：待办�
 一键保留其一。顶级**资产页** `/assets`（与记忆平级）：save_asset 沉淀的
 方法/脚本/查询/基线——卡片带复用数/生效状态/文件数，抽屉可看元数据、
 编辑摘要说明、过期止损；文件类资产逐个在线查看内容，手动登记支持文本类；
-类型/状态 chips + 名称搜索 + 分页（v5.11.0）。
+类型/状态 chips + 名称搜索 + 分页（v5.11.0）；抽屉内展示历史版本留档
+（整替换的旧版，保留最近 5 版）并可一键回滚（当前版自动留档，回滚可逆，
+v5.15.0）。
 对话页 `/chat`（会话侧栏 +
 历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
 run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
@@ -129,10 +131,37 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 不可能拿错环境），其他环境的配置文件遮蔽为 `/dev/null`；
 `--die-with-parent` 保证启动它的会话结束，服务自动结束。
 
+## 运维 API（/v1：人与 AI 共用）
+
+Viewer 只是这套 API 的一个客户端——初始化部署时由 AI 批量总结录入、日常运维
+由 AI 巡检操作，走的都是同一组端点（bearer 鉴权）。明细见设计文档 §3.13/§3.14。
+
+- 记忆：`GET/POST /v1/knowledge`、`/v1/knowledge/search`（召回试用）、
+  `/v1/knowledge/conflicts`（矛盾对）、`/v1/knowledge/{id}`（明细/改/expire/restore）；
+  案例 `GET /v1/cases`
+- 资产：`GET/POST /v1/assets`、`/v1/assets/{id}`（明细含文件清单与历史版本
+  留档 revisions）、`/v1/assets/{id}/file`、`/v1/assets/{id}/rollback/{ts}`（回滚，
+  当前版自动留档可逆）、改/expire/restore
+- run 运维：`POST /v1/runs/{id}/rerun`（失败续跑/成功新开）、
+  `POST /v1/runs/{id}/steps/{seq}/feedback`（单步 👍👎）
+- 定义管理：`/v1/admin/{roles|tasks|policies}` CRUD + 单条读取 + history +
+  rollback（写即新版本、热生效）
+- 统计：`GET /v1/stats?hours=24`
+
+最小示例（AI 巡检：查近 24h 失败 → 续跑 → 沉淀一条知识）：
+
+```bash
+curl -s -H "Authorization: Bearer $AGENT_BEARER_TOKEN" "$BASE/v1/stats?hours=24"
+curl -s -X POST -H "Authorization: Bearer $AGENT_BEARER_TOKEN" "$BASE/v1/runs/<run_id>/rerun"
+curl -s -X POST -H "Authorization: Bearer $AGENT_BEARER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"board","key":"毛利率口径","content":"……"}' "$BASE/v1/knowledge"
+```
+
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 120 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 178 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）
@@ -143,7 +172,9 @@ agent = AgentClient(server="board", role="data_searcher")
 print(agent.ask("3月以来 total_fee 是多少"))
 ```
 
-CLI：`agent-chat --server board --role data_searcher`
+CLI：`agent-chat --server board --role data_searcher`（SSE 流式：工具调用
+实时逐行可见；SDK 侧 `ask_stream(question, on_event=...)`，同步阻塞版
+`ask()` 仍可用）
 
 ## 目录
 

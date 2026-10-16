@@ -293,6 +293,29 @@ def list_revisions(path: str) -> list[dict]:
     return out
 
 
+def restore_revision(path: str, ts: str) -> None:
+    """把留档版本 ts 恢复为资产当前版本（后悔药的出口）。
+
+    当前版先整体留档——回滚本身也可回滚；指定留档挪回原位。
+    FileNotFoundError：留档不存在；ValueError：资产无文件载体 / ts 非法。
+    """
+    if not path:
+        raise ValueError("该资产没有文件载体")
+    if not ts or "/" in ts or "\\" in ts or ts.startswith("."):
+        raise ValueError(f"非法版本标识：{ts!r}")
+    dest = os.path.realpath(path)
+    revs_root = dest + ".revs"
+    rev = os.path.realpath(os.path.join(revs_root, ts))
+    if not rev.startswith(revs_root + os.sep) or not os.path.isdir(rev):
+        raise FileNotFoundError(ts)
+    if os.path.isdir(dest):
+        cur = _new_revision_path(dest)  # 当前版留档，回滚可逆
+        os.makedirs(os.path.dirname(cur), exist_ok=True)
+        os.replace(dest, cur)
+    os.replace(rev, dest)
+    _prune_revisions(dest, _KEEP_REVISIONS)
+
+
 def python_lint_errors(scratch_dir: str, files: list[str]) -> list[str]:
     """收编前检查：files 里的 .py（目录递归）逐个 compile()，返回错误清单。
 

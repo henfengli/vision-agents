@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "sdk"))
 
 try:
     import pgserver
@@ -649,6 +650,37 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                                     headers=headers).status_code, 404)
         self.assertEqual(client.get("/v1/assets/999999",
                                     headers=headers).status_code, 404)
+
+    async def test_asset_rollback_api(self):
+        """资产回滚 API：详情带留档清单；rollback 恢复旧版且当前版自动留档。"""
+        from agent_platform.store import assets
+        with tempfile.TemporaryDirectory() as d:
+            scratch, root = f"{d}/scratch", f"{d}/assets"
+            os.makedirs(scratch)
+            Path(scratch, "s.py").write_text("print('v1')\n")
+            dest, _, _ = assets.collect_files(
+                root, "test", "board", "data-qa", "script", "回滚脚本",
+                ["s.py"], scratch)
+            Path(scratch, "s.py").write_text("print('v2')\n")
+            assets.collect_files(root, "test", "board", "data-qa", "script",
+                                 "回滚脚本", ["s.py"], scratch)
+            await assets.upsert("test", "board", "data-qa", "script",
+                                "回滚脚本", "s", "c", path=dest)
+            client, headers = self._ops_client()
+            aid = next(a["id"] for a in await assets.list_all("test", "board")
+                       if a["name"] == "回滚脚本")
+            det = client.get(f"/v1/assets/{aid}", headers=headers).json()
+            self.assertEqual(len(det["revisions"]), 1)
+            ts = det["revisions"][0]["ts"]
+            ok = client.post(f"/v1/assets/{aid}/rollback/{ts}",
+                             headers=headers)
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.json()["restored"], ts)
+            self.assertEqual(Path(dest, "s.py").read_text(), "print('v1')\n")
+            # 当前版（v2）自动留档 → 回滚可逆
+            self.assertEqual(len(ok.json()["revisions"]), 1)
+            self.assertEqual(client.post(f"/v1/assets/{aid}/rollback/nope",
+                                         headers=headers).status_code, 404)
 
     async def test_cases_and_conflicts_api(self):
         """案例清单 + 矛盾对读口（AI 仲裁的读侧；仲裁动作 = knowledge/expire）。"""
@@ -1771,6 +1803,30 @@ class TestAssetFiles(unittest.TestCase):
         # 越界/不存在的路径由 collect_files 报错，lint 不重复管
         self.assertEqual(self.assets.python_lint_errors(
             self.scratch, ["../etc", "missing.py"]), [])
+    def test_restore_revision(self):
+        # v1 → v2 整替换后，回滚到 v1 的留档
+        Path(self.scratch, "run.py").write_text("print('v1')\n")
+        dest, _, _ = self._collect(["run.py"])
+        Path(self.scratch, "run.py").write_text("print('v2')\n")
+        self._collect(["run.py"])
+        ts = self.assets.list_revisions(dest)[0]["ts"]  # v1 的留档
+        self.assets.restore_revision(dest, ts)
+        self.assertEqual(Path(dest, "run.py").read_text(), "print('v1')\n")
+        # 当前版（v2）自动留档：回滚可逆
+        revs = self.assets.list_revisions(dest)
+        self.assertEqual(len(revs), 1)
+        self.assertEqual(Path(revs[0]["path"], "run.py").read_text(),
+                         "print('v2')\n")
+        self.assets.restore_revision(dest, revs[0]["ts"])  # 再回滚回 v2
+        self.assertEqual(Path(dest, "run.py").read_text(), "print('v2')\n")
+        # 错误形态：留档不存在 / ts 非法 / 无文件载体
+        with self.assertRaises(FileNotFoundError):
+            self.assets.restore_revision(dest, "20990101-000000-000000")
+        for bad in ("../x", "a/b", "", ".revs"):
+            with self.assertRaises(ValueError):
+                self.assets.restore_revision(dest, bad)
+        with self.assertRaises(ValueError):
+            self.assets.restore_revision("", ts)
 
 
 class TestFilesystemBackend(unittest.TestCase):
@@ -1800,6 +1856,46 @@ class TestFilesystemBackend(unittest.TestCase):
             with self.assertRaises(ValueError):
                 be.write("/../evil.txt", "x")
             self.assertFalse(os.path.exists(os.path.join(d, "..", "evil.txt")))
+
+
+class TestSdkStream(unittest.TestCase):
+    """SDK 流式问答（MockTransport 模拟 SSE，无需服务端）。"""
+
+    def _client(self, body: str, status: int = 200):
+        import httpx
+
+        from agent_client import AgentClient
+        c = AgentClient(server="board", role="r", base_url="http://x",
+                        token="t")
+        def handler(request):
+            return httpx.Response(
+                status, text=body,
+                headers={"content-type": "text/event-stream"})
+        c._client = lambda: httpx.Client(  # 测试替身：只换传输层
+            transport=httpx.MockTransport(handler), base_url="http://x")
+        return c
+
+    def test_ask_stream_happy_path(self):
+        from agent_client import AgentClient  # noqa: F401 —— 确认 sdk 可导入
+        sse = ('data: {"type":"run","run_id":"r1","session_id":"s1"}\n\n'
+               'data: {"type":"tool_call","tool":"bash"}\n\n'
+               'data: {"type":"final","status":"success",'
+               '"output":{"answer":"42"}}\n\n')
+        seen = []
+        answer = self._client(sse).ask_stream("q", on_event=seen.append)
+        self.assertEqual(answer, "42")
+        self.assertEqual([e["type"] for e in seen],
+                         ["run", "tool_call", "final"])
+        c = self._client(sse)
+        c.ask_stream("q")
+        self.assertEqual(c.session_id, "s1")  # run 事件回填 session
+
+    def test_ask_stream_timeout_event(self):
+        from agent_client import AgentError
+        sse = 'data: {"type":"timeout","run_id":"r9"}\n\n'
+        with self.assertRaises(AgentError) as cm:
+            self._client(sse).ask_stream("q")
+        self.assertIn("r9", str(cm.exception))
 
 
 if __name__ == "__main__":

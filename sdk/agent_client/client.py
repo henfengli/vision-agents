@@ -14,9 +14,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -58,6 +59,41 @@ class AgentClient:
         if "answer" in output:
             return output["answer"]
         return data.get("note") or str(output)
+
+    def ask_stream(self, question: str,
+                   on_event: Callable[[dict], None] | None = None) -> str:
+        """流式问答（/v1/chat/stream，SSE）：on_event 逐事件回调，返回最终回答。
+
+        事件类型：run（拿到 run_id/session_id）/ tool_call / tool_result /
+        thought / note / final（终态 + output）/ timeout（超时但 run 还在跑，
+        可拿 run_id 用 wait 继续等）。进度展示订阅 on_event 即可。
+        """
+        answer = ""
+        payload = {"server": self.server, "role": self.role,
+                   "question": question, "session_id": self.session_id,
+                   "env": self.env}
+        with self._client() as c:
+            with c.stream("POST", "/v1/chat/stream", json=payload) as resp:
+                if resp.status_code != 200:
+                    raise AgentError(f"/v1/chat/stream 返回 {resp.status_code}: "
+                                     f"{resp.read()[:200]!r}")
+                for line in resp.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    ev = json.loads(line[6:])
+                    if on_event:
+                        on_event(ev)
+                    t = ev.get("type")
+                    if t == "run":
+                        self.session_id = ev.get("session_id", self.session_id)
+                    elif t == "final":
+                        out = ev.get("output") or {}
+                        answer = out.get("answer") or str(out)
+                    elif t == "timeout":
+                        raise AgentError(
+                            f"流式等待超时，run {ev.get('run_id')} 仍在执行，"
+                            "可用 wait(run_id) 继续轮询")
+        return answer
 
     def submit(self, task_type: str, input_data: dict[str, Any],
                idempotency_key: str | None = None) -> dict:

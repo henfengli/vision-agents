@@ -1,4 +1,4 @@
-"""agent-chat：交互式对话 CLI。
+"""agent-chat：交互式对话 CLI（SSE 流式：工具调用实时可见）。
 
     agent-chat --server board --role data_searcher
     agent-chat --server board --role data_searcher --resume board-fee-a1b2
@@ -13,6 +13,12 @@ import sys
 import uuid
 
 from .client import AgentClient, AgentError
+
+
+def _show_progress(ev: dict) -> None:
+    """执行进度：每个工具调用一行；最终回答由主循环打印。"""
+    if ev.get("type") == "tool_call":
+        print(f"  ⚙ {ev.get('tool', '?')}", flush=True)
 
 
 def main() -> None:
@@ -38,7 +44,7 @@ def main() -> None:
         if not question:
             continue
         try:
-            answer = client.ask(question)
+            answer = client.ask_stream(question, on_event=_show_progress)
         except AgentError as e:
             print(f"[错误] {e}", file=sys.stderr)
             continue
