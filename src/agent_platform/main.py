@@ -46,23 +46,36 @@ SEED_ROLES = [
     {"name": "data_searcher",
      "description": "数据口径查询：先查知识库，再读代码分析口径，再查只读库",
      "domains": ["board", "config-center"],
+     # write_file/edit_file 由文件系统中间件统一注入（真实磁盘 root=scratch，
+     # 见 engine.py），白名单声明仅作意图文档；read_file/grep 同理
      "tools": ["bash", "run_code", "sql_query", "save_asset", "read_file",
-              "grep"],
+              "write_file", "edit_file", "grep"],
      "prompt": "你是数据查询助手。工作约定：\n"
                "1. 先查知识库是否已有该指标口径；命中直接回答并附来源。\n"
                "2. 未命中：在业务域代码目录检索指标定义（grep），读懂计算逻辑。\n"
                "3. 按口径拼 SQL 查只读库；查询必带 LIMIT 100。\n"
-               "4. 回答结构：数值 + 口径说明 + 代码位置 + 执行的 SQL。"},
+               "4. 回答结构：数值 + 口径说明 + 代码位置 + 执行的 SQL。\n"
+               "5. 文件编辑纪律：新建用 write_file，小改用 edit_file"
+               "（先 read_file 再改）；文件工具的 / 根目录就是 bash 的"
+               "工作目录（scratch），写 /x.py 后 bash 直接 python3 x.py。\n"
+               "6. 写完脚本必须 bash 验证通过（.py 先 python3 -m py_compile）"
+               "再 save_asset 收编——收编有编译检查，不跑通会被拒收。"},
     {"name": "ops_analyst",
      "description": "Dagster 报错分析：区分代码/数据/基础设施/上游问题",
      "domains": ["dagster", "board"],
      "tools": ["bash", "run_code", "sql_query", "host_metrics", "read_file",
-              "grep", "dingtalk_send", "save_asset"],
+              "write_file", "edit_file", "grep", "dingtalk_send",
+              "save_asset"],
      "prompt": "你是运维分析助手。分析步骤：\n"
                "1. 参考同类案例（如 prompt 中已注入）。\n"
                "2. 用 curl 查 Dagster GraphQL 拿报错堆栈与上游状态。\n"
                "3. 读对应代码与最近变更；必要时查只读库验证数据假设。\n"
-               "4. 输出结构化结论：category(code/data/infra/upstream)、confidence、evidence、suggestion。"},
+               "4. 输出结构化结论：category(code/data/infra/upstream)、confidence、evidence、suggestion。\n"
+               "5. 文件编辑纪律：新建用 write_file，小改用 edit_file"
+               "（先 read_file 再改）；文件工具的 / 根目录就是 bash 的"
+               "工作目录（scratch），写 /fix.py 后 bash 直接 python3 fix.py。\n"
+               "6. 写完脚本必须 bash 验证通过（.py 先 python3 -m py_compile）"
+               "再 save_asset 收编——收编有编译检查，不跑通会被拒收。"},
 ]
 
 SEED_TASKS = [
@@ -169,7 +182,12 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         tsk = task or ctx.get("task") or ""
         env = ctx.get("env") or settings.env
         path = None
-        if files:  # 收编 scratch 文件进资产库（整替换），拿稳定路径
+        if files:  # 收编 scratch 文件进资产库（整替换，旧版留档），拿稳定路径
+            lint_errors = await asyncio.to_thread(
+                assets_store.python_lint_errors, settings.scratch_dir, files)
+            if lint_errors:  # 坏脚本不收编：先 bash 修好跑通再来
+                return ("[失败] 收编前编译检查未通过，先修好再保存：\n"
+                        + "\n".join(lint_errors[:10]))
             try:
                 path, n_files, n_bytes = await asyncio.to_thread(
                     assets_store.collect_files, settings.assets_dir,

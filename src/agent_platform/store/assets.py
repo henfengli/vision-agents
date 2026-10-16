@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from datetime import datetime
 
 from .db import pool
 
@@ -23,6 +24,8 @@ _KIND_ORDER = {"procedure": 0, "baseline": 1, "query": 2, "script": 3}
 # 收编护栏：单次收编的文件数/总字节上限（资产库在内网磁盘，防失控不收大文件）
 _MAX_FILES = 200
 _MAX_BYTES = 50 * 1024 * 1024
+# 整替换留档（后悔药）：旧版目录整体挪到 <资产目录>.revs/<时间戳>/，保留最近 N 版
+_KEEP_REVISIONS = 5
 
 
 async def upsert(env: str, domain: str, task: str, kind: str, name: str,
@@ -202,6 +205,8 @@ def collect_files(root: str, env: str, domain: str, task: str, kind: str,
                   ) -> tuple[str, int, int]:
     """把 scratch 里的文件/目录收编进资产库（整替换）。返回 (目录, 文件数, 字节数)。
 
+    整替换不留空窗：新内容先落 staging，旧版目录改名进 <dest>.revs/ 留档
+    （保留最近 _KEEP_REVISIONS 版，os.replace 原子换入）。
     护栏：来源必须解析在 scratch_dir 内（防路径穿越读到宿主任意文件）；
     文件数/总字节超上限直接报错——agent 收到错误可裁剪后重试。
     """
@@ -234,12 +239,87 @@ def collect_files(root: str, env: str, domain: str, task: str, kind: str,
             raise ValueError(
                 f"收编超上限（{count} 文件 / {total // 1024}KB；"
                 f"上限 {_MAX_FILES} 文件 / {_MAX_BYTES // 1024 // 1024}MB）")
-        shutil.rmtree(dest, ignore_errors=True)  # 整替换：清旧版文件
+        if os.path.isdir(dest):
+            # 后悔药：整替换不清旧版，整体挪到 <dest>.revs/<时间戳>/ 留档
+            rev = _new_revision_path(dest)
+            os.makedirs(os.path.dirname(rev), exist_ok=True)
+            os.replace(dest, rev)
+            _prune_revisions(dest, _KEEP_REVISIONS)
+        elif os.path.lexists(dest):
+            os.remove(dest)  # 同名残留文件（异常态），清掉保证 replace 成功
         os.replace(staging, dest)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return dest, count, total
+
+
+def _new_revision_path(dest: str) -> str:
+    """留档路径：<dest>.revs/<微秒时间戳>——名字字典序即时间序，prune 按名
+    排序不会误删新版（不能用同秒序号复用旧名：旧名被 prune 后序号名归零，
+    新留档反而排到最前被当最旧删掉）。同微秒撞名加序号兜底。"""
+    base = os.path.join(dest + ".revs",
+                        datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
+    path, i = base, 0
+    while os.path.exists(path):
+        i += 1
+        path = f"{base}-{i}"
+    return path
+
+
+def _prune_revisions(dest: str, keep: int) -> None:
+    """只留最近 keep 版。时间戳命名（含同秒序号），字典序即时间序。"""
+    revs = dest + ".revs"
+    for name in sorted(os.listdir(revs))[:-keep]:  # len<=keep 时切片为空
+        shutil.rmtree(os.path.join(revs, name), ignore_errors=True)
+
+
+def list_revisions(path: str) -> list[dict]:
+    """资产的历史版本留档（新的在前）——/v1/assets/{id} 详情展示后悔药。"""
+    revs = (path or "") + ".revs"
+    if not path or not os.path.isdir(revs):
+        return []
+    out = []
+    for name in sorted(os.listdir(revs), reverse=True):
+        full = os.path.join(revs, name)
+        if not os.path.isdir(full):
+            continue
+        count, total = 0, 0
+        for dirpath, _dirs, fnames in os.walk(full):
+            for f in fnames:
+                count += 1
+                total += os.path.getsize(os.path.join(dirpath, f))
+        out.append({"ts": name, "path": full, "files": count, "bytes": total})
+    return out
+
+
+def python_lint_errors(scratch_dir: str, files: list[str]) -> list[str]:
+    """收编前检查：files 里的 .py（目录递归）逐个 compile()，返回错误清单。
+
+    空列表=通过。路径护栏与 collect_files 同款（必须落在 scratch 内）；
+    不存在/越界的路径交给 collect_files 报错，这里跳过——lint 只管
+    「能读到的 .py 必须能编译」。
+    """
+    scratch = os.path.realpath(scratch_dir)
+    targets: list[str] = []
+    for rel in files:
+        src = os.path.realpath(os.path.join(scratch, rel))
+        if not src.startswith(scratch + os.sep) or not os.path.exists(src):
+            continue
+        if os.path.isdir(src):
+            for dirpath, _dirs, fnames in os.walk(src):
+                targets += [os.path.join(dirpath, f) for f in sorted(fnames)
+                            if f.endswith(".py")]
+        elif src.endswith(".py"):
+            targets.append(src)
+    errors = []
+    for full in sorted(set(targets)):
+        try:
+            with open(full, "rb") as fh:
+                compile(fh.read(), full, "exec")  # bytes 入参自动探测编码
+        except (SyntaxError, ValueError) as e:
+            errors.append(f"{os.path.relpath(full, scratch)}: {e}")
+    return errors
 
 
 def list_files(path: str, limit: int = 50) -> list[dict]:

@@ -5,6 +5,15 @@ DeepAgents 为 pre-1.0 锁版本依赖；本模块是唯一直接 import 它的�
 
 Engine 复用同一个 agent 实例跨 run 服务（构建有成本），
 角色变更后按 TTL 惰性重建；并发重建由锁保护。
+
+文件系统后端：默认 StateBackend 是虚拟 FS（文件存在 agent state 里），
+与 bash/run_code 的真实磁盘（scratch）脱节——edit_file 改完的文件
+save_asset 收不到。因此装配时显式挂真实磁盘后端，root=scratch，
+virtual_mode 把 read_file/write_file/edit_file/ls/grep/glob 全部锁在
+scratch 内（拦截 .. 与越界绝对路径）。文件工具由 FilesystemMiddleware
+统一注入主控与全部子代理，不走角色白名单（白名单里声明仅作意图文档）。
+scratch 全 run 共享（与 bash cwd 一致），不做 per-run 隔离——否则文件
+工具与 bash 看到的就不是同一块地盘，编辑闭环反而断裂。
 """
 
 from __future__ import annotations
@@ -27,9 +36,25 @@ AGENT_REBUILD_TTL_S = 5.0  # 与 DefinitionStore 缓存 TTL 对齐：角色改�
 # 保持简单。若未来 profile 显示重建可见，再换 hash 方案。
 
 
+def _scratch_backend(scratch_dir: str) -> Any:
+    """真实磁盘文件后端：root=scratch，与 bash/run_code 同一块地盘。
+
+    virtual_mode=True："/x.py" → scratch/x.py，路径穿越（..、~、越界
+    绝对路径）被后端拒绝——文件工具不经过 bwrap，边界靠这一层保证。
+    实例无状态（路径按调用解析），全 agent 共享一个即可。
+    """
+    from deepagents.backends import FilesystemBackend
+    return FilesystemBackend(root_dir=scratch_dir, virtual_mode=True)
+
+
 def create_agent(roles: list, tool_registry: "ToolRegistry",
-                 model: Any, checkpointer: Any = None) -> Any:
-    """装配主控 agent + 子角色。deepagents 缺失时给出可操作的报错。"""
+                 model: Any, checkpointer: Any = None,
+                 scratch_dir: str | None = None) -> Any:
+    """装配主控 agent + 子角色。deepagents 缺失时给出可操作的报错。
+
+    scratch_dir 给定即挂真实磁盘文件后端；不给（纯逻辑测试）退回
+    deepagents 默认 StateBackend（虚拟 FS，不落盘）。
+    """
     try:
         from deepagents import create_deep_agent
     except ImportError as e:
@@ -44,6 +69,7 @@ def create_agent(roles: list, tool_registry: "ToolRegistry",
         subagents=build_subagents(roles, tool_registry),
         system_prompt=build_system_prompt(roles),
         checkpointer=checkpointer,
+        backend=_scratch_backend(scratch_dir) if scratch_dir else None,
     )
 
 
@@ -115,7 +141,8 @@ class Engine:
                 return self._agent
             resolved = list(resolve_all(await self.roles()).values())
             self._agent = create_agent(resolved, self._tools, self._make_model(),
-                                       checkpointer=await self._get_checkpointer())
+                                       checkpointer=await self._get_checkpointer(),
+                                       scratch_dir=self._settings.scratch_dir)
             self._built_at = time.monotonic()
             return self._agent
 

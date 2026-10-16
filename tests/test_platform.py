@@ -4,6 +4,7 @@
 dedup；API 鉴权与 admin CRUD。
 """
 
+import os
 import sys
 import tempfile
 import unittest
@@ -1700,6 +1701,105 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         # 多目标环境：园丁逐环境巡检，输出按环境分组；单环境实例只有实例标签一档
         self.assertEqual(run["output"]["test"]["drift_expired"], 0)
         self.assertIsNone(run["output"]["test"]["decay"])
+
+
+class TestAssetFiles(unittest.TestCase):
+    """资产文件库纯 FS 逻辑（无需 DB）：整替换留档（后悔药）+ 收编前编译检查。"""
+
+    def setUp(self):
+        from agent_platform.store import assets
+        self.assets = assets
+        self._tmp = tempfile.TemporaryDirectory()
+        d = self._tmp.name
+        self.root, self.scratch = f"{d}/assets", f"{d}/scratch"
+        os.makedirs(self.scratch)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _collect(self, files, name="脚本"):
+        return self.assets.collect_files(
+            self.root, "test", "board", "data-qa", "script", name, files,
+            self.scratch)
+
+    def test_collect_files_keeps_revisions(self):
+        # v1 收编：无留档
+        Path(self.scratch, "run.py").write_text("print('v1')\n")
+        dest, n, _ = self._collect(["run.py"])
+        self.assertEqual(n, 1)
+        self.assertEqual(self.assets.list_revisions(dest), [])
+        # v2 整替换：旧版整体留档，新版生效
+        Path(self.scratch, "run.py").write_text("print('v2')\n")
+        self._collect(["run.py"])
+        self.assertEqual(Path(dest, "run.py").read_text(), "print('v2')\n")
+        revs = self.assets.list_revisions(dest)
+        self.assertEqual(len(revs), 1)
+        self.assertEqual(Path(revs[0]["path"], "run.py").read_text(),
+                         "print('v1')\n")
+        self.assertEqual(revs[0]["files"], 1)
+        # 留档上限：再替换 6 次只留最近 5 版，新的在前
+        for i in range(6):
+            Path(self.scratch, "run.py").write_text(f"print('x{i}')\n")
+            self._collect(["run.py"])
+        revs = self.assets.list_revisions(dest)
+        self.assertEqual(len(revs), 5)
+        # 最新留档 = 被最后一次收编（x5）顶掉的 x4
+        self.assertEqual(Path(revs[0]["path"], "run.py").read_text(),
+                         "print('x4')\n")
+        self.assertEqual([Path(r["path"], "run.py").read_text()
+                          for r in revs],
+                         [f"print('x{i}')\n" for i in (4, 3, 2, 1, 0)])
+        # 留档目录不属于资产本体：文件清单不含 .revs
+        self.assertEqual([f["name"] for f in self.assets.list_files(dest)],
+                         ["run.py"])
+        # 非文件类（path=None / 目录不存在）：留档为空而非报错
+        self.assertEqual(self.assets.list_revisions(None), [])
+        self.assertEqual(self.assets.list_revisions(f"{self.root}/不存在"), [])
+
+    def test_python_lint_errors(self):
+        Path(self.scratch, "ok.py").write_text("def f():\n    return 1\n")
+        Path(self.scratch, "bad.py").write_text("def f(:\n")
+        os.makedirs(f"{self.scratch}/pkg")
+        Path(self.scratch, "pkg", "also_bad.py").write_text("x = (\n")
+        Path(self.scratch, "pkg", "note.txt").write_text("非 .py 不查")
+        self.assertEqual(
+            self.assets.python_lint_errors(self.scratch, ["ok.py"]), [])
+        errs = self.assets.python_lint_errors(self.scratch, ["bad.py", "pkg"])
+        self.assertEqual(len(errs), 2)
+        self.assertTrue(any("bad.py" in e for e in errs))
+        self.assertTrue(any("also_bad.py" in e for e in errs))
+        # 越界/不存在的路径由 collect_files 报错，lint 不重复管
+        self.assertEqual(self.assets.python_lint_errors(
+            self.scratch, ["../etc", "missing.py"]), [])
+
+
+class TestFilesystemBackend(unittest.TestCase):
+    """文件工具的真实磁盘后端（engine._scratch_backend）：
+
+    root=scratch（与 bash/run_code 同一块地盘）、写改读落盘、
+    路径穿越被 virtual_mode 拒绝（文件工具不过 bwrap，边界靠这层）。
+    """
+
+    def test_scratch_backend(self):
+        try:
+            from agent_platform.agent.engine import _scratch_backend
+        except ImportError:
+            self.skipTest("deepagents 不可用")
+        with tempfile.TemporaryDirectory() as d:
+            be = _scratch_backend(d)
+            r = be.write("/sub/a.py", "print(1)\n")
+            self.assertIsNone(r.error)
+            self.assertEqual(Path(d, "sub", "a.py").read_text(), "print(1)\n")
+            # 重复写同一路径被拒（Claude Code 语义：先 read 再 edit）
+            self.assertIsNotNone(be.write("/sub/a.py", "x").error)
+            e = be.edit("/sub/a.py", "print(1)", "print(2)")
+            self.assertIsNone(e.error)
+            self.assertIn("print(2)", be.read("/sub/a.py").file_data["content"])
+            # 路径穿越：越出 scratch 的写入被拒（后端抛 ValueError，
+            # 中间件层转成工具错误消息返回给模型）
+            with self.assertRaises(ValueError):
+                be.write("/../evil.txt", "x")
+            self.assertFalse(os.path.exists(os.path.join(d, "..", "evil.txt")))
 
 
 if __name__ == "__main__":

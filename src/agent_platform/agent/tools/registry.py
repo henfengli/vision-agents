@@ -23,8 +23,10 @@ log = logging.getLogger(__name__)
 
 ReviewFn = Callable[[str], Awaitable[None]]  # 命中危险模式时由它决定阻断/等待审批
 
-# DeepAgents 内置文件系统中间件提供的工具名：不注册、不告警
-_BUILTIN_TOOLS = {"read_file", "write_file", "grep", "ls", "edit_file"}
+# DeepAgents 文件系统中间件统一注入的工具名（主控+子代理全量注入，
+# 真实磁盘后端 root=scratch，见 engine.py）：不注册、不告警。
+# 角色白名单里声明它们只是意图文档，实际上不受白名单控制。
+_BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "ls", "grep", "glob"}
 
 
 class ToolRegistry:
@@ -167,6 +169,8 @@ class ToolRegistry:
             files：把 scratch 里已写好的文件/目录收编进资产库（相对路径列表，
             保持原名）——脚本等大产出用 files 收编，不要把内容粘进 content；
             收编后得到稳定路径，后续 run 直接执行/读取，不要重写。
+            .py 文件收编前强制编译检查（py_compile 语义），不过则整体拒收——
+            先 bash 跑通验证再收编；同名收编为整替换，旧版自动留档可回滚。
             domain/task 缺省取当前 run 上下文，task 空=域级通用。"""
             assert writer is not None
             return await writer(name, kind, summary, content,

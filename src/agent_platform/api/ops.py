@@ -187,13 +187,15 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
 
     @router.get("/v1/assets/{asset_id}")
     async def asset_detail(asset_id: int):
-        """资产明细：整行 + 文件清单（文件类）。"""
+        """资产明细：整行 + 文件清单（文件类）+ 历史版本留档（整替换的旧版）。"""
         entry = await assets_store.get_entry(asset_id)
         if entry is None:
             raise HTTPException(404, "资产不存在")
         entry["files"] = (await asyncio.to_thread(
             assets_store.list_files, entry["path"])
             if entry.get("path") else [])
+        entry["revisions"] = await asyncio.to_thread(
+            assets_store.list_revisions, entry.get("path"))
         return entry
 
     @router.get("/v1/assets/{asset_id}/file")
