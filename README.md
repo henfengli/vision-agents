@@ -139,7 +139,8 @@ bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径�
 ## 运维 API（/v1：人与 AI 共用）
 
 Viewer 只是这套 API 的一个客户端——初始化部署时由 AI 批量总结录入、日常运维
-由 AI 巡检操作，走的都是同一组端点（bearer 鉴权）。明细见设计文档 §3.13/§3.14。
+由 AI 巡检操作，走的都是同一组端点（bearer 鉴权）。明细见设计文档 §3.13/§3.14；
+**逐端点契约见 `docs/外部接口文档.md`，业务方接入见 `docs/SDK开发指南.md`**。
 
 - 记忆：`GET/POST /v1/knowledge`、`/v1/knowledge/search`（召回试用）、
   `/v1/knowledge/conflicts`（矛盾对）、`/v1/knowledge/{id}`（明细/改/expire/restore）、
@@ -193,5 +194,5 @@ conf/                 base/common.yaml（共享默认）+ env/{dev,test,prod}.ya
 deploy/               systemd unit + install.sh
 sdk/agent_client/     业务方客户端 + agent-chat CLI
 tests/                单测 + PG 集成测试
-docs/                 设计文档+预览图
+docs/                 设计文档 + 部署指南 + SDK开发指南 + 外部接口文档 + 预览图
 ```
