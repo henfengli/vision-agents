@@ -7,5 +7,3 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-web/node_modules/
-web/dist/

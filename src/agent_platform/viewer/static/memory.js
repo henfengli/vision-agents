@@ -97,6 +97,7 @@ function openCreate() {
   $("md-usage-sec").style.display = "none";
   $("md-chain-sec").style.display = "none";
   $("md-feedback-sec").style.display = "none";
+  $("md-hist-sec").style.display = "none";
 }
 
 async function openDrawer(id) {
@@ -106,7 +107,7 @@ async function openDrawer(id) {
   drawer.classList.add("open");
   scrim.classList.add("open");
   $("md-create-fields").style.display = "none";
-  ["md-usage-sec", "md-chain-sec", "md-feedback-sec"]
+  ["md-usage-sec", "md-chain-sec", "md-feedback-sec", "md-hist-sec"]
     .forEach(s => $(s).style.display = "");
   const resp = await fetch(`/v1/knowledge/${id}`);
   if (!resp.ok) {
@@ -176,7 +177,7 @@ async function openDrawer(id) {
         ${c.current ? '<span class="ver-cur">当前查看</span>' : ""}
         <span class="meta">${TS.span(c.created_at)}</span>
       </div>`).join("")
-    : '<div class="meta">无演化链——同 key 的修改是原地覆盖不留历史；'
+    : '<div class="meta">无演化链——同 key 的覆盖修改见下方「内容历史」；'
       + '仅「新 key 取代旧 key」才形成链</div>';
 
   document.getElementById("md-feedback").innerHTML = e.feedback.length
@@ -188,6 +189,20 @@ async function openDrawer(id) {
         <span> · ${TS.span(f.created_at)}</span>
       </div>`).join("")
     : '<div class="meta">来源 run 尚无反馈留痕</div>';
+
+  // 内容历史（同 key 覆盖前的旧内容快照；恢复会把当前内容先留档）
+  const hr = await fetch(`/v1/knowledge/${id}/history`);
+  const hist = hr.ok ? await hr.json() : [];
+  $("md-hist").innerHTML = hist.length
+    ? hist.map(h => `
+      <div class="ver-row">
+        <span class="ver-cur mono">v${h.version}</span>
+        <span class="meta">${esc(h.source)} · ${TS.span(h.created_at)} · ${(h.content || "").length} 字</span>
+        <button type="button" class="ver-rb" data-hv="${h.version}">查看</button>
+        <button type="button" class="ver-rb" data-hr="${h.version}">恢复此版</button>
+      </div>
+      <pre class="ad-file-view" data-hb="${h.version}" hidden>${esc(h.content)}</pre>`).join("")
+    : '<div class="meta">无历史版本——内容尚未被覆盖过</div>';
 }
 
 function closeDrawer() {
@@ -219,6 +234,24 @@ document.addEventListener("click", async e => {
     const resp = await fetch(`/v1/knowledge/${keep.dataset.drop}/expire`,
                              {method: "POST"});
     if (resp.ok) location.reload(); else alert("操作失败");
+    return;
+  }
+  const hv = e.target.closest("[data-hv]");
+  if (hv) {  // 历史版本内容展开/收起
+    const body = document.querySelector(`[data-hb="${hv.dataset.hv}"]`);
+    if (body) { body.hidden = !body.hidden; hv.textContent = body.hidden ? "查看" : "收起"; }
+    return;
+  }
+  const hb = e.target.closest("[data-hr]");
+  if (hb) {  // 恢复历史版本（当前内容会先自动留档，可再恢复回来）
+    if (!confirm(`恢复到 v${hb.dataset.hr}？当前内容会先留档。`)) return;
+    const resp = await fetch(`/v1/knowledge/${curId}/history/${hb.dataset.hr}/restore`,
+                             {method: "POST"});
+    if (resp.ok) { dirty = false; openDrawer(curId); }
+    else {
+      const j = await resp.json().catch(() => ({}));
+      alert("恢复失败：" + (j.detail || resp.status));
+    }
   }
 });
 

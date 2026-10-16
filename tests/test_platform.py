@@ -592,6 +592,31 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
         entry = client.get(f"/v1/knowledge/{rows[0]['id']}",
                            headers=headers).json()
         self.assertEqual(entry["content"], "口径 v3")
+        # 内容历史：两次覆盖各留一档（upsert 来源记 run/upsert，网页改记 web-edit）
+        hist = client.get(f"/v1/knowledge/{rows[0]['id']}/history",
+                          headers=headers).json()["history"]
+        self.assertEqual([h["version"] for h in hist], [2, 1])
+        self.assertEqual(hist[0]["content"], "口径 v2")
+        self.assertEqual(hist[0]["source"], "web-edit")
+        self.assertEqual(hist[1]["content"], "口径 v1")
+        # 回滚到 v1：当前内容先留档（可逆），内容回到 v1
+        ok = client.post(f"/v1/knowledge/{rows[0]['id']}/history/1/restore",
+                         headers=headers)
+        self.assertEqual(ok.status_code, 200)
+        entry = client.get(f"/v1/knowledge/{rows[0]['id']}",
+                           headers=headers).json()
+        self.assertEqual(entry["content"], "口径 v1")
+        hist = client.get(f"/v1/knowledge/{rows[0]['id']}/history",
+                          headers=headers).json()["history"]
+        self.assertEqual(hist[0]["version"], 3)
+        self.assertEqual(hist[0]["source"], "rollback-to-v1")
+        self.assertEqual(hist[0]["content"], "口径 v3")
+        # 回滚不存在的版本 / 不存在的条目 → 404
+        self.assertEqual(client.post(
+            f"/v1/knowledge/{rows[0]['id']}/history/99/restore",
+            headers=headers).status_code, 404)
+        self.assertEqual(client.get("/v1/knowledge/999999/history",
+                                    headers=headers).status_code, 404)
         # 过期 → 默认清单消失；恢复 → 回来
         client.post(f"/v1/knowledge/{rows[0]['id']}/expire", headers=headers)
         items = client.get("/v1/knowledge?domain=board",
@@ -635,6 +660,30 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
                     json={"summary": "v2", "content": "2. ..."})
         entry = client.get(f"/v1/assets/{row['id']}", headers=headers).json()
         self.assertEqual(entry["summary"], "v2")
+        # 内容历史：网页编辑前的旧版（v1）留档，source=web-edit
+        hist = client.get(f"/v1/assets/{row['id']}/history",
+                          headers=headers).json()["history"]
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["version"], 1)
+        self.assertEqual(hist[0]["summary"], "board 服务重启步骤")
+        self.assertEqual(hist[0]["content"], "1. ...")
+        self.assertEqual(hist[0]["source"], "web-edit")
+        # 恢复 v1：summary/content 回到旧版，当前版先留档（可逆）
+        ok = client.post(f"/v1/assets/{row['id']}/history/1/restore",
+                         headers=headers)
+        self.assertEqual(ok.status_code, 200)
+        entry = client.get(f"/v1/assets/{row['id']}", headers=headers).json()
+        self.assertEqual(entry["summary"], "board 服务重启步骤")
+        self.assertEqual(entry["content"], "1. ...")
+        hist = client.get(f"/v1/assets/{row['id']}/history",
+                          headers=headers).json()["history"]
+        self.assertEqual(hist[0]["version"], 2)
+        self.assertEqual(hist[0]["source"], "rollback-to-v1")
+        self.assertEqual(client.post(
+            f"/v1/assets/{row['id']}/history/99/restore",
+            headers=headers).status_code, 404)
+        self.assertEqual(client.get("/v1/assets/999999/history",
+                                    headers=headers).status_code, 404)
         client.post(f"/v1/assets/{row['id']}/expire", headers=headers)
         names = [a["name"] for a in client.get(
             "/v1/assets?domain=board&state=off", headers=headers)
@@ -681,6 +730,53 @@ class TestPlatform(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ok.json()["revisions"]), 1)
             self.assertEqual(client.post(f"/v1/assets/{aid}/rollback/nope",
                                          headers=headers).status_code, 404)
+
+    async def test_content_history_prune_and_noop(self):
+        """内容历史 store 层：内容没变不留档；每个 key 只留最近 20 版；错误路径。"""
+        from agent_platform.store import assets, knowledge
+        # 同内容重复 upsert = 幂等，不产生历史
+        await knowledge.upsert("test", "board", "noop-key", "同样内容")
+        await knowledge.upsert("test", "board", "noop-key", "同样内容")
+        self.assertEqual(
+            await knowledge.list_content_history("test", "board", "noop-key"),
+            [])
+        await assets.upsert("test", "board", "", "procedure", "幂等资产",
+                            "s", "同样内容")
+        await assets.upsert("test", "board", "", "procedure", "幂等资产",
+                            "s", "同样内容")
+        self.assertEqual(
+            await assets.list_content_history(
+                "test", "board", "", "procedure", "幂等资产"),
+            [])
+        # 25 次 upsert → 24 个快照 → 裁剪到最近 20 版（v5..v24）
+        for i in range(25):
+            await knowledge.upsert("test", "board", "prune-key", f"内容 {i}")
+        hist = await knowledge.list_content_history("test", "board",
+                                                    "prune-key")
+        self.assertEqual(len(hist), 20)
+        self.assertEqual(hist[0]["version"], 24)
+        self.assertEqual(hist[0]["content"], "内容 23")
+        self.assertEqual(hist[-1]["version"], 5)
+        # 资产同理（summary/content/path 任一变化都留档）
+        for i in range(25):
+            await assets.upsert("test", "board", "", "procedure", "裁剪资产",
+                                "s", f"资产内容 {i}")
+        hist = await assets.list_content_history(
+            "test", "board", "", "procedure", "裁剪资产")
+        self.assertEqual(len(hist), 20)
+        self.assertEqual(hist[0]["version"], 24)
+        self.assertEqual(hist[0]["content"], "资产内容 23")
+        # 回滚不存在的版本 / 不存在的本体 → KeyError
+        with self.assertRaises(KeyError):
+            await knowledge.restore_content("test", "board", "prune-key", 99)
+        with self.assertRaises(KeyError):
+            await knowledge.restore_content("test", "board", "ghost-key", 1)
+        with self.assertRaises(KeyError):
+            await assets.restore_content(
+                "test", "board", "", "procedure", "裁剪资产", 99)
+        with self.assertRaises(KeyError):
+            await assets.restore_content(
+                "test", "board", "", "procedure", "幽灵资产", 1)
 
     async def test_cases_and_conflicts_api(self):
         """案例清单 + 矛盾对读口（AI 仲裁的读侧；仲裁动作 = knowledge/expire）。"""

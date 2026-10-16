@@ -5,9 +5,13 @@
 - artifacts           资产化任务图的产物（血缘 + 输入指纹 + 重跑复用）
 - definitions         角色/任务/策略的版本化定义（写后即时生效，历史全留）
 - knowledge           知识库（时序化：valid_from/to + superseded_by）
+- knowledge_history   知识内容历史（覆盖前旧内容快照，可回滚）
 - cases               案例库（报错指纹归一化）
+- recall_hits         召回埋点（真实召回按序记录命中，零召回/用量统计的数据源）
 - feedback            反馈（rating=run 打分 / step=步骤打分 / correction=纠正）
 - approvals           危险命令审批单
+- assets              任务资产（方法/脚本/查询/基线；文件本体在 assets_dir）
+- asset_history       资产内容历史（覆盖前旧内容快照，可回滚）
 """
 
 from __future__ import annotations
@@ -173,6 +177,38 @@ CREATE TABLE IF NOT EXISTS assets (
     superseded_by TEXT,
     created_at   TIMESTAMPTZ DEFAULT now(),
     UNIQUE(env, domain, task, kind, name)
+);
+
+-- 内容历史：主表整替换前的旧内容快照（assets 同构）。主表只留当前态
+-- （召回/检索路径不变），历史只进不出（除 per-key 裁剪），回滚 = 把历史
+-- 版本写回主表（写回前当前内容同样快照，回滚可逆）。
+CREATE TABLE IF NOT EXISTS asset_history (
+    id         BIGSERIAL PRIMARY KEY,
+    env        TEXT NOT NULL,
+    domain     TEXT NOT NULL DEFAULT '',
+    task       TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    version    INT  NOT NULL,              -- 自然键内递增（v1 = 最初被覆盖的内容）
+    summary    TEXT NOT NULL DEFAULT '',
+    content    TEXT NOT NULL,
+    path       TEXT,                       -- 当时的文件载体（文件本体留档在 .revs）
+    source     TEXT NOT NULL DEFAULT '',   -- upsert:<run_id> / web-edit / rollback-to-vN
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(env, domain, task, kind, name, version)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_history (
+    id         BIGSERIAL PRIMARY KEY,
+    env        TEXT NOT NULL,
+    domain     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    version    INT  NOT NULL,
+    content    TEXT NOT NULL,
+    code_ref   JSONB,
+    source     TEXT NOT NULL DEFAULT '',   -- upsert:<run_id> / web-edit / rollback-to-vN
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(env, domain, key, version)
 );
 
 -- pg_trgm：知识/案例的关键词相似度检索（无 pg_trgm 时跳过，退化 ILIKE）

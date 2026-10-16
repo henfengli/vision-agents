@@ -99,7 +99,7 @@
       </select></div>
     <div class="af-field"><label class="af-label">任务（空 = 域级通用）</label>
       <input id="ad-task" class="mono" placeholder="如：daily-inspection"></div>
-    <div class="af-field"><label class="af-label">名称（同 域/任务/类型/名称 整替换，幂等）</label>
+    <div class="af-field"><label class="af-label">名称（同 域/任务/类型/名称 整替换，旧版自动留档可恢复）</label>
       <input id="ad-name" class="mono" placeholder="如：ods-orders-巡检方法"></div>
   </div>
   <div class="af-field"><label class="af-label">摘要（一句话：何时该用它——召回触发全靠它）</label>
@@ -117,8 +117,12 @@
     <div id="ad-files"></div>
   </div>
   <div id="ad-revs-sec" hidden>
-    <div class="md-sec">历史版本（整替换的旧版留档；回滚会把当前版先留档，可再回滚回来）</div>
+    <div class="md-sec">文件历史（整替换的旧版目录留档；回滚会把当前版先留档，可再回滚回来）</div>
     <div id="ad-revs"></div>
+  </div>
+  <div id="ad-hist-sec" hidden>
+    <div class="md-sec">内容历史（说明/文本内容被覆盖前的旧版留档；恢复会把当前内容先留档）</div>
+    <div id="ad-hist" class="af-vers"></div>
   </div>
 </div>
 <div class="mem-scrim" id="asset-scrim"></div>

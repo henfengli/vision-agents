@@ -43,3 +43,9 @@ version = {attr = "agent_platform.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# viewer 的模板/静态资源不是 .py，必须显式声明才进 wheel——
+# 否则 pip install 后页面全 404（base.py 按 __file__ 相对路径读）
+[tool.setuptools.package-data]
+agent_platform = ["viewer/templates/*.html", "viewer/static/*",
+                  "viewer/static/fonts/*"]

@@ -93,10 +93,59 @@
     });
   }
 
+  function renderContentHistory(id) {
+    var sec = document.getElementById("ad-hist-sec"), box = document.getElementById("ad-hist");
+    fetch("/v1/assets/" + id + "/history")
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (hist) {
+        if (!hist.length) { sec.hidden = true; box.innerHTML = ""; return; }
+        sec.hidden = false;
+        box.innerHTML = hist.map(function (h) {
+          return '<div class="ad-file"><span class="ad-file-name mono">v' + h.version + "</span>" +
+            '<span class="ad-file-size">' + esc(h.source || "") + " · " + TS.span(h.created_at) +
+            " · " + (h.content || "").length + " 字" + (h.path ? " · 有文件载体" : "") + "</span>" +
+            '<button class="ver-rb ad-hist-view" data-v="' + h.version + '">查看</button>' +
+            '<button class="ver-rb ad-hist-rb" data-v="' + h.version + '">恢复此版</button></div>' +
+            '<pre class="ad-file-view" data-vb="' + h.version + '" hidden>' +
+            esc((h.summary ? "【说明】\n" + h.summary + "\n\n【内容】\n" : "") + (h.content || "")) + "</pre>";
+        }).join("");
+        box.querySelectorAll(".ad-hist-view").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var view = box.querySelector('[data-vb="' + btn.dataset.v + '"]');
+            if (view) { view.hidden = !view.hidden; btn.textContent = view.hidden ? "查看" : "收起"; }
+          });
+        });
+        box.querySelectorAll(".ad-hist-rb").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            if (!confirm("恢复到 v" + btn.dataset.v + "？当前内容会先自动留档，可再恢复回来。")) return;
+            fetch("/v1/assets/" + id + "/history/" + btn.dataset.v + "/restore", {method: "POST"})
+              .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+              .then(function (res) {
+                var msg = document.getElementById("ad-msg");
+                if (!res.ok) { msg.textContent = res.d.detail || "恢复失败"; msg.style.color = "#b91c1c"; return; }
+                msg.textContent = "已恢复到 v" + btn.dataset.v; msg.style.color = "#047857";
+                refreshBody(id);  // 文本字段与历史列表一并刷新
+              })
+              .catch(function () {
+                var msg = document.getElementById("ad-msg");
+                msg.textContent = "网络错误"; msg.style.color = "#b91c1c";
+              });
+          });
+        });
+      });
+  }
+
   function refreshBody(id) {
     fetch("/v1/assets/" + id)
       .then(function (r) { return r.json(); })
-      .then(function (a) { renderFiles(a.id, a.files); renderRevisions(a.id, a.revisions); });
+      .then(function (a) {
+        renderFiles(a.id, a.files); renderRevisions(a.id, a.revisions);
+        // 恢复历史后，抽屉里的说明/内容字段也要换成当前值
+        document.getElementById("ad-summary").value = a.summary;
+        document.getElementById("ad-content").value = a.content;
+        dirty = false;
+        renderContentHistory(a.id);
+      });
   }
 
   function openDetail(card) {
@@ -123,6 +172,7 @@
         document.getElementById("ad-msg").textContent = "";
         renderFiles(a.id, a.files);
         renderRevisions(a.id, a.revisions);
+        renderContentHistory(a.id);
         drawer.classList.add("open"); scrim.classList.add("open");
       });
   }
@@ -144,6 +194,8 @@
     document.getElementById("ad-files").innerHTML = "";
     document.getElementById("ad-revs-sec").hidden = true;
     document.getElementById("ad-revs").innerHTML = "";
+    document.getElementById("ad-hist-sec").hidden = true;
+    document.getElementById("ad-hist").innerHTML = "";
     drawer.classList.add("open"); scrim.classList.add("open");
   }
 

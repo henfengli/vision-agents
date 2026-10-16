@@ -15,7 +15,8 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 记忆层    recall（运行前召回）/ distill（运行后沉淀）/ assets（任务资产：
           方法/脚本/查询/基线，save_asset 沉淀、prepare 自动召回）/ gardener（夜间维护口子）
 存储层    Postgres：runs(含定义版本谱系)/run_events/definitions(角色/任务/策略)/
-          knowledge/cases/feedback/approvals/artifacts(产物血缘)
+          knowledge/cases/feedback/approvals/artifacts(产物血缘)/
+          asset_history/knowledge_history(内容历史：覆盖留档、可回滚)
 观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ Run Viewer（自托管页面）
 通知      钉钉中继（单向只发）
 ```
@@ -96,14 +97,16 @@ run 并跳过去重）、审批 `/approvals`（待办/已处理双 tab：待办�
 本身，返回角色实际注入的 prompt 全文块 + 过滤后命中序；**手动新增
 条目**（upsert 幂等，立即参与召回）；编辑保存同步重算向量；**反馈
 闭环**——反馈分统一加权所有召回路径终排，负反馈条目抽屉内给出
-处置提示；条目点开右抽屉（编辑/来源 run/演化链/反馈留痕/过期恢复）；
+处置提示；条目点开右抽屉（编辑/来源 run/演化链/反馈留痕/**内容历史**
+——同 key 覆盖前的旧版留档，可一键恢复，v5.16.0/过期恢复）；
 **案例 tab** 报错案例库；**矛盾 tab** 向量相似度 ≥0.85 的生效条目对，
 一键保留其一。顶级**资产页** `/assets`（与记忆平级）：save_asset 沉淀的
 方法/脚本/查询/基线——卡片带复用数/生效状态/文件数，抽屉可看元数据、
 编辑摘要说明、过期止损；文件类资产逐个在线查看内容，手动登记支持文本类；
 类型/状态 chips + 名称搜索 + 分页（v5.11.0）；抽屉内展示历史版本留档
 （整替换的旧版，保留最近 5 版）并可一键回滚（当前版自动留档，回滚可逆，
-v5.15.0）。
+v5.15.0）；说明/文本内容同样有内容历史（覆盖自动留档最近 20 版，可恢复，
+v5.16.0）。
 对话页 `/chat`（会话侧栏 +
 历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
 run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
@@ -138,11 +141,13 @@ Viewer 只是这套 API 的一个客户端——初始化部署时由 AI 批量�
 由 AI 巡检操作，走的都是同一组端点（bearer 鉴权）。明细见设计文档 §3.13/§3.14。
 
 - 记忆：`GET/POST /v1/knowledge`、`/v1/knowledge/search`（召回试用）、
-  `/v1/knowledge/conflicts`（矛盾对）、`/v1/knowledge/{id}`（明细/改/expire/restore）；
+  `/v1/knowledge/conflicts`（矛盾对）、`/v1/knowledge/{id}`（明细/改/expire/restore）、
+  `/v1/knowledge/{id}/history` + `POST .../history/{version}/restore`（内容历史）；
   案例 `GET /v1/cases`
 - 资产：`GET/POST /v1/assets`、`/v1/assets/{id}`（明细含文件清单与历史版本
   留档 revisions）、`/v1/assets/{id}/file`、`/v1/assets/{id}/rollback/{ts}`（回滚，
-  当前版自动留档可逆）、改/expire/restore
+  当前版自动留档可逆）、`/v1/assets/{id}/history` +
+  `POST .../history/{version}/restore`（说明/文本内容历史）、改/expire/restore
 - run 运维：`POST /v1/runs/{id}/rerun`（失败续跑/成功新开）、
   `POST /v1/runs/{id}/steps/{seq}/feedback`（单步 👍👎）
 - 定义管理：`/v1/admin/{roles|tasks|policies}` CRUD + 单条读取 + history +
@@ -162,7 +167,7 @@ curl -s -X POST -H "Authorization: Bearer $AGENT_BEARER_TOKEN" \
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 178 个用例；pgserver 不可用时 PG 用例自动跳过
+python3 -m unittest discover -s tests    # 180 个用例；pgserver 不可用时 PG 用例自动跳过
 ```
 
 ## SDK（业务方接入）

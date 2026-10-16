@@ -30,11 +30,13 @@ langfuse:
 #   - browser：微软官方 @playwright/mcp（需 Node.js，npx 自动下载）
 #   - datahub：DataHub 官方 mcp-server-datahub（需 uv/uvx，uvx 自动建虚拟环境）
 # 只有 dagster 是仓库自带（内部 GraphQL 接口，无现成实现），见 mcp_servers/
+# （install.sh 已拷到 /opt/agent-platform/mcp_servers/；systemd 服务无固定
+# 工作目录，stdio 的脚本参数必须写绝对路径）
 # mcp_servers:
 #   dagster:
 #     transport: stdio
 #     command: python
-#     args: ["mcp_servers/dagster_mcp.py"]
+#     args: ["/opt/agent-platform/mcp_servers/dagster_mcp.py"]
 #   browser:
 #     transport: stdio
 #     command: npx

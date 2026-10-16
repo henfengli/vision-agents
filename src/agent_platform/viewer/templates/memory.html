@@ -148,7 +148,7 @@
       <select id="md-domain">
         {% for d in domains %}<option{% if d == domain %} selected{% endif %}>{{ d }}</option>{% endfor %}
       </select></div>
-    <div class="af-field"><label class="af-label">Key（同 key 会整替换，幂等）</label>
+    <div class="af-field"><label class="af-label">Key（同 key 整替换，旧版自动留档可恢复）</label>
       <input id="md-new-key" class="mono" placeholder="如：毛利率口径"></div>
   </div>
   <div id="md-hint" class="md-hint" style="display:none"></div>
@@ -170,6 +170,10 @@
   <div id="md-feedback-sec">
     <div class="md-sec">来源反馈</div>
     <div id="md-feedback"></div>
+  </div>
+  <div id="md-hist-sec">
+    <div class="md-sec">内容历史（每次覆盖自动留档；恢复会把当前内容先留档）</div>
+    <div id="md-hist" class="af-vers"></div>
   </div>
 </div>
 <div class="mem-scrim" id="mem-scrim"></div>

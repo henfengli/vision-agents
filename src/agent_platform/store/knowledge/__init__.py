@@ -6,8 +6,8 @@
 """
 
 from .crud import (domain_stats, evolution_chain, get_entry, list_all,
-                   list_by_domain, restore, similar_pairs, update_content,
-                   upsert)
+                   list_by_domain, list_content_history, restore,
+                   restore_content, similar_pairs, update_content, upsert)
 from .profiles import asset_profiles, latest_session_summaries
 from .retrieval import code_base, current_commit, is_entry_fresh, search
 from .temporal import mark_expired, supersede_by_runs, supersede_keys
@@ -19,5 +19,6 @@ __all__ = [
     "supersede_by_runs", "supersede_keys", "mark_expired",
     "latest_session_summaries", "asset_profiles",
     "domain_stats", "evolution_chain", "similar_pairs", "restore",
+    "list_content_history", "restore_content",
     "record_hits", "recent_hits", "usage_map",
 ]

@@ -10,7 +10,7 @@ id agent-svc &>/dev/null || useradd -r -s /usr/sbin/nologin agent-svc
 
 # 2. 代码包与运行目录
 mkdir -p /opt/agent-platform
-cp -r "$PKG_DIR"/src "$PKG_DIR"/conf "$PKG_DIR"/pyproject.toml /opt/agent-platform/
+cp -r "$PKG_DIR"/src "$PKG_DIR"/conf "$PKG_DIR"/mcp_servers "$PKG_DIR"/pyproject.toml /opt/agent-platform/
 mkdir -p /var/lib/agent-platform/scratch /var/lib/agent-platform/assets \
          /var/log/agent-platform /etc/agent-platform
 mkdir -p /var/lib/temporal                       # temporal-server.service 的 SQLite 目录

@@ -131,6 +131,29 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
                                              embedder=embedder)
         return {"status": "ok"}
 
+    @router.get("/v1/knowledge/{entry_id}/history")
+    async def knowledge_history(entry_id: int):
+        """内容历史（覆盖自动留档，新版本在前）。"""
+        entry = await knowledge_store.get_entry(entry_id)
+        if entry is None:
+            raise HTTPException(404, "条目不存在")
+        return {"history": await knowledge_store.list_content_history(
+            entry["env"], entry["domain"], entry["key"])}
+
+    @router.post("/v1/knowledge/{entry_id}/history/{version}/restore")
+    async def knowledge_history_restore(entry_id: int, version: int):
+        """回滚内容到历史版本（当前内容先留档，回滚可逆）。"""
+        entry = await knowledge_store.get_entry(entry_id)
+        if entry is None:
+            raise HTTPException(404, "条目不存在")
+        try:
+            await knowledge_store.restore_content(
+                entry["env"], entry["domain"], entry["key"], version,
+                embedder=embedder)
+        except KeyError as e:
+            raise HTTPException(404, e.args[0])
+        return {"ok": True, "restored": version}
+
     @router.post("/v1/knowledge/{entry_id}/expire")
     async def knowledge_expire(entry_id: int):
         if await knowledge_store.get_entry(entry_id) is None:
@@ -214,6 +237,31 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
         return {"ok": True, "restored": ts,
                 "revisions": await asyncio.to_thread(
                     assets_store.list_revisions, entry["path"])}
+
+    @router.get("/v1/assets/{asset_id}/history")
+    async def asset_content_history(asset_id: int):
+        """内容历史（summary/content 覆盖自动留档，新版本在前）。"""
+        entry = await assets_store.get_entry(asset_id)
+        if entry is None:
+            raise HTTPException(404, "资产不存在")
+        return {"history": await assets_store.list_content_history(
+            entry["env"], entry["domain"], entry["task"], entry["kind"],
+            entry["name"])}
+
+    @router.post("/v1/assets/{asset_id}/history/{version}/restore")
+    async def asset_content_restore(asset_id: int, version: int):
+        """回滚文本内容到历史版本（当前内容先留档，回滚可逆；
+        文件载体不动——文件版本走 /rollback/{ts}）。"""
+        entry = await assets_store.get_entry(asset_id)
+        if entry is None:
+            raise HTTPException(404, "资产不存在")
+        try:
+            await assets_store.restore_content(
+                entry["env"], entry["domain"], entry["task"], entry["kind"],
+                entry["name"], version)
+        except KeyError as e:
+            raise HTTPException(404, e.args[0])
+        return {"ok": True, "restored": version}
 
     @router.get("/v1/assets/{asset_id}/file")
     async def asset_file(asset_id: int, path: str):

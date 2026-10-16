@@ -8,6 +8,11 @@
 PG 是唯一元数据源（scope/复用数/反馈/生命周期）；文件系统只是内容载体。
 生命周期与知识库同款（upsert 幂等、软过期、反馈分），复用统计直接记行上
 （use_count/last_used_at——资产的「被用」就是 prepare 注入那一刻）。
+
+内容版本管理：upsert/update 覆盖前把旧 (summary, content, path) 快照进
+asset_history（内容没变不记，防止重复保存刷屏）；回滚 = 历史版本写回主表
+（写回前当前内容同样快照，回滚可逆）。文件本体的版本是另一套：
+<资产目录>.revs/ 留档（collect_files / restore_revision）。
 """
 
 from __future__ import annotations
@@ -26,14 +31,47 @@ _MAX_FILES = 200
 _MAX_BYTES = 50 * 1024 * 1024
 # 整替换留档（后悔药）：旧版目录整体挪到 <资产目录>.revs/<时间戳>/，保留最近 N 版
 _KEEP_REVISIONS = 5
+# 内容历史：每个自然键保留最近 N 版（distill/run 高频写入，防表膨胀）
+_HISTORY_KEEP = 20
+
+
+async def _put_history(conn, env: str, domain: str, task: str, kind: str,
+                       name: str, summary: str, content: str,
+                       path: str | None, source: str) -> None:
+    """把旧内容快照进 asset_history（版本 = 键内递增）并裁到最近 N 版。"""
+    cur = await conn.execute(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM asset_history"
+        " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
+        (env, domain, task, kind, name))
+    version = (await cur.fetchone())[0]
+    await conn.execute(
+        "INSERT INTO asset_history (env, domain, task, kind, name, version,"
+        " summary, content, path, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (env, domain, task, kind, name, version, summary, content, path,
+         source))
+    await conn.execute(
+        "DELETE FROM asset_history"
+        " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
+        " AND version <= %s",
+        (env, domain, task, kind, name, version - _HISTORY_KEEP))
 
 
 async def upsert(env: str, domain: str, task: str, kind: str, name: str,
                  summary: str, content: str,
                  source_run: str | None = None,
                  path: str | None = None) -> None:
-    """幂等 upsert（同 (domain, task, kind, name) 整替换并刷新有效期）。"""
-    async with pool().connection() as conn:
+    """幂等 upsert（同 (domain, task, kind, name) 整替换并刷新有效期）。
+    覆盖前旧内容快照进 asset_history（内容没变不记）。"""
+    async with pool().connection() as conn, conn.transaction():
+        cur = await conn.execute(
+            "SELECT summary, content, path FROM assets"
+            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
+            (env, domain, task, kind, name))
+        old = await cur.fetchone()
+        if old and (old[0], old[1], old[2]) != (summary, content, path):
+            await _put_history(conn, env, domain, task, kind, name,
+                               old[0], old[1], old[2],
+                               source_run or "upsert")
         await conn.execute(
             "INSERT INTO assets (env, domain, task, kind, name, summary,"
             " content, source_run, path) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
@@ -44,6 +82,50 @@ async def upsert(env: str, domain: str, task: str, kind: str, name: str,
             " created_at=now()",
             (env, domain, task, kind, name, summary, content, source_run,
              path))
+
+
+async def list_content_history(env: str, domain: str, task: str, kind: str,
+                               name: str) -> list[dict]:
+    """内容历史（新版本在前）：回滚选择与审计用。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT version, summary, content, path, source, created_at"
+            " FROM asset_history"
+            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
+            " ORDER BY version DESC", (env, domain, task, kind, name))
+        rows = await cur.fetchall()
+    return [{"version": r[0], "summary": r[1], "content": r[2], "path": r[3],
+             "source": r[4], "created_at": r[5].isoformat()} for r in rows]
+
+
+async def restore_content(env: str, domain: str, task: str, kind: str,
+                          name: str, version: int) -> None:
+    """把历史版本写回主表（当前内容先快照，回滚可逆）。版本不存在 KeyError。"""
+    async with pool().connection() as conn, conn.transaction():
+        cur = await conn.execute(
+            "SELECT summary, content FROM asset_history"
+            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
+            " AND version=%s", (env, domain, task, kind, name, version))
+        hist = await cur.fetchone()
+        if hist is None:
+            raise KeyError(f"无历史版本 v{version}")
+        cur = await conn.execute(
+            "SELECT summary, content, path FROM assets"
+            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
+            (env, domain, task, kind, name))
+        cur_row = await cur.fetchone()
+        if cur_row is None:
+            raise KeyError("资产本体不存在")
+        if (cur_row[0], cur_row[1]) != (hist[0], hist[1]):
+            await _put_history(conn, env, domain, task, kind, name,
+                               cur_row[0], cur_row[1], cur_row[2],
+                               f"rollback-to-v{version}")
+        # 文件载体不回滚（文件版本走 .revs 那套）；只回文本内容
+        await conn.execute(
+            "UPDATE assets SET summary=%s, content=%s, valid_from=now(),"
+            " valid_to=NULL, superseded_by=NULL, created_at=now()"
+            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
+            (hist[0], hist[1], env, domain, task, kind, name))
 
 
 async def search_active(env: str, domain: str, task: str,
@@ -165,8 +247,18 @@ async def get_entry(asset_id: int) -> dict | None:
 
 async def update(asset_id: int, summary: str, content: str) -> None:
     """网页编辑：改摘要/说明并刷新有效期（视为人工修正，重新生效）。
-    文件类资产的文件本体不从网页改——重新跑 run 用 save_asset 覆盖。"""
-    async with pool().connection() as conn:
+    文件类资产的文件本体不从网页改——重新跑 run 用 save_asset 覆盖。
+    覆盖前旧内容快照进 asset_history（source=web-edit）。"""
+    async with pool().connection() as conn, conn.transaction():
+        cur = await conn.execute(
+            "SELECT env, domain, task, kind, name, summary, content, path"
+            " FROM assets WHERE id=%s", (asset_id,))
+        old = await cur.fetchone()
+        if old is None:
+            raise KeyError(asset_id)
+        if (old[5], old[6]) != (summary, content):
+            await _put_history(conn, *old[:5], old[5], old[6], old[7],
+                               "web-edit")
         await conn.execute(
             "UPDATE assets SET summary=%s, content=%s, valid_from=now(),"
             " valid_to=NULL, superseded_by=NULL, created_at=now() WHERE id=%s",
