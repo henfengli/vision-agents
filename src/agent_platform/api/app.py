@@ -58,7 +58,7 @@ def create_app(settings, lifespan=None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "env": settings.env,
+        return {"status": "ok", "env": settings.env, "version": __version__,
                 "target_envs": settings.target_envs or [settings.env]}
 
     return app

@@ -145,13 +145,16 @@ def make_static_router() -> APIRouter:
                "cytoscape-dagre.min.js", "marked.min.js", "dompurify.min.js"}
 
     # filename:path 才能匹配 fonts/ 子目录（默认 path converter 不吃斜杠，字体曾因此 404）
+    # no-cache：每次请求都协商（304 走 ETag），升级后页面必拿新 JS/CSS——
+    # 内网静态资源小，协商请求的成本可忽略，换"部署即生效"的确定性
     @router.get("/static/{filename:path}")
     async def static_file(filename: str):
+        headers = {"Cache-Control": "no-cache"}
         if filename in allowed:
-            return FileResponse(STATIC / filename)
+            return FileResponse(STATIC / filename, headers=headers)
         if filename.startswith("fonts/") and filename.endswith(".woff2") \
                 and "/" not in filename[6:]:
-            return FileResponse(STATIC / filename)
+            return FileResponse(STATIC / filename, headers=headers)
         raise HTTPException(404)
 
     return router
