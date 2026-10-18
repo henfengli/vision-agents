@@ -46,6 +46,7 @@
         {% if f_kind %}<input type="hidden" name="kind" value="{{ f_kind }}">{% endif %}
         {% if f_state %}<input type="hidden" name="state" value="{{ f_state }}">{% endif %}
         <input name="q" class="inline" placeholder="名称 / 摘要关键词" value="{{ f_q }}">
+        <button type="submit" class="sm">搜索</button>
       </form>
     </div>
     {% for a in assets %}

@@ -17,7 +17,7 @@
   {% if rows %}
   <div class="card"><table class="grid"><thead><tr>
     <th>编号</th><th>RUN</th><th>待执行命令</th><th>任务</th>
-    <th>来源</th><th>调用方</th><th>等待</th>
+    <th>来源</th><th>调用方</th><th>等待</th><th class="appr-actions-col">操作</th>
   </tr></thead><tbody>
     {% for r in rows %}
     <tr class="rowlink" onclick="location.href='/approvals/{{ r.run_id }}'">
@@ -28,6 +28,15 @@
       <td>{{ r.trigger_source or "—" }}</td>
       <td class="meta">{{ r.caller or "—" }}</td>
       <td>{{ m.ts(r.created_at) }}</td>
+      <td class="appr-actions" onclick="event.stopPropagation()">
+        <form method="post" action="/approvals/{{ r.run_id }}/decide" class="appr-quick">
+          <input type="hidden" name="approval_id" value="{{ r.id }}">
+          <button name="decision" value="approved" class="ok sm"
+                  title="放行执行">✓ 放行</button>
+          <button name="decision" value="rejected" class="danger sm"
+                  title="拒绝并终止">✕ 拒绝</button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
   </tbody></table></div>

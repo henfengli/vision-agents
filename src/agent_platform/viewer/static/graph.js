@@ -316,11 +316,18 @@ async function watchRun(runId) {
     }
     // 最终输出：Markdown 渲染（answer 字段），否则 JSON 代码块——与对话页一致
     const outEl = document.getElementById("output");
-    if (s.run.output && typeof s.run.output.answer === "string")
+    const outCard = outEl.closest(".card");
+    if (s.run.output && typeof s.run.output.answer === "string") {
+      outCard.style.display = "";
       outEl.innerHTML = DOMPurify.sanitize(
         marked.parse(s.run.output.answer, {breaks: true}));
-    else
+    } else if (s.run.output && Object.keys(s.run.output).length) {
+      outCard.style.display = "";
       outEl.innerHTML = `<pre>${esc(JSON.stringify(s.run.output, null, 2))}</pre>`;
+    } else {
+      // 无输出（失败/排队/运行中）：隐藏整张卡片，不渲染 null
+      outCard.style.display = "none";
+    }
     // 失败 run：报错从时间线提到顶部横幅，一眼定位
     if (s.run.status === "failed" && !document.getElementById("fail-banner")) {
       const last = [...allEvents].reverse().find(e => e.kind !== "graph");

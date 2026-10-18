@@ -184,7 +184,10 @@ table.grid tr:last-child td { border-bottom: none; }
 table.grid tbody tr { transition: background 0.12s ease; }
 table.grid tbody tr:hover { background: var(--panel-2); }
 td .run-link { font-family: var(--mono); font-size: 12.5px; }
-table.grid pre { margin: 0; }
+table.grid pre { margin: 0; white-space: pre-wrap; word-break: break-word;
+                 max-width: 460px; }
+/* 卡片里的表格：窄屏/列多时横向滚动，不挤压变形 */
+.card { overflow-x: auto; }
 
 /* —— 筛选条 / 表单行 —— */
 .filter-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -224,6 +227,13 @@ button.danger:hover { background: rgba(248, 113, 113, 0.18); box-shadow: 0 0 12p
 button.ok { color: var(--ok); background: rgba(52, 211, 153, 0.08);
             border-color: rgba(52, 211, 153, 0.35); }
 button.ok:hover { background: rgba(52, 211, 153, 0.18); }
+button.sm { padding: 3px 10px; font-size: 12px; margin: 0; }
+
+/* 审批列表行内快捷操作：不占行高、竖排不撑宽，点击不触发行跳转 */
+.appr-actions-col { width: 1%; white-space: nowrap; }
+.appr-actions { white-space: nowrap; }
+.appr-quick { display: flex; gap: 6px; }
+.appr-quick button { flex-shrink: 0; }
 
 /* —— 步骤时间线 —— */
 .step {
@@ -314,8 +324,11 @@ button.ok:hover { background: rgba(52, 211, 153, 0.18); }
 .chat-page { display: grid; grid-template-columns: 264px 1fr;
   height: calc(100vh - 52px); }
 
-/* 侧栏：比主区更暗一档，会话项是圆角块 */
+/* 侧栏：比主区更暗一档，会话项是圆角块；
+   min-height:0 + overflow:hidden —— grid 子项默认 min-height:auto 会被内容撑开，
+   导致整页一起滚；压住后侧栏自己的 .sess-list 才接管滚动，与主区滚动分离 */
 .chat-side { display: flex; flex-direction: column; gap: 4px;
+  min-height: 0; overflow: hidden;
   background: #070b14; border-right: 1px solid var(--border); padding: 12px; }
 .chat-side .new-chat { width: 100%; background: transparent;
   border: 1px dashed var(--border); border-radius: 10px; color: var(--text-dim);
@@ -332,8 +345,10 @@ button.ok:hover { background: rgba(52, 211, 153, 0.18); }
 .sess-item .t { font-size: 11px; font-family: var(--mono); opacity: 0.55;
   margin-top: 3px; }
 
-/* 主区：顶条（配置）+ 滚动消息区 + 底部 composer */
-.chat-main { display: flex; flex-direction: column; min-width: 0; }
+/* 主区：顶条（配置）+ 滚动消息区 + 底部 composer；
+   同样要 min-height:0 + overflow:hidden，.chat-scroll 才是唯一滚动容器 */
+.chat-main { display: flex; flex-direction: column; min-width: 0;
+  min-height: 0; overflow: hidden; }
 .chat-topbar { display: flex; align-items: center; gap: 8px;
   padding: 10px 22px; border-bottom: 1px solid var(--border); }
 .chat-topbar select { width: auto; padding: 5px 10px; font-size: 12.5px;
@@ -444,8 +459,11 @@ details.steps .step pre { white-space: pre-wrap; word-break: break-word;
 /* —— 管理页：列表 + 编辑器双栏 —— */
 .admin-layout { display: grid; grid-template-columns: 290px 1fr; gap: 16px;
   align-items: start; }
+/* 左侧栏条目多时独立滚动，不顶长整页；与右侧主区滚动分离 */
 .admin-side { background: var(--panel); border: 1px solid var(--border);
-  border-radius: 10px; padding: 10px; }
+  border-radius: 10px; padding: 10px;
+  max-height: calc(100vh - 120px); overflow-y: auto;
+  position: sticky; top: 68px; }
 .admin-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .admin-tabs button { flex: 1; padding: 6px 0; font-size: 13px;
   background: transparent; border: 1px solid var(--border); color: var(--text-dim); }

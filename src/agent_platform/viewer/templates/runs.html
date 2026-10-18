@@ -35,7 +35,7 @@
     <input name="task" class="inline" placeholder="任务名" value="{{ f_task }}"
            style="width:130px">
     <input name="q" class="inline" placeholder="run id / 问题关键词" value="{{ f_q }}">
-    <button type="submit" style="display:none"></button>
+    <button type="submit" class="sm">筛选</button>
   </form>
   {% if pager %}<span class="meta fcount">共 {{ pager.total }} 条</span>{% endif %}
 </div>
