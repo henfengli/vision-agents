@@ -13,7 +13,40 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-_CONF_ROOT = Path(os.environ.get("AGENT_CONF", "conf"))
+def _default_conf_root() -> Path:
+    """配置根默认值：仓库内 conf（源码部署，任意 cwd 均可启动）→ cwd/conf（兼容）。
+
+    老行为是恒取 cwd 下的 "conf"，从仓库根以外目录启动即失败；源码 checkout
+    场景下包位置与 conf 目录的相对关系固定（src/agent_platform/config.py
+    → ../../conf），优先按 __file__ 定位，找不到再退回 cwd（pip 安装到
+    venv 的旧部署方式不受影响——那时本来也只能靠 cwd 或 AGENT_CONF）。
+    """
+    repo_conf = Path(__file__).resolve().parents[2] / "conf"
+    if (repo_conf / "base/common.yaml").is_file():
+        return repo_conf
+    return Path("conf")
+
+
+_CONF_ROOT = Path(os.environ.get("AGENT_CONF") or _default_conf_root())
+
+
+def _default_data_dir() -> str:
+    """数据目录（scratch/assets）默认值：AGENT_DATA_DIR > /var/lib（可写）> ~/.local/share。
+
+    老默认值硬编码 /var/lib/agent-platform——生产 systemd 部署（root 安装 +
+    低权限用户 + 目录预建）没问题，但开发机/容器/无 root 环境里启动即
+    PermissionError。探测顺序保持生产行为优先，无权限时退到用户目录。
+    """
+    env = os.environ.get("AGENT_DATA_DIR")
+    if env:
+        return env
+    var_lib = Path("/var/lib/agent-platform")
+    try:
+        if var_lib.is_dir() or os.access("/var/lib", os.W_OK):
+            return str(var_lib)
+    except OSError:
+        pass
+    return str(Path.home() / ".local" / "share" / "agent-platform")
 
 
 class DomainConfig(BaseModel):
@@ -105,8 +138,8 @@ class Settings(BaseModel):
     dingtalk_token: str
     bearer_token: str                      # 固定 token 鉴权（内网无用户体系）
     viewer_base_url: str
-    scratch_dir: str = "/var/lib/agent-platform/scratch"
-    assets_dir: str = "/var/lib/agent-platform/assets"  # 任务资产库（文件载体；元数据在 PG）
+    scratch_dir: str = Field(default_factory=lambda: _default_data_dir() + "/scratch")
+    assets_dir: str = Field(default_factory=lambda: _default_data_dir() + "/assets")  # 任务资产库（文件载体；元数据在 PG）
     domains: dict[str, DomainConfig] = Field(default_factory=dict)
     temporal: TemporalConfig = TemporalConfig()
     langfuse: LangfuseConfig = LangfuseConfig()

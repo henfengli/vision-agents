@@ -58,6 +58,30 @@ class TestConfig(unittest.TestCase):
             finally:
                 config._CONF_ROOT = old_root
 
+    def test_conf_root_defaults_to_repo(self):
+        """不指定 AGENT_CONF 且 cwd 无 conf 时，落到仓库内 conf（源码部署任意 cwd 可启动）。"""
+        from agent_platform import config
+        root = config._default_conf_root()
+        self.assertTrue((root / "base/common.yaml").is_file(),
+                        f"仓库 conf 未命中：{root}")
+
+    def test_data_dir_fallback(self):
+        """数据目录默认值：AGENT_DATA_DIR 优先；未设时给出可创建路径。"""
+        from agent_platform import config
+        with tempfile.TemporaryDirectory() as d:
+            old = os.environ.get("AGENT_DATA_DIR")
+            os.environ["AGENT_DATA_DIR"] = d
+            try:
+                self.assertEqual(config._default_data_dir(), d)
+            finally:
+                if old is None:
+                    os.environ.pop("AGENT_DATA_DIR", None)
+                else:
+                    os.environ["AGENT_DATA_DIR"] = old
+        os.environ.pop("AGENT_DATA_DIR", None)
+        fallback = config._default_data_dir()
+        self.assertTrue(fallback.startswith("/var/lib") or fallback.startswith(str(Path.home())))
+
     def test_resolve_target_env(self):
         from agent_platform.config import Settings
         s = Settings(db_dsn="x", model={"url": "u", "name": "m", "tokens": ["t"]},
