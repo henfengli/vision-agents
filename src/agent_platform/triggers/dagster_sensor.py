@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 
 DEFAULT_SESSION_TEMPLATE = "dagster:{asset}:{error_class}:{date}"
@@ -61,11 +62,20 @@ def make_router(submitter, notifier, auth=None,
         error = str(payload.get("error", ""))
         hit = rule_classify(error, rules)
         if hit and notifier is not None:
-            await notifier.send_alert_card(
-                f"[failure-analysis] {payload.get('asset_key', '')}",
-                f"**规则判定**（{hit['category']}）：{hit['conclusion']}\n\n"
-                f"报错摘要：{error[:500]}",
-                dedup_hash=str(payload.get("run_id", "")))
+            try:
+                await notifier.send_alert_card(
+                    f"[failure-analysis] {payload.get('asset_key', '')}",
+                    f"**规则判定**（{hit['category']}）：{hit['conclusion']}\n\n"
+                    f"报错摘要：{error[:500]}",
+                    dedup_hash=str(payload.get("run_id", "")))
+            except Exception:
+                # 告警通道（relay 不可达等）挂了不能让 webhook 500：
+                # 规则结论照样返回调用方，只标注通知未送达
+                logging.getLogger(__name__).exception(
+                    "规则判定告警卡发送失败（asset=%s）",
+                    payload.get("asset_key", ""))
+                return {"status": "rule_resolved",
+                        "category": hit["category"], "notify": "failed"}
             return {"status": "rule_resolved", "category": hit["category"]}
         return await submitter.submit(
             "failure-analysis", payload, trigger_source="sensor",

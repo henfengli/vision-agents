@@ -18,6 +18,7 @@ async def create_worker(client: Client, deps: activities.Deps,
         workflows=[AgentRunWorkflow, ArtifactRunWorkflow, BuiltinTaskWorkflow],
         activities=[activities.prepare_run, activities.run_agent,
                     activities.finalize_run, activities.mark_failed,
+                    activities.deliver_output,
                     activities.art_materialize, activities.art_gate,
                     activities.art_mark, activities.run_builtin_task],
     )
