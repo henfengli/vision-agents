@@ -112,6 +112,8 @@ class Runtime:
     temporal_client: object = None
     worker: object = None
     rule_provider: object = None     # 规则库运行期源（rules.RuleProvider）
+    domain_provider: object = None   # 域注册表（domains.DomainProvider）
+    env_gate: object = None          # 环境启停（domains.EnvGate）
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
     _sync_task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -144,6 +146,14 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         defs, settings.env,
         fallback={name: (pack.rules or [])
                   for name, pack in settings.domains.items()})
+    # 域（服务）注册表：conf/domains 播种进 definitions，之后 DB 是事实源
+    # （服务页创建/编辑/启停/回滚，5s 热生效）；文件只兜底首次启动
+    from . import domains as domains_svc
+    domain_provider = domains_svc.DomainProvider(defs, settings.env,
+                                                 settings.domains)
+    await domain_provider.seed_from_packs()
+    await domain_provider.refresh()
+    env_gate = domains_svc.EnvGate(defs, settings.env)
     tasks = TaskRegistry(defs, settings.env)
     langfuse = LangfuseClient(settings.langfuse)
     relay = DingTalkRelay(settings.dingtalk_relay_url, settings.dingtalk_token)
@@ -217,14 +227,14 @@ async def assemble_runtime(settings: Settings) -> Runtime:
     extra_tools = await load_mcp_tools(settings.mcp_servers)
 
     def sql_dsn(domain: str | None) -> str | None:
-        dom = domain or next(iter(settings.domains), None)
-        cfg = settings.domains.get(dom) if dom else None
+        dom = domain or next(iter(domain_provider.all()), None)
+        cfg = domain_provider.get(dom)
         return cfg.readonly_dsn if cfg else None
 
     def host_resolver(domain: str | None, env: str | None):
         """(domain, env) → (部署主机列表, GrafanaConfig)。主机按目标环境取 envs 覆盖值。"""
-        dom = domain or next(iter(settings.domains), None)
-        cfg = settings.domains.get(dom) if dom else None
+        dom = domain or next(iter(domain_provider.all()), None)
+        cfg = domain_provider.get(dom)
         if cfg is None:
             return [], settings.grafana
         tenv = settings.resolve_target_env(env)
@@ -254,21 +264,27 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                           settings.temporal.task_queue, settings.env,
                           defs=defs, approval_notifier=submit_gate_notify,
                           target_envs=settings.target_envs,
-                          default_target_env=settings.default_target_env)
+                          default_target_env=settings.default_target_env,
+                          domain_provider=domain_provider, env_gate=env_gate)
 
     worker = await create_worker(
         temporal_client,
         activities.Deps(settings=settings, engine=engine,
                         model_pool=model_pool, notifier=relay,
-                        langfuse=langfuse),
+                        langfuse=langfuse, domains=domain_provider),
         settings.temporal.task_queue)
 
     async def resync_schedules() -> int:
-        """任务定义保存后立即重同步 Temporal Schedules（热生效）；
-        失败只留痕——周期对账兜底，不阻断保存。"""
+        """任务/域定义保存后立即重同步 Temporal Schedules（热生效）；
+        失败只留痕——周期对账兜底，不阻断保存。
+        停用域的调度任务不建 schedule（先 refresh 再取停用集合）。"""
         try:
+            await domain_provider.refresh()
+            disabled = {n for n in domain_provider.names()
+                        if not domain_provider.enabled(n)}
             return await sync_schedules(temporal_client, await tasks.list(),
-                                        settings.temporal.task_queue)
+                                        settings.temporal.task_queue,
+                                        disabled_domains=disabled)
         except Exception:  # noqa: BLE001 — Temporal 抖动不应让定义保存失败
             log.exception("热同步 Temporal Schedule 失败")
             return 0
@@ -287,11 +303,14 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                  temporal_client=temporal_client,
                  worker=worker,
                  rule_provider=rule_provider,
+                 domain_provider=domain_provider, env_gate=env_gate,
                  _worker_task=asyncio.create_task(worker.run()),
                  _sync_task=asyncio.create_task(_schedule_reconcile()))
 
-    n = await sync_schedules(temporal_client, await tasks.list(),
-                             settings.temporal.task_queue)
+    n = await sync_schedules(
+        temporal_client, await tasks.list(), settings.temporal.task_queue,
+        disabled_domains={d for d in domain_provider.names()
+                          if not domain_provider.enabled(d)})
     if n:
         log.info("同步 %d 个 Temporal Schedule", n)
     return rt
@@ -322,22 +341,28 @@ def build_app(settings: Settings | None = None):
         rt = await assemble_runtime(settings)
         # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
         auth = make_auth_dependency(settings.bearer_token)
-        dagster_pack = settings.domains.get("dagster")
+        dagster_cfg = rt.domain_provider.get("dagster")
 
         async def _rules_for(domain: str, _error: str) -> list[dict]:
             return await rt.rule_provider.rules_for(domain)
 
+        async def _domain_enabled(domain: str) -> bool:
+            await rt.domain_provider.refresh()
+            return rt.domain_provider.enabled(domain)
+
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse,
-                            schedule_sync=rt.resync_schedules),
+                            schedule_sync=rt.resync_schedules,
+                            domain_provider=rt.domain_provider),
             make_ops_router(settings, embedder=rt.embedder,
-                            domain_cfgs=settings.domains),
+                            domain_cfgs=rt.domain_provider.all()),
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 classifier=_rules_for,
-                session_template=(dagster_pack.session_template
-                                  if dagster_pack else None)),
+                session_template=(dagster_cfg.session_template
+                                  if dagster_cfg else None),
+                domain_enabled=_domain_enabled),
             gitlab_webhook.make_router(rt.submitter, auth=auth),
             chat_trigger.make_router(rt.submitter, auth=auth),
         ):
@@ -345,9 +370,11 @@ def build_app(settings: Settings | None = None):
         app.include_router(make_viewer_router(
             rt.submitter, rt.defs, settings.env,
             langfuse=rt.langfuse, token=settings.bearer_token,
-            domains=list(settings.domains),
+            domains=list(rt.domain_provider.all()),
             target_envs=settings.target_envs or None,
-            tool_names=rt.tool_names, domain_cfgs=settings.domains))
+            tool_names=rt.tool_names,
+            domain_cfgs=rt.domain_provider.all(),
+            domain_provider=rt.domain_provider, env_gate=rt.env_gate))
         try:
             yield
         finally:

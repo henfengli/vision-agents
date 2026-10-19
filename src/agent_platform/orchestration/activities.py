@@ -58,6 +58,7 @@ class Deps:
     model_pool: Any
     notifier: Any
     langfuse: Any          # LangfuseClient | None
+    domains: Any = None    # DomainProvider（域启停 + code_paths 的 DB 事实源）
 
 
 _deps: Deps | None = None
@@ -85,6 +86,17 @@ async def prepare_run(raw: dict) -> dict:
     """
     d = _d()
     spec = RunSpec.from_dict(raw)
+    # 停用兜底：提交端闸门外，调度/重试进入的 run 在这里再拦一次——
+    # 域已停用则直接失败落账，不进入召回与执行（任务级停用靠
+    # sync_schedules 不建 schedule + 提交端拒绝覆盖）
+    dom_provider = getattr(d, "domains", None)
+    if dom_provider is not None:
+        await dom_provider.refresh()
+        if spec.domain and not dom_provider.enabled(spec.domain):
+            if spec.run_id:
+                await runs.set_status(spec.run_id, "failed", output={
+                    "error": f"服务 {spec.domain} 已停用"})
+            return spec.to_dict()
     if not spec.run_id:
         spec.run_id = uuid.uuid4().hex[:16]
         spec.session_id = spec.run_id
@@ -115,10 +127,13 @@ async def prepare_run(raw: dict) -> dict:
     role = resolve(spec.role, await d.engine.roles())
     spec.domain = spec.domain or (role.domains[0] if role.domains else None)
     # 目标环境：run 操作哪套业务环境——域连接信息（code_paths/只读库）与
-    # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）
+    # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）。
+    # 域连接信息走 DomainProvider（DB 事实源），取不到再退 settings 种子
     t_env = spec.effective_env(d.settings.env)
-    if spec.domain and spec.domain in d.settings.domains:
-        spec.code_paths = d.settings.domains[spec.domain].for_env(t_env).code_paths
+    dom_cfg = (dom_provider.get(spec.domain) if dom_provider is not None
+               else None) or d.settings.domains.get(spec.domain or "")
+    if spec.domain and dom_cfg is not None:
+        spec.code_paths = dom_cfg.for_env(t_env).code_paths
     # save_asset 等工具的默认值上下文（域/任务/目标环境）
     current_run_ctx.set({"env": t_env, "domain": spec.domain or "",
                          "task": spec.task_type})

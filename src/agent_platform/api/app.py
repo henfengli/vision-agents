@@ -66,7 +66,7 @@ def create_app(settings, lifespan=None) -> FastAPI:
 
 def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
                     defs: DefinitionStore, langfuse=None,
-                    schedule_sync=None) -> APIRouter:
+                    schedule_sync=None, domain_provider=None) -> APIRouter:
     auth = make_auth_dependency(settings.bearer_token)
     router = APIRouter(dependencies=[Depends(auth)])
 
@@ -304,6 +304,67 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.get("/v1/admin/policies")
     async def list_policies():
         return await defs.list_active("policy", settings.env)
+
+    # —— Admin：服务（业务域）配置（kind="domain"；服务页全权管理） ——
+
+    @router.post("/v1/admin/domains")
+    async def put_domain(req: DefinitionPutRequest):
+        """保存服务配置（新版本，热生效）。definition 是 DomainConfig 字段。"""
+        from ..config import DomainConfig
+        if not req.name or ":" in req.name or "/" in req.name:
+            raise HTTPException(422, "服务名只允许字母数字、-、_、.")
+        try:
+            DomainConfig.model_validate(req.definition)
+        except Exception as e:
+            raise HTTPException(422, f"服务配置不合法：{e}")
+        version = await defs.put("domain", settings.env, req.name,
+                                 req.definition, req.updated_by)
+        if domain_provider is not None:
+            await domain_provider.refresh()
+        # 服务启停影响调度同步（停用域的调度任务立即暂停）
+        synced = await schedule_sync() if schedule_sync is not None else None
+        return {"name": req.name, "version": version,
+                **({"schedule_resynced": True} if synced is not None else {})}
+
+    @router.get("/v1/admin/domains")
+    async def list_domains():
+        return await defs.list_active("domain", settings.env)
+
+    @router.get("/v1/admin/domains/{name}")
+    async def get_domain(name: str):
+        return await _get_def("domain", name)
+
+    @router.get("/v1/admin/domains/{name}/history")
+    async def domain_history(name: str):
+        return await defs.history("domain", settings.env, name)
+
+    @router.post("/v1/admin/domains/{name}/rollback/{version}")
+    async def rollback_domain(name: str, version: int):
+        history = await defs.history("domain", settings.env, name)
+        target = next((h for h in history if h["version"] == version), None)
+        if target is None:
+            raise HTTPException(404, f"服务 {name} 不存在版本 {version}")
+        new_version = await defs.put("domain", settings.env, name,
+                                     target["definition"],
+                                     updated_by=f"rollback-to-v{version}")
+        if domain_provider is not None:
+            await domain_provider.refresh()
+        return {"name": name, "version": new_version}
+
+    # —— Admin：目标环境启停（kind="env"，name=环境名；未配置=启用） ——
+
+    @router.post("/v1/admin/envs")
+    async def put_env_gate(req: DefinitionPutRequest):
+        enabled = req.definition.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "环境定义须含 enabled: true/false")
+        version = await defs.put("env", settings.env, req.name,
+                                 {"enabled": enabled}, req.updated_by)
+        return {"name": req.name, "version": version}
+
+    @router.get("/v1/admin/envs")
+    async def list_env_gates():
+        return await defs.list_active("env", settings.env)
 
     # —— Admin：报错规则库（rules 服务模块；按域存，name=域名） ——
 

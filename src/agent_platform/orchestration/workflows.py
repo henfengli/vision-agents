@@ -76,17 +76,27 @@ class AgentRunWorkflow:
 # ==================== 调度（Temporal Schedules） ====================
 
 
-async def sync_schedules(client, tasks: list, task_queue: str) -> int:
+async def sync_schedules(client, tasks: list, task_queue: str,
+                         disabled_domains: set[str] | None = None) -> int:
     """把带 schedule 的任务定义同步为 Temporal Schedules。幂等。
 
     任务定义变更/删除时：平台前缀下多余的 schedule 删除，同名的更新。
+    任务级 enabled=false 或所在域停用（disabled_domains）的任务不建
+    schedule，已建的删除——停用即暂停调度。
     """
+    disabled_domains = disabled_domains or set()
     from temporalio.client import (Schedule, ScheduleActionStartWorkflow,
                                    ScheduleOverlapPolicy, ScheduleSpec)
     from temporalio.common import WorkflowIDReusePolicy
 
     prefix = "task:"
-    wanted = {t.name: t for t in tasks if getattr(t, "schedule", None)}
+    # 调度任务的域归属 = schedule_input 里的 server/domain（与提交端同口径）
+    def _dom(t) -> str:
+        inp = getattr(t, "schedule_input", None) or {}
+        return str(inp.get("server") or inp.get("domain") or "")
+    wanted = {t.name: t for t in tasks
+              if getattr(t, "schedule", None) and getattr(t, "enabled", True)
+              and _dom(t) not in disabled_domains}
 
     existing = set()
     async for s in await client.list_schedules():

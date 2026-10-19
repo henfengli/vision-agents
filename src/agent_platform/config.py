@@ -61,6 +61,7 @@ class DomainConfig(BaseModel):
 
     code_paths: list[str] = []
     readonly_dsn: str | None = None
+    enabled: bool = True                      # 停用：拒新任务/webhook + 暂停调度
     hosts: list[str] = []                     # 该域服务实际部署的机器（IP/主机名，供 host_metrics 查监控）
     rules: list[dict] = []                    # [{pattern, category, conclusion}]
     session_template: str | None = None       # 含 {asset}/{error_class}/{date}

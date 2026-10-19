@@ -19,10 +19,11 @@ from ...store import feedback as feedback_store
 from ...store import runs as runs_store
 from .base import render
 
-# 管理页只管平台级定义（角色/任务/策略）；规则库是域资产，归服务页（/services）
-KINDS = ("role", "task", "policy")
-# 历史/diff 读回额外放行 rules——服务页规则库的版本时间线与 diff 走这里
-_READBACK_KINDS = KINDS + ("rules",)
+# 管理页管平台级定义（角色/任务/策略）+ 目标环境开关；
+# 规则库与服务配置是域资产，归服务页（/services）
+KINDS = ("role", "task", "policy", "env")
+# 历史/diff 读回额外放行 rules/domain——服务页的时间线与 diff 走这里
+_READBACK_KINDS = KINDS + ("rules", "domain")
 
 
 def make_router(defs_store, env: str, langfuse=None,
@@ -70,9 +71,9 @@ def make_router(defs_store, env: str, langfuse=None,
 
     @router.get("/admin/diff")
     async def def_diff(kind: str, name: str, a: int, b: int, format: str = ""):
-        """两个版本的定义 diff。format=json 供管理页内联渲染；默认整页 HTML
-        （直链/新窗口打开）。排查"当时那版 prompt 怎么写的"的落点。"""
-        if kind not in _READBACK_KINDS:
+        """两个版本的定义 diff。format=json 供管理页/服务页内联渲染；
+        默认整页 HTML（直链/新窗口打开）。"""
+        if kind not in ("role", "task", "rules", "domain"):
             raise HTTPException(422, f"kind 只能是 {'/'.join(_READBACK_KINDS)}")
         history = await defs_store.history(kind, env, name)
         by_version = {h["version"]: h for h in history}

@@ -9,8 +9,9 @@ const D = window.ADMIN;
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 
-const KIND_LABEL = {role: "角色", task: "任务", policy: "策略"};
+const KIND_LABEL = {role: "角色", task: "任务", policy: "策略", env: "环境"};
 const SAVE_URL = {role: "/v1/admin/roles", task: "/v1/admin/tasks",
+                  env: "/v1/admin/envs",
                   policy: "/v1/admin/policies"};
 
 /* 表单 schema：kind → 字段描述列表。type: text/number/textarea/json/
@@ -28,6 +29,7 @@ const FORMS = {
      type: "textarea", rows: 3, mono: true},
   ],
   task: [
+    {k: "enabled", label: "启用（停用 = 拒新提交 + 暂停调度）", type: "bool"},
     {k: "extends", label: "父任务", type: "select",
      options: () => D.taskNames.filter(n => n !== cur.name && !n.includes(":")),
      empty: "（不继承，通用任务）",
@@ -50,6 +52,10 @@ const FORMS = {
      type: "json", rows: 2},
     {k: "env_gate", label: "启用环境（空 = 全部）", type: "checks",
      options: () => D.envs},
+  ],
+  env: [
+    {k: "enabled", label: "启用（停用 = 拒收指向该环境的一切新 run，含调度）",
+     type: "bool"},
   ],
   policy: [
     {k: "match_regex", label: "命中正则（作用于 任务名+输入+question）",

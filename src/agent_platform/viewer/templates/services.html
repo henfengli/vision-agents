@@ -1,15 +1,22 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block content %}
-{{ m.page_head("SERVICES", "服务", "业务域（conf/domains/ 域包）的聚合视图 · 点进单个服务看规则/任务/知识/资产/run") }}
+{{ m.page_head("SERVICES", "服务", "业务域的聚合视图 · 配置存版本化定义库，创建/启停/回滚都在这里，热生效") }}
+
+<div class="svc-actions">
+  <a class="admin-new svc-new" href="/services/new">＋ 新建服务</a>
+</div>
+
 {% if cards %}
 <div class="svc-cards">
   {% for c in cards %}
-  <a class="card svc-card" href="/services/{{ c.name }}">
-    <h3>{{ c.name }}</h3>
+  <a class="card svc-card{% if not c.enabled %} svc-off{% endif %}" href="/services/{{ c.name }}">
+    <h3>{{ c.name }}
+      {% if not c.enabled %}<span class="pill pill-cancelled">已停用</span>{% endif %}
+      {% if c.version %}<span class="tag">v{{ c.version }}</span>{% endif %}</h3>
     <div class="meta">{% if c.envs %}环境覆盖：{{ c.envs | join("、") }}{% else %}默认环境{% endif %}{% if c.hosts %} · {{ c.hosts }} 台主机{% endif %}</div>
     <div class="svc-stats">
-      <span>{% if c.has_rules %}规则库 v{{ c.rules_version }}{% else %}规则库未配置{% endif %}</span>
+      <span>{% if c.has_rules %}分流规则 v{{ c.rules_version }}{% else %}无分流规则{% endif %}</span>
       <span>任务 {{ c.tasks }}{% if c.sub_tasks %}（+{{ c.sub_tasks }} 子任务）{% endif %}</span>
       <span>知识 {{ c.knowledge }}</span>
       <span>资产 {{ c.assets }}</span>
@@ -19,6 +26,23 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="card meta">未配置业务域——在 conf/domains/&lt;名称&gt;/ 放域包（domain.yaml 等）后重启生效。</div>
+<div class="card meta">还没有服务。点「＋ 新建服务」创建第一个，或在 conf/domains/&lt;名称&gt;/ 放域包后重启播种。</div>
 {% endif %}
+
+{% if env_states %}
+<div class="card">
+  <h3>目标环境</h3>
+  <div class="meta" style="margin-bottom:10px">环境级启停：停用后拒收一切指向该环境的新 run（含调度）。开关保存即生效。</div>
+  {% for e, on in env_states.items() %}
+  <div class="svc-task">
+    <span class="svc-task-name">{{ e }}</span>
+    <span class="pill {{ 'pill-success' if on else 'pill-cancelled' }}">{{ '启用中' if on else '已停用' }}</span>
+    <button class="sm svc-env-toggle" data-env="{{ e }}" data-on="{{ '1' if on else '0' }}">{{ '停用' if on else '启用' }}</button>
+    <span class="meta svc-env-msg" data-env="{{ e }}"></span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script src="/static/services.js"></script>
 {% endblock %}

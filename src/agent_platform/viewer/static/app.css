@@ -633,3 +633,6 @@ a.svc-card:hover { border-color: var(--accent); text-decoration: none; }
 .svc-k { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .svc-k:last-child { border-bottom: none; }
 .svc-k-content { margin-top: 3px; white-space: pre-wrap; word-break: break-word; }
+.svc-actions { margin-bottom: 12px; }
+a.svc-new { display: inline-block; width: auto; margin: 0; text-decoration: none; }
+a.svc-card.svc-off { opacity: 0.55; }

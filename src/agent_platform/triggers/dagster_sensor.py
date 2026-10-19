@@ -36,9 +36,11 @@ def session_id_for(asset_key: str, error: str, rules: list[dict],
 
 def make_router(submitter, notifier, auth=None,
                 classifier=None,
-                session_template: str | None = None):
+                session_template: str | None = None,
+                domain_enabled=None):
     """classifier：async (domain, error) -> rules 列表（RuleProvider.rules_for
-    的部分应用）；缺省 = 无规则全交 agent。"""
+    的部分应用）；缺省 = 无规则全交 agent。
+    domain_enabled：async (domain) -> bool，服务停用即拒收（429）。"""
     from fastapi import APIRouter, Depends
 
     # auth：与 /v1 API 同一 bearer 依赖；webhook 也是服务间调用，不能裸奔
@@ -61,6 +63,10 @@ def make_router(submitter, notifier, auth=None,
         env 是目标业务环境：多套 Dagster 环境共用一个 agent 实例时，
         sensor 侧按自己的环境标识上送（缺省 = 实例默认环境）。
         """
+        # 服务停用即拒收：sensor 应降级或暂停，别把报错打进停用的域
+        if domain_enabled is not None and not await domain_enabled("dagster"):
+            from fastapi import HTTPException
+            raise HTTPException(429, "服务 dagster 已停用")
         error = str(payload.get("error", ""))
         asset_key = str(payload.get("asset_key", ""))
         target_env = payload.get("env") or None

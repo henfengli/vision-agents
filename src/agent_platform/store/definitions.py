@@ -12,7 +12,8 @@ from typing import Literal
 
 from .db import pool
 
-Kind = Literal["role", "task", "policy", "rules"]
+# domain = 业务域配置（服务部署信息），env = 目标环境启停开关
+Kind = Literal["role", "task", "policy", "rules", "domain", "env"]
 
 _CACHE_TTL_S = 5.0  # 缓存短 TTL + 写时主动失效，双保险
 

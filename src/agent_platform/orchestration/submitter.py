@@ -44,7 +44,8 @@ class Submitter:
                  defs: DefinitionStore | None = None,
                  approval_notifier=None,
                  target_envs: list[str] | None = None,
-                 default_target_env: str | None = None):
+                 default_target_env: str | None = None,
+                 domain_provider=None, env_gate=None):
         self._client = client
         self._tasks = tasks
         self._tq = task_queue
@@ -55,6 +56,8 @@ class Submitter:
         self._approval_notifier = approval_notifier  # 任务级闸门钉钉通知
         self._target_envs = target_envs or []    # 可操作的业务环境（空=单环境）
         self._default_target = default_target_env
+        self._domains = domain_provider         # 服务级启停（domains.DomainProvider）
+        self._env_gate = env_gate               # 环境级启停（domains.EnvGate）
 
     # —— 内部 ——
 
@@ -77,6 +80,8 @@ class Submitter:
         task = await self._tasks.resolve(task_name)
         if task is None:
             raise TaskRejected(f"未知任务类型：{task_name}")
+        if not task.enabled:
+            raise TaskRejected(f"任务 {task_name} 已停用")
         if not task.enabled_in(target_env):
             raise TaskRejected(
                 f"任务 {task_name} 未在目标环境（{target_env}）启用")
@@ -213,6 +218,10 @@ class Submitter:
                      target_env: str | None = None,
                      idempotency_key: str | None = None) -> dict:
         target_env = self._resolve_target_env(target_env)
+        # 环境级启停：目标环境停用即拒收一切新 run
+        if self._env_gate is not None and not await self._env_gate.enabled(
+                target_env):
+            raise TaskRejected(f"目标环境 {target_env} 已停用")
         task = await self._resolve_task(task_name, role, target_env)
         # 子任务选择（命名即绑定）：输入里任一值 == 子任务名后缀即选用，
         # 如子任务 failure-analysis:dwd_trade_order 对输入
@@ -222,9 +231,18 @@ class Submitter:
             child = await self._tasks.find_child(task.name, input_data)
             if child is not None:
                 task = child
+                if not task.enabled:
+                    raise TaskRejected(f"子任务 {task.name} 已停用")
                 if not task.enabled_in(target_env):
                     raise TaskRejected(
                         f"子任务 {task.name} 未在目标环境（{target_env}）启用")
+        # 服务级启停：域停用即拒绝响应（webhook/submit 统一过这里）
+        domain = str(input_data.get("server") or input_data.get("domain")
+                     or "") or None
+        if domain and self._domains is not None:
+            await self._domains.refresh()
+            if not self._domains.enabled(domain):
+                raise TaskRejected(f"服务 {domain} 已停用")
         # 提交闸门链（policies.py）：env_gate 之外的 DB 声明策略都在这里过
         if self._defs is not None and not correction:
             verdict = await policies.evaluate_submit(

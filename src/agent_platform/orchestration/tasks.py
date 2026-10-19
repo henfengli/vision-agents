@@ -27,6 +27,7 @@ class TaskDef(BaseModel):
     schedule: str | None = None              # cron 表达式（Temporal Schedule）
     schedule_input: dict = Field(default_factory=dict)  # 定时触发时的固定输入
     timeout_s: int = 300
+    enabled: bool = True                     # 全局开关：False = 拒新提交+暂停调度
     env_gate: list[str] = Field(default_factory=list)  # 空 = 所有环境启用
     # —— 任务形态（三选一，都空 = 单 agent 问答） ——
     artifacts: dict[str, NodeDef] | None = None  # 资产化任务图（见 artgraph.py）
@@ -41,7 +42,7 @@ class TaskDef(BaseModel):
     context: dict = Field(default_factory=dict)  # 任务档案：负责人/代码位置/常见坑/上游依赖/备注
 
     def enabled_in(self, env: str) -> bool:
-        return not self.env_gate or env in self.env_gate
+        return self.enabled and (not self.env_gate or env in self.env_gate)
 
     def compute_dedup_key(self, input_data: dict) -> str:
         """dedup_key 支持 "a+b" 拼接多个输入字段。"""
