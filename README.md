@@ -37,10 +37,17 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 - **资产化任务图**：节点是产物、边是依赖（数据流不是控制流）；动态性只收进
   route（枚举选一）与 map（对上游 list 扇出）两个出口；拓扑分层 + 层内并行；
   输入指纹未变的节点重跑时直接复用旧产物（选择性再物化）。
-- **提交闸门链**：DB 声明策略（正则 + order）在提交路径上按序短路——deny 拒绝 /
-  require_approval 挂起等审批，批准即启动；与执行期危险命令审批两层互补。
-- **域包**：域知识（规则/会话模板/种子任务）住 `conf/domains/<name>/`，
-  内核只留机制；业务团队 PR 自己的域包。
+- **提交闸门链**：先过开关（目标环境/服务/任务停用、任务环境门禁），再过
+  DB 声明策略（正则 + order）——deny 拒绝 / require_approval 挂起等审批，批准
+  即启动；拒绝统一带原因码（`error_code`）。与执行期危险命令审批两层互补。
+- **服务（域）**：与 agent 同机部署的业务项目。配置（代码路径/主机/只读库/
+  服务档案/环境覆盖/启停）与规则库都存定义库，服务页编辑、热生效、可回滚；
+  `conf/domains/<name>/` 只在库里没有该服务时播种一次（之后改文件不生效，
+  启动日志会提示）。
+- **子任务 + 档案**：`任务:对象名` 一层子任务，只存差异、其余继承；调用方
+  显式带 `subtask`（或直接提交完整名）选用，不存在即自动继承建桩。档案两层——
+  服务档案（该服务所有 run）+ 任务档案（该任务/子任务），自由键、逐字置顶注入，
+  只记代码和配置里读不出来的东西。见设计文档 §3.15。
 - **概念唯一 session_id**：会话由它标识；LangGraph thread 是实现细节，不出 engine 层。
 - **episode 会话**：`dagster:{asset}:{error_class}:{date}`，连续性由记忆层承载
   （资产档案逐字保留 → 前序交接摘要四节模板 → 历史知识 RRF 混合检索 → 同类案例）。
@@ -57,8 +64,7 @@ agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工
 - **工具分层**：L0 bash（bwrap 沙箱：全盘只读/仅 scratch 可写/默认断网——
   出网访问全部收口成薄工具，命令是 LLM 现场拼的，正则审批管不住 API 语义）/
   L2 run_code（CodeAct，一次编排多工具）/
-  薄工具（sql_query、host_metrics、dingtalk_send、update_asset_profile、
-  save_asset）/
+  薄工具（sql_query、host_metrics、dingtalk_send、save_asset）/
   MCP 桥（内部服务类型化接口；browser / datahub 直接用官方实现
   @playwright/mcp、mcp-server-datahub，仓库只自带 dagster server，见 `mcp_servers/`）。
 - **安全**：systemd 物理收口 + bwrap 沙箱（含 `--unshare-pid --as-pid-1`：

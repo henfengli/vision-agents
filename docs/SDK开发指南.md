@@ -107,9 +107,9 @@ session_id 是会话唯一标识：不指定则服务端生成并在首次应答
 
 | 方法 | 语义 |
 |---|---|
-| `submit(task_type, input: dict, idempotency_key=None) -> dict` | 立即返回 `{"run_id", "status", ...}`；命中幂等/去重时 `status="dedup_hit"` |
+| `submit(task_type, input: dict, idempotency_key=None, subtask=None) -> dict` | 立即返回 `{"run_id", "status", ...}`；命中幂等/去重时 `status="dedup_hit"` |
 | `wait(run_id, timeout=300.0, interval=2.0) -> dict` | 轮询至终态，返回 run 视图；超时抛 `AgentError` |
-| `submit_and_wait(task_type, input, timeout=300.0, idempotency_key=None) -> dict` | 提交 + 等待一体；**待审批立即返回**（`status="awaiting_approval"`，不等审批） |
+| `submit_and_wait(task_type, input, timeout=300.0, idempotency_key=None, subtask=None) -> dict` | 提交 + 等待一体；**待审批立即返回**（`status="awaiting_approval"`，不等审批） |
 | `get_task(run_id) -> dict` | 单次查询 run 视图 |
 | `events(run_id, after_seq=-1) -> list[dict]` | 事件流增量拉取（观测进度用；每条 `{"seq","kind","payload","created_at"}`） |
 | `cancel(run_id, by="") -> dict` | 取消运行中/排队中的 run；已终态抛错（HTTP 409） |
