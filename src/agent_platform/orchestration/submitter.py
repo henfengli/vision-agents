@@ -214,11 +214,13 @@ class Submitter:
                      idempotency_key: str | None = None) -> dict:
         target_env = self._resolve_target_env(target_env)
         task = await self._resolve_task(task_name, role, target_env)
-        # 子任务自动选择：通用任务（如 failure-analysis）的某个子任务
-        # 声明了 bind 且与本次输入精确匹配时，改用子任务——档案/归因
-        # 按子任务名落账，调用方无需知道子任务存在
+        # 子任务选择：先按 bind 精确匹配；未命中且父任务开了 auto_branch
+        # 时自动建桩（继承全部 + 绑定 branch_key 值，档案待人补全）。
+        # 档案/归因按子任务名落账，调用方无需知道子任务存在
         if role is None:
             bound = await self._tasks.find_bound(task.name, input_data)
+            if bound is None:
+                bound = await self._tasks.auto_branch(task, input_data)
             if bound is not None:
                 task = bound
                 if not task.enabled_in(target_env):

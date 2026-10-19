@@ -98,7 +98,7 @@ async def distill(pool: ModelPool, env: str, domain: str | None, run_id: str,
                 code_ref = {"path": item["code_path"], "commit": commit}
             await knowledge_store.upsert(env, domain, item["key"], item["content"],
                                          source_run=run_id, code_ref=code_ref,
-                                         embedder=embedder)
+                                         task=task_type, embedder=embedder)
         elif item.get("kind") == "case":
             error = str(run_input.get("error", ""))
             if error:

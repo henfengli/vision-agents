@@ -70,6 +70,8 @@
               {% else %}<span class="pill pill-failed">代码已漂移</span>{% endif %}
             {% endif %}
             {% if i.feedback_score %}<span class="meta">反馈 {{ "%+d"|format(i.feedback_score) }}</span>{% endif %}
+            {% if i.task %}<span class="pill pill-running"
+              title="沉淀来源任务：召回时同谱系优先，异谱系降级">{{ i.task }}</span>{% endif %}
             {% if not i.superseded and not i.expired %}
               {% if i.usage %}<span class="meta">近{{ usage_days }}天命中 {{ i.usage.hits }} 次</span>
               {% else %}<span class="pill pill-queued">零召回</span>{% endif %}

@@ -148,7 +148,7 @@ async def prepare_run(raw: dict) -> dict:
             t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
             embedder=d.model_pool.embed, session_id=spec.session_id,
-            run_id=spec.run_id)
+            run_id=spec.run_id, task=spec.task_type)
         if recalled:
             spec.prompt = f"{recalled}\n\n{spec.prompt}"
             await runs.log_event(spec.run_id, "note",

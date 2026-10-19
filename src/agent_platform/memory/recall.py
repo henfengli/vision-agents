@@ -12,11 +12,21 @@ from ..store import cases as cases_store
 from ..store import knowledge as knowledge_store
 
 
+def _task_lineage(task: str) -> set[str]:
+    """任务谱系链：'a:b:c' → {'a:b:c', 'a:b', 'a', ''}（含无归属的通用知识）。"""
+    chain = {""}
+    parts = task.split(":") if task else []
+    for i in range(1, len(parts) + 1):
+        chain.add(":".join(parts[:i]))
+    return chain
+
+
 async def recall_block(env: str, domain: str | None, query: str,
                        error_text: str | None = None,
                        domain_code_paths: list[str] | None = None,
                        embedder=None, session_id: str | None = None,
                        run_id: str | None = None,
+                       task: str = "",
                        source: str = "recall") -> str:
     """拼召回文本块；无命中返回空串。
 
@@ -55,11 +65,20 @@ async def recall_block(env: str, domain: str | None, query: str,
             else:
                 await knowledge_store.mark_expired(e["id"])
         if fresh:
-            await knowledge_store.record_hits(env, domain, fresh,
+            # 任务谱系分区：本任务（及父任务链）沉淀的知识优先，无归属/
+            # 异谱系（兄弟子任务的特异性结论）排后并标来源任务——
+            # 通用任务总结的"某个具体对象"的知识不会抢先喂给别的子任务
+            lineage = _task_lineage(task)
+            same = [e for e in fresh if e.get("task", "") in lineage]
+            other = [e for e in fresh if e.get("task", "") not in lineage]
+            ordered = same + other
+            await knowledge_store.record_hits(env, domain, ordered,
                                               run_id=run_id, source=source)
             lines = ["[历史知识]"] + [
-                f"- {e['key']}: {e['content']}（来源 run {e['source_run'] or '未知'}）"
-                for e in fresh]
+                f"- {e['key']}: {e['content']}（来源 run {e['source_run'] or '未知'}"
+                + (f"，沉淀自任务 {e['task']}）" if e.get("task")
+                   and e["task"] not in lineage else "）")
+                for e in ordered]
             sections.append("\n".join(lines))
 
     if error_text:

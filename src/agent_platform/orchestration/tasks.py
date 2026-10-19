@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from ..store.definitions import DefinitionStore
@@ -38,6 +40,10 @@ class TaskDef(BaseModel):
     extends: str | None = None               # 父任务名（继承其全部未覆盖字段）
     bind: dict[str, str] = Field(default_factory=dict)  # 绑定条件：input 字段精确匹配
     context: dict = Field(default_factory=dict)  # 任务档案：负责人/代码位置/常见坑/上游依赖/备注
+    # 自动派生：开启后，输入里 branch_key 字段出现新值时自动建子任务桩
+    # （继承本任务全部定义 + 绑定该值，档案留空待人补全）——不用手动开子任务
+    auto_branch: bool = False
+    branch_key: str = ""                     # 派生依据的 input 字段名（任意字段）
 
     def enabled_in(self, env: str) -> bool:
         return not self.env_gate or env in self.env_gate
@@ -153,6 +159,26 @@ class TaskRegistry:
             return None
         candidates.sort(key=lambda t: t.name)
         return await self.resolve(candidates[0].name)
+
+    async def auto_branch(self, base: TaskDef,
+                          input_data: dict) -> TaskDef | None:
+        """父任务开启 auto_branch 时，按 branch_key 的输入值自动建子任务桩。
+
+        桩 = 名字 parent:<值> + extends + bind + 空档案（管理页"自动"徽标，
+        待人补全 context）；已存在则直接复用。返回值已合并父任务定义。
+        """
+        if not base.auto_branch or not base.branch_key:
+            return None
+        value = str(input_data.get(base.branch_key) or "").strip()
+        if not value:
+            return None
+        safe = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", value)[:60]
+        name = f"{base.name}:{safe}"
+        if await self.get(name) is None:
+            await self.put(TaskDef(name=name, extends=base.name,
+                                   bind={base.branch_key: value}),
+                           updated_by="auto-branch")
+        return await self.resolve(name)
 
     async def list(self) -> list[TaskDef]:
         rows = await self._store.list_active("task", self._env)

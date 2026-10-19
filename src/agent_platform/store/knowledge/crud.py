@@ -24,17 +24,19 @@ _HISTORY_KEEP = 20
 # upsert 的两种形态写成两个具名常量，不用 format 拼（全库只此两处，
 # 读一遍即可懂）：差别仅是有无 embedding 一列。
 _SQL_UPSERT = (
-    "INSERT INTO knowledge (env, domain, key, content, source_run, code_ref)"
-    " VALUES (%s,%s,%s,%s,%s,%s)"
+    "INSERT INTO knowledge (env, domain, task, key, content, source_run,"
+    " code_ref) VALUES (%s,%s,%s,%s,%s,%s,%s)"
     " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
     " code_ref=EXCLUDED.code_ref,"
     " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
     " expired=false, created_at=now()")
 _SQL_UPSERT_WITH_VEC = (
-    "INSERT INTO knowledge (env, domain, key, content, source_run, code_ref,"
-    " embedding) VALUES (%s,%s,%s,%s,%s,%s,%s::vector)"
+    "INSERT INTO knowledge (env, domain, task, key, content, source_run,"
+    " code_ref, embedding) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::vector)"
     " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
     " code_ref=EXCLUDED.code_ref,"
     " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
@@ -73,15 +75,16 @@ async def _snapshot_if_changed(conn, env: str, domain: str, key: str,
 
 async def upsert(env: str, domain: str, key: str, content: str,
                  source_run: str | None = None, code_ref: dict | None = None,
-                 embedder=None) -> None:
+                 task: str = "", embedder=None) -> None:
     """幂等 upsert（同 key 整替换）；embedder 存在时同步写入向量。
-    覆盖前旧内容快照进 knowledge_history（与 upsert 同事务）。"""
+    覆盖前旧内容快照进 knowledge_history（与 upsert 同事务）。
+    task = 沉淀来源任务名（召回按任务谱系分区的依据；手工/通用知识留空）。"""
     vec = None
     if embedder is not None:
         vecs = await embedder([f"{key} {content}"])
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
-    params = (env, domain, key, content, source_run,
+    params = (env, domain, task, key, content, source_run,
               json.dumps(code_ref) if code_ref else None)
     source = source_run or "upsert"
     if vec is not None:
@@ -164,7 +167,7 @@ async def get_entry(entry_id: int) -> dict | None:
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, env, domain, key, content, expired, valid_from, valid_to,"
-            " superseded_by, feedback_score, source_run, code_ref, created_at"
+            " superseded_by, feedback_score, source_run, code_ref, created_at, task"
             " FROM knowledge WHERE id=%s", (entry_id,))
         row = await cur.fetchone()
     if not row:
@@ -175,7 +178,8 @@ async def get_entry(entry_id: int) -> dict | None:
             "valid_to": row[7].isoformat() if row[7] else None,
             "superseded_by": row[8], "feedback_score": row[9],
             "source_run": row[10], "code_ref": row[11],
-            "created_at": row[12].isoformat() if row[12] else None}
+            "created_at": row[12].isoformat() if row[12] else None,
+            "task": row[13]}
 
 
 async def restore(entry_id: int) -> None:
@@ -328,13 +332,13 @@ async def list_all(env: str, domain: str | None = None,
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, domain, key, content, expired, valid_to IS NOT NULL,"
-            " feedback_score, code_ref, created_at FROM knowledge " + where +
+            " feedback_score, code_ref, created_at, task FROM knowledge " + where +
             " ORDER BY domain, key LIMIT 500", tuple(params))
         rows = await cur.fetchall()
     return [{"id": r[0], "domain": r[1], "key": r[2], "content": r[3],
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],
              "code_ref": r[7],  # JSONB 已被 psycopg3 解析成 dict/None
-             "created_at": r[8].isoformat()} for r in rows]
+             "created_at": r[8].isoformat(), "task": r[9]} for r in rows]
 
 
 async def by_source_run(run_id: str) -> list[dict]:

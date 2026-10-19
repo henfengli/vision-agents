@@ -41,10 +41,12 @@
       {% for sub in items[kind] if sub.extends == it.name %}
       <div class="admin-item-wrap admin-sub">
         <button class="admin-item" data-name="{{ sub.name }}">
-          <span class="ai-name">↳ {{ sub.name }}</span>
+          <span class="ai-name">↳ {{ sub.name }}
+            {% if sub.updated_by == "auto-branch" %}<span class="pill pill-running">自动</span>{% endif %}</span>
           <span class="ai-meta">v{{ sub.version }}{% if sub.bind %}
             · 绑定 {{ sub.bind | tojson }}{% endif %}{% if sub.usage %}
-            · {{ sub.usage.runs }} run/24h{% endif %}</span>
+            · {{ sub.usage.runs }} run/24h{% endif %}
+            {% if not sub.context %} · 档案待补全{% endif %}</span>
         </button>
         <a class="ai-link" href="/runs?task={{ sub.name }}"
            title="该子任务的 run 历史">runs →</a>

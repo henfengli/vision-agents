@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     id             BIGSERIAL PRIMARY KEY,
     env            TEXT NOT NULL,
     domain         TEXT NOT NULL,
+    task           TEXT NOT NULL DEFAULT '',  -- 沉淀来源任务（谱系分区的依据）
     key            TEXT NOT NULL,
     content        TEXT NOT NULL,
     source_run     TEXT,
@@ -257,6 +258,8 @@ MIGRATIONS = [
     "ALTER TABLE assets ADD COLUMN IF NOT EXISTS path TEXT",
     # 资产目录方案已废弃（v5.16.2 回滚）：业务信息归属任务继承体系，不再单建实体
     "DROP TABLE IF EXISTS catalog_entry",
+    # 知识按任务谱系分区：沉淀记来源任务，召回时同谱系优先、异谱系降级
+    "ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS task TEXT NOT NULL DEFAULT ''",
 ]
 
 _dsn: str | None = None

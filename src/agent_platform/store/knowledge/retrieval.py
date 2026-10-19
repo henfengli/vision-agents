@@ -86,8 +86,9 @@ async def search(env: str, domain: str, query: str, limit: int = 5,
     rows = await _weight_by_feedback(candidates, limit)
     return [
         {"id": i, "key": k, "content": c,
-         "code_ref": json.loads(r) if isinstance(r, str) else r, "source_run": s}
-        for i, k, c, r, s, *_ in rows  # 查询多带的分数字段，丢弃
+         "code_ref": json.loads(r) if isinstance(r, str) else r,
+         "source_run": s, "task": t}
+        for i, k, c, r, s, t, *_ in rows  # 查询多带的分数字段，丢弃
     ]
 
 
@@ -133,7 +134,7 @@ async def _search_vector(env, domain, vec: list[float], limit):
     try:
         async with pool().connection() as conn:
             cur = await conn.execute(
-                "SELECT id, key, content, code_ref, source_run,"
+                "SELECT id, key, content, code_ref, source_run, task,"
                 " 1 - (embedding <=> %s::vector) AS sim FROM knowledge"
                 " WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
                 " AND embedding IS NOT NULL"
@@ -150,7 +151,7 @@ async def _search_trgm(env, domain, terms, limit):
     sim_expr = "GREATEST(" + ", ".join(
         ["word_similarity(%s, key || ' ' || content)"] * len(terms)) + ")"
     like_expr = " OR ".join(["key ILIKE %s OR content ILIKE %s"] * len(terms))
-    sql = (f"SELECT id, key, content, code_ref, source_run, {sim_expr} AS sim"
+    sql = (f"SELECT id, key, content, code_ref, source_run, task, {sim_expr} AS sim"
            f" FROM knowledge"
            f" WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
            f" AND ({sim_expr} > 0.08 OR {like_expr})"
@@ -175,7 +176,7 @@ async def _search_ilike(env, domain, terms, limit):
         params += [f"%{t}%", f"%{t}%"]
     async with pool().connection() as conn:
         cur = await conn.execute(
-            f"SELECT id, key, content, code_ref, source_run FROM knowledge"
+            f"SELECT id, key, content, code_ref, source_run, task FROM knowledge"
             f" WHERE env=%s AND domain=%s AND expired=false AND valid_to IS NULL"
             f" AND ({where})"
             f" ORDER BY feedback_score DESC, created_at DESC LIMIT %s",

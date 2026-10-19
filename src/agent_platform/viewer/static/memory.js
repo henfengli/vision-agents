@@ -141,6 +141,9 @@ async function openDrawer(id) {
   if (e.source_run && e.source_run !== "manual")
     meta.push(`来源 <a href="/runs/${esc(e.source_run)}">run</a>`);
   else if (e.source_run === "manual") meta.push("手动新增");
+  if (e.task)
+    meta.push(`沉淀自任务 <span class="mono">${esc(e.task)}</span>` +
+      "（召回时同谱系优先）");
   if (e.code_ref && e.code_ref.path)
     meta.push(`出处 <span class="mono">${esc(e.code_ref.path)}` +
       (e.code_ref.commit ? `@${esc(String(e.code_ref.commit).slice(0, 7))}` : "") +

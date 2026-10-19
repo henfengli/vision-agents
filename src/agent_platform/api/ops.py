@@ -60,8 +60,9 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
 
     @router.get("/v1/knowledge/search")
     async def knowledge_search(q: str = "", domain: str = "",
-                               env: str | None = None):
-        """检索试用：角色实际注入的 prompt 块（recall 全文）+ 命中序。"""
+                               env: str | None = None, task: str = ""):
+        """检索试用：角色实际注入的 prompt 块（recall 全文）+ 命中序。
+        task 模拟"以某任务身份召回"——验证知识按任务谱系分区的效果。"""
         from ..memory.recall import recall_block
         view_env = env or settings.env
         dom = domain or next(iter(code_paths), "")
@@ -69,7 +70,7 @@ def make_ops_router(settings, embedder=None, domain_cfgs=None) -> APIRouter:
             raise HTTPException(422, "q 不能为空")
         if not dom:
             raise HTTPException(422, "没有可用域")
-        block = await recall_block(view_env, dom, q,
+        block = await recall_block(view_env, dom, q, task=task,
                                    domain_code_paths=code_paths.get(dom, []),
                                    embedder=embedder, source="playground")
         hits = await knowledge_store.search(view_env, dom, q, limit=8,

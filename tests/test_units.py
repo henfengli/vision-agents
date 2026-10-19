@@ -464,6 +464,26 @@ class TestSubTask(unittest.TestCase):
         self.assertIn("t1", block)
         self.assertIn("负责人：张三", block)
 
+    def test_auto_branch_fields_default_off(self):
+        from agent_platform.orchestration.tasks import TaskDef
+        t = TaskDef(name="x")
+        self.assertFalse(t.auto_branch)
+        self.assertEqual(t.branch_key, "")
+
+    def test_child_inherits_auto_branch_from_parent(self):
+        from agent_platform.orchestration.tasks import TaskDef, merge_task
+        parent = TaskDef(name="p", auto_branch=True, branch_key="table")
+        child = TaskDef(name="p:t1", extends="p", bind={"table": "t1"})
+        merged = merge_task(parent, child)
+        self.assertTrue(merged.auto_branch)
+        self.assertEqual(merged.branch_key, "table")
+
+    def test_task_lineage(self):
+        from agent_platform.memory.recall import _task_lineage
+        self.assertEqual(_task_lineage("a:b:c"), {"a:b:c", "a:b", "a", ""})
+        self.assertEqual(_task_lineage("a"), {"a", ""})
+        self.assertEqual(_task_lineage(""), {""})
+
 
 class TestSpec(unittest.TestCase):
     def test_roundtrip(self):
