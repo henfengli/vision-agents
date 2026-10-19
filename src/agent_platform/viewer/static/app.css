@@ -611,3 +611,4 @@ th.sortable a:hover { color: var(--accent); }
   transform: translateY(-50%); font-size: 11px; opacity: 0;
   transition: opacity .12s; }
 .admin-item-wrap:hover .ai-link { opacity: 1; }
+.af-help { font-size: .82em; color: var(--muted, #8a8f98); margin-top: 4px; line-height: 1.5; }

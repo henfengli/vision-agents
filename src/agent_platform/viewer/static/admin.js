@@ -29,10 +29,12 @@ const FORMS = {
      type: "textarea", rows: 3, mono: true},
   ],
   task: [
-    {k: "extends", label: "继承自（建子任务：挂在哪个通用任务下；子任务名须为 父任务:对象名）", type: "select",
-     options: () => D.taskNames.filter(n => n !== cur.name), empty: "（不继承，通用任务）"},
-    {k: "context", label: '任务档案（确定性注入 prompt，逐字保留）：{"owner": "负责人", "code_refs": ["代码位置"], "pitfalls": ["常见坑"], "upstream": ["上游依赖"], "runbook": "运维备注"}，可自定义键',
-     type: "json", rows: 6},
+    {k: "extends", label: "父任务", type: "select",
+     options: () => D.taskNames.filter(n => n !== cur.name && !n.includes(":")),
+     empty: "（不继承，通用任务）",
+     help: "选了父任务就是子任务：上面名称只填对象名，其余字段继承父任务"},
+    {k: "context", label: "任务档案", type: "json", rows: 6,
+     help: '这个对象的一手事实，逐字注入 prompt 最前。例：{"owner": "张三", "code_refs": ["repo://…/job.py"], "pitfalls": ["02 点锁表属正常，重跑即可"], "upstream": ["ods_x"], "runbook": "先查分区再查上游"}'},
     {k: "role", label: "角色", type: "select",
      options: () => D.roleNames, empty: "（无 / artifacts 任务）"},
     {k: "triggers", label: "触发源（逗号分隔）", type: "comma"},
@@ -74,6 +76,7 @@ let cur = {kind: "role", name: "", dirty: false};
 
 function fieldHtml(f, val) {
   const id = `f-${f.k}`;
+  const help = f.help ? `<div class="af-help">${esc(f.help)}</div>` : "";
   if (f.type === "textarea" || f.type === "json") {
     const text = f.type === "json"
       ? (val && Object.keys(val).length ? JSON.stringify(val, null, 2) : "")
@@ -81,7 +84,7 @@ function fieldHtml(f, val) {
     return `<label class="af-label" for="${id}">${f.label}</label>
       <textarea id="${id}" data-k="${f.k}" data-t="${f.type}"
         class="${f.mono || f.type === "json" ? "mono" : ""}"
-        rows="${f.rows || 4}" spellcheck="false">${esc(text)}</textarea>`;
+        rows="${f.rows || 4}" spellcheck="false">${esc(text)}</textarea>${help}`;
   }
   if (f.type === "checks") {
     const cur_ = new Set(val || []);
@@ -91,7 +94,7 @@ function fieldHtml(f, val) {
       <div class="af-checks" data-k="${f.k}" data-t="checks">
         ${opts.map(o => `<label class="af-check">
           <input type="checkbox" value="${esc(o)}"${cur_.has(o) ? " checked" : ""}>
-          ${esc(o)}</label>`).join("")}</div>`;
+          ${esc(o)}</label>`).join("")}</div>${help}`;
   }
   if (f.type === "select") {
     const opts = f.options();
@@ -99,7 +102,7 @@ function fieldHtml(f, val) {
       <select id="${id}" data-k="${f.k}" data-t="select">
         ${f.empty !== undefined ? `<option value="">${f.empty}</option>` : ""}
         ${opts.map(o => `<option value="${esc(o)}"${o === val ? " selected" : ""}>
-          ${esc(o)}</option>`).join("")}</select>`;
+          ${esc(o)}</option>`).join("")}</select>${help}`;
   }
   if (f.type === "bool")
     return `<label class="af-check af-bool">
@@ -132,9 +135,10 @@ function renderEditor(kind, name) {
         ${name ? `<span class="tag">v${def.version}</span>` : ""}</h3>
       <div class="meta">${impact}${kind === "role" ? ` · ${esc(D.source)}` : ""}</div>
     </div>
-    <div class="af-field"><label class="af-label" for="f-name">名称</label>
+    <div class="af-field"><label class="af-label" for="f-name" id="f-name-label">名称</label>
       <input id="f-name" value="${esc(name)}" ${name ? "disabled" : ""}
-        spellcheck="false" class="mono"></div>
+        spellcheck="false" class="mono">
+      <div class="af-help" id="f-name-help" hidden>子任务：输入对象名（如表名 dwd_trade_order），保存时自动拼为 父任务:对象名。调用方输入里出现该对象名即自动命中本任务</div></div>
     ${fields.map(f => `<div class="af-field">${fieldHtml(f, def[f.k])}</div>`).join("")}
     <details class="af-extra" ${Object.keys(extra).length ? "open" : ""}>
       <summary>高级 JSON（未识别字段，原样保留合并）</summary>
@@ -152,7 +156,29 @@ function renderEditor(kind, name) {
   document.getElementById("af-save").onclick = () => save(kind);
   main.querySelectorAll("input,textarea,select").forEach(el =>
     el.addEventListener("input", () => { cur.dirty = true; }));
+  if (kind === "task") wireSubTaskName(name);
   if (name && kind !== "policy") loadVersions(kind, name);
+}
+
+/* —— 子任务名称联动：选父任务后名称只填对象名，前缀自动拼 —— */
+
+function wireSubTaskName(name) {
+  const extEl = document.querySelector('[data-k="extends"]');
+  const nameEl = document.getElementById("f-name");
+  const help = document.getElementById("f-name-help");
+  const label = document.getElementById("f-name-label");
+  if (!extEl) return;
+  const sync = () => {
+    const parent = extEl.value;
+    help.hidden = !parent;
+    label.textContent = parent ? "对象名" : "名称";
+    if (!parent) return;
+    // 显示态去掉前缀（存量编辑也保持只显示对象名），保存时统一拼回
+    if (nameEl.value.startsWith(parent + ":"))
+      nameEl.value = nameEl.value.slice(parent.length + 1);
+  };
+  extEl.addEventListener("change", sync);
+  sync();
 }
 
 /* —— 值收集（表单 + 高级 JSON 合并） —— */
@@ -185,7 +211,11 @@ function collect(kind) {
 
 async function save(kind) {
   const msg = document.getElementById("af-msg");
-  const name = document.getElementById("f-name").value.trim();
+  let name = document.getElementById("f-name").value.trim();
+  if (kind === "task") {
+    const parent = document.querySelector('[data-k="extends"]')?.value || "";
+    if (parent && !name.startsWith(parent + ":")) name = parent + ":" + name;
+  }
   if (!name) { msg.textContent = "名称必填"; return; }
   let definition;
   try { definition = collect(kind); }
