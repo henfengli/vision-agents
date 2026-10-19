@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import re
-
 from pydantic import BaseModel, Field
 
 from ..store.definitions import DefinitionStore
@@ -35,15 +33,12 @@ class TaskDef(BaseModel):
     handler: str | None = None                 # 内建处理器名（如 memory-gardener）
     # —— 继承（子任务）：比任务更细一层的维度 ——
     # 简单场景用通用任务（如 failure-analysis）；某个具体对象（某张表/
-    # 某个报表/某条链路）的业务信息很多很重要时，派生子任务挂上去：
-    # 定义只写差异，其余字段从父任务合并，归因/统计天然按子任务名落账。
+    # 某个报表/某条链路）的业务信息很多很重要时，派生子任务挂上去。
+    # 命名即绑定：子任务名 = "父任务名:对象名"（如 failure-analysis:
+    # dwd_trade_order），提交时输入里任何字段的值与对象名对上即自动
+    # 选用——没有单独的绑定字段要维护。
     extends: str | None = None               # 父任务名（继承其全部未覆盖字段）
-    bind: dict[str, str] = Field(default_factory=dict)  # 绑定条件：input 字段精确匹配
     context: dict = Field(default_factory=dict)  # 任务档案：负责人/代码位置/常见坑/上游依赖/备注
-    # 自动派生：开启后，输入里 branch_key 字段出现新值时自动建子任务桩
-    # （继承本任务全部定义 + 绑定该值，档案留空待人补全）——不用手动开子任务
-    auto_branch: bool = False
-    branch_key: str = ""                     # 派生依据的 input 字段名（任意字段）
 
     def enabled_in(self, env: str) -> bool:
         return not self.env_gate or env in self.env_gate
@@ -64,9 +59,9 @@ _DICT_MERGE_FIELDS = ("input_schema", "schedule_input", "context")
 
 def merge_task(parent: TaskDef, child: TaskDef) -> TaskDef:
     """父任务 + 子任务差异 → 生效任务定义。子任务显式给的值优先。"""
-    data = parent.model_dump(exclude={"name", "extends", "bind"})
+    data = parent.model_dump(exclude={"name", "extends"})
     set_fields = child.model_fields_set - {"name"}
-    child_data = child.model_dump(exclude={"name", "extends", "bind"})
+    child_data = child.model_dump(exclude={"name", "extends"})
     for f in _DICT_MERGE_FIELDS:
         merged = dict(data[f] or {})
         merged.update(child_data[f] or {})
@@ -77,8 +72,7 @@ def merge_task(parent: TaskDef, child: TaskDef) -> TaskDef:
         if f in set_fields:
             data[f] = v
     return TaskDef.model_validate({**data, "name": child.name,
-                                   "extends": child.extends,
-                                   "bind": child.bind})
+                                   "extends": child.extends})
 
 
 # 档案字段的固定展示顺序（其余自定义键按字典序跟在后面）
@@ -143,42 +137,28 @@ class TaskRegistry:
             return task  # 父任务被删：子任务裸定义仍可用（字段全在自己身上）
         return merge_task(parent, task)
 
-    async def find_bound(self, base_name: str, input_data: dict) -> TaskDef | None:
-        """在 base 任务的子任务里找 bind 条件与本次输入精确匹配的那个。
+    async def find_child(self, base_name: str,
+                         input_data: dict) -> TaskDef | None:
+        """子任务选择：输入里任一字段的值 == 某子任务名的后缀时选用。
 
-        多个命中时按名字序取第一个（确定性优先于"最特殊优先"的猜谜）。
+        命名即绑定——子任务叫 "failure-analysis:dwd_trade_order"，输入里
+        有值是 "dwd_trade_order"（不管字段叫 table/asset_key 还是别的）
+        就命中。多个字段同时命中不同子任务时按名字序取第一个（确定性）。
         """
-        candidates: list[TaskDef] = []
+        prefix = base_name + ":"
+        values = {str(v).strip() for v in input_data.values()
+                  if isinstance(v, (str, int)) and str(v).strip()}
+        if not values:
+            return None
+        candidates: list[str] = []
         for raw in await self._store.list_active("task", self._env):
             t = TaskDef.model_validate(raw)
-            if t.extends == base_name and t.bind:
-                if all(str(input_data.get(k, "")) == v
-                       for k, v in t.bind.items()):
-                    candidates.append(t)
+            if t.extends == base_name and t.name.startswith(prefix) \
+                    and t.name[len(prefix):] in values:
+                candidates.append(t.name)
         if not candidates:
             return None
-        candidates.sort(key=lambda t: t.name)
-        return await self.resolve(candidates[0].name)
-
-    async def auto_branch(self, base: TaskDef,
-                          input_data: dict) -> TaskDef | None:
-        """父任务开启 auto_branch 时，按 branch_key 的输入值自动建子任务桩。
-
-        桩 = 名字 parent:<值> + extends + bind + 空档案（管理页"自动"徽标，
-        待人补全 context）；已存在则直接复用。返回值已合并父任务定义。
-        """
-        if not base.auto_branch or not base.branch_key:
-            return None
-        value = str(input_data.get(base.branch_key) or "").strip()
-        if not value:
-            return None
-        safe = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", value)[:60]
-        name = f"{base.name}:{safe}"
-        if await self.get(name) is None:
-            await self.put(TaskDef(name=name, extends=base.name,
-                                   bind={base.branch_key: value}),
-                           updated_by="auto-branch")
-        return await self.resolve(name)
+        return await self.resolve(sorted(candidates)[0])
 
     async def list(self) -> list[TaskDef]:
         rows = await self._store.list_active("task", self._env)

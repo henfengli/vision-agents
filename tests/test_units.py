@@ -413,7 +413,7 @@ class TestDagsterSensor(unittest.TestCase):
 
 
 class TestSubTask(unittest.TestCase):
-    """任务继承（子任务）：extends 合并 / bind 匹配 / 档案渲染。"""
+    """任务继承（子任务）：extends 合并 / 命名即绑定 / 档案渲染。"""
 
     def test_merge_task_scalars_and_dicts(self):
         from agent_platform.orchestration.tasks import TaskDef, merge_task
@@ -424,7 +424,6 @@ class TestSubTask(unittest.TestCase):
                          env_gate=["prod", "test"])
         child = TaskDef(name="failure-analysis:dwd_trade_order",
                         extends="failure-analysis",
-                        bind={"asset_key": "dwd_trade_order"},
                         context={"owner": "张三"},
                         timeout_s=600)
         merged = merge_task(parent, child)
@@ -436,12 +435,11 @@ class TestSubTask(unittest.TestCase):
         self.assertEqual(merged.input_schema,
                          {"run_id": "str", "asset_key": "str"})
         self.assertEqual(merged.context, {"owner": "张三"})
-        self.assertEqual(merged.bind, {"asset_key": "dwd_trade_order"})
 
     def test_merge_task_dict_child_wins(self):
         from agent_platform.orchestration.tasks import TaskDef, merge_task
         parent = TaskDef(name="p", context={"owner": "A", "upstream": ["x"]})
-        child = TaskDef(name="c", extends="p",
+        child = TaskDef(name="p:c", extends="p",
                         context={"owner": "B"})
         merged = merge_task(parent, child)
         self.assertEqual(merged.context, {"owner": "B", "upstream": ["x"]})
@@ -464,19 +462,45 @@ class TestSubTask(unittest.TestCase):
         self.assertIn("t1", block)
         self.assertIn("负责人：张三", block)
 
-    def test_auto_branch_fields_default_off(self):
-        from agent_platform.orchestration.tasks import TaskDef
-        t = TaskDef(name="x")
-        self.assertFalse(t.auto_branch)
-        self.assertEqual(t.branch_key, "")
+    def test_find_child_by_name_suffix(self):
+        """命名即绑定：输入任一值 == 子任务名后缀即命中（字段名无关）。"""
+        import asyncio
+        from agent_platform.orchestration.tasks import TaskDef, TaskRegistry
 
-    def test_child_inherits_auto_branch_from_parent(self):
-        from agent_platform.orchestration.tasks import TaskDef, merge_task
-        parent = TaskDef(name="p", auto_branch=True, branch_key="table")
-        child = TaskDef(name="p:t1", extends="p", bind={"table": "t1"})
-        merged = merge_task(parent, child)
-        self.assertTrue(merged.auto_branch)
-        self.assertEqual(merged.branch_key, "table")
+        class FakeStore:
+            def __init__(self, defs_): self._defs = defs_
+            async def list_active(self, kind, env):
+                return [d.model_dump(exclude={"name"}, exclude_defaults=True)
+                        | {"name": d.name, "version": 1}
+                        for d in self._defs]
+            async def get_active(self, kind, env, name):
+                for d in self._defs:
+                    if d.name == name:
+                        return d.model_dump(exclude={"name"},
+                                            exclude_defaults=True)
+                return None
+
+        parent = TaskDef(name="failure-analysis", role="ops_analyst")
+        child = TaskDef(name="failure-analysis:dwd_trade_order",
+                        extends="failure-analysis")
+        reg = TaskRegistry(FakeStore([parent, child]), "test")
+
+        # 值在 asset_key 字段里 → 命中
+        hit = asyncio.run(reg.find_child(
+            "failure-analysis", {"asset_key": "dwd_trade_order"}))
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.name, "failure-analysis:dwd_trade_order")
+        self.assertEqual(hit.role, "ops_analyst")  # 继承生效
+        # 换个字段名也一样命中（名字即绑定，不看字段名）
+        hit2 = asyncio.run(reg.find_child(
+            "failure-analysis", {"table": "dwd_trade_order"}))
+        self.assertIsNotNone(hit2)
+        # 输入没这个对象 → 不命中
+        self.assertIsNone(asyncio.run(reg.find_child(
+            "failure-analysis", {"table": "other_table"})))
+        # 别的父任务的子任务不误命中
+        self.assertIsNone(asyncio.run(reg.find_child(
+            "data-qa", {"table": "dwd_trade_order"})))
 
     def test_task_lineage(self):
         from agent_platform.memory.recall import _task_lineage

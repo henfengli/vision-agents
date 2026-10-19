@@ -271,8 +271,11 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             raise HTTPException(422, "任务不能继承自己")
         if task.extends and await tasks.get(task.extends) is None:
             raise HTTPException(422, f"父任务 {task.extends} 不存在")
-        if task.bind and not task.extends:
-            raise HTTPException(422, "bind 只对子任务（extends）有意义")
+        # 命名即绑定：子任务名必须是 "父任务:对象名"，否则命名与继承
+        # 关系脱节（选择器按名字后缀匹配输入值，见 tasks.find_child）
+        if task.extends and not req.name.startswith(task.extends + ":"):
+            raise HTTPException(
+                422, f"子任务名须以父任务名为前缀：{task.extends}:<对象名>")
         await defs.put("task", settings.env, req.name,
                        req.definition, req.updated_by)
         # 定时任务热生效：保存后立即重同步 Temporal Schedules（不必等重启；

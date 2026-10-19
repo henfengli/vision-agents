@@ -214,15 +214,14 @@ class Submitter:
                      idempotency_key: str | None = None) -> dict:
         target_env = self._resolve_target_env(target_env)
         task = await self._resolve_task(task_name, role, target_env)
-        # 子任务选择：先按 bind 精确匹配；未命中且父任务开了 auto_branch
-        # 时自动建桩（继承全部 + 绑定 branch_key 值，档案待人补全）。
-        # 档案/归因按子任务名落账，调用方无需知道子任务存在
+        # 子任务选择（命名即绑定）：输入里任一值 == 子任务名后缀即选用，
+        # 如子任务 failure-analysis:dwd_trade_order 对输入
+        # {"table": "dwd_trade_order"} 命中。档案/归因按子任务名落账，
+        # 调用方只需照常上送业务对象名，无需知道子任务存在
         if role is None:
-            bound = await self._tasks.find_bound(task.name, input_data)
-            if bound is None:
-                bound = await self._tasks.auto_branch(task, input_data)
-            if bound is not None:
-                task = bound
+            child = await self._tasks.find_child(task.name, input_data)
+            if child is not None:
+                task = child
                 if not task.enabled_in(target_env):
                     raise TaskRejected(
                         f"子任务 {task.name} 未在目标环境（{target_env}）启用")
