@@ -30,7 +30,8 @@ _RANGES = [("", "全部时间"), ("24", "24 小时"), ("168", "7 天"),
 
 def make_router(env: str, langfuse=None,
                 target_envs: list[str] | None = None,
-                submitter=None, domains: list[str] | None = None) -> APIRouter:
+                submitter=None, defs_store=None,
+                domains: list[str] | None = None) -> APIRouter:
     router = APIRouter()
 
     @router.get("/runs", response_class=HTMLResponse)
@@ -134,7 +135,7 @@ def make_router(env: str, langfuse=None,
             if tid:
                 trace = {"tid": tid, "url": await langfuse.trace_url(tid)}
         pending = await approvals.find_pending(run_id)
-        context = await _run_context(run, run_id)
+        context = await _run_context(run, run_id, defs_store, env)
         return render(
             "run_detail.html", f"Run {run_id[:8]}", active="/runs",
             run_id=run_id, pending=pending, trace=trace, ctx=context,
@@ -173,30 +174,43 @@ def make_router(env: str, langfuse=None,
     return router
 
 
-async def _run_context(run: dict, run_id: str) -> dict:
+async def _run_context(run: dict, run_id: str, defs_store,
+                       env: str) -> dict:
     """run 详情「上下文与沉淀」卡：这次 run 召回/产生/关联了什么。
 
-    五块：资产目录档案（按 input.asset_key 确定性关联）→ 召回的知识
-    （recall_hits 反查）→ 召回的任务资产（prepare 事件里的 asset_ids）
-    → 本次沉淀（knowledge/assets 的 source_run 反查）→ 同会话的其他
-    run（故障周期/续聊链）。全部有出处可查，不从 prompt 文本里猜。
+    五块：任务档案（run 当时生效的任务定义版本上的 context，确定性
+    挂载）→ 召回的知识（recall_hits 反查）→ 召回的任务资产（prepare
+    事件里的 asset_ids）→ 本次沉淀（knowledge/assets 的 source_run
+    反查）→ 同会话的其他 run（故障周期/续聊链）。全部有出处可查，
+    不从 prompt 文本里猜。
     """
+    from ...orchestration.tasks import profile_lines
     from ...store import assets as assets_store
-    from ...store import catalog as catalog_store
     from ...store import knowledge as knowledge_store
 
-    ctx: dict = {"catalog": None, "knowledge_hits": [], "assets_recalled": [],
+    ctx: dict = {"task_profile": [], "knowledge_hits": [], "assets_recalled": [],
                  "assets_saved": [], "knowledge_saved": [],
                  "session_id": run.get("session_id") or "",
                  "session_runs": []}
 
-    inp = run.get("input") or {}
-    asset_key = inp.get("asset_key")
-    domain = run.get("domain")
-    t_env = run.get("target_env") or ""
-    if asset_key and domain:
-        ctx["catalog"] = await catalog_store.get(t_env, domain,
-                                                 str(asset_key))
+    # 任务档案：按 run 固化的 task_version 回读子任务定义（谱系：当时
+    # 是哪一版），再与父任务当前 context 按键合并——与注入侧 merge_task
+    # 同规则，展示的就是 prompt 里那段
+    try:
+        if defs_store is not None and run.get("task_version") \
+                and run.get("task_type"):
+            definition = await defs_store.get_version(
+                "task", env, run["task_type"], run["task_version"]) or {}
+            parent_name = definition.get("extends")
+            if parent_name:
+                parent = await defs_store.get_active("task", env,
+                                                     parent_name) or {}
+                merged = dict(parent.get("context") or {})
+                merged.update(definition.get("context") or {})
+                definition = {**definition, "context": merged}
+            ctx["task_profile"] = profile_lines(definition)
+    except Exception:  # noqa: BLE001 —— 档案缺失不挡详情页
+        pass
 
     ctx["knowledge_hits"] = await knowledge_store.hits_for_run(run_id)
     ctx["assets_saved"] = await assets_store.by_source_run(run_id)

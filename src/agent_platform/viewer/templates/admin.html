@@ -25,7 +25,7 @@
            style="width:100%;margin-bottom:8px">
     {% for kind in ("role", "task", "policy", "rules") %}
     <div class="admin-items" data-kind="{{ kind }}"{% if kind != "role" %} hidden{% endif %}>
-      {% for it in items[kind] %}
+      {% for it in items[kind] if not it.extends %}
       <div class="admin-item-wrap">
         <button class="admin-item" data-name="{{ it.name }}">
           <span class="ai-name">{{ it.name }}</span>
@@ -37,6 +37,20 @@
            title="该任务的 run 历史">runs →</a>
         {% endif %}
       </div>
+      {% if kind == "task" %}
+      {% for sub in items[kind] if sub.extends == it.name %}
+      <div class="admin-item-wrap admin-sub">
+        <button class="admin-item" data-name="{{ sub.name }}">
+          <span class="ai-name">↳ {{ sub.name }}</span>
+          <span class="ai-meta">v{{ sub.version }}{% if sub.bind %}
+            · 绑定 {{ sub.bind | tojson }}{% endif %}{% if sub.usage %}
+            · {{ sub.usage.runs }} run/24h{% endif %}</span>
+        </button>
+        <a class="ai-link" href="/runs?task={{ sub.name }}"
+           title="该子任务的 run 历史">runs →</a>
+      </div>
+      {% endfor %}
+      {% endif %}
       {% else %}
       <div class="meta" style="padding:10px 4px">暂无定义</div>
       {% endfor %}
@@ -54,6 +68,7 @@ window.ADMIN = {
   domains: {{ domains|tojson }},
   envs: {{ envs|tojson }},
   roleNames: {{ role_names|tojson }},
+  taskNames: {{ items["task"] | map(attribute="name") | list | tojson }},
   source: {{ source|tojson }},
 };
 </script>

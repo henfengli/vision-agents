@@ -264,9 +264,15 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.post("/v1/admin/tasks")
     async def put_task(req: DefinitionPutRequest):
         try:
-            TaskDef.model_validate({"name": req.name, **req.definition})
+            task = TaskDef.model_validate({"name": req.name, **req.definition})
         except Exception as e:
             raise HTTPException(422, f"任务定义不合法：{e}")
+        if task.extends == req.name:
+            raise HTTPException(422, "任务不能继承自己")
+        if task.extends and await tasks.get(task.extends) is None:
+            raise HTTPException(422, f"父任务 {task.extends} 不存在")
+        if task.bind and not task.extends:
+            raise HTTPException(422, "bind 只对子任务（extends）有意义")
         await defs.put("task", settings.env, req.name,
                        req.definition, req.updated_by)
         # 定时任务热生效：保存后立即重同步 Temporal Schedules（不必等重启；
@@ -332,51 +338,6 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
                                      target["definition"],
                                      updated_by=f"rollback-to-v{version}")
         return {"name": name, "version": new_version}
-
-    # —— 资产目录（catalog）：业务对象档案的 CRUD ——
-
-    @router.get("/v1/catalog")
-    async def catalog_list(env: str = "", domain: str = "", q: str = ""):
-        from ..store import catalog as catalog_store
-        t_env = settings.resolve_target_env(env or None)
-        return {"entries": await catalog_store.list_entries(
-            t_env, domain or None, q or None)}
-
-    @router.post("/v1/catalog")
-    async def catalog_upsert(req: Request):
-        from ..store import catalog as catalog_store
-        body = await req.json()
-        asset_key = str(body.get("asset_key") or "").strip()
-        domain = str(body.get("domain") or "").strip()
-        if not asset_key or not domain:
-            raise HTTPException(422, "asset_key 与 domain 必填")
-        tier = str(body.get("tier") or "")
-        if tier and tier not in ("core", "important", "normal"):
-            raise HTTPException(422, "tier 只能是 core/important/normal")
-        t_env = settings.resolve_target_env(body.get("env") or None)
-        entry = await catalog_store.upsert(
-            t_env, domain, asset_key,
-            name=str(body.get("name") or ""),
-            owner=str(body.get("owner") or ""), tier=tier,
-            upstream=body.get("upstream"), downstream=body.get("downstream"),
-            code_refs=body.get("code_refs"), tags=body.get("tags"),
-            runbook=str(body.get("runbook") or ""),
-            by=str(body.get("updated_by") or "api"))
-        return entry
-
-    @router.get("/v1/catalog/{entry_id}")
-    async def catalog_get(entry_id: int):
-        from ..store import catalog as catalog_store
-        entry = await catalog_store.get_by_id(entry_id)
-        if entry is None:
-            raise HTTPException(404, "目录条目不存在")
-        return entry
-
-    @router.delete("/v1/catalog/{entry_id}")
-    async def catalog_delete(entry_id: int):
-        from ..store import catalog as catalog_store
-        await catalog_store.delete(entry_id)
-        return {"ok": True}
 
     # —— Admin：单条读取 / 历史 / 回滚（三类补齐，AI 的 read-modify-write 闭环） ——
 

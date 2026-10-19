@@ -29,6 +29,12 @@ const FORMS = {
      type: "textarea", rows: 3, mono: true},
   ],
   task: [
+    {k: "extends", label: "继承自（建子任务：挂在哪个通用任务下）", type: "select",
+     options: () => D.taskNames.filter(n => n !== cur.name), empty: "（不继承，通用任务）"},
+    {k: "bind", label: '绑定条件（子任务用：{"input字段": "精确值"}，匹配时自动改用本任务）',
+     type: "json", rows: 2},
+    {k: "context", label: '任务档案（确定性注入 prompt，逐字保留）：{"owner": "负责人", "code_refs": ["代码位置"], "pitfalls": ["常见坑"], "upstream": ["上游依赖"], "runbook": "运维备注"}，可自定义键',
+     type: "json", rows: 6},
     {k: "role", label: "角色", type: "select",
      options: () => D.roleNames, empty: "（无 / artifacts 任务）"},
     {k: "triggers", label: "触发源（逗号分隔）", type: "comma"},

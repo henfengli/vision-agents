@@ -35,11 +35,10 @@ def session_id_for(asset_key: str, error: str, rules: list[dict],
 
 
 def make_router(submitter, notifier, auth=None,
-                classifier=None, catalog_register=None,
+                classifier=None,
                 session_template: str | None = None):
     """classifier：async (domain, error) -> rules 列表（RuleProvider.rules_for
-    的部分应用）；缺省 = 无规则全交 agent。catalog_register：async
-    (asset_key, env) 自动登记未知资产到资产目录。"""
+    的部分应用）；缺省 = 无规则全交 agent。"""
     from fastapi import APIRouter, Depends
 
     # auth：与 /v1 API 同一 bearer 依赖；webhook 也是服务间调用，不能裸奔
@@ -66,16 +65,8 @@ def make_router(submitter, notifier, auth=None,
         asset_key = str(payload.get("asset_key", ""))
         target_env = payload.get("env") or None
         # 本 webhook 即 dagster 域入口：补 domain 让 run 归属域，
-        # 召回（资产目录/域知识/案例）与记忆分区全部按域生效
+        # 召回（域知识/案例）与记忆分区全部按域生效
         payload.setdefault("domain", "dagster")
-
-        # 资产目录自动登记：首次上报即建档（占位条目，人去补全），
-        # 归因从第一次失败开始累计；登记失败不挡主链路
-        if asset_key and catalog_register is not None:
-            try:
-                await catalog_register(asset_key, target_env)
-            except Exception as e:  # noqa: BLE001
-                log.warning("资产目录登记失败（不影响上报）：%s", e)
 
         rules = await _rules(error)
         hit = rules_svc.classify(error, rules)

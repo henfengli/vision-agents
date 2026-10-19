@@ -412,6 +412,59 @@ class TestDagsterSensor(unittest.TestCase):
         self.assertEqual(sid, "dc-my.asset-2026-10-08")
 
 
+class TestSubTask(unittest.TestCase):
+    """任务继承（子任务）：extends 合并 / bind 匹配 / 档案渲染。"""
+
+    def test_merge_task_scalars_and_dicts(self):
+        from agent_platform.orchestration.tasks import TaskDef, merge_task
+        parent = TaskDef(name="failure-analysis", role="ops_analyst",
+                         triggers=["dagster_sensor"],
+                         input_schema={"run_id": "str", "asset_key": "str"},
+                         output_channel="dingtalk", timeout_s=300,
+                         env_gate=["prod", "test"])
+        child = TaskDef(name="failure-analysis:dwd_trade_order",
+                        extends="failure-analysis",
+                        bind={"asset_key": "dwd_trade_order"},
+                        context={"owner": "张三"},
+                        timeout_s=600)
+        merged = merge_task(parent, child)
+        self.assertEqual(merged.name, child.name)
+        self.assertEqual(merged.role, "ops_analyst")          # 继承
+        self.assertEqual(merged.output_channel, "dingtalk")   # 继承
+        self.assertEqual(merged.timeout_s, 600)               # 覆盖
+        self.assertEqual(merged.env_gate, ["prod", "test"])   # 子空→继承
+        self.assertEqual(merged.input_schema,
+                         {"run_id": "str", "asset_key": "str"})
+        self.assertEqual(merged.context, {"owner": "张三"})
+        self.assertEqual(merged.bind, {"asset_key": "dwd_trade_order"})
+
+    def test_merge_task_dict_child_wins(self):
+        from agent_platform.orchestration.tasks import TaskDef, merge_task
+        parent = TaskDef(name="p", context={"owner": "A", "upstream": ["x"]})
+        child = TaskDef(name="c", extends="p",
+                        context={"owner": "B"})
+        merged = merge_task(parent, child)
+        self.assertEqual(merged.context, {"owner": "B", "upstream": ["x"]})
+
+    def test_profile_lines_order_and_labels(self):
+        from agent_platform.orchestration.tasks import profile_lines
+        lines = profile_lines({"context": {
+            "runbook": "02 点锁表", "owner": "张三",
+            "code_refs": ["a.py", "b.py"], "自定义键": "值"}})
+        self.assertEqual(lines[0], ("负责人", "张三"))
+        self.assertEqual(lines[1], ("代码位置", "a.py、b.py"))
+        self.assertEqual(lines[2], ("运维备注", "02 点锁表"))
+        self.assertIn(("自定义键", "值"), lines)
+        self.assertEqual(profile_lines({}), [])
+        self.assertEqual(profile_lines({"context": "bad"}), [])
+
+    def test_render_profile_block(self):
+        from agent_platform.orchestration.tasks import render_profile_block
+        block = render_profile_block("t1", [("负责人", "张三")])
+        self.assertIn("t1", block)
+        self.assertIn("负责人：张三", block)
+
+
 class TestSpec(unittest.TestCase):
     def test_roundtrip(self):
         from agent_platform.orchestration.spec import RunSpec

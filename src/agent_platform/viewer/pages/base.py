@@ -121,7 +121,7 @@ _LOGO_SVG = """<svg width="18" height="18" viewBox="0 0 18 18" fill="none">
   from="0 9 9" to="360 9 9" dur="4.2s" repeatCount="indefinite"/></line></svg>"""
 
 _NAV = [("/", "总览"), ("/chat", "对话"), ("/runs", "Runs"),
-        ("/approvals", "审批"), ("/catalog", "目录"), ("/admin", "管理"),
+        ("/approvals", "审批"), ("/admin", "管理"),
         ("/memory", "记忆"), ("/assets", "资产")]
 
 

@@ -33,6 +33,8 @@ class RunSpec:
     prompt: str = ""                # 召回块 + question 拼好的最终 prompt
     domain: str | None = None
     code_paths: list[str] = field(default_factory=list)
+    # —— 提交时固化 ——
+    profile: str = ""               # 任务档案注入块（子任务 context 渲染，置顶）
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunSpec":

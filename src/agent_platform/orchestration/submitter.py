@@ -24,7 +24,8 @@ from ..store import runs
 from ..store.definitions import DefinitionStore
 from . import policies
 from .spec import RunSpec
-from .tasks import TaskDef, TaskRegistry, question_text
+from .tasks import (TaskDef, TaskRegistry, profile_lines, question_text,
+                    render_profile_block)
 from .workflows import (AgentRunWorkflow, ArtifactRunWorkflow,
                         BuiltinTaskWorkflow)
 
@@ -70,8 +71,10 @@ class Submitter:
             raise TaskRejected(str(e)) from e
 
     async def _resolve_task(self, task_name: str, role: str | None,
-                            target_env: str) -> TaskDef:
-        task = await self._tasks.get(task_name)
+                            target_env: str,
+                            input_data: dict | None = None) -> TaskDef:
+        # 继承解析：子任务（extends）合并父任务后生效
+        task = await self._tasks.resolve(task_name)
         if task is None:
             raise TaskRejected(f"未知任务类型：{task_name}")
         if not task.enabled_in(target_env):
@@ -117,6 +120,10 @@ class Submitter:
                        session_id=session_id, timeout_s=task.timeout_s,
                        target_env=target_env,
                        domain=domain,
+                       profile=render_profile_block(
+                           task.name, profile_lines(
+                               task.model_dump(exclude={"name"})))
+                       if task.context else "",
                        trigger=trigger_source, correction=correction,
                        resume=resume,
                        artifacts=({k: v.model_dump() for k, v in
@@ -207,6 +214,16 @@ class Submitter:
                      idempotency_key: str | None = None) -> dict:
         target_env = self._resolve_target_env(target_env)
         task = await self._resolve_task(task_name, role, target_env)
+        # 子任务自动选择：通用任务（如 failure-analysis）的某个子任务
+        # 声明了 bind 且与本次输入精确匹配时，改用子任务——档案/归因
+        # 按子任务名落账，调用方无需知道子任务存在
+        if role is None:
+            bound = await self._tasks.find_bound(task.name, input_data)
+            if bound is not None:
+                task = bound
+                if not task.enabled_in(target_env):
+                    raise TaskRejected(
+                        f"子任务 {task.name} 未在目标环境（{target_env}）启用")
         # 提交闸门链（policies.py）：env_gate 之外的 DB 声明策略都在这里过
         if self._defs is not None and not correction:
             verdict = await policies.evaluate_submit(

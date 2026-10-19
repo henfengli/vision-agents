@@ -17,12 +17,10 @@ async def recall_block(env: str, domain: str | None, query: str,
                        domain_code_paths: list[str] | None = None,
                        embedder=None, session_id: str | None = None,
                        run_id: str | None = None,
-                       asset_key: str | None = None,
                        source: str = "recall") -> str:
     """拼召回文本块；无命中返回空串。
 
-    层次（自上而下）：资产目录档案（按 asset_key 确定性挂载，逐字保留，
-    优先级最高）→ 资产档案知识条目（query 提及即命中）→ 前序 episode
+    层次（自上而下）：资产档案知识条目（query 提及即命中）→ 前序 episode
     交接摘要（同资产同故障类的最近摘要，连续性由记忆而非 thread 承载）
     → 历史知识（混合检索 + commit 校验）→ 同类案例。
 
@@ -30,14 +28,6 @@ async def recall_block(env: str, domain: str | None, query: str,
     run_id 为空（页面试用）时 source 传 playground，不算真实使用。
     """
     sections: list[str] = []
-
-    if domain and asset_key:
-        # 资产目录：run 明确针对某资产时整段置顶——归因不靠检索运气
-        from ..store import catalog as catalog_store
-        entry = await catalog_store.get(env, domain, asset_key)
-        if entry is not None and (entry["runbook"] or entry["owner"]
-                                  or entry["code_refs"]):
-            sections.append(catalog_store.render_block(entry))
 
     if domain:
         profiles = await knowledge_store.asset_profiles(env, domain, query)

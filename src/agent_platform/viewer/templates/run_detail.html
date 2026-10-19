@@ -29,14 +29,14 @@
   <pre id="input-pre">{{ input_json }}</pre>
   {% endif %}
 </div>
-{% if ctx.catalog or ctx.knowledge_hits or ctx.assets_recalled or ctx.assets_saved or ctx.knowledge_saved or ctx.session_runs %}
+{% if ctx.task_profile or ctx.knowledge_hits or ctx.assets_recalled or ctx.assets_saved or ctx.knowledge_saved or ctx.session_runs %}
 <div class="card"><b>上下文与沉淀</b>
   <div class="ctx-grid">
-    {% if ctx.catalog %}
-    <div><div class="af-label">资产档案（自动挂载）</div>
-      <a href="/catalog" class="mono">{{ ctx.catalog.asset_key }}</a>
-      <span class="meta">{% if ctx.catalog.owner %}负责人 {{ ctx.catalog.owner }}{% else %}档案待补全{% endif %}</span>
-      {% if ctx.catalog.runbook %}<div class="meta ctx-pre">{{ ctx.catalog.runbook[:300] }}{% if ctx.catalog.runbook|length > 300 %}…{% endif %}</div>{% endif %}
+    {% if ctx.task_profile %}
+    <div><div class="af-label">任务档案（子任务挂载）</div>
+      {% for label, text in ctx.task_profile %}
+      <div class="meta ctx-pre"><b>{{ label }}</b>：{{ text }}</div>
+      {% endfor %}
     </div>
     {% endif %}
     {% if ctx.knowledge_hits %}

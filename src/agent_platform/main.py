@@ -327,12 +327,6 @@ def build_app(settings: Settings | None = None):
         async def _rules_for(domain: str, _error: str) -> list[dict]:
             return await rt.rule_provider.rules_for(domain)
 
-        async def _catalog_register(asset_key: str, target_env: str | None):
-            from .store import catalog as catalog_store
-            env = settings.resolve_target_env(target_env)
-            await catalog_store.register_stub(env, "dagster", asset_key,
-                                              by="dagster-webhook")
-
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse,
@@ -342,7 +336,6 @@ def build_app(settings: Settings | None = None):
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 classifier=_rules_for,
-                catalog_register=_catalog_register,
                 session_template=(dagster_pack.session_template
                                   if dagster_pack else None)),
             gitlab_webhook.make_router(rt.submitter, auth=auth),

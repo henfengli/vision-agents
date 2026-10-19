@@ -148,12 +148,14 @@ async def prepare_run(raw: dict) -> dict:
             t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
             embedder=d.model_pool.embed, session_id=spec.session_id,
-            run_id=spec.run_id,
-            asset_key=str((spec.input or {}).get("asset_key") or "") or None)
+            run_id=spec.run_id)
         if recalled:
             spec.prompt = f"{recalled}\n\n{spec.prompt}"
             await runs.log_event(spec.run_id, "note",
                                  {"stage": "recall", "content": recalled})
+    if spec.profile:
+        # 任务档案（子任务 context）：提交时固化、逐字保留，置于一切之上
+        spec.prompt = f"{spec.profile}\n\n{spec.prompt}"
     return spec.to_dict()
 
 

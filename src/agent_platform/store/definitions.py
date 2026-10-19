@@ -71,6 +71,17 @@ class DefinitionStore:
             self._cache[key] = (time.monotonic(), definition)
         return definition
 
+    async def get_version(self, kind: Kind, env: str, name: str,
+                          version: int) -> dict | None:
+        """指定版本的定义内容（谱系回读：查 run 当时用的是哪一版）。"""
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT definition FROM definitions"
+                " WHERE kind=%s AND env=%s AND name=%s AND version=%s",
+                (kind, env, name, version))
+            row = await cur.fetchone()
+        return _as_dict(row[0]) if row else None
+
     async def list_active(self, kind: Kind, env: str) -> list[dict]:
         async with pool().connection() as conn:
             cur = await conn.execute(

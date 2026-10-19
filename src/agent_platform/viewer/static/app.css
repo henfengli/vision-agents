@@ -605,6 +605,8 @@ th.sortable a:hover { color: var(--accent); }
   margin-top: 4px; }
 /* 管理页任务条目 → run 历史直达 */
 .admin-item-wrap { position: relative; }
+.admin-sub { margin-left: 18px; }
+.admin-sub .ai-name { font-size: .92em; }
 .admin-item-wrap .ai-link { position: absolute; right: 8px; top: 50%;
   transform: translateY(-50%); font-size: 11px; opacity: 0;
   transition: opacity .12s; }
