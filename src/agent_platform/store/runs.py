@@ -88,6 +88,18 @@ async def find_by_idempotency(key: str) -> dict | None:
     return _row_to_dict(cur, row) if row else None
 
 
+async def list_by_session(session_id: str, exclude: str = "",
+                          limit: int = 50) -> list[dict]:
+    """同会话的全部 run（按时间正序）：run 详情「会话链/故障周期」用。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_LIST_COLS} FROM runs WHERE session_id = %s"
+            " AND run_id <> %s ORDER BY created_at LIMIT %s",
+            (session_id, exclude, limit))
+        rows = await cur.fetchall()
+    return [_list_row(r) for r in rows]
+
+
 async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
     """会话最近一个 run 的概要（correction 继承 task_type/role/domain/env 用）。"""
     async with db.pool().connection() as conn:
@@ -114,6 +126,7 @@ _LIST_COLS = ("run_id, session_id, task_type, role, domain, target_env,"
 async def list_filtered(*, target_env: str | None = None,
                         status: str | None = None, domain: str | None = None,
                         task: str | None = None, source: str | None = None,
+                        session: str | None = None,
                         q: str | None = None, hours: int | None = None,
                         sort: str = "created_at", asc: bool = False,
                         after: str | None = None, before: str | None = None,
@@ -130,6 +143,7 @@ async def list_filtered(*, target_env: str | None = None,
     params: list = []
     for clause, val in (("target_env=%s", target_env), ("status=%s", status),
                         ("domain=%s", domain), ("task_type=%s", task),
+                        ("session_id=%s", session),
                         ("trigger_source=%s", source)):
         if val:
             conds.append(clause)
@@ -384,3 +398,33 @@ async def overview(hours: int = 24) -> dict:
 
 def _row_to_dict(cur, row) -> dict:
     return {d.name: v for d, v in zip(cur.description, row)}
+
+
+async def stats_by_asset_key(target_env: str, days: int = 30) -> dict:
+    """按 input->>'asset_key' 聚合 run 统计（资产目录页用）：
+    {asset_key: {runs, failed, last_at}}。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT input->>'asset_key' AS k, COUNT(*),"
+            " COUNT(*) FILTER (WHERE status='failed'), MAX(created_at)"
+            " FROM runs WHERE target_env=%s"
+            " AND input->>'asset_key' IS NOT NULL"
+            " AND created_at > now() - make_interval(days => %s)"
+            " GROUP BY k", (target_env, days))
+        rows = await cur.fetchall()
+    return {r[0]: {"runs": r[1], "failed": r[2],
+                   "last_at": r[3].isoformat() if r[3] else None}
+            for r in rows if r[0]}
+
+
+async def recent_by_asset_key(target_env: str, asset_key: str,
+                              limit: int = 10) -> list[dict]:
+    """某资产最近的 run（目录详情抽屉用），按时间倒序。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_LIST_COLS} FROM runs"
+            " WHERE target_env=%s AND input->>'asset_key'=%s"
+            " ORDER BY created_at DESC LIMIT %s",
+            (target_env, asset_key, limit))
+        rows = await cur.fetchall()
+    return [_list_row(r) for r in rows]

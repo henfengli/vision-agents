@@ -335,3 +335,13 @@ async def list_all(env: str, domain: str | None = None,
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],
              "code_ref": r[7],  # JSONB 已被 psycopg3 解析成 dict/None
              "created_at": r[8].isoformat()} for r in rows]
+
+
+async def by_source_run(run_id: str) -> list[dict]:
+    """反查：某次 run 沉淀了哪些知识条目（run 详情「本次沉淀」用）。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, domain, key FROM knowledge WHERE source_run=%s"
+            " ORDER BY id", (run_id,))
+        rows = await cur.fetchall()
+    return [{"id": r[0], "domain": r[1], "key": r[2]} for r in rows]

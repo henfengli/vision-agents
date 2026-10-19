@@ -111,6 +111,7 @@ class Runtime:
     resync_schedules: object = None  # 任务保存后热同步 Temporal Schedules
     temporal_client: object = None
     worker: object = None
+    rule_provider: object = None     # 规则库运行期源（rules.RuleProvider）
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
     _sync_task: asyncio.Task | None = field(default=None, repr=False)
 
@@ -134,6 +135,15 @@ async def assemble_runtime(settings: Settings) -> Runtime:
 
     defs = DefinitionStore()
     await seed_if_empty(defs, settings.env, domains=settings.domains)
+    # 规则库（顶层服务）：域包 rules.yaml 首次播种进 definitions，之后
+    # 管理页编辑的版本为准（已有定义不覆盖）
+    from . import rules as rules_svc
+    await rules_svc.seed_from_domain_packs(defs, settings.env,
+                                           settings.domains)
+    rule_provider = rules_svc.RuleProvider(
+        defs, settings.env,
+        fallback={name: (pack.rules or [])
+                  for name, pack in settings.domains.items()})
     tasks = TaskRegistry(defs, settings.env)
     langfuse = LangfuseClient(settings.langfuse)
     relay = DingTalkRelay(settings.dingtalk_relay_url, settings.dingtalk_token)
@@ -276,6 +286,7 @@ async def assemble_runtime(settings: Settings) -> Runtime:
                  resync_schedules=resync_schedules,
                  temporal_client=temporal_client,
                  worker=worker,
+                 rule_provider=rule_provider,
                  _worker_task=asyncio.create_task(worker.run()),
                  _sync_task=asyncio.create_task(_schedule_reconcile()))
 
@@ -312,6 +323,16 @@ def build_app(settings: Settings | None = None):
         # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
         auth = make_auth_dependency(settings.bearer_token)
         dagster_pack = settings.domains.get("dagster")
+
+        async def _rules_for(domain: str, _error: str) -> list[dict]:
+            return await rt.rule_provider.rules_for(domain)
+
+        async def _catalog_register(asset_key: str, target_env: str | None):
+            from .store import catalog as catalog_store
+            env = settings.resolve_target_env(target_env)
+            await catalog_store.register_stub(env, "dagster", asset_key,
+                                              by="dagster-webhook")
+
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
                             langfuse=rt.langfuse,
@@ -320,7 +341,8 @@ def build_app(settings: Settings | None = None):
                             domain_cfgs=settings.domains),
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
-                rules=dagster_pack.rules if dagster_pack else [],
+                classifier=_rules_for,
+                catalog_register=_catalog_register,
                 session_template=(dagster_pack.session_template
                                   if dagster_pack else None)),
             gitlab_webhook.make_router(rt.submitter, auth=auth),

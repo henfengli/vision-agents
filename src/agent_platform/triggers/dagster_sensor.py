@@ -3,8 +3,9 @@
 规则粗分类放这里（sensor 也可复用同一函数）：模式化报错直接出结论，
 只有规则未命中的疑难报错才建 run 交给 agent——省钱、快、准。
 
-规则与 episode 命名模板来自域包（conf/domains/dagster/），不在内核硬编码；
-未配置规则时全部交给 agent（宁可多花钱，不乱判）。
+规则库是平台顶层服务（agent_platform.rules）：存 definitions（版本化、
+管理页可编辑、热生效），域包 rules.yaml 只是首次启动的种子。episode
+命名模板仍来自域包（conf/domains/dagster/session.yaml）。
 """
 
 from __future__ import annotations
@@ -13,23 +14,13 @@ import datetime
 import logging
 import re
 
+from .. import rules as rules_svc
+
 DEFAULT_SESSION_TEMPLATE = "dagster:{asset}:{error_class}:{date}"
 
-
-def rule_classify(error: str, rules: list[dict]) -> dict | None:
-    """规则先行：命中返回结论，未命中返回 None（交给 agent）。"""
-    for rule in rules:
-        if re.search(rule["pattern"], error, re.IGNORECASE):
-            return {"category": rule["category"],
-                    "conclusion": rule["conclusion"], "by": "rule"}
-    return None
-
-
-def error_class(error: str, rules: list[dict]) -> str:
-    """粗粒度报错分类（仅取类别，不出结论）：session_id 维度用。
-    同类故障历史连续，跨类自动开新线，避免旧历史带偏判断。"""
-    hit = rule_classify(error, rules)
-    return hit["category"] if hit else "unknown"
+# 兼容旧导入路径（测试与外部引用）：实现已迁到 rules 服务模块
+rule_classify = rules_svc.classify
+error_class = rules_svc.error_class
 
 
 def session_id_for(asset_key: str, error: str, rules: list[dict],
@@ -44,13 +35,25 @@ def session_id_for(asset_key: str, error: str, rules: list[dict],
 
 
 def make_router(submitter, notifier, auth=None,
-                rules: list[dict] | None = None,
+                classifier=None, catalog_register=None,
                 session_template: str | None = None):
+    """classifier：async (domain, error) -> rules 列表（RuleProvider.rules_for
+    的部分应用）；缺省 = 无规则全交 agent。catalog_register：async
+    (asset_key, env) 自动登记未知资产到资产目录。"""
     from fastapi import APIRouter, Depends
 
     # auth：与 /v1 API 同一 bearer 依赖；webhook 也是服务间调用，不能裸奔
     router = APIRouter(dependencies=[Depends(auth)] if auth else [])
-    rules = rules or []
+    log = logging.getLogger(__name__)
+
+    async def _rules(error: str) -> list[dict]:
+        if classifier is None:
+            return []
+        try:
+            return await classifier("dagster", error)
+        except Exception as e:  # noqa: BLE001 —— 规则源故障退化为无规则
+            log.warning("规则库读取失败，本次报错交 agent：%s", e)
+            return []
 
     @router.post("/v1/hooks/dagster")
     async def dagster_hook(payload: dict):
@@ -60,27 +63,40 @@ def make_router(submitter, notifier, auth=None,
         sensor 侧按自己的环境标识上送（缺省 = 实例默认环境）。
         """
         error = str(payload.get("error", ""))
-        hit = rule_classify(error, rules)
+        asset_key = str(payload.get("asset_key", ""))
+        target_env = payload.get("env") or None
+        # 本 webhook 即 dagster 域入口：补 domain 让 run 归属域，
+        # 召回（资产目录/域知识/案例）与记忆分区全部按域生效
+        payload.setdefault("domain", "dagster")
+
+        # 资产目录自动登记：首次上报即建档（占位条目，人去补全），
+        # 归因从第一次失败开始累计；登记失败不挡主链路
+        if asset_key and catalog_register is not None:
+            try:
+                await catalog_register(asset_key, target_env)
+            except Exception as e:  # noqa: BLE001
+                log.warning("资产目录登记失败（不影响上报）：%s", e)
+
+        rules = await _rules(error)
+        hit = rules_svc.classify(error, rules)
         if hit and notifier is not None:
             try:
                 await notifier.send_alert_card(
-                    f"[failure-analysis] {payload.get('asset_key', '')}",
+                    f"[failure-analysis] {asset_key}",
                     f"**规则判定**（{hit['category']}）：{hit['conclusion']}\n\n"
                     f"报错摘要：{error[:500]}",
                     dedup_hash=str(payload.get("run_id", "")))
             except Exception:
                 # 告警通道（relay 不可达等）挂了不能让 webhook 500：
                 # 规则结论照样返回调用方，只标注通知未送达
-                logging.getLogger(__name__).exception(
-                    "规则判定告警卡发送失败（asset=%s）",
-                    payload.get("asset_key", ""))
+                log.exception("规则判定告警卡发送失败（asset=%s）", asset_key)
                 return {"status": "rule_resolved",
                         "category": hit["category"], "notify": "failed"}
             return {"status": "rule_resolved", "category": hit["category"]}
         return await submitter.submit(
             "failure-analysis", payload, trigger_source="sensor",
-            session_id=session_id_for(str(payload.get("asset_key", "")),
-                                      error, rules, session_template),
-            target_env=payload.get("env") or None)
+            session_id=session_id_for(asset_key, error, rules,
+                                      session_template),
+            target_env=target_env)
 
     return router

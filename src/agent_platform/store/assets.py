@@ -483,3 +483,31 @@ def _row_meta(r) -> dict:
             "superseded_by": r[10], "source_run": r[11],
             "created_at": r[12].isoformat() if r[12] else None,
             "path": r[13]}
+
+
+async def by_ids(ids: list[int]) -> list[dict]:
+    """按 id 批量取（run 详情还原「本次召回的任务资产」用）。"""
+    if not ids:
+        return []
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, domain, task, kind, name, summary, use_count,"
+            " last_used_at, feedback_score,"
+            " (valid_to IS NOT NULL) AS expired, superseded_by, source_run,"
+            " created_at, path"
+            " FROM assets WHERE id = ANY(%s) ORDER BY id", (list(ids),))
+        rows = await cur.fetchall()
+    return [_row_meta(r) for r in rows]
+
+
+async def by_source_run(run_id: str) -> list[dict]:
+    """反查：某次 run 沉淀了哪些资产（run 详情「本次沉淀」用）。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, domain, task, kind, name, summary, use_count,"
+            " last_used_at, feedback_score,"
+            " (valid_to IS NOT NULL) AS expired, superseded_by, source_run,"
+            " created_at, path"
+            " FROM assets WHERE source_run=%s ORDER BY id", (run_id,))
+        rows = await cur.fetchall()
+    return [_row_meta(r) for r in rows]

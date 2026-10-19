@@ -42,7 +42,9 @@ def make_router(env: str, langfuse=None,
             rows, total, next_c, prev_c = await runs.list_filtered(
                 target_env=p.get("env") or None, status=status or None,
                 domain=p.get("domain") or None, task=p.get("task") or None,
-                source=p.get("source") or None, q=p.get("q") or None,
+                source=p.get("source") or None,
+                session=p.get("session") or None,
+                q=p.get("q") or None,
                 hours=hours or None,
                 sort=p.get("sort") or "created_at", asc=p.get("dir") == "asc",
                 after=p.get("c") or None, before=p.get("b") or None,
@@ -63,6 +65,7 @@ def make_router(env: str, langfuse=None,
                       f_env=p.get("env") or "", f_domain=p.get("domain") or "",
                       f_task=p.get("task") or "", f_q=p.get("q") or "",
                       f_source=p.get("source") or "",
+                      f_session=p.get("session") or "",
                       sort=p.get("sort") or "created_at",
                       dir=p.get("dir") or "desc",
                       statuses=_STATUSES, sources=_SOURCES, ranges=_RANGES,
@@ -131,9 +134,10 @@ def make_router(env: str, langfuse=None,
             if tid:
                 trace = {"tid": tid, "url": await langfuse.trace_url(tid)}
         pending = await approvals.find_pending(run_id)
+        context = await _run_context(run, run_id)
         return render(
             "run_detail.html", f"Run {run_id[:8]}", active="/runs",
-            run_id=run_id, pending=pending, trace=trace,
+            run_id=run_id, pending=pending, trace=trace, ctx=context,
             input_question=(run.get("input") or {}).get("question") or "",
             input_json=json.dumps(run.get("input"),
                                   ensure_ascii=False, indent=2))
@@ -167,6 +171,54 @@ def make_router(env: str, langfuse=None,
         return RedirectResponse(f"/runs/{result['run_id']}", status_code=303)
 
     return router
+
+
+async def _run_context(run: dict, run_id: str) -> dict:
+    """run 详情「上下文与沉淀」卡：这次 run 召回/产生/关联了什么。
+
+    五块：资产目录档案（按 input.asset_key 确定性关联）→ 召回的知识
+    （recall_hits 反查）→ 召回的任务资产（prepare 事件里的 asset_ids）
+    → 本次沉淀（knowledge/assets 的 source_run 反查）→ 同会话的其他
+    run（故障周期/续聊链）。全部有出处可查，不从 prompt 文本里猜。
+    """
+    from ...store import assets as assets_store
+    from ...store import catalog as catalog_store
+    from ...store import knowledge as knowledge_store
+
+    ctx: dict = {"catalog": None, "knowledge_hits": [], "assets_recalled": [],
+                 "assets_saved": [], "knowledge_saved": [],
+                 "session_id": run.get("session_id") or "",
+                 "session_runs": []}
+
+    inp = run.get("input") or {}
+    asset_key = inp.get("asset_key")
+    domain = run.get("domain")
+    t_env = run.get("target_env") or ""
+    if asset_key and domain:
+        ctx["catalog"] = await catalog_store.get(t_env, domain,
+                                                 str(asset_key))
+
+    ctx["knowledge_hits"] = await knowledge_store.hits_for_run(run_id)
+    ctx["assets_saved"] = await assets_store.by_source_run(run_id)
+    ctx["knowledge_saved"] = await knowledge_store.by_source_run(run_id)
+
+    # 召回的任务资产：prepare 阶段把 asset_ids 写进了 stage=assets 事件
+    try:
+        events = await runs.get_events(run_id)
+        ids: list[int] = []
+        for e in events:
+            p = e["payload"] if isinstance(e["payload"], dict) else {}
+            if p.get("stage") == "assets" and p.get("asset_ids"):
+                ids.extend(p["asset_ids"])
+        if ids:
+            ctx["assets_recalled"] = await assets_store.by_ids(ids)
+    except Exception:  # noqa: BLE001 —— 上下文卡失败不挡详情页主体
+        pass
+
+    sid = ctx["session_id"]
+    if sid and sid != run_id:
+        ctx["session_runs"] = await runs.list_by_session(sid, exclude=run_id)
+    return ctx
 
 
 def _span_meta(events: list[dict], observations: list[dict]) -> dict:

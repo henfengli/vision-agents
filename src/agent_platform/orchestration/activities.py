@@ -134,7 +134,9 @@ async def prepare_run(raw: dict) -> dict:
             spec.prompt = f"{block}\n\n{spec.prompt}"
             await assets_store.mark_used([a["id"] for a in assets])
             await runs.log_event(spec.run_id, "note",
-                                 {"stage": "assets", "content": block})
+                                 {"stage": "assets",
+                                  "asset_ids": [a["id"] for a in assets],
+                                  "content": block})
         elif spec.trigger == "schedule" and "save_asset" in role.tools:
             # 首跑提示：调度任务没有既定方法时，引导探索后沉淀——
             # 确定性不靠平台写死，靠资产复用收敛出来
@@ -146,7 +148,8 @@ async def prepare_run(raw: dict) -> dict:
             t_env, spec.domain, spec.question,
             error_text=spec.error_text, domain_code_paths=spec.code_paths,
             embedder=d.model_pool.embed, session_id=spec.session_id,
-            run_id=spec.run_id)
+            run_id=spec.run_id,
+            asset_key=str((spec.input or {}).get("asset_key") or "") or None)
         if recalled:
             spec.prompt = f"{recalled}\n\n{spec.prompt}"
             await runs.log_event(spec.run_id, "note",

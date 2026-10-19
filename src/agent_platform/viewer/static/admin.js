@@ -9,8 +9,9 @@ const D = window.ADMIN;
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 
-const KIND_LABEL = {role: "角色", task: "任务", policy: "策略"};
+const KIND_LABEL = {role: "角色", task: "任务", policy: "策略", rules: "规则库"};
 const SAVE_URL = {role: "/v1/admin/roles", task: "/v1/admin/tasks",
+  rules: "/v1/admin/rules",
                   policy: "/v1/admin/policies"};
 
 /* 表单 schema：kind → 字段描述列表。type: text/number/textarea/json/
@@ -44,6 +45,10 @@ const FORMS = {
      type: "json", rows: 2},
     {k: "env_gate", label: "启用环境（空 = 全部）", type: "checks",
      options: () => D.envs},
+  ],
+  rules: [
+    {k: "rules", label: '规则（JSON 数组，按序匹配首个命中）：[{"pattern": "正则", "category": "类别", "conclusion": "结论", "enabled": true}]——命中即直接回结论发告警，未命中才建 run 交 agent',
+     type: "json", rows: 14},
   ],
   policy: [
     {k: "match_regex", label: "命中正则（作用于 任务名+输入+question）",

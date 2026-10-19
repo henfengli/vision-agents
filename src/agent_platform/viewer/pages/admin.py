@@ -19,7 +19,7 @@ from ...store import feedback as feedback_store
 from ...store import runs as runs_store
 from .base import render
 
-KINDS = ("role", "task", "policy")
+KINDS = ("role", "task", "policy", "rules")
 
 
 def make_router(defs_store, env: str, langfuse=None,
@@ -48,7 +48,7 @@ def make_router(defs_store, env: str, langfuse=None,
             # 编辑器的结构化选项：工具目录、域、目标环境、角色名（任务用）
             tool_names=tool_names or [], domains=domains or [],
             envs=sorted({env, *(target_envs or [])}),
-            role_names=[r["name"] for r in items["role"]],
+            role_names=[r["name"] for r in items.get("role", [])],
             defs_json=json.dumps(
                 {k: {r["name"]: r for r in rows} for k, rows in items.items()},
                 ensure_ascii=False))
@@ -69,8 +69,8 @@ def make_router(defs_store, env: str, langfuse=None,
     async def def_diff(kind: str, name: str, a: int, b: int, format: str = ""):
         """两个版本的定义 diff。format=json 供管理页内联渲染；默认整页 HTML
         （直链/新窗口打开）。排查"当时那版 prompt 怎么写的"的落点。"""
-        if kind not in ("role", "task"):
-            raise HTTPException(422, "kind 只能是 role/task")
+        if kind not in ("role", "task", "rules"):
+            raise HTTPException(422, "kind 只能是 role/task/rules")
         history = await defs_store.history(kind, env, name)
         by_version = {h["version"]: h for h in history}
         if a not in by_version or b not in by_version:

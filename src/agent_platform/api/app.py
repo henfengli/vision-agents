@@ -7,7 +7,7 @@ make_api_router：全部 /v1 业务端点——在 lifespan 内、依赖（Submi
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..agent import approvals
@@ -295,6 +295,88 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
     @router.get("/v1/admin/policies")
     async def list_policies():
         return await defs.list_active("policy", settings.env)
+
+    # —— Admin：报错规则库（rules 服务模块；按域存，name=域名） ——
+
+    @router.post("/v1/admin/rules")
+    async def put_rules(req: DefinitionPutRequest):
+        """保存某域的规则库（新版本，热生效）。definition={"rules": [...]}。"""
+        from .. import rules as rules_svc
+        try:
+            rules = rules_svc.validate(req.definition.get("rules"))
+        except ValueError as e:
+            raise HTTPException(422, f"规则库定义不合法：{e}")
+        version = await defs.put("rules", settings.env, req.name,
+                                 {"rules": rules}, req.updated_by)
+        return {"name": req.name, "version": version}
+
+    @router.get("/v1/admin/rules")
+    async def list_rules():
+        return await defs.list_active("rules", settings.env)
+
+    @router.get("/v1/admin/rules/{name}")
+    async def get_rules(name: str):
+        return await _get_def("rules", name)
+
+    @router.get("/v1/admin/rules/{name}/history")
+    async def rules_history(name: str):
+        return await defs.history("rules", settings.env, name)
+
+    @router.post("/v1/admin/rules/{name}/rollback/{version}")
+    async def rollback_rules(name: str, version: int):
+        history = await defs.history("rules", settings.env, name)
+        target = next((h for h in history if h["version"] == version), None)
+        if target is None:
+            raise HTTPException(404, f"规则库 {name} 不存在版本 {version}")
+        new_version = await defs.put("rules", settings.env, name,
+                                     target["definition"],
+                                     updated_by=f"rollback-to-v{version}")
+        return {"name": name, "version": new_version}
+
+    # —— 资产目录（catalog）：业务对象档案的 CRUD ——
+
+    @router.get("/v1/catalog")
+    async def catalog_list(env: str = "", domain: str = "", q: str = ""):
+        from ..store import catalog as catalog_store
+        t_env = settings.resolve_target_env(env or None)
+        return {"entries": await catalog_store.list_entries(
+            t_env, domain or None, q or None)}
+
+    @router.post("/v1/catalog")
+    async def catalog_upsert(req: Request):
+        from ..store import catalog as catalog_store
+        body = await req.json()
+        asset_key = str(body.get("asset_key") or "").strip()
+        domain = str(body.get("domain") or "").strip()
+        if not asset_key or not domain:
+            raise HTTPException(422, "asset_key 与 domain 必填")
+        tier = str(body.get("tier") or "")
+        if tier and tier not in ("core", "important", "normal"):
+            raise HTTPException(422, "tier 只能是 core/important/normal")
+        t_env = settings.resolve_target_env(body.get("env") or None)
+        entry = await catalog_store.upsert(
+            t_env, domain, asset_key,
+            name=str(body.get("name") or ""),
+            owner=str(body.get("owner") or ""), tier=tier,
+            upstream=body.get("upstream"), downstream=body.get("downstream"),
+            code_refs=body.get("code_refs"), tags=body.get("tags"),
+            runbook=str(body.get("runbook") or ""),
+            by=str(body.get("updated_by") or "api"))
+        return entry
+
+    @router.get("/v1/catalog/{entry_id}")
+    async def catalog_get(entry_id: int):
+        from ..store import catalog as catalog_store
+        entry = await catalog_store.get_by_id(entry_id)
+        if entry is None:
+            raise HTTPException(404, "目录条目不存在")
+        return entry
+
+    @router.delete("/v1/catalog/{entry_id}")
+    async def catalog_delete(entry_id: int):
+        from ..store import catalog as catalog_store
+        await catalog_store.delete(entry_id)
+        return {"ok": True}
 
     # —— Admin：单条读取 / 历史 / 回滚（三类补齐，AI 的 read-modify-write 闭环） ——
 

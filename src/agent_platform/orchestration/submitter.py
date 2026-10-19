@@ -109,11 +109,14 @@ class Submitter:
             await self._create_row(run_id, task, input_data, trigger_source,
                                    caller, session_id, domain, dedup_key,
                                    target_env)
+        domain = domain or str(input_data.get("server")
+                               or input_data.get("domain") or "") or None
         spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
                        question=_to_question(task, input_data),
                        input=input_data, error_text=input_data.get("error"),
                        session_id=session_id, timeout_s=task.timeout_s,
                        target_env=target_env,
+                       domain=domain,
                        trigger=trigger_source, correction=correction,
                        resume=resume,
                        artifacts=({k: v.model_dump() for k, v in

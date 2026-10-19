@@ -59,3 +59,16 @@ async def recent_hits(entry_id: int, limit: int = 8) -> list[dict]:
     return [{"run_id": r[0], "source": r[1], "rank": r[2],
              "created_at": r[3].isoformat() if r[3] else None}
             for r in rows]
+
+
+async def hits_for_run(run_id: str) -> list[dict]:
+    """反查：某次 run 实际召回了哪些知识条目（run 详情「召回上下文」用）。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT k.id, k.domain, k.key, h.rank FROM recall_hits h"
+            " JOIN knowledge k ON k.id = h.entry_id"
+            " WHERE h.run_id=%s AND h.source='recall' ORDER BY h.rank",
+            (run_id,))
+        rows = await cur.fetchall()
+    return [{"id": r[0], "domain": r[1], "key": r[2], "rank": r[3]}
+            for r in rows]

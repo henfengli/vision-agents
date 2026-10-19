@@ -163,7 +163,7 @@
           "<span>" + esc(a.domain) + " / " + (a.task ? esc(a.task) : "域级通用") + "</span>" +
           "<span>复用 " + a.use_count + " 次</span>" +
           "<span>最近复用 " + (a.last_used_at ? TS.span(a.last_used_at) : "—") + "</span>" +
-          (a.source_run ? '<span>来源 run <span class="mono">' + esc(a.source_run.slice(0, 8)) + "</span></span>" : "") +
+          (a.source_run ? '<span>来源 <a href="/runs/' + esc(a.source_run) + '">run</a></span>' : "") +
           "<span>登记于 " + TS.span(a.created_at) + "</span>";
         document.getElementById("ad-summary").value = a.summary;
         document.getElementById("ad-content").value = a.content;

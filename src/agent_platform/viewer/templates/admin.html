@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block content %}
-{{ m.page_head("ADMIN", "管理", "角色 / 任务 / 策略热更新 · 保存即新版本即时生效") }}
+{{ m.page_head("ADMIN", "管理", "角色 / 任务 / 策略 / 规则库热更新 · 保存即新版本即时生效") }}
 {% if escalations %}
 <div class="alert warn"><b>升舱提示</b>（同一 session 被纠正 ≥3 次）<ul>
   {% for e in escalations %}
@@ -18,18 +18,25 @@
       <button data-kind="role" class="on">角色</button>
       <button data-kind="task">任务</button>
       <button data-kind="policy">策略</button>
+      <button data-kind="rules">规则库</button>
     </div>
     <button id="admin-new" class="admin-new">＋ 新建</button>
     <input id="admin-q" class="inline" placeholder="过滤名称…"
            style="width:100%;margin-bottom:8px">
-    {% for kind in ("role", "task", "policy") %}
+    {% for kind in ("role", "task", "policy", "rules") %}
     <div class="admin-items" data-kind="{{ kind }}"{% if kind != "role" %} hidden{% endif %}>
       {% for it in items[kind] %}
-      <button class="admin-item" data-name="{{ it.name }}">
-        <span class="ai-name">{{ it.name }}</span>
-        <span class="ai-meta">v{{ it.version }}{% if it.usage %}
-          · {{ it.usage.runs }} run/24h{% endif %}</span>
-      </button>
+      <div class="admin-item-wrap">
+        <button class="admin-item" data-name="{{ it.name }}">
+          <span class="ai-name">{{ it.name }}</span>
+          <span class="ai-meta">v{{ it.version }}{% if it.usage %}
+            · {{ it.usage.runs }} run/24h{% endif %}</span>
+        </button>
+        {% if kind == "task" %}
+        <a class="ai-link" href="/runs?task={{ it.name }}"
+           title="该任务的 run 历史">runs →</a>
+        {% endif %}
+      </div>
       {% else %}
       <div class="meta" style="padding:10px 4px">暂无定义</div>
       {% endfor %}

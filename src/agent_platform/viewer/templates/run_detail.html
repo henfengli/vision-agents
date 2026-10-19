@@ -29,6 +29,53 @@
   <pre id="input-pre">{{ input_json }}</pre>
   {% endif %}
 </div>
+{% if ctx.catalog or ctx.knowledge_hits or ctx.assets_recalled or ctx.assets_saved or ctx.knowledge_saved or ctx.session_runs %}
+<div class="card"><b>上下文与沉淀</b>
+  <div class="ctx-grid">
+    {% if ctx.catalog %}
+    <div><div class="af-label">资产档案（自动挂载）</div>
+      <a href="/catalog" class="mono">{{ ctx.catalog.asset_key }}</a>
+      <span class="meta">{% if ctx.catalog.owner %}负责人 {{ ctx.catalog.owner }}{% else %}档案待补全{% endif %}</span>
+      {% if ctx.catalog.runbook %}<div class="meta ctx-pre">{{ ctx.catalog.runbook[:300] }}{% if ctx.catalog.runbook|length > 300 %}…{% endif %}</div>{% endif %}
+    </div>
+    {% endif %}
+    {% if ctx.knowledge_hits %}
+    <div><div class="af-label">本次召回的知识（{{ ctx.knowledge_hits|length }}）</div>
+      {% for h in ctx.knowledge_hits %}
+      <div><a href="/memory?env=&domain={{ h.domain }}">#{{ h.rank }} {{ h.key }}</a></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if ctx.assets_recalled %}
+    <div><div class="af-label">本次召回的任务资产（{{ ctx.assets_recalled|length }}）</div>
+      {% for a in ctx.assets_recalled %}
+      <div><a href="/assets?domain={{ a.domain }}">{{ a.kind }}:{{ a.name }}</a></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if ctx.assets_saved or ctx.knowledge_saved %}
+    <div><div class="af-label">本次沉淀</div>
+      {% for a in ctx.assets_saved %}
+      <div><a href="/assets?domain={{ a.domain }}">资产 {{ a.kind }}:{{ a.name }}</a></div>
+      {% endfor %}
+      {% for k in ctx.knowledge_saved %}
+      <div><a href="/memory?domain={{ k.domain }}">知识 {{ k.key }}</a></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if ctx.session_runs %}
+    <div><div class="af-label">同会话 / 故障周期（{{ ctx.session_runs|length }} 个其他 run）</div>
+      {% for r in ctx.session_runs %}
+      <div><a href="/runs/{{ r.run_id }}"><code>{{ r.run_id[:8] }}</code></a>
+        <span class="pill pill-{{ r.status }}">{{ r.status }}</span>
+        <span class="meta">{{ r.created_at | reltime }}</span></div>
+      {% endfor %}
+      <div style="margin-top:4px"><a href="/runs?session={{ ctx.session_id }}">该会话全部 run →</a></div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 {# data-trace-tid 触发 JS 回填 span 元信息（模型/token/成本）到步骤行；
    深层排查（Annotate/队列）走官方 UI 外链 #}
 <div class="page-head" id="steps-head" style="margin-top:22px"

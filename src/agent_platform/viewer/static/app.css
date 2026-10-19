@@ -597,3 +597,15 @@ th.sortable a:hover { color: var(--accent); }
 .filter-bar .fcount { margin-left: auto; }
 .rowlink { cursor: pointer; }
 .rowlink:hover td { background: rgba(34, 211, 238, 0.04); }
+
+/* run 详情「上下文与沉淀」卡 */
+.ctx-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px; margin-top: 10px; }
+.ctx-pre { white-space: pre-wrap; word-break: break-word; max-width: 480px;
+  margin-top: 4px; }
+/* 管理页任务条目 → run 历史直达 */
+.admin-item-wrap { position: relative; }
+.admin-item-wrap .ai-link { position: absolute; right: 8px; top: 50%;
+  transform: translateY(-50%); font-size: 11px; opacity: 0;
+  transition: opacity .12s; }
+.admin-item-wrap:hover .ai-link { opacity: 1; }

@@ -211,6 +211,29 @@ CREATE TABLE IF NOT EXISTS knowledge_history (
     UNIQUE(env, domain, key, version)
 );
 
+-- 资产目录：业务对象（dagster asset / 表 / 报表）的档案，结构化归因 + runbook。
+-- 与知识条目的区别：按 asset_key 确定性挂载（不靠向量召回运气），
+-- 负责人/依赖/代码位置是一等字段，可聚合统计（连续失败、零档案覆盖率）。
+CREATE TABLE IF NOT EXISTS catalog_entry (
+    id          BIGSERIAL PRIMARY KEY,
+    env         TEXT NOT NULL,
+    domain      TEXT NOT NULL,
+    asset_key   TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    owner       TEXT NOT NULL DEFAULT '',
+    tier        TEXT NOT NULL DEFAULT '',      -- core/important/normal
+    upstream    JSONB NOT NULL DEFAULT '[]',
+    downstream  JSONB NOT NULL DEFAULT '[]',
+    code_refs   JSONB NOT NULL DEFAULT '[]',
+    tags        JSONB NOT NULL DEFAULT '[]',
+    runbook     TEXT NOT NULL DEFAULT '',      -- 自由文本：坑/口径/SOP，整段注入
+    created_by  TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_by  TEXT NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(env, domain, asset_key)
+);
+
 -- pg_trgm：知识/案例的关键词相似度检索（无 pg_trgm 时跳过，退化 ILIKE）
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -255,6 +278,16 @@ MIGRATIONS = [
     superseded_by TEXT, created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE(env, domain, task, kind, name))""",
     "ALTER TABLE assets ADD COLUMN IF NOT EXISTS path TEXT",
+    # 资产目录（老库补建；新库 SCHEMA 已含，幂等）
+    """CREATE TABLE IF NOT EXISTS catalog_entry (
+    id BIGSERIAL PRIMARY KEY, env TEXT NOT NULL, domain TEXT NOT NULL,
+    asset_key TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '', tier TEXT NOT NULL DEFAULT '',
+    upstream JSONB NOT NULL DEFAULT '[]', downstream JSONB NOT NULL DEFAULT '[]',
+    code_refs JSONB NOT NULL DEFAULT '[]', tags JSONB NOT NULL DEFAULT '[]',
+    runbook TEXT NOT NULL DEFAULT '', created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT now(), updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(env, domain, asset_key))""",
 ]
 
 _dsn: str | None = None
