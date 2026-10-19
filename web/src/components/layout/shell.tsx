@@ -1,0 +1,192 @@
+/**
+ * 应用骨架：左侧导航 + 顶栏（全局环境、搜索、审批、主题）+ 内容区。
+ */
+import { type ReactNode } from "react";
+import {
+  LuActivity, LuBrain, LuChevronsLeft, LuChevronsRight, LuLayoutDashboard, LuListTodo, LuLogOut, LuMessageSquare,
+  LuMonitor, LuMoon, LuSearch, LuServer, LuShieldCheck, LuSlidersHorizontal, LuSun, LuBot, LuLayers,
+} from "react-icons/lu";
+
+import { useApprovals, useEnvs, useMeta } from "@/api/hooks";
+import { cn } from "@/lib/cn";
+import { Link, useActive } from "@/lib/router";
+import { setUi, useNarrow, useUi, type Theme } from "@/lib/store";
+import { Kbd } from "../ui/primitives";
+import { Menu, Tooltip } from "../ui/overlay";
+import { openPalette } from "./palette";
+
+function NavItem({ to, icon, label, badge, collapsed }: { to: string; icon: ReactNode; label: string; badge?: number; collapsed: boolean }) {
+  const active = useActive(to);
+  const item = (
+    <Link to={to} className={cn(
+      "group relative flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] font-medium transition-colors [&_svg]:size-4 [&_svg]:shrink-0",
+      active ? "bg-panel text-fg shadow-[0_0_0_1px_var(--color-line),var(--shadow-card)]" : "text-fg-2 hover:bg-hover hover:text-fg",
+      collapsed && "justify-center px-0",
+    )}>
+      <span className={cn(active ? "text-accent" : "text-fg-3 group-hover:text-fg-2")}>{icon}</span>
+      {!collapsed && <span className="flex-1 truncate">{label}</span>}
+      {!!badge && (collapsed
+        ? <span className="absolute right-1 top-1 size-1.5 rounded-full bg-warn" />
+        : <span className="rounded-full bg-warn-soft px-1.5 text-[11px] font-semibold tabular-nums text-warn">{badge}</span>)}
+    </Link>
+  );
+  return collapsed ? <div className="[&>span]:flex"><Tooltip content={label} side="right">{item}</Tooltip></div> : item;
+}
+
+function Sidebar() {
+  const { sidebarCollapsed } = useUi();
+  const narrow = useNarrow();
+  const collapsed = sidebarCollapsed || narrow;
+  const { data: pending } = useApprovals("pending");
+  const { data: meta } = useMeta();
+  return (
+    <aside className={cn("flex h-full shrink-0 flex-col border-r border-line bg-sunken/60 transition-[width] duration-150", collapsed ? "w-[56px]" : "w-[220px]")}>
+      <div className={cn("flex h-12 items-center gap-2 px-3.5", collapsed && "justify-center px-0")}>
+        <Logo />
+        {!collapsed && <div className="min-w-0 leading-tight">
+          <div className="truncate text-[13px] font-semibold tracking-tight text-fg">agent-platform</div>
+          <div className="text-[10.5px] text-fg-3">v{meta?.version ?? "6"}</div>
+        </div>}
+      </div>
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
+        <NavItem to="/" icon={<LuLayoutDashboard />} label="概览" collapsed={collapsed} />
+        <NavItem to="/services" icon={<LuServer />} label="服务" collapsed={collapsed} />
+        <NavItem to="/tasks" icon={<LuListTodo />} label="任务" collapsed={collapsed} />
+        <NavItem to="/runs" icon={<LuActivity />} label="运行" collapsed={collapsed} />
+        <NavItem to="/chat" icon={<LuMessageSquare />} label="对话" collapsed={collapsed} />
+        <NavItem to="/approvals" icon={<LuShieldCheck />} label="审批" badge={pending?.length} collapsed={collapsed} />
+        <NavItem to="/memory" icon={<LuBrain />} label="记忆" collapsed={collapsed} />
+        <div className={cn("px-2.5 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-fg-3", collapsed && "invisible h-3 p-0")}>平台</div>
+        <NavItem to="/settings/roles" icon={<LuBot />} label="角色" collapsed={collapsed} />
+        <NavItem to="/settings/policies" icon={<LuSlidersHorizontal />} label="策略" collapsed={collapsed} />
+        <NavItem to="/settings/envs" icon={<LuLayers />} label="环境" collapsed={collapsed} />
+      </nav>
+      <div className={cn("flex items-center border-t border-line p-2", collapsed ? "justify-center" : "justify-between")}>
+        {!collapsed && <ThemeMenu />}
+        {!narrow && <Tooltip content={collapsed ? "展开侧栏" : "收起侧栏"} side="right">
+          <button type="button" onClick={() => setUi({ sidebarCollapsed: !collapsed })}
+            className="inline-flex size-7 items-center justify-center rounded-md text-fg-3 hover:bg-hover hover:text-fg">
+            {collapsed ? <LuChevronsRight className="size-4" /> : <LuChevronsLeft className="size-4" />}
+          </button>
+        </Tooltip>}
+      </div>
+    </aside>
+  );
+}
+
+function ThemeMenu() {
+  const { theme } = useUi();
+  const icon = theme === "dark" ? <LuMoon /> : theme === "light" ? <LuSun /> : <LuMonitor />;
+  const set = (t: Theme) => () => setUi({ theme: t });
+  return (
+    <Menu align="start" trigger={
+      <button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5">
+        {icon}{{ dark: "深色", light: "浅色", system: "跟随系统" }[theme]}
+      </button>
+    } items={[
+      { label: "浅色", icon: <LuSun />, onClick: set("light") },
+      { label: "深色", icon: <LuMoon />, onClick: set("dark") },
+      { label: "跟随系统", icon: <LuMonitor />, onClick: set("system") },
+      { separator: true, label: "" },
+      { label: "退出登录", icon: <LuLogOut />, onClick: () => { window.location.href = "/logout"; } },
+    ]} />
+  );
+}
+
+export function Logo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={cn("size-7 shrink-0", className)} aria-hidden>
+      <rect width="32" height="32" rx="8" className="fill-accent" />
+      <path d="M9 21.5 16 9l7 12.5" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="16" cy="18.2" r="2.2" fill="#fff" />
+    </svg>
+  );
+}
+
+/** 全局环境切换：决定各列表/统计默认看哪套环境 */
+export function EnvSwitcher() {
+  const { env } = useUi();
+  const { data: envs } = useEnvs();
+  const items = [{ name: "", title: "全部" }, ...(envs ?? []).filter((e) => e.enabled)];
+  return (
+    <div className="inline-flex h-7 items-center rounded-md border border-line bg-sunken p-0.5">
+      {items.map((e) => (
+        <button key={e.name} type="button" onClick={() => setUi({ env: e.name })}
+          className={cn("h-6 rounded-[5px] px-2.5 text-[12px] font-medium transition-colors",
+            env === e.name ? "bg-panel text-fg shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "text-fg-3 hover:text-fg",
+            e.name && "font-mono uppercase tracking-wide")}>
+          {e.name || <><span className="md:hidden">全部</span><span className="hidden md:inline">全部环境</span></>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Topbar() {
+  const { data: pending } = useApprovals("pending");
+  return (
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-panel/80 px-3 backdrop-blur md:gap-3 md:px-5">
+      <button type="button" onClick={openPalette} aria-label="搜索"
+        className="flex h-7 items-center gap-2 rounded-md border border-line bg-sunken px-2.5 text-[12.5px] text-fg-3 transition-colors hover:border-line-strong hover:text-fg-2 md:w-[300px]">
+        <LuSearch className="size-3.5" />
+        <span className="hidden flex-1 text-left md:inline">搜索服务、任务、运行…</span>
+        <Kbd className="hidden md:inline-flex">⌘K</Kbd>
+      </button>
+      <div className="flex-1" />
+      <EnvSwitcher />
+      <Tooltip content={pending?.length ? `${pending.length} 条待审批` : "没有待审批"}>
+        <Link to="/approvals" className="relative inline-flex size-8 items-center justify-center rounded-md text-fg-2 hover:bg-hover hover:text-fg">
+          <LuShieldCheck className="size-4" />
+          {!!pending?.length && <span className="absolute right-1 top-1 flex size-3.5 items-center justify-center rounded-full bg-warn text-[9px] font-bold text-white">{pending.length}</span>}
+        </Link>
+      </Tooltip>
+    </header>
+  );
+}
+
+export function AppShell({ children }: { children: ReactNode }) {
+  useEnvs();
+  return (
+    <div className="flex h-full">
+      <Sidebar />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Topbar />
+        <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+// ———————— 页面骨架 ————————
+
+export function Page({ children, className, wide }: { children: ReactNode; className?: string; wide?: boolean }) {
+  return <div className={cn("mx-auto w-full px-4 py-5 md:px-6", wide ? "max-w-[1600px]" : "max-w-[1320px]", className)}>{children}</div>;
+}
+
+export function PageHeader({ title, description, actions, crumbs, meta, icon }: {
+  title: ReactNode; description?: ReactNode; actions?: ReactNode; crumbs?: { label: ReactNode; to?: string }[]; meta?: ReactNode; icon?: ReactNode;
+}) {
+  return (
+    <div className="mb-5">
+      {crumbs && (
+        <div className="mb-2 flex items-center gap-1.5 text-[12.5px] text-fg-3">
+          {crumbs.map((c, i) => (
+            <span key={i} className="flex items-center gap-1.5">
+              {i > 0 && <span className="text-line-strong">/</span>}
+              {c.to ? <Link to={c.to} className="hover:text-fg">{c.label}</Link> : <span className="text-fg-2">{c.label}</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+        {icon && <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-fg-2 shadow-[var(--shadow-card)] [&_svg]:size-5">{icon}</div>}
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
+          {description && <div className="mt-0.5 text-[13px] text-fg-3">{description}</div>}
+          {meta && <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-fg-3">{meta}</div>}
+        </div>
+        {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+      </div>
+    </div>
+  );
+}
