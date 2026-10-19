@@ -46,6 +46,7 @@
           <span class="ai-name">↳ {{ sub.name }}</span>
           <span class="ai-meta">v{{ sub.version }}{% if sub.usage %}
             · {{ sub.usage.runs }} run/24h{% endif %}
+            {% if sub.auto_created %} · 自动创建{% endif %}
             {% if not sub.context %} · 档案待补全{% endif %}</span>
         </button>
         <a class="ai-link" href="/runs?task={{ sub.name }}"

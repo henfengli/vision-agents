@@ -36,11 +36,13 @@ def session_id_for(asset_key: str, error: str, rules: list[dict],
 
 def make_router(submitter, notifier, auth=None,
                 classifier=None,
-                session_template: str | None = None,
-                domain_enabled=None):
+                session_template=None):
     """classifier：async (domain, error) -> rules 列表（RuleProvider.rules_for
     的部分应用）；缺省 = 无规则全交 agent。
-    domain_enabled：async (domain) -> bool，服务停用即拒收（429）。"""
+    session_template：模板字符串，或 () -> str | None（每次请求现取——服务
+    配置在定义库里可编辑，启动时取一次会拿到旧值）。
+    启停：规则先行路径不建 run，先问 submitter.check_switches（与提交路径
+    同一处判断），环境/服务停用即拒收（429，带原因码）。"""
     from fastapi import APIRouter, Depends
 
     # auth：与 /v1 API 同一 bearer 依赖；webhook 也是服务间调用，不能裸奔
@@ -58,18 +60,32 @@ def make_router(submitter, notifier, auth=None,
 
     @router.post("/v1/hooks/dagster")
     async def dagster_hook(payload: dict):
-        """Dagster run_failure_sensor 回调：{run_id, asset_key, error, env?}。
+        """Dagster run_failure_sensor 回调：{run_id, asset_key, error, env?,
+        subtask?}。
 
         env 是目标业务环境：多套 Dagster 环境共用一个 agent 实例时，
         sensor 侧按自己的环境标识上送（缺省 = 实例默认环境）。
+        subtask 是显式的子任务对象名：sensor 想让某个对象走专属子任务
+        （failure-analysis:<subtask>）就传，不传就跑通用任务——平台不拿
+        asset_key 去猜。点名的子任务不存在时自动建桩。
         """
-        # 服务停用即拒收：sensor 应降级或暂停，别把报错打进停用的域
-        if domain_enabled is not None and not await domain_enabled("dagster"):
-            from fastapi import HTTPException
-            raise HTTPException(429, "服务 dagster 已停用")
+        from fastapi import HTTPException
+
+        from ..orchestration.submitter import TaskRejected
+
         error = str(payload.get("error", ""))
         asset_key = str(payload.get("asset_key", ""))
         target_env = payload.get("env") or None
+        subtask = str(payload.pop("subtask", "") or "").strip() or None
+        # 环境/服务停用即拒收：sensor 应降级或暂停，别把报错打进停用的域
+        try:
+            await submitter.check_switches("dagster", target_env)
+        except TaskRejected as e:
+            # 停用 = 429（sensor 该降级/暂停）；其余（如环境名不合法）= 400
+            status = 429 if e.code in ("env_disabled",
+                                       "service_disabled") else 400
+            raise HTTPException(status, {"detail": str(e),
+                                         "error_code": e.code})
         # 本 webhook 即 dagster 域入口：补 domain 让 run 归属域，
         # 召回（域知识/案例）与记忆分区全部按域生效
         payload.setdefault("domain", "dagster")
@@ -93,7 +109,9 @@ def make_router(submitter, notifier, auth=None,
         return await submitter.submit(
             "failure-analysis", payload, trigger_source="sensor",
             session_id=session_id_for(asset_key, error, rules,
-                                      session_template),
-            target_env=target_env)
+                                      session_template() if callable(
+                                          session_template)
+                                      else session_template),
+            target_env=target_env, subtask=subtask)
 
     return router

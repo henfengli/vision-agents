@@ -50,13 +50,13 @@ def _default_data_dir() -> str:
 
 
 class DomainConfig(BaseModel):
-    """业务域：代码目录（读口径/排障用）+ 可选只读库 + 域包声明。
+    """业务域（服务）：与 agent 同机部署的一个项目——代码目录（读口径/
+    排障用）+ 可选只读库 + 主机 + 服务档案。
 
-    域知识从内核搬进 conf/domains/<name>/ 域包：
-    - rules.yaml        规则分类器（dagster_sensor 的规则先行）
-    - session.yaml      episode 命名模板
-    - tasks.yaml        域自带种子任务（如 failure-analysis 住 dagster 包）
-    协作边界：平台团队维护内核，业务团队 PR 自己的域包。
+    事实源是定义库（definitions kind="domain"：版本化、服务页编辑、热
+    生效、可回滚）。conf/domains/<name>/ 域包只在库里还没有该服务时播种
+    一次（domain.yaml / rules.yaml / session.yaml / tasks.yaml），之后文件
+    改动不再生效——启动时文件与库内不一致会打日志提示。
     """
 
     code_paths: list[str] = []
@@ -66,6 +66,10 @@ class DomainConfig(BaseModel):
     rules: list[dict] = []                    # [{pattern, category, conclusion}]
     session_template: str | None = None       # 含 {asset}/{error_class}/{date}
     seed_tasks: list[dict] = []               # 域自带种子任务定义
+    # 服务档案：自由键（口径与术语/禁区/环境差异/常见坑…），该服务下
+    # 所有 run 置顶逐字注入，跨任务共享的事实放这里，任务特有的放任务
+    # 档案。只记代码和配置里读不出来的东西；没有负责人这类归属字段。
+    profile: dict = Field(default_factory=dict)
     # 按目标环境覆盖连接信息：{env: {readonly_dsn/code_paths/...}}——
     # 一套 agent 部署操作多套业务环境时，差异只在这里
     envs: dict[str, dict] = Field(default_factory=dict)

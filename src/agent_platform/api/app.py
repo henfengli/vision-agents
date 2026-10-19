@@ -15,7 +15,8 @@ from ..agent.roles import RoleDef
 from ..orchestration import policies
 from ..orchestration.policies import PolicyDef
 from ..orchestration.submitter import OverloadedError, Submitter, TaskRejected
-from ..orchestration.tasks import TaskDef, TaskRegistry
+from ..orchestration.tasks import (TaskDef, TaskRegistry, check_object_name,
+                                   split_subtask_name)
 from ..store import definitions as definitions_store
 from ..store import feedback as feedback_store
 from ..store import runs
@@ -53,7 +54,9 @@ def create_app(settings, lifespan=None) -> FastAPI:
     @app.exception_handler(TaskRejected)
     async def _rejected(_req, exc):
         # 客户端错误不冒泡成 500：未知任务/闸门拒绝/终态冲突统一 400
-        return JSONResponse({"detail": str(exc), "error_code": "task_rejected"},
+        # error_code 是闸门链的原因码（env_disabled/service_disabled/
+        # task_disabled/env_gate/policy/unknown_task/bad_subtask…）
+        return JSONResponse({"detail": str(exc), "error_code": exc.code},
                             status_code=400)
 
     @app.get("/health")
@@ -78,7 +81,8 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
         return await submitter.submit(req.task_type, req.input,
                                       trigger_source="sdk", caller=req.caller,
                                       role=req.role, target_env=req.env,
-                                      idempotency_key=idempotency_key)
+                                      idempotency_key=idempotency_key,
+                                      subtask=req.subtask)
 
     @router.get("/v1/tasks/{run_id}")
     async def get_task(run_id: str):
@@ -271,11 +275,22 @@ def make_api_router(settings, submitter: Submitter, tasks: TaskRegistry,
             raise HTTPException(422, "任务不能继承自己")
         if task.extends and await tasks.get(task.extends) is None:
             raise HTTPException(422, f"父任务 {task.extends} 不存在")
-        # 命名即绑定：子任务名必须是 "父任务:对象名"，否则命名与继承
-        # 关系脱节（选择器按名字后缀匹配输入值，见 tasks.find_child）
-        if task.extends and not req.name.startswith(task.extends + ":"):
-            raise HTTPException(
-                422, f"子任务名须以父任务名为前缀：{task.extends}:<对象名>")
+        # 子任务名必须是 "父任务:对象名"：提交时 subtask=对象名 按这个
+        # 名字直取（tasks.resolve_for_submit），命名与继承关系不能脱节
+        if task.extends:
+            base, obj = split_subtask_name(req.name)
+            if base != task.extends or not obj:
+                raise HTTPException(
+                    422, f"子任务名须为 {task.extends}:<对象名>")
+            try:
+                check_object_name(obj)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            parent = await tasks.get(task.extends)
+            if parent is not None and parent.extends:
+                raise HTTPException(422, "子任务不能再派生子任务（只嵌套一层）")
+        elif ":" in req.name:
+            raise HTTPException(422, "任务名含冒号即子任务，须声明 extends")
         await defs.put("task", settings.env, req.name,
                        req.definition, req.updated_by)
         # 定时任务热生效：保存后立即重同步 Temporal Schedules（不必等重启；

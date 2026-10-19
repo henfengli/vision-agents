@@ -29,11 +29,15 @@
   <pre id="input-pre">{{ input_json }}</pre>
   {% endif %}
 </div>
-{% if ctx.task_profile or ctx.knowledge_hits or ctx.assets_recalled or ctx.assets_saved or ctx.knowledge_saved or ctx.session_runs %}
+{% if ctx.profile_text or ctx.task_profile or ctx.knowledge_hits or ctx.assets_recalled or ctx.assets_saved or ctx.knowledge_saved or ctx.session_runs %}
 <div class="card"><b>上下文与沉淀</b>
   <div class="ctx-grid">
-    {% if ctx.task_profile %}
-    <div><div class="af-label">任务档案（子任务挂载）</div>
+    {% if ctx.profile_text %}
+    <div><div class="af-label">档案（本次注入原文）</div>
+      <div class="meta ctx-pre">{{ ctx.profile_text }}</div>
+    </div>
+    {% elif ctx.task_profile %}
+    <div><div class="af-label">任务档案（按定义版本回推）</div>
       {% for label, text in ctx.task_profile %}
       <div class="meta ctx-pre"><b>{{ label }}</b>：{{ text }}</div>
       {% endfor %}

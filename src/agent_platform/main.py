@@ -171,16 +171,6 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         review_hook = make_review_hook(settings.approvals.danger_patterns,
                                        approval_notify)
 
-    async def write_asset_profile(asset_key: str, content: str,
-                                  domain: str | None = None) -> None:
-        from .store import knowledge as knowledge_store
-        dom = domain or next(iter(settings.domains), None)
-        if not dom:
-            raise ValueError("无可用 domain，请显式指定")
-        await knowledge_store.upsert(
-            settings.env, dom, f"asset:{asset_key}:profile", content,
-            source_run="agent-tool", embedder=model_pool.embed)
-
     # save_asset 工具：上下文默认值由 prepare_run 注入的 ContextVar 提供，
     # 模型只需给 name/kind/summary/content 四要素
     _ASSET_KINDS = ("procedure", "script", "query", "baseline")
@@ -242,7 +232,6 @@ async def assemble_runtime(settings: Settings) -> Runtime:
 
     tool_registry = ToolRegistry(settings.scratch_dir, relay=relay,
                                  review=review_hook,
-                                 profile_writer=write_asset_profile,
                                  asset_writer=write_asset,
                                  sql_dsn=sql_dsn,
                                  host_resolver=(host_resolver
@@ -271,7 +260,10 @@ async def assemble_runtime(settings: Settings) -> Runtime:
         temporal_client,
         activities.Deps(settings=settings, engine=engine,
                         model_pool=model_pool, notifier=relay,
-                        langfuse=langfuse, domains=domain_provider),
+                        langfuse=langfuse, domains=domain_provider,
+                        switches=domains_svc.Switches(domain_provider,
+                                                      env_gate),
+                        tasks=tasks),
         settings.temporal.task_queue)
 
     async def resync_schedules() -> int:
@@ -341,14 +333,9 @@ def build_app(settings: Settings | None = None):
         rt = await assemble_runtime(settings)
         # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
         auth = make_auth_dependency(settings.bearer_token)
-        dagster_cfg = rt.domain_provider.get("dagster")
 
         async def _rules_for(domain: str, _error: str) -> list[dict]:
             return await rt.rule_provider.rules_for(domain)
-
-        async def _domain_enabled(domain: str) -> bool:
-            await rt.domain_provider.refresh()
-            return rt.domain_provider.enabled(domain)
 
         for r in (
             make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
@@ -360,9 +347,9 @@ def build_app(settings: Settings | None = None):
             dagster_sensor.make_router(
                 rt.submitter, rt.relay, auth=auth,
                 classifier=_rules_for,
-                session_template=(dagster_cfg.session_template
-                                  if dagster_cfg else None),
-                domain_enabled=_domain_enabled),
+                session_template=lambda: getattr(
+                    rt.domain_provider.get("dagster"), "session_template",
+                    None)),
             gitlab_webhook.make_router(rt.submitter, auth=auth),
             chat_trigger.make_router(rt.submitter, auth=auth),
         ):

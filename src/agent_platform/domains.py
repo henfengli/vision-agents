@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 
 from .config import DomainConfig
-from .store.definitions import DefinitionStore
+from .store.definitions import DefinitionStore, seed_drifted
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +37,22 @@ class DomainProvider:
         self._snap: dict[str, DomainConfig] | None = None
 
     async def seed_from_packs(self) -> int:
-        """文件域包播种进 definitions；已有定义不覆盖（编辑版本为准）。"""
+        """文件域包播种进 definitions；已有定义不覆盖（编辑版本为准）。
+
+        已播种过的服务若文件自播种后又改过，打警告——文件改动不生效，
+        要改去服务页（避免"改了文件怎么没用"的排查死角）。"""
         n = 0
         for name, cfg in self._fallback.items():
+            file_def = cfg.model_dump(mode="json")
             if await self._defs.get_active("domain", self._env, name) is None:
-                await self._defs.put(
-                    "domain", self._env, name,
-                    cfg.model_dump(mode="json"), updated_by="seed")
+                await self._defs.put("domain", self._env, name, file_def,
+                                     updated_by="seed")
                 n += 1
+            elif await seed_drifted(self._defs, "domain", self._env, name,
+                                    file_def):
+                log.warning("域包 conf/domains/%s 自播种后有改动，但服务配置"
+                            "以定义库为准，文件改动未生效——请到 /services/%s 编辑",
+                            name, name)
         return n
 
     async def refresh(self) -> dict[str, DomainConfig]:
@@ -79,6 +87,29 @@ class DomainProvider:
         return cfg.enabled if cfg is not None else True
 
 
+
+
+class Switches:
+    """启停开关的唯一读取面（policies.check_switches 的数据源）。
+
+    服务级读 DomainProvider（先 refresh，5s 快照），环境级读 EnvGate；
+    任务级在 TaskDef 自身。判断逻辑只在 policies.check_switches 一处。
+    """
+
+    def __init__(self, domains: "DomainProvider | None",
+                 envs: "EnvGate | None"):
+        self._domains = domains
+        self._envs = envs
+
+    async def env_enabled(self, target_env: str) -> bool:
+        return True if self._envs is None else await self._envs.enabled(
+            target_env)
+
+    async def domain_enabled(self, domain: str) -> bool:
+        if self._domains is None:
+            return True
+        await self._domains.refresh()
+        return self._domains.enabled(domain)
 
 
 class EnvGate:

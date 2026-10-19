@@ -53,6 +53,7 @@ if (createBtn) createBtn.addEventListener("click", async () => {
       session_template:
         document.getElementById("svc-session-template").value.trim() || null,
       envs: parseJsonField("svc-envs", {}),
+      profile: parseJsonField("svc-profile", {}),
     };
     await post("/v1/admin/domains", {name, definition, updated_by: "viewer"});
     msg.textContent = "已创建，跳转中…";
@@ -75,6 +76,7 @@ if (cfgSave) {
     session_template:
       document.getElementById("cfg-session-template").value.trim() || null,
     envs: parseJsonField("cfg-envs", {}),
+    profile: parseJsonField("cfg-profile", {}),
     seed_tasks: SVC.seedTasks || [],
     enabled: SVC.enabled,
   });

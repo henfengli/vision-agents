@@ -30,21 +30,13 @@ async def recall_block(env: str, domain: str | None, query: str,
                        source: str = "recall") -> str:
     """拼召回文本块；无命中返回空串。
 
-    层次（自上而下）：资产档案知识条目（query 提及即命中）→ 前序 episode
-    交接摘要（同资产同故障类的最近摘要，连续性由记忆而非 thread 承载）
+    层次（自上而下）：前序 episode 交接摘要（同资产同故障类的最近摘要，连续性由记忆而非 thread 承载）
     → 历史知识（混合检索 + commit 校验）→ 同类案例。
 
     副作用：最终命中的知识条目写 recall_hits 埋点（记忆运营数据源）；
     run_id 为空（页面试用）时 source 传 playground，不算真实使用。
     """
     sections: list[str] = []
-
-    if domain:
-        profiles = await knowledge_store.asset_profiles(env, domain, query)
-        if profiles:
-            sections.append(
-                "[资产档案——逐字保留的事实，优先级最高]\n" + "\n".join(
-                    f"- {p['key']}: {p['content']}" for p in profiles))
 
     if session_id and ":" in session_id:
         prefix = session_id.rsplit(":", 1)[0]  # 去掉 episode 段

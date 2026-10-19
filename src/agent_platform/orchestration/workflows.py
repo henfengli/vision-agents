@@ -113,6 +113,7 @@ async def sync_schedules(client, tasks: list, task_queue: str,
     for name, task in wanted.items():
         spec = RunSpec(  # run_id 空 = 触发时由 prepare_run 生成
             task_type=task.name, role=task.role,
+            domain=_dom(task) or None,  # 调度 run 同样归属服务（开关/档案/记忆分区）
             question=_schedule_question(task),
             input=dict(task.schedule_input or {}),
             timeout_s=task.timeout_s, trigger="schedule").to_dict()

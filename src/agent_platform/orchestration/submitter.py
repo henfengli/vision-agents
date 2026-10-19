@@ -20,18 +20,23 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 
 from ..config import resolve_target_env
+from ..domains import Switches
 from ..store import runs
 from ..store.definitions import DefinitionStore
 from . import policies
 from .spec import RunSpec
-from .tasks import (TaskDef, TaskRegistry, profile_lines, question_text,
-                    render_profile_block)
+from .tasks import TaskDef, TaskRegistry, question_text
 from .workflows import (AgentRunWorkflow, ArtifactRunWorkflow,
                         BuiltinTaskWorkflow)
 
 
 class TaskRejected(ValueError):
-    pass
+    """提交被拒：code 是机器可读原因码（闸门链的 Verdict.code 原样带出），
+    对外 400 响应的 error_code 即它。"""
+
+    def __init__(self, message: str, code: str = "task_rejected"):
+        super().__init__(message)
+        self.code = code or "task_rejected"
 
 
 class OverloadedError(RuntimeError):
@@ -56,8 +61,8 @@ class Submitter:
         self._approval_notifier = approval_notifier  # 任务级闸门钉钉通知
         self._target_envs = target_envs or []    # 可操作的业务环境（空=单环境）
         self._default_target = default_target_env
-        self._domains = domain_provider         # 服务级启停（domains.DomainProvider）
-        self._env_gate = env_gate               # 环境级启停（domains.EnvGate）
+        # 启停三级的读取面；判断只在 policies.check_switches 一处
+        self._switches = Switches(domain_provider, env_gate)
 
     # —— 内部 ——
 
@@ -74,20 +79,31 @@ class Submitter:
             raise TaskRejected(str(e)) from e
 
     async def _resolve_task(self, task_name: str, role: str | None,
-                            target_env: str,
-                            input_data: dict | None = None) -> TaskDef:
-        # 继承解析：子任务（extends）合并父任务后生效
-        task = await self._tasks.resolve(task_name)
+                            target_env: str, domain: str | None) -> TaskDef:
+        """已有 run 的再启动（续跑/重跑/纠正/审批放行）：解析任务 + 过开关。
+
+        这些路径不重过输入策略（不是新需求），但服务/环境/任务停用了
+        照样拦——开关判断与新提交同一处（policies.check_switches）。
+        """
+        task = await self._tasks.resolve(task_name)  # 子任务合并父任务后生效
         if task is None:
-            raise TaskRejected(f"未知任务类型：{task_name}")
-        if not task.enabled:
-            raise TaskRejected(f"任务 {task_name} 已停用")
-        if not task.enabled_in(target_env):
-            raise TaskRejected(
-                f"任务 {task_name} 未在目标环境（{target_env}）启用")
+            raise TaskRejected(f"未知任务类型：{task_name}", "unknown_task")
+        verdict = await policies.check_switches(task, target_env, domain,
+                                                self._switches)
+        if verdict is not None:
+            raise TaskRejected(verdict.message, verdict.code)
         if role:
             task = task.model_copy(update={"role": role})
         return task
+
+    async def check_switches(self, domain: str | None,
+                             target_env: str | None) -> None:
+        """不建 run 的入口（规则先行 webhook）问"环境/服务还开着吗"。"""
+        target_env = self._resolve_target_env(target_env)
+        verdict = await policies.check_switches(None, target_env, domain,
+                                                self._switches)
+        if verdict is not None:
+            raise TaskRejected(verdict.message, verdict.code)
 
     async def _start(self, task: TaskDef, input_data: dict, trigger_source: str,
                      caller: str | None, session_id: str | None,
@@ -117,18 +133,13 @@ class Submitter:
             await self._create_row(run_id, task, input_data, trigger_source,
                                    caller, session_id, domain, dedup_key,
                                    target_env)
-        domain = domain or str(input_data.get("server")
-                               or input_data.get("domain") or "") or None
+        domain = domain or _domain_of(input_data)
         spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
                        question=_to_question(task, input_data),
                        input=input_data, error_text=input_data.get("error"),
                        session_id=session_id, timeout_s=task.timeout_s,
                        target_env=target_env,
                        domain=domain,
-                       profile=render_profile_block(
-                           task.name, profile_lines(
-                               task.model_dump(exclude={"name"})))
-                       if task.context else "",
                        trigger=trigger_source, correction=correction,
                        resume=resume,
                        artifacts=({k: v.model_dump() for k, v in
@@ -158,8 +169,7 @@ class Submitter:
                           dedup_key: str, target_env: str = "") -> None:
         await runs.create(
             run_id, task.name, task.role,
-            domain=domain or str(input_data.get("server")
-                                 or input_data.get("domain") or "") or None,
+            domain=domain or _domain_of(input_data),
             trigger_source=trigger_source, caller=caller or "",
             input_data=input_data, dedup_key=dedup_key,
             session_id=session_id, target_env=target_env)
@@ -199,7 +209,8 @@ class Submitter:
         if run is None:
             raise TaskRejected(f"run {run_id} 不存在")
         task = await self._resolve_task(run["task_type"], run["role"] or None,
-                                        run.get("target_env") or self._env)
+                                        run.get("target_env") or self._env,
+                                        run.get("domain"))
         # 闸门挂起的 run 从未启动过 workflow：不是 resume（没有可续的
         # LangGraph thread），而是首次启动——只跳过建行/去重
         return await self._start(task, run.get("input") or {},
@@ -216,47 +227,48 @@ class Submitter:
                      session_id: str | None = None, role: str | None = None,
                      correction: bool = False,
                      target_env: str | None = None,
-                     idempotency_key: str | None = None) -> dict:
+                     idempotency_key: str | None = None,
+                     subtask: str | None = None) -> dict:
+        """新提交的唯一入口。
+
+        子任务选择是显式的：subtask=对象名（或 task_name 直接写成
+        "父任务:对象名"）；点名的子任务不存在时自动建桩（继承父任务全部
+        字段，档案待补），平台不从输入里猜。之后过闸门链：开关 →
+        输入策略，任一环拒绝都带原因码。
+        """
         target_env = self._resolve_target_env(target_env)
-        # 环境级启停：目标环境停用即拒收一切新 run
-        if self._env_gate is not None and not await self._env_gate.enabled(
-                target_env):
-            raise TaskRejected(f"目标环境 {target_env} 已停用")
-        task = await self._resolve_task(task_name, role, target_env)
-        # 子任务选择（命名即绑定）：输入里任一值 == 子任务名后缀即选用，
-        # 如子任务 failure-analysis:dwd_trade_order 对输入
-        # {"table": "dwd_trade_order"} 命中。档案/归因按子任务名落账，
-        # 调用方只需照常上送业务对象名，无需知道子任务存在
-        if role is None:
-            child = await self._tasks.find_child(task.name, input_data)
-            if child is not None:
-                task = child
-                if not task.enabled:
-                    raise TaskRejected(f"子任务 {task.name} 已停用")
-                if not task.enabled_in(target_env):
-                    raise TaskRejected(
-                        f"子任务 {task.name} 未在目标环境（{target_env}）启用")
-        # 服务级启停：域停用即拒绝响应（webhook/submit 统一过这里）
-        domain = str(input_data.get("server") or input_data.get("domain")
-                     or "") or None
-        if domain and self._domains is not None:
-            await self._domains.refresh()
-            if not self._domains.enabled(domain):
-                raise TaskRejected(f"服务 {domain} 已停用")
-        # 提交闸门链（policies.py）：env_gate 之外的 DB 声明策略都在这里过
-        if self._defs is not None and not correction:
-            verdict = await policies.evaluate_submit(
-                task, target_env, self._env, input_data,
-                _to_question(task, input_data), self._defs)
-            if verdict.action == "deny":
-                raise TaskRejected(verdict.message)
-            if verdict.action == "require_approval":
-                return await self._gate(task, input_data, trigger_source,
-                                        caller, session_id, verdict,
-                                        target_env)
-        return await self._start(task, input_data, trigger_source, caller,
-                                 session_id, correction, target_env=target_env,
-                                 idempotency_key=idempotency_key)
+        try:
+            task, stub = await self._tasks.resolve_for_submit(task_name,
+                                                              subtask)
+        except ValueError as e:
+            raise TaskRejected(str(e), "bad_subtask") from e
+        if task is None:
+            raise TaskRejected(f"未知任务类型：{task_name}", "unknown_task")
+        if role:
+            task = task.model_copy(update={"role": role})
+        domain = _domain_of(input_data)
+        verdict = await policies.evaluate_submit(
+            task, target_env, self._env, input_data,
+            _to_question(task, input_data),
+            None if correction else self._defs,  # 纠正不重过输入策略
+            switches=self._switches, domain=domain)
+        if verdict.action == "deny":
+            raise TaskRejected(verdict.message, verdict.code)
+        # 受理了（放行或挂审批）才落子任务桩：被拒的提交不留垃圾定义
+        if stub is not None:
+            await self._tasks.create_stub(stub,
+                                          created_by=f"auto:{trigger_source}")
+        if verdict.action == "require_approval":
+            result = await self._gate(task, input_data, trigger_source,
+                                      caller, session_id, verdict, target_env)
+        else:
+            result = await self._start(task, input_data, trigger_source,
+                                       caller, session_id, correction,
+                                       target_env=target_env,
+                                       idempotency_key=idempotency_key)
+        if stub is not None:
+            result["subtask_created"] = stub.name
+        return result
 
     async def correct(self, session_id: str, correction_text: str,
                       by: str = "") -> dict:
@@ -266,7 +278,7 @@ class Submitter:
             raise TaskRejected(f"session {session_id} 不存在或无历史 run")
         target_env = self._resolve_target_env(last.get("target_env") or None)
         task = await self._resolve_task(last["task_type"], last["role"],
-                                        target_env)
+                                        target_env, last.get("domain"))
         input_data = dict(last.get("input") or {})
         input_data["correction"] = correction_text
         input_data["corrected_by"] = by
@@ -277,7 +289,8 @@ class Submitter:
     async def run_sync(self, task_name: str, input_data: dict,
                        trigger_source: str, session_id: str | None = None,
                        role: str | None = None,
-                       target_env: str | None = None) -> dict:
+                       target_env: str | None = None,
+                       subtask: str | None = None) -> dict:
         """同步路径：提交后等结果，超时转异步。"""
         if self._inflight >= self._max_inflight:
             raise OverloadedError("服务繁忙，请稍后重试")
@@ -286,7 +299,8 @@ class Submitter:
             submitted = await self.submit(task_name, input_data,
                                           trigger_source,
                                           session_id=session_id, role=role,
-                                          target_env=target_env)
+                                          target_env=target_env,
+                                          subtask=subtask)
             if submitted["dedup_hit"]:
                 run = await runs.get(submitted["run_id"])
                 return {"run_id": submitted["run_id"],
@@ -297,7 +311,9 @@ class Submitter:
                         "note": "任务待提交审批，批准后自动开始执行",
                         "approval_id": submitted.get("approval_id")}
             run_id = submitted["run_id"]
-            task = await self._tasks.get(task_name)
+            run = await runs.get(run_id)
+            task = await self._tasks.resolve(
+                (run or {}).get("task_type") or task_name)
             timeout = min(task.timeout_s if task else 300, 300)
             try:
                 handle = self._client.get_workflow_handle(run_id)
@@ -317,7 +333,8 @@ class Submitter:
         if run["status"] == "success":
             raise TaskRejected("run 已完成，无需续跑")
         task = await self._resolve_task(run["task_type"], run["role"],
-                                        run.get("target_env") or self._env)
+                                        run.get("target_env") or self._env,
+                                        run.get("domain"))
         return await self._start(task, run.get("input") or {}, "resume",
                                  run.get("caller"), run.get("session_id"),
                                  correction=False, run_id=run_id, resume=True,
@@ -338,7 +355,7 @@ class Submitter:
             return await self.resume_run(run_id)
         target_env = self._resolve_target_env(run.get("target_env") or None)
         task = await self._resolve_task(run["task_type"], run["role"] or None,
-                                        target_env)
+                                        target_env, run.get("domain"))
         return await self._start(task, run.get("input") or {}, "rerun",
                                  run.get("caller"), run.get("session_id"),
                                  correction=False, skip_dedup=True,
@@ -380,3 +397,9 @@ class Submitter:
 
 def _to_question(task: TaskDef, input_data: dict) -> str:
     return question_text(task, input_data)  # 实现唯一出处：tasks.question_text
+
+
+def _domain_of(input_data: dict) -> str | None:
+    """run 的 home domain 取自输入的 server/domain 字段（唯一出处）。"""
+    return str(input_data.get("server") or input_data.get("domain")
+               or "") or None

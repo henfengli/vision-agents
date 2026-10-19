@@ -24,6 +24,10 @@
     <input id="svc-session-template" class="mono" spellcheck="false"
       placeholder="dagster:{asset}:{error_class}:{date}（可空）">
     <div class="af-help">webhook 报错的 episode 命名；含 {asset}/{error_class}/{date} 占位符</div></div>
+  <div class="af-field"><label class="af-label">服务档案</label>
+    <textarea id="svc-profile" class="mono" rows="4" spellcheck="false"
+      placeholder='{"conventions": "GMV 不含退款", "no_go": "prod 不碰 ods_* 表"}'></textarea>
+    <div class="af-help">JSON 对象，键随意（如 conventions 口径与术语 / no_go 禁区 / env_notes 环境差异 / pitfalls 常见坑）。该服务下所有 run 置顶逐字注入；只记代码和配置里读不出来的东西，任务特有的写进任务档案</div></div>
   <div class="af-field"><label class="af-label">环境覆盖</label>
     <textarea id="svc-envs" class="mono" rows="4" spellcheck="false"
       placeholder='{"prod": {"readonly_dsn": "…", "hosts": ["…"]}, "test": {…}}'></textarea>

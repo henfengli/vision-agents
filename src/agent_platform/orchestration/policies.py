@@ -1,9 +1,15 @@
 """提交路径闸门链：所有"放行 / 拒绝 / 需审批"判断的唯一入口与测试面。
 
-链序（evaluate_submit 内按序短路）：
-1. env_gate（内置）：读 TaskDef.env_gate，任务级环境门禁
+链序（evaluate_submit 内按序短路），每一环拒绝都带原因码 code：
+1. 开关（check_switches，内置）——"为什么没跑"只在这一处判：
+   env_disabled（目标环境停用）→ service_disabled（服务停用）→
+   task_disabled（任务停用）→ env_gate（任务未在该目标环境启用）
 2. input_guard（DB 声明）：definitions 表 kind="policy" 的记录，按 order 升序；
    正则作用于 任务名 + 输入 JSON + 拼接后的 question，命中即按 action 处理
+   （code=policy）
+
+开关这一环也被续跑/重跑/纠正/审批放行/规则先行的 webhook 单独调用——
+这些路径不过输入策略（已经过过或不是新需求），但停用了就是停用了。
 
 为什么 dedup 不在链里：去重不是闸门决策（不是 allow/deny），而是"合并到
 已有 run"，留在 Submitter；执行期危险命令审批（agent/approvals.py 的
@@ -18,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -50,19 +56,57 @@ class Verdict:
     action: Literal["allow", "deny", "require_approval"]
     policy: str = ""                       # 命中的策略名（allow 时为空）
     message: str = ""
+    code: str = ""                         # 拒绝原因码（allow 时为空）
+
+
+class Switches(Protocol):
+    """启停开关的读取面（实现见 domains.Switches）。"""
+
+    async def env_enabled(self, target_env: str) -> bool: ...
+
+    async def domain_enabled(self, domain: str) -> bool: ...
+
+
+async def check_switches(task: TaskDef | None, target_env: str,
+                         domain: str | None,
+                         switches: Switches | None) -> Verdict | None:
+    """启停三级 + 任务环境门禁；命中返回 deny Verdict，全部放行返回 None。
+
+    task 可空：规则先行的 webhook 不建 run，只问"环境/服务还开着吗"。
+    """
+    if switches is not None and target_env \
+            and not await switches.env_enabled(target_env):
+        return Verdict("deny", "", f"目标环境 {target_env} 已停用",
+                       "env_disabled")
+    if switches is not None and domain \
+            and not await switches.domain_enabled(domain):
+        return Verdict("deny", "", f"服务 {domain} 已停用", "service_disabled")
+    if task is None:
+        return None
+    if not task.enabled:
+        return Verdict("deny", "", f"任务 {task.name} 已停用", "task_disabled")
+    if task.env_gate and target_env not in task.env_gate:
+        return Verdict("deny", "env_gate",
+                       f"任务 {task.name} 未在目标环境（{target_env}）启用",
+                       "env_gate")
+    return None
 
 
 async def evaluate_submit(task: TaskDef, target_env: str, instance_env: str,
                           input_data: dict, question: str,
-                          defs: DefinitionStore) -> Verdict:
+                          defs: DefinitionStore | None,
+                          switches: Switches | None = None,
+                          domain: str | None = None) -> Verdict:
     """提交前过闸门链；任一环节命中即短路返回。
 
-    target_env 是 run 操作的业务环境（env_gate 与策略 envs 都按它判）；
+    target_env 是 run 操作的业务环境（开关、env_gate 与策略 envs 都按它判）；
     instance_env 是本部署实例标签（策略定义按它存取——一套部署一套定义）。
     """
-    if not task.enabled_in(target_env):
-        return Verdict("deny", "env_gate",
-                       f"任务 {task.name} 未在目标环境（{target_env}）启用")
+    switched = await check_switches(task, target_env, domain, switches)
+    if switched is not None:
+        return switched
+    if defs is None:
+        return Verdict("allow")
 
     text = "\n".join([task.name, question,
                       json.dumps(input_data, ensure_ascii=False, default=str)])
@@ -77,7 +121,7 @@ async def evaluate_submit(task: TaskDef, target_env: str, instance_env: str,
             continue
         if re.search(p.match_regex, text, re.IGNORECASE | re.DOTALL):
             return Verdict(p.action, p.name,
-                           p.message or f"命中提交策略 {p.name}")
+                           p.message or f"命中提交策略 {p.name}", "policy")
     return Verdict("allow")
 
 

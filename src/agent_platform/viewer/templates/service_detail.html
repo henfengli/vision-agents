@@ -20,6 +20,9 @@
       <input id="cfg-readonly-dsn" class="mono" spellcheck="false" value="{{ cfg.readonly_dsn or '' }}" placeholder="postgresql://readonly@host:5432/db（可空）"></div>
     <div class="af-field"><label class="af-label">会话命名模板</label>
       <input id="cfg-session-template" class="mono" spellcheck="false" value="{{ cfg.session_template or '' }}" placeholder="{asset}/{error_class}/{date}（可空）"></div>
+    <div class="af-field"><label class="af-label">服务档案</label>
+      <textarea id="cfg-profile" class="mono" rows="5" spellcheck="false">{{ cfg.profile | tojson }}</textarea>
+      <div class="af-help">JSON 对象，键随意（如 conventions 口径与术语 / no_go 禁区 / env_notes 环境差异 / pitfalls 常见坑）。该服务下所有 run 置顶逐字注入；只记代码和配置里读不出来的东西，任务特有的写进任务档案</div></div>
     <div class="af-field"><label class="af-label">环境覆盖（JSON，key=环境名）</label>
       <textarea id="cfg-envs" class="mono" rows="4" spellcheck="false">{{ cfg.envs | tojson }}</textarea></div>
     <div class="af-field"><label class="af-label">种子任务（域包声明，编辑去管理页）</label>
@@ -44,6 +47,7 @@
     <div class="svc-task svc-sub">
       <span class="svc-task-name">↳ {{ s.name }}</span>
       {% if not s.enabled %}<span class="pill pill-cancelled">已停用</span>{% endif %}
+      {% if s.auto_created %}<span class="tag">自动</span>{% endif %}
       <span class="meta">v{{ s.version }}{% if not s.context %} · 档案待补全{% endif %}</span>
       <a class="ai-link" href="/runs?task={{ s.name }}">runs →</a>
     </div>

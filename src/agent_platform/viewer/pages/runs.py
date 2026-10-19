@@ -188,16 +188,25 @@ async def _run_context(run: dict, run_id: str, defs_store,
     from ...store import assets as assets_store
     from ...store import knowledge as knowledge_store
 
-    ctx: dict = {"task_profile": [], "knowledge_hits": [], "assets_recalled": [],
+    ctx: dict = {"task_profile": [], "profile_text": "",
+                 "knowledge_hits": [], "assets_recalled": [],
                  "assets_saved": [], "knowledge_saved": [],
                  "session_id": run.get("session_id") or "",
                  "session_runs": []}
 
-    # 任务档案：按 run 固化的 task_version 回读子任务定义（谱系：当时
-    # 是哪一版），再与父任务当前 context 按键合并——与注入侧 merge_task
-    # 同规则，展示的就是 prompt 里那段
+    # 档案：prepare 把注入的原文（服务档案 + 任务档案）落成 stage=profile
+    # 事件，有就原样展示；老 run 没有这条事件时按 task_version 回读子任务
+    # 定义并与父任务 context 合并（近似回推，只覆盖任务档案）
     try:
-        if defs_store is not None and run.get("task_version") \
+        for e in await runs.get_events(run_id):
+            p = e["payload"] if isinstance(e["payload"], dict) else {}
+            if p.get("stage") == "profile" and p.get("content"):
+                ctx["profile_text"] = p["content"]
+    except Exception:  # noqa: BLE001 —— 档案缺失不挡详情页
+        pass
+    try:
+        if not ctx["profile_text"] and defs_store is not None \
+                and run.get("task_version") \
                 and run.get("task_type"):
             definition = await defs_store.get_version(
                 "task", env, run["task_type"], run["task_version"]) or {}

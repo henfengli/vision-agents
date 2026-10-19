@@ -89,12 +89,17 @@ async def seed_from_domain_packs(defs, env: str, domains: dict) -> int:
         rules = getattr(pack, "rules", None) or []
         if not rules:
             continue
-        if await defs.get_active("rules", env, name) is not None:
-            continue
         try:
             rules = validate(rules)
         except ValueError as e:
             log.warning("域包 %s 规则不合法，跳过播种：%s", name, e)
+            continue
+        if await defs.get_active("rules", env, name) is not None:
+            from ..store.definitions import seed_drifted
+            if await seed_drifted(defs, "rules", env, name, {"rules": rules}):
+                log.warning("域包 %s 的 rules.yaml 自播种后有改动，但规则库以"
+                            "定义库为准，文件改动未生效——请到 /services/%s 编辑",
+                            name, name)
             continue
         await defs.put("rules", env, name, {"rules": rules},
                        updated_by="seed")

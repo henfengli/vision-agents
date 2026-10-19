@@ -96,23 +96,29 @@ class AgentClient:
         return answer
 
     def submit(self, task_type: str, input_data: dict[str, Any],
-               idempotency_key: str | None = None) -> dict:
+               idempotency_key: str | None = None,
+               subtask: str | None = None) -> dict:
         """异步任务：立即返回 run_id，用 wait/get_task 轮询或走任务的输出通道。
 
         idempotency_key：24h 内同键重提返回首个 run（网络重试安全）。
+        subtask：显式子任务对象名——跑 "{task_type}:{subtask}"（专属档案/
+        知识归属），不存在时服务端自动继承 task_type 建桩。
         """
         headers = ({"Idempotency-Key": idempotency_key}
                    if idempotency_key else None)
-        return self._post("/v1/tasks", {"task_type": task_type,
-                                        "input": input_data, "env": self.env},
-                          headers=headers)
+        body = {"task_type": task_type, "input": input_data, "env": self.env}
+        if subtask:
+            body["subtask"] = subtask
+        return self._post("/v1/tasks", body, headers=headers)
 
     def submit_and_wait(self, task_type: str, input_data: dict[str, Any],
                         timeout: float = 300.0,
-                        idempotency_key: str | None = None) -> dict:
+                        idempotency_key: str | None = None,
+                        subtask: str | None = None) -> dict:
         """提交并等到终态，返回 run 视图。待审批时立即返回（不等审批）。"""
         submitted = self.submit(task_type, input_data,
-                                idempotency_key=idempotency_key)
+                                idempotency_key=idempotency_key,
+                                subtask=subtask)
         if submitted.get("status") == "awaiting_approval":
             return submitted
         return self.wait(submitted["run_id"], timeout=timeout)

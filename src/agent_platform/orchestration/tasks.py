@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from ..store.definitions import DefinitionStore
@@ -35,11 +37,14 @@ class TaskDef(BaseModel):
     # —— 继承（子任务）：比任务更细一层的维度 ——
     # 简单场景用通用任务（如 failure-analysis）；某个具体对象（某张表/
     # 某个报表/某条链路）的业务信息很多很重要时，派生子任务挂上去。
-    # 命名即绑定：子任务名 = "父任务名:对象名"（如 failure-analysis:
-    # dwd_trade_order），提交时输入里任何字段的值与对象名对上即自动
-    # 选用——没有单独的绑定字段要维护。
+    # 子任务名 = "父任务名:对象名"（如 failure-analysis:dwd_trade_order），
+    # 只嵌套一层。选用永远是显式的：调用方提交时带 subtask=对象名（或
+    # 直接提交完整子任务名），平台不从输入里猜。点名的子任务还不存在
+    # 时自动建空桩（只有 extends，全部继承父任务，auto_created 标记），
+    # 档案由人事后补。
     extends: str | None = None               # 父任务名（继承其全部未覆盖字段）
-    context: dict = Field(default_factory=dict)  # 任务档案：负责人/代码位置/常见坑/上游依赖/备注
+    context: dict = Field(default_factory=dict)  # 任务档案：自由键（常见坑/代码位置/口径/禁区/备注…）
+    auto_created: bool = False               # 提交时自动建的桩（不参与继承合并）
 
     def enabled_in(self, env: str) -> bool:
         return self.enabled and (not self.env_gate or env in self.env_gate)
@@ -76,11 +81,33 @@ def merge_task(parent: TaskDef, child: TaskDef) -> TaskDef:
                                    "extends": child.extends})
 
 
-# 档案字段的固定展示顺序（其余自定义键按字典序跟在后面）
-_PROFILE_ORDER = ("owner", "code_refs", "pitfalls", "upstream", "downstream",
-                  "runbook")
-_PROFILE_LABELS = {"owner": "负责人", "code_refs": "代码位置",
-                   "pitfalls": "常见坑", "upstream": "上游依赖",
+SUBTASK_SEP = ":"
+# 对象名：不含分隔符/空白/路径符，长度有限——传错名字最多建出一个
+# 一眼可辨的桩，不会建出能伪装成别的任务或嵌套层级的名字
+_OBJECT_NAME_RE = re.compile(r"^[^:\s/\\]{1,120}$")
+
+
+def split_subtask_name(name: str) -> tuple[str, str]:
+    """'a:x' → ('a', 'x')；'a' → ('a', '')。只认第一个分隔符。"""
+    base, _, obj = name.partition(SUBTASK_SEP)
+    return base, obj
+
+
+def check_object_name(obj: str) -> None:
+    if not _OBJECT_NAME_RE.match(obj):
+        raise ValueError(
+            f"子任务对象名不合法：{obj!r}（不能含冒号/空白/斜杠，≤120 字符）")
+
+
+# 档案是自由键：没有固定字段，也没有"负责人"这类归属概念（项目共同开发）。
+# 这里只给常用键一个中文标签和展示顺序，其余键按字典序跟在后面。
+# 内容原则：只记代码和配置里读不出来的东西——agent 能直接读项目，
+# 能读出来的写进档案只会过时。
+_PROFILE_ORDER = ("conventions", "no_go", "env_notes", "pitfalls",
+                  "code_refs", "upstream", "downstream", "runbook")
+_PROFILE_LABELS = {"conventions": "口径与术语", "no_go": "禁区",
+                   "env_notes": "环境差异", "pitfalls": "常见坑",
+                   "code_refs": "代码位置", "upstream": "上游依赖",
                    "downstream": "下游影响", "runbook": "运维备注"}
 
 
@@ -107,10 +134,29 @@ def profile_lines(definition: dict) -> list[tuple[str, str]]:
 
 
 def render_profile_block(name: str, lines: list[tuple[str, str]]) -> str:
-    """档案的 prompt 注入块：逐字保留，置于最前，优先级最高。"""
+    """档案的 prompt 注入块：逐字保留，置于最前，优先级最高。
+
+    name 带层级前缀（"服务 dagster" / "任务 failure-analysis:x"），
+    服务档案与任务档案各出一块，服务在前。"""
     body = "\n".join(f"{label}：{text}" for label, text in lines)
-    return (f"[任务档案——{name} 的一手事实，逐字保留，优先级最高]\n"
+    return (f"[档案——{name}：一手事实，逐字保留，优先级最高]\n"
             f"{body}")
+
+
+def compose_profile(service: str | None, service_profile: dict | None,
+                    task: "TaskDef | None") -> str:
+    """服务档案 + 任务档案 → 置顶注入块（两层各一块，服务在前；都空返回空串）。
+
+    task 应是沿继承链合并后的生效定义（子任务 context 已含父任务的键）。"""
+    blocks = []
+    lines = profile_lines({"context": service_profile or {}})
+    if service and lines:
+        blocks.append(render_profile_block(f"服务 {service}", lines))
+    if task is not None:
+        lines = profile_lines({"context": task.context})
+        if lines:
+            blocks.append(render_profile_block(f"任务 {task.name}", lines))
+    return "\n\n".join(blocks)
 
 
 class TaskRegistry:
@@ -138,28 +184,41 @@ class TaskRegistry:
             return task  # 父任务被删：子任务裸定义仍可用（字段全在自己身上）
         return merge_task(parent, task)
 
-    async def find_child(self, base_name: str,
-                         input_data: dict) -> TaskDef | None:
-        """子任务选择：输入里任一字段的值 == 某子任务名的后缀时选用。
+    async def resolve_for_submit(
+            self, task_name: str, subtask: str | None = None,
+    ) -> tuple[TaskDef | None, TaskDef | None]:
+        """提交入口的任务解析 → (生效定义, 待建的子任务桩 | None)。
 
-        命名即绑定——子任务叫 "failure-analysis:dwd_trade_order"，输入里
-        有值是 "dwd_trade_order"（不管字段叫 table/asset_key 还是别的）
-        就命中。多个字段同时命中不同子任务时按名字序取第一个（确定性）。
+        两种等价写法：(task="a", subtask="x") 或 task="a:x"。父任务不存在
+        返回 (None, None)（调用方报未知任务）。点名的子任务不存在时不立刻
+        落库：返回内存里的桩（只有 extends + auto_created，内容全继承父任务）
+        与合并后的生效定义，由提交端过完闸门链、确定受理后再 create_stub——
+        被拒的提交不留垃圾定义。平台不从输入里猜子任务，只认这一处入口。
         """
-        prefix = base_name + ":"
-        values = {str(v).strip() for v in input_data.values()
-                  if isinstance(v, (str, int)) and str(v).strip()}
-        if not values:
-            return None
-        candidates: list[str] = []
-        for raw in await self._store.list_active("task", self._env):
-            t = TaskDef.model_validate(raw)
-            if t.extends == base_name and t.name.startswith(prefix) \
-                    and t.name[len(prefix):] in values:
-                candidates.append(t.name)
-        if not candidates:
-            return None
-        return await self.resolve(sorted(candidates)[0])
+        base, obj = split_subtask_name(task_name)
+        if subtask:
+            if obj:
+                raise ValueError(
+                    f"task 已是子任务名（{task_name}），不能再带 subtask")
+            obj = subtask.strip()
+        if not obj:
+            return await self.resolve(base), None
+        check_object_name(obj)
+        parent = await self.get(base)
+        if parent is None:
+            return None, None
+        if parent.extends:
+            raise ValueError(f"{base} 本身是子任务，子任务不能再派生子任务")
+        full = f"{base}{SUBTASK_SEP}{obj}"
+        if await self.get(full) is not None:
+            return await self.resolve(full), None
+        stub = TaskDef(name=full, extends=base, auto_created=True)
+        return merge_task(await self.resolve(base) or parent, stub), stub
+
+    async def create_stub(self, stub: TaskDef, created_by: str = "") -> None:
+        """落库自动建的子任务桩；并发下别人先建了就不重复写版本。"""
+        if await self.get(stub.name) is None:
+            await self.put(stub, updated_by=created_by or "auto")
 
     async def list(self) -> list[TaskDef]:
         rows = await self._store.list_active("task", self._env)

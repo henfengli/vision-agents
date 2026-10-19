@@ -146,3 +146,15 @@ async def active_version(kind: Kind, env: str, name: str) -> int | None:
             " WHERE kind=%s AND env=%s AND name=%s", (kind, env, name))
         row = await cur.fetchone()
     return row[0] if row and row[0] is not None else None
+
+
+async def seed_drifted(store: "DefinitionStore", kind: Kind, env: str,
+                       name: str, file_def: dict) -> bool:
+    """文件种子自播种以来是否改过：与 updated_by="seed" 的那版比对。
+
+    定义库是事实源，文件只播种一次——之后有人改了文件，改动不会生效。
+    这里不判断谁对谁错，只让启动日志把"文件改了但没生效"说出来。
+    """
+    seeded = next((h for h in reversed(await store.history(kind, env, name))
+                   if h["updated_by"] == "seed"), None)
+    return seeded is not None and seeded["definition"] != file_def

@@ -28,6 +28,7 @@ class ChatRequest(BaseModel):
     question: str
     session_id: str | None = None
     env: str | None = None         # 目标业务环境（缺省 = 实例默认）
+    subtask: str | None = None     # 显式子任务对象名（跑 data-qa:<subtask>）
 
 
 def make_router(submitter, auth=None):
@@ -42,7 +43,7 @@ def make_router(submitter, auth=None):
             DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
             trigger_source="cli", session_id=session_id, role=req.role,
-            target_env=req.env)
+            target_env=req.env, subtask=req.subtask)
         return {**result, "session_id": session_id}
 
     @router.post("/v1/chat/stream")
@@ -54,7 +55,7 @@ def make_router(submitter, auth=None):
             DEFAULT_CHAT_TASK,
             {"server": req.server, "question": req.question},
             trigger_source="web_chat", session_id=session_id, role=req.role,
-            target_env=req.env)
+            target_env=req.env, subtask=req.subtask)
 
         async def events():
             yield _sse({"type": "run", "run_id": submitted["run_id"],

@@ -34,7 +34,7 @@ class RunSpec:
     domain: str | None = None
     code_paths: list[str] = field(default_factory=list)
     # —— 提交时固化 ——
-    profile: str = ""               # 任务档案注入块（子任务 context 渲染，置顶）
+    profile: str = ""               # 档案注入块（服务档案 + 任务档案，prepare 现拼，置顶）
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunSpec":

@@ -4,7 +4,7 @@
 - host_tools(names)：给 run_code 桩函数的原生 callable（同一实现，无壳）
 
 分层：L0 bash（bwrap 沙箱兜底）/ L2 run_code（CodeAct 编排）/
-薄工具（sql_query、dingtalk_send、update_asset_profile、save_asset）。
+薄工具（sql_query、dingtalk_send、save_asset）。
 审查层（review）与工具解耦：bash 命令与 run_code 代码走同一组危险模式审批。
 """
 
@@ -32,7 +32,6 @@ _BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "ls", "grep", "glob"}
 class ToolRegistry:
     def __init__(self, scratch_dir: str, relay: Any = None,
                  review: ReviewFn | None = None,
-                 profile_writer: Callable[..., Awaitable[None]] | None = None,
                  asset_writer: Callable[..., Awaitable[str]] | None = None,
                  sql_dsn: Callable[[str | None], str | None] | None = None,
                  host_resolver: Callable[[str | None, str | None],
@@ -41,7 +40,6 @@ class ToolRegistry:
         self._scratch_dir = scratch_dir
         self._relay = relay
         self._review = review
-        self._profile_writer = profile_writer
         self._asset_writer = asset_writer
         self._sql_dsn = sql_dsn               # domain → 只读 DSN
         self._host_resolver = host_resolver   # (domain, env) → (主机列表, GrafanaConfig)
@@ -58,8 +56,6 @@ class ToolRegistry:
             self._catalog["host_metrics"] = self._build_host_metrics
         if relay is not None:
             self._catalog["dingtalk_send"] = self._build_dingtalk_send
-        if profile_writer is not None:
-            self._catalog["update_asset_profile"] = self._build_update_asset_profile
         if asset_writer is not None:
             self._catalog["save_asset"] = self._build_save_asset
         self._catalog["run_code"] = self._build_run_code_placeholder
@@ -144,18 +140,6 @@ class ToolRegistry:
                 return f"[监控不可用] {type(e).__name__}: {str(e)[:300]}"
         return host_metrics
 
-    def _build_update_asset_profile(self) -> Callable:
-        writer = self._profile_writer
-
-        async def update_asset_profile(asset_key: str, content: str,
-                                       domain: str | None = None) -> str:
-            """沉淀某资产的档案事实（负责人、上游依赖、特殊口径、已知坑）。
-            逐字保存、永不摘要；下次涉及该资产的分析自动召回置顶。"""
-            assert writer is not None
-            await writer(asset_key, content, domain)
-            return f"asset:{asset_key}:profile 已更新"
-        return update_asset_profile
-
     def _build_save_asset(self) -> Callable:
         writer = self._asset_writer
 
@@ -190,7 +174,7 @@ class ToolRegistry:
 
         async def run_code(code: str, timeout: int = 120) -> str:
             """写 Python 代码一次编排多个工具：桩函数直接调用角色白名单内的工具
-            （bash/sql_query/host_metrics/dingtalk_send/update_asset_profile/save_asset/MCP 工具），
+            （bash/sql_query/host_metrics/dingtalk_send/save_asset/MCP 工具），
             可循环/分支/并发；中间数据不进上下文，只有 print 输出返回。代码在沙箱内执行。"""
             if review is not None:
                 await review(code)

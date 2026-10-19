@@ -11,6 +11,9 @@ class TaskSubmitRequest(BaseModel):
     caller: str | None = None
     role: str | None = None          # 可选：覆盖任务默认角色（与 /v1/chat 对齐）
     env: str | None = None           # 目标业务环境（缺省 = 实例默认）
+    # 子任务对象名（显式选择）：跑 "{task_type}:{subtask}"，不存在则自动
+    # 继承 task_type 建桩；等价于把 task_type 直接写成完整子任务名
+    subtask: str | None = None
     # 调用方幂等键走 Idempotency-Key 请求头，不进 body（Stripe 同款）
 
 

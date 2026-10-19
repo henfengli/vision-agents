@@ -49,6 +49,7 @@ from ..store import definitions as definitions_store
 from ..store import knowledge as knowledge_store
 from ..store import runs
 from .spec import RunSpec
+from .tasks import compose_profile
 
 
 @dataclass
@@ -58,7 +59,9 @@ class Deps:
     model_pool: Any
     notifier: Any
     langfuse: Any          # LangfuseClient | None
-    domains: Any = None    # DomainProvider（域启停 + code_paths 的 DB 事实源）
+    domains: Any = None    # DomainProvider（code_paths 等域配置的 DB 事实源）
+    switches: Any = None   # domains.Switches（启停读取面，判断在 policies）
+    tasks: Any = None      # TaskRegistry（档案拼装：子任务沿继承链合并）
 
 
 _deps: Deps | None = None
@@ -86,21 +89,24 @@ async def prepare_run(raw: dict) -> dict:
     """
     d = _d()
     spec = RunSpec.from_dict(raw)
-    # 停用兜底：提交端闸门外，调度/重试进入的 run 在这里再拦一次——
-    # 域已停用则直接失败落账，不进入召回与执行（任务级停用靠
-    # sync_schedules 不建 schedule + 提交端拒绝覆盖）
-    dom_provider = getattr(d, "domains", None)
-    if dom_provider is not None:
-        await dom_provider.refresh()
-        if spec.domain and not dom_provider.enabled(spec.domain):
+    # 停用兜底：调度触发的 run 不经提交端，在这里过同一处开关判断
+    # （policies.check_switches：环境/服务；任务级停用靠 sync_schedules
+    # 不建 schedule）。命中则失败落账带原因码，不进入召回与执行
+    switches = getattr(d, "switches", None)
+    if switches is not None:
+        from . import policies
+        blocked = await policies.check_switches(
+            None, spec.target_env or "", spec.domain, switches)
+        if blocked is not None:
             if spec.run_id:
                 await runs.set_status(spec.run_id, "failed", output={
-                    "error": f"服务 {spec.domain} 已停用"})
+                    "error": blocked.message, "error_code": blocked.code})
             return spec.to_dict()
     if not spec.run_id:
         spec.run_id = uuid.uuid4().hex[:16]
         spec.session_id = spec.run_id
-        await runs.create(spec.run_id, spec.task_type, spec.role, domain=None,
+        await runs.create(spec.run_id, spec.task_type, spec.role,
+                          domain=spec.domain,
                           trigger_source=spec.trigger or "schedule", caller="",
                           input_data=spec.input, session_id=spec.session_id)
     await runs.set_status(spec.run_id, "running")
@@ -130,10 +136,19 @@ async def prepare_run(raw: dict) -> dict:
     # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）。
     # 域连接信息走 DomainProvider（DB 事实源），取不到再退 settings 种子
     t_env = spec.effective_env(d.settings.env)
+    dom_provider = getattr(d, "domains", None)
     dom_cfg = (dom_provider.get(spec.domain) if dom_provider is not None
                else None) or d.settings.domains.get(spec.domain or "")
     if spec.domain and dom_cfg is not None:
         spec.code_paths = dom_cfg.for_env(t_env).code_paths
+    # 档案（服务档案 + 任务/子任务档案）：所有入口（提交/调度/续跑）都在
+    # 这里按 run 的服务与目标环境现取现拼，一处实现；结尾置顶注入
+    task_registry = getattr(d, "tasks", None)
+    if task_registry is not None:
+        task_def = await task_registry.resolve(spec.task_type)
+        svc_profile = (dom_cfg.for_env(t_env).profile
+                       if spec.domain and dom_cfg is not None else {})
+        spec.profile = compose_profile(spec.domain, svc_profile, task_def)
     # save_asset 等工具的默认值上下文（域/任务/目标环境）
     current_run_ctx.set({"env": t_env, "domain": spec.domain or "",
                          "task": spec.task_type})
@@ -169,8 +184,11 @@ async def prepare_run(raw: dict) -> dict:
             await runs.log_event(spec.run_id, "note",
                                  {"stage": "recall", "content": recalled})
     if spec.profile:
-        # 任务档案（子任务 context）：提交时固化、逐字保留，置于一切之上
+        # 档案：逐字保留、置于一切之上；原文落事件，详情页展示的就是
+        # 注入的那段，不靠回推
         spec.prompt = f"{spec.profile}\n\n{spec.prompt}"
+        await runs.log_event(spec.run_id, "note",
+                             {"stage": "profile", "content": spec.profile})
     return spec.to_dict()
 
 
@@ -547,7 +565,8 @@ async def run_builtin_task(raw: dict) -> dict:
     if not spec.run_id:
         spec.run_id = uuid.uuid4().hex[:16]
         spec.session_id = spec.run_id
-        await runs.create(spec.run_id, spec.task_type, spec.role, domain=None,
+        await runs.create(spec.run_id, spec.task_type, spec.role,
+                          domain=spec.domain,
                           trigger_source=spec.trigger or "schedule", caller="",
                           input_data=spec.input, session_id=spec.session_id)
     await runs.set_status(spec.run_id, "running")
