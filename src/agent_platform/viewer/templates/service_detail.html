@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("SERVICE", name,
+  "主机 " ~ (cfg.hosts | length) ~ " 台 · 代码目录 " ~ (cfg.code_paths | length) ~ " 个"
+  ~ (" · 只读库已配置" if cfg.readonly_dsn else "")
+  ~ (" · 环境覆盖：" ~ env_overlays | join("、") if env_overlays else "")) }}
+<div class="svc-back"><a href="/services">‹ 全部服务</a></div>
+
+<div class="svc-grid">
+  <div class="card">
+    <h3>规则库
+      {% if rules_version is not none %}<span class="tag">v{{ rules_version }}</span>{% endif %}
+      <a class="more" href="/runs?domain={{ name }}&source=webhook">webhook run →</a></h3>
+    <div class="meta" style="margin-bottom:8px">传感器/Webhook 先入规则：命中即按结论直接告警，未命中才建 run 交 agent。保存即新版本，5 秒内热生效。</div>
+    <textarea id="svc-rules" class="mono" rows="12" spellcheck="false"
+      placeholder='[{"pattern": "正则", "category": "类别", "conclusion": "结论", "enabled": true}]'>{{ rules_json }}</textarea>
+    <div class="af-actions">
+      <button id="svc-rules-save">{{ "保存（新版本，即时生效）" if rules is not none else "创建规则库" }}</button>
+      <span id="svc-rules-msg" class="meta"></span>
+    </div>
+    {% if rules is not none %}
+    <div class="af-vers">
+      <div class="af-label">版本时间线（点选两个版本对比）</div>
+      <div id="svc-ver-list" class="meta">加载中…</div>
+      <div id="svc-diff"></div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3>任务<a class="more" href="/admin">在管理页编辑 →</a></h3>
+    {% for t in parents %}
+    <div class="svc-task">
+      <span class="svc-task-name">{{ t.name }}</span>
+      <span class="meta">v{{ t.version }}{% if t.role %} · {{ t.role }}{% endif %}</span>
+      <a class="ai-link" href="/runs?task={{ t.name }}">runs →</a>
+    </div>
+    {% for s in subs if s.extends == t.name %}
+    <div class="svc-task svc-sub">
+      <span class="svc-task-name">↳ {{ s.name }}</span>
+      <span class="meta">v{{ s.version }}{% if not s.context %} · 档案待补全{% endif %}</span>
+      <a class="ai-link" href="/runs?task={{ s.name }}">runs →</a>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="meta">域包未声明种子任务（tasks.yaml）</div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h3>知识<a class="more" href="/memory?domain={{ name }}">全部 {{ knowledge_total }} 条 →</a></h3>
+    {% for k in knowledge %}
+    <div class="svc-k">
+      <div><b>{{ k.key }}</b>
+        {% if k.task %}<span class="pill pill-running" title="沉淀来源任务">{{ k.task }}</span>{% endif %}
+        {% if k.feedback_score %}<span class="meta">👍{{ k.feedback_score }}</span>{% endif %}
+      </div>
+      <div class="meta svc-k-content">{{ k.content }}</div>
+    </div>
+    {% else %}
+    <div class="meta">该服务还没有沉淀知识</div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h3>资产<a class="more" href="/assets?domain={{ name }}">全部 {{ assets_total }} 个 →</a></h3>
+    {% for a in assets %}
+    <div class="svc-task">
+      <span class="svc-task-name">{{ a.name }}</span>
+      <span class="meta">{{ a.kind }} · 复用 {{ a.use_count }} 次{% if a.expired %} · 已失效{% endif %}</span>
+    </div>
+    {% else %}
+    <div class="meta">该服务还没有任务资产</div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h3>近期 run<a class="more" href="/runs?domain={{ name }}">全部 {{ runs_total }} 个 →</a></h3>
+  {% if runs %}
+  <table class="grid">
+    <thead><tr><th>run</th><th>任务</th><th>来源</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td><a href="/runs/{{ r.run_id }}" class="mono">{{ r.run_id[:8] }}</a></td>
+        <td>{{ r.task_type }}</td>
+        <td>{{ r.trigger_source }}</td>
+        <td>{{ m.pill(r.status) }}</td>
+        <td>{{ r.duration_ms | dur }}</td>
+        <td>{{ m.ts(r.created_at) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="meta">该服务还没有 run</div>
+  {% endif %}
+</div>
+
+<script>
+window.SVC = {name: {{ name | tojson }}, hasRules: {{ (rules is not none) | tojson }}};
+</script>
+<script src="/static/ts.js"></script>
+<script src="/static/services.js"></script>
+{% endblock %}

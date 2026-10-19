@@ -121,8 +121,8 @@ _LOGO_SVG = """<svg width="18" height="18" viewBox="0 0 18 18" fill="none">
   from="0 9 9" to="360 9 9" dur="4.2s" repeatCount="indefinite"/></line></svg>"""
 
 _NAV = [("/", "总览"), ("/chat", "对话"), ("/runs", "Runs"),
-        ("/approvals", "审批"), ("/admin", "管理"),
-        ("/memory", "记忆"), ("/assets", "资产")]
+        ("/approvals", "审批"), ("/services", "服务"),
+        ("/memory", "记忆"), ("/assets", "资产"), ("/admin", "管理")]
 
 
 def render(template: str, title: str, active: str = "", nav: bool = True,
@@ -141,7 +141,7 @@ def esc(text: str) -> str:
 def make_static_router() -> APIRouter:
     router = APIRouter()
     allowed = {"app.css", "graph.js", "admin.js", "memory.js", "assets.js",
-               "ts.js", "cytoscape.min.js",
+               "services.js", "ts.js", "cytoscape.min.js",
                "cytoscape-dagre.min.js", "marked.min.js", "dompurify.min.js"}
 
     # filename:path 才能匹配 fonts/ 子目录（默认 path converter 不吃斜杠，字体曾因此 404）

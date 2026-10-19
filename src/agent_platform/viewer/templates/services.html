@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{{ m.page_head("SERVICES", "服务", "业务域（conf/domains/ 域包）的聚合视图 · 点进单个服务看规则/任务/知识/资产/run") }}
+{% if cards %}
+<div class="svc-cards">
+  {% for c in cards %}
+  <a class="card svc-card" href="/services/{{ c.name }}">
+    <h3>{{ c.name }}</h3>
+    <div class="meta">{% if c.envs %}环境覆盖：{{ c.envs | join("、") }}{% else %}默认环境{% endif %}{% if c.hosts %} · {{ c.hosts }} 台主机{% endif %}</div>
+    <div class="svc-stats">
+      <span>{% if c.has_rules %}规则库 v{{ c.rules_version }}{% else %}规则库未配置{% endif %}</span>
+      <span>任务 {{ c.tasks }}{% if c.sub_tasks %}（+{{ c.sub_tasks }} 子任务）{% endif %}</span>
+      <span>知识 {{ c.knowledge }}</span>
+      <span>资产 {{ c.assets }}</span>
+      <span>24h run {{ c.runs_24h }}</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card meta">未配置业务域——在 conf/domains/&lt;名称&gt;/ 放域包（domain.yaml 等）后重启生效。</div>
+{% endif %}
+{% endblock %}

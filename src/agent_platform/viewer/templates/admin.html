@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
 {% block content %}
-{{ m.page_head("ADMIN", "管理", "角色 / 任务 / 策略 / 规则库热更新 · 保存即新版本即时生效") }}
+{{ m.page_head("ADMIN", "管理", "角色 / 任务 / 策略热更新 · 保存即新版本即时生效 · 各服务的规则库在服务页维护") }}
 {% if escalations %}
 <div class="alert warn"><b>升舱提示</b>（同一 session 被纠正 ≥3 次）<ul>
   {% for e in escalations %}
@@ -18,12 +18,11 @@
       <button data-kind="role" class="on">角色</button>
       <button data-kind="task">任务</button>
       <button data-kind="policy">策略</button>
-      <button data-kind="rules">规则库</button>
     </div>
     <button id="admin-new" class="admin-new">＋ 新建</button>
     <input id="admin-q" class="inline" placeholder="过滤名称…"
            style="width:100%;margin-bottom:8px">
-    {% for kind in ("role", "task", "policy", "rules") %}
+    {% for kind in ("role", "task", "policy") %}
     <div class="admin-items" data-kind="{{ kind }}"{% if kind != "role" %} hidden{% endif %}>
       {% for it in items[kind] if not it.extends %}
       <div class="admin-item-wrap">

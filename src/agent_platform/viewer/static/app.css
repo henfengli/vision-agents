@@ -612,3 +612,24 @@ th.sortable a:hover { color: var(--accent); }
   transition: opacity .12s; }
 .admin-item-wrap:hover .ai-link { opacity: 1; }
 .af-help { font-size: .82em; color: var(--muted, #8a8f98); margin-top: 4px; line-height: 1.5; }
+
+/* —— 服务页（业务域顶层模块） —— */
+.svc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+             gap: 12px; }
+a.svc-card { display: block; margin: 0; color: var(--text); }
+a.svc-card:hover { border-color: var(--accent); text-decoration: none; }
+.svc-card h3 { margin: 0 0 6px; }
+.svc-stats { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px;
+             font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.svc-back { margin: -8px 0 6px; font-size: 12.5px; }
+.svc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; align-items: start; }
+@media (max-width: 1100px) { .svc-grid { grid-template-columns: 1fr; } }
+.svc-task { display: flex; align-items: baseline; gap: 10px; padding: 7px 0;
+            border-bottom: 1px solid var(--border); }
+.svc-task:last-child { border-bottom: none; }
+.svc-task .svc-task-name { font-family: var(--mono); font-size: 13px; }
+.svc-task.svc-sub { margin-left: 18px; }
+.svc-task .ai-link { margin-left: auto; }
+.svc-k { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.svc-k:last-child { border-bottom: none; }
+.svc-k-content { margin-top: 3px; white-space: pre-wrap; word-break: break-word; }

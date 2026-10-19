@@ -12,7 +12,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..api.auth import make_viewer_auth_dependency
-from .pages import admin, approvals, assets, base, chat, memory, overview, runs
+from .pages import (admin, approvals, assets, base, chat, memory, overview,
+                    runs, services)
 
 
 def make_viewer_router(submitter, defs_store, env: str,
@@ -37,6 +38,8 @@ def make_viewer_router(submitter, defs_store, env: str,
     pages.include_router(approvals.make_router(submitter))
     pages.include_router(chat.make_router(domains or [], target_envs=target_envs,
                                           defs_store=defs_store, env=env))
+    pages.include_router(services.make_router(env, defs_store,
+                                              domain_cfgs or {}))
     pages.include_router(admin.make_router(defs_store, env, langfuse=langfuse,
                                            tool_names=tool_names,
                                            domains=domains,
