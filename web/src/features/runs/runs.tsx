@@ -41,7 +41,6 @@ export function RunsPage() {
   const set = (patch: Partial<Search>) => setS({ ...patch, cursor: undefined });
   const clear = () => setS({ status: undefined, hours: undefined, service: undefined, env: undefined, task: undefined, trigger: undefined, caller: undefined, q: undefined, session_id: undefined, cursor: undefined });
   const active = !!(s.status || s.hours || s.service || s.env !== undefined || s.task || s.trigger || s.caller || s.q || s.session_id);
-  const page = Math.floor(Number(s.cursor || 0) / ui.pageSize) + 1;
 
   return (
     <Page wide>
@@ -85,7 +84,7 @@ export function RunsPage() {
           empty={<Empty icon={<LuActivity />} title="没有符合条件的运行" description={active ? "试试放宽筛选条件" : "任务运行后会出现在这里"} />} />
         {data && (data.next_cursor || data.prev_cursor) && (
           <div className="flex items-center justify-between border-t border-line px-4 py-2.5">
-            <span className="text-xs text-fg-3">第 {page} 页 / 共 {Math.ceil(data.total / ui.pageSize)} 页</span>
+            <span className="text-xs text-fg-3">共 {data.total} 条 · 每页 {ui.pageSize} 条</span>
             <div className="flex gap-1.5">
               <Button size="sm" icon={<LuChevronLeft />} disabled={!data.prev_cursor} onClick={() => setS({ cursor: data.prev_cursor ?? undefined }, false)}>上一页</Button>
               <Button size="sm" disabled={!data.next_cursor} onClick={() => setS({ cursor: data.next_cursor ?? undefined }, false)}>下一页<LuChevronRight /></Button>
@@ -97,10 +96,10 @@ export function RunsPage() {
   );
 }
 
-/** 发起方 = API 密钥名 / 控制台用户 / schedule / event。管理员能列出全部密钥；其他人只看到自己和系统发起方 */
+/** 发起方 = API 密钥名（事件也是推事件那把密钥）/ 控制台用户 / schedule。管理员能列出全部密钥 */
 function CallerFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { data: meta } = useMeta();
   const { data: keys } = useApiKeys();
-  const names = new Set([...(keys ?? []).map((k) => k.name), meta?.me.name ?? "", "schedule", "event", value].filter(Boolean));
+  const names = new Set([...(keys ?? []).map((k) => k.name), meta?.me.name ?? "", "schedule", value].filter(Boolean));
   return <FilterSelect label="发起方" allLabel="全部" value={value} onChange={onChange} options={[...names].map((n) => ({ value: n, label: n }))} />;
 }

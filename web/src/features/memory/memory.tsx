@@ -180,7 +180,7 @@ function KnowledgeDialog({ open, scope, onClose }: { open: boolean; scope: Memor
   const save = useMutation(async () => {
     try {
       await api.createKnowledge({ ...where, key, content });
-      toast("已录入", { description: "人工录入的条目召回时排在自动沉淀之前" });
+      toast("已录入", { description: "人工录入的条目召回时优先"});
       invalidate("memory");
       onClose();
     } catch (e) { toast.error("录入失败", (e as Error).message); }
@@ -360,7 +360,7 @@ function AssetDialog({ open, scope, onClose }: { open: boolean; scope: MemorySco
   const [where, setWhere] = useWhere(open, scope);
   const [d, setD] = useState(BLANK_ASSET);
   useEffect(() => { if (open) setD(BLANK_ASSET); }, [open]);
-  const valid = !!where.service && !!where.env && !!d.name.trim() && !!d.summary.trim();
+  const valid = !!where.service && !!where.env && !!d.name.trim() && !!d.summary.trim() && !!d.content.trim();
   const save = useMutation(async () => {
     try {
       await api.createAsset({ ...where, ...d });
@@ -379,7 +379,7 @@ function AssetDialog({ open, scope, onClose }: { open: boolean; scope: MemorySco
           <Field label="名字" required><Input autoFocus value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="订单表数据量突降排查" /></Field>
         </div>
         <Field label="摘要" required help="一句话：什么时候用它"><Input value={d.summary} onChange={(e) => setD({ ...d, summary: e.target.value })} /></Field>
-        <Field label="内容" help={{ procedure: "步骤清单", baseline: "数字与口径", script: "脚本原文", query: "SQL 原文" }[d.kind]}>
+        <Field label="内容" required help={{ procedure: "步骤清单", baseline: "数字与口径", script: "脚本原文", query: "SQL 原文" }[d.kind]}>
           <Textarea rows={8} mono={isCode(d.kind)} value={d.content} onChange={(e) => setD({ ...d, content: e.target.value })} />
         </Field>
       </div>
