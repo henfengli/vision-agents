@@ -27,7 +27,7 @@ import { AssetList, KnowledgeList } from "../memory/memory";
 import { ServiceAvatar } from "../overview/overview";
 import { RunMiniList, RunsTable } from "../runs/runs-table";
 import { RunTaskDialog } from "../tasks/run-dialog";
-import { TasksTable } from "../tasks/tasks";
+import { TasksTable, taskRowsOf } from "../tasks/tasks";
 import { ServiceConfigEditor } from "./service-config";
 
 type TabKey = "overview" | "envs" | "tasks" | "runs" | "memory" | "config" | "versions";
@@ -111,7 +111,7 @@ export function ServiceDetailPage() {
         <>
           {tab === "overview" && <OverviewTab svc={svc} env={env} onOpenEnvs={() => setSearch({ tab: "envs" })} />}
           {tab === "envs" && <EnvsTab svc={svc} onSaved={refetch} />}
-          {tab === "tasks" && <Card><TasksTable tasks={tasks?.filter((t) => !t.extends)} all={tasks} hideService /></Card>}
+          {tab === "tasks" && <Card><TasksTable groups={[{ key: "all", rows: taskRowsOf(tasks) }]} /></Card>}
           {tab === "runs" && <RunsTab service={svc.name} env={env} />}
           {tab === "memory" && <div className="space-y-4">
             <KnowledgeList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />

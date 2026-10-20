@@ -11,7 +11,7 @@
 - knowledge / knowledge_history / recall_hits   知识（时序化、内容历史、召回埋点）
 - cases              案例（报错指纹 → 结论）
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
-- feedback           反馈（运行打分 / 步骤打分 / 纠正）
+- feedback           反馈（对整次运行或某一步：分数 + 问题类型 + 说明；一人一步一条）
 
 记忆三表与产物都按 (env, service) 分区；schema_version 记录库结构版本，
 从 v5 升级见 scripts/migrate_v5.py。
@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS run_events (
     seq        INT  NOT NULL,
     kind       TEXT NOT NULL,                -- stage/thought/tool_call/tool_result/approval/artifact/final/error
     payload    JSONB NOT NULL DEFAULT '{}',
-    feedback   INT,                          -- 步骤 👍👎（+1/-1）
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE (run_id, seq)
 );
@@ -257,16 +256,17 @@ CREATE TABLE IF NOT EXISTS asset_history (
 
 CREATE TABLE IF NOT EXISTS feedback (
     id         BIGSERIAL PRIMARY KEY,
-    run_id     TEXT REFERENCES runs (run_id) ON DELETE CASCADE,
-    session_id TEXT,
-    kind       TEXT NOT NULL DEFAULT 'rating',   -- rating / step / correction
-    score      INT,
-    step_seq   INT,
-    comment    TEXT,
-    created_by TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMPTZ DEFAULT now()
+    run_id     TEXT NOT NULL REFERENCES runs (run_id) ON DELETE CASCADE,
+    step_seq   INT  NOT NULL DEFAULT 0,          -- 0 = 整次运行；>0 = 时间线上的某一步
+    score      SMALLINT NOT NULL,                -- 1 有用 / -1 有问题
+    reasons    TEXT[] NOT NULL DEFAULT '{}',     -- 问题类型（domain/feedback.py）
+    comment    TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (run_id, step_seq, created_by)        -- 一人一步一条：改主意是覆盖
 );
-CREATE INDEX IF NOT EXISTS idx_feedback_run ON feedback (run_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_negative ON feedback (created_at DESC) WHERE score < 0;
 
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -281,7 +281,7 @@ OPTIONAL = [
 ]
 
 _dsn: str | None = None
-_pool: AsyncConnectionPool | None = None
+_pool: "AsyncConnectionPool | None" = None
 
 
 async def open_db(dsn: str) -> None:
@@ -312,7 +312,7 @@ async def close_db() -> None:
         _pool = None
 
 
-def pool() -> AsyncConnectionPool:
+def pool() -> "AsyncConnectionPool":
     if _pool is None:
         raise RuntimeError("DB 未初始化：先 await open_db(dsn)")
     return _pool

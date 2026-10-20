@@ -179,6 +179,7 @@ const EVENTS: { value: NotifyEvent; label: string; hint: string }[] = [
   { value: "run_succeeded", label: "运行成功", hint: "量大，建议加范围" },
   { value: "approval_requested", label: "等待审批", hint: "" },
   { value: "process_stopped", label: "进程停止", hint: "租约到期或异常退出" },
+  { value: "feedback_negative", label: "收到负反馈", hint: "有人对运行或某一步点了 👎，带问题类型与说明" },
 ];
 const TRIGGERS = ["api", "chat", "schedule", "event", "web"];
 

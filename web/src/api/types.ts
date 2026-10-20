@@ -66,6 +66,7 @@ export interface Meta {
   tools: ToolInfo[];
   event_sources: EventSourceInfo[];
   channels: string[];    // 通知渠道名（任务投递、notify 工具可选）
+  feedback_reasons: { value: FeedbackReason; label: string }[];
   features: { process_control: "systemd" | "local" | "off"; vector_search: boolean };
   me: Me;
 }
@@ -93,7 +94,7 @@ export interface ApprovalsConfig {
   timeout_minutes: number;
 }
 
-export type NotifyEvent = "run_failed" | "run_succeeded" | "approval_requested" | "process_stopped";
+export type NotifyEvent = "run_failed" | "run_succeeded" | "approval_requested" | "process_stopped" | "feedback_negative";
 
 export interface Channel {
   type: "dingtalk" | "webhook";
@@ -420,7 +421,7 @@ export interface Run extends RunListItem {
   memory: MemoryOverride;
   pending_approval: Approval | null;
   context: RunContext;
-  feedback: { score: number; comment: string; at: ISODate } | null;
+  feedback: FeedbackEntry[];   // 所有人对整次（step_seq=0）与各步的评价
 }
 
 export interface RunContext {
@@ -462,7 +463,6 @@ export interface RunEvent {
     status?: string;
     [k: string]: unknown;
   };
-  feedback?: number | null;    // 步骤 👍👎
 }
 
 /** POST /v1/runs */
@@ -501,6 +501,47 @@ export interface RunFilters {
   limit?: number;
 }
 
+// ———————————————————— 反馈 ————————————————————
+
+export type FeedbackReason =
+  | "wrong_conclusion" | "wrong_definition" | "wrong_data" | "incomplete" | "off_topic"
+  | "wrong_tool" | "detour" | "unsafe" | "other";
+
+/** PUT /v1/runs/{id}/feedback 与 /v1/runs/{id}/events/{seq}/feedback 的请求体 */
+export interface FeedbackInput {
+  score: 1 | -1;
+  reasons: FeedbackReason[];
+  comment: string;
+}
+
+/** 一人一步一条：再提交即覆盖 */
+export interface FeedbackEntry extends FeedbackInput {
+  id: number;
+  run_id: string;
+  step_seq: number;            // 0 = 整次运行
+  created_by: string;
+  created_at: ISODate;
+  updated_at: ISODate;
+}
+
+/** GET /v1/feedback 的列表项：带上运行的归属 */
+export interface FeedbackInboxItem extends FeedbackEntry {
+  task: string;
+  service: string | null;
+  env: string;
+  summary: string;
+  run_status: RunStatus;
+}
+
+export interface FeedbackFilters {
+  score?: 1 | -1;
+  service?: string;
+  env?: string;
+  task?: string;
+  reason?: string;
+  hours?: number;
+}
+
 // ———————————————————— 对话 ————————————————————
 
 /** POST /v1/chat */
@@ -531,7 +572,7 @@ export interface ChatTurn {
   answer: string | null;
   status: RunStatus;
   events: RunEvent[];
-  feedback: number | null;
+  feedback: FeedbackEntry | null;   // 当前用户对这一轮的评价
   created_at: ISODate;
 }
 

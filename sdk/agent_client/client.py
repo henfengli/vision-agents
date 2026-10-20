@@ -115,9 +115,11 @@ class AgentClient:
         """纠正一次结论：同会话开新一轮重答，纠正内容沉淀为人工知识。返回新运行的回执。"""
         return self._call("POST", f"/v1/runs/{run_id}/correct", json={"text": text})
 
-    def feedback(self, run_id: str, score: int, comment: str = "") -> None:
-        """score：1 有用 / -1 没帮助。"""
-        self._call("POST", f"/v1/runs/{run_id}/feedback", json={"score": score, "comment": comment})
+    def feedback(self, run_id: str, score: int, *, reasons: list[str] | None = None, comment: str = "") -> dict:
+        """评价一次运行：score 1 有用 / -1 有问题；reasons 是问题类型（取值见 /v1/meta 的 feedback_reasons）。
+        同一个密钥再评一次就是覆盖。"""
+        return self._call("PUT", f"/v1/runs/{run_id}/feedback",
+                          json={"score": score, "reasons": reasons or [], "comment": comment})
 
     # —— 事件 ——
 

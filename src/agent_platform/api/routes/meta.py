@@ -1,6 +1,6 @@
 """元信息、统计、搜索、事件入口、登录。
 
-    GET    /v1/meta                 版本、环境、工具目录、事件来源、通知渠道、功能开关、当前身份
+    GET    /v1/meta                 版本、环境、工具目录、事件来源、通知渠道、反馈问题类型、功能开关、当前身份
     GET    /v1/stats                hours service env
     GET    /v1/search?q=            全局搜索（服务 / 任务 / 角色 / 运行 / 知识）
     POST   /v1/events/{source}      事件入口（dagster / gitlab / webhook）
@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 
 from ... import __version__
-from ...domain import Rejected
+from ...domain import FEEDBACK_REASONS, Rejected
 from ...store import db, runs
 from ...store import knowledge as knowledge_store
 from ...triggers.sources import SOURCES
@@ -34,6 +34,7 @@ async def meta(rt: Runtime = RT, who: Caller = WHO):
         "tools": rt.toolbox.info(),
         "event_sources": [s.info() for s in SOURCES.values()],
         "channels": await rt.notifier.channel_names(),
+        "feedback_reasons": [{"value": k, "label": v} for k, v in FEEDBACK_REASONS.items()],
         "features": {"process_control": rt.controller.backend, "vector_search": await db.has_vector()},
         "me": who.model_dump(),
     }

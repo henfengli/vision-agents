@@ -47,7 +47,6 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
     run_id = run["run_id"]
     events = await runs.events(run_id)
     stage = {e["payload"].get("stage"): e["payload"] for e in events if e["kind"] == "stage"}
-    feedback = [f for f in await feedback_store.for_run(run_id) if f["kind"] == "rating"]
     session_runs = [{"run_id": r["run_id"], "task": r["task"], "status": r["status"], "created_at": r["created_at"]}
                     for r in await runs.by_session(run["session_id"], exclude=run_id)]
     return {
@@ -56,8 +55,7 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
         "input": run["input"], "output": run.get("output"), "error_code": run.get("error_code"),
         "memory": run.get("memory") or {},
         "pending_approval": await approvals_store.pending_of_run(run_id),
-        "feedback": ({"score": feedback[-1]["score"], "comment": feedback[-1]["comment"] or "",
-                      "at": feedback[-1]["created_at"]} if feedback else None),
+        "feedback": await feedback_store.for_run(run_id),        # 所有人对整次与各步的评价
         "context": {
             "profile": (stage.get("profile") or {}).get("content", ""),
             "recalled_knowledge": (stage.get("recall") or {}).get("hits", []),
@@ -85,7 +83,8 @@ async def _graph(run_id: str, topology: dict | None, events: list[dict]) -> dict
     }
 
 
-def chat_turn(run: dict, events: list[dict], feedback: int | None) -> dict:
+def chat_turn(run: dict, events: list[dict], feedback: dict | None) -> dict:
+    """对话的一轮。feedback 是当前用户对这一轮的评价（没有则 None）。"""
     output = run.get("output") or {}
     return {"run_id": run["run_id"], "question": run["input"].get("question", run["summary"]),
             "answer": output.get("answer") or output.get("error"), "status": run["status"],

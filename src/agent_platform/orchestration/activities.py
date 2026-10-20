@@ -12,9 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 from temporalio import activity
@@ -200,7 +199,7 @@ async def finalize(raw: dict, output: dict, resolution: str) -> None:
             await distill(d.model_pool, env=spec.env, service=spec.service, run_id=spec.run_id, task=spec.task,
                           run_input=spec.input, run_output=output, code_paths=spec.code_paths,
                           session_id=spec.session_id, handoff_summary=memory.handoff_summary)
-        except Exception:
+        except Exception:  # noqa: BLE001
             log.exception("运行 %s 的记忆沉淀失败", spec.run_id)
     await _announce(d, spec, "run_succeeded", "运行成功", str(output.get("answer") or output)[:1500])
     if resolution == "rule":
@@ -241,7 +240,7 @@ async def deliver(raw: dict) -> None:
             await d.notifier.send(spec.deliver["channel"], Message(
                 title=f"{spec.task} · {_STATUS_TEXT.get(run['status'], run['status'])}", text=str(text)[:3000],
                 link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         if activity.info().attempt < 3:
             raise                                   # 交给 Temporal 重试
         await runs.log_event(spec.run_id, "stage", {"stage": "deliver", "title": "结果投递失败",

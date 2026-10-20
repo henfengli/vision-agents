@@ -79,16 +79,14 @@ async def sessions(service: str | None = None, env: str | None = None, task: str
 
 
 @router.get("/sessions/{session_id}")
-async def session(session_id: str, _: Caller = WHO):
+async def session(session_id: str, who: Caller = WHO):
     turns = await runs.of_session(session_id)
     if not turns:
         raise Rejected.not_found(f"会话 {session_id}")
-    events = await runs.events_of([t["run_id"] for t in turns])
-    ratings = {}
-    for t in turns:
-        rated = [f for f in await feedback_store.for_run(t["run_id"]) if f["kind"] == "rating"]
-        ratings[t["run_id"]] = rated[-1]["score"] if rated else None
+    run_ids = [t["run_id"] for t in turns]
+    events = await runs.events_of(run_ids)
+    my_feedback = await feedback_store.mine(run_ids, who.name)
     last = turns[-1]
     return {"session_id": session_id, "title": turns[0]["summary"][:60], "service": last["service"], "env": last["env"],
             "task": last["task"], "runs": len(turns), "last_at": last["created_at"],
-            "turns": [views.chat_turn(t, events.get(t["run_id"], []), ratings[t["run_id"]]) for t in turns]}
+            "turns": [views.chat_turn(t, events.get(t["run_id"], []), my_feedback.get(t["run_id"])) for t in turns]}

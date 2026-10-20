@@ -3,23 +3,24 @@
  *
  * 输入区上方的维度条决定"问谁、在哪问"：服务、环境、任务、对象（子任务，可直接输入新对象）、
  * 任务的其它输入字段、记忆开关。一个会话 = 一个 LangGraph thread，服务 / 环境 / 任务 / 对象在会话内固定；
- * 记忆开关和其它输入每轮都能改。回答下面可以 👍👎、纠正（同会话开新一轮，并取代上一轮沉淀的记忆）。
+ * 记忆开关和其它输入每轮都能改。回答下面可以 👍、👎（选问题类型、写说明，可顺手让 agent 按意见重答）、纠正。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleStop, LuExternalLink, LuMessageSquare, LuPenLine,
-  LuPlus, LuSlidersHorizontal, LuSparkles, LuThumbsDown, LuThumbsUp, LuWrench,
+  LuPlus, LuSlidersHorizontal, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
 import { stream } from "@/api/client";
 import { api, useEnvs, useServices, useSession, useSessions, useSubtasks, useTasks } from "@/api/hooks";
 import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } from "@/api/types";
 import { EnvFilter, ServiceFilter } from "@/components/filters";
+import { FeedbackButtons } from "@/components/feedback";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
 import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea, objectNameError } from "@/components/ui/form";
-import { Popover, toast } from "@/components/ui/overlay";
+import { Popover, Tooltip, toast } from "@/components/ui/overlay";
 import { Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
@@ -218,11 +219,11 @@ function Conversation({ sessionId }: { sessionId?: string }) {
               <Select size="sm" className="w-24" value={env || null} disabled={locked} onChange={setEnv}
                 options={(envs ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: svc?.health[e.name]?.enabled === false ? "该服务在此环境已停用" : e.title }))} />
             </Dim>
-            <Dim label="任务" locked={locked}>
-              <Select size="sm" className="w-36" value={task || null} disabled={locked || chatTasks.length <= 1} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
-                placeholder="没有对话任务" options={chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: t.service === "*" ? "通用" : t.service ?? "" }))} />
+            <Dim label="任务" locked={locked} hint="问哪一类问题：服务上声明了「对话」触发的任务都能选，不同任务用不同的角色与档案">
+              <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
+                placeholder="该服务没有对话任务" options={chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: `${t.name}${t.service === "*" ? " · 通用" : ""}` }))} />
             </Dim>
-            <Dim label="对象" locked={locked}>
+            <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个指标、一张表）问。会带上这个对象的专属档案，沉淀的知识也记在它名下；输入新名字会自动建一个。`}>
               {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
             </Dim>
             {extraFields.length > 0 && (
@@ -270,10 +271,11 @@ function Conversation({ sessionId }: { sessionId?: string }) {
   );
 }
 
-function Dim({ label, locked, children }: { label: string; locked: boolean; children: React.ReactNode }) {
+function Dim({ label, hint, locked, children }: { label: string; hint?: string; locked: boolean; children: React.ReactNode }) {
+  const name = <span className={cn("text-[11px] text-fg-3", hint && "cursor-help underline decoration-dotted underline-offset-2")}>{label}</span>;
   return (
     <div className={cn("flex items-center gap-1.5 rounded-md pl-1.5", locked && "opacity-80")}>
-      <span className="text-[11px] text-fg-3">{label}</span>
+      {hint ? <Tooltip content={hint}>{name}</Tooltip> : name}
       {children}
     </div>
   );
@@ -283,8 +285,8 @@ function Dim({ label, locked, children }: { label: string; locked: boolean; chil
 function SubtaskPicker({ task, value, onChange }: { task: string; value: string; onChange: (v: string) => void }) {
   const { data } = useSubtasks(task);
   return (
-    <CreatableSelect className="w-40" value={value} onChange={onChange} placeholder="不指定" validate={objectNameError}
-      options={(data ?? []).map((t) => ({ value: t.name.split(":")[1], label: t.name.split(":")[1], hint: t.title || (t.auto_created ? "自动创建" : undefined) }))} />
+    <CreatableSelect className="w-44" value={value} onChange={onChange} placeholder={data?.length ? `不指定（${data.length} 个可选）` : "不指定"} validate={objectNameError}
+      createLabel="新对象" options={(data ?? []).map((t) => ({ value: t.name.split(":")[1], label: t.name.split(":")[1], hint: t.title || (t.auto_created ? "自动创建，档案待补" : undefined) }))} />
   );
 }
 
@@ -306,16 +308,10 @@ function Welcome({ service, onPick }: { service: string; onPick: (q: string) => 
 
 function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [fb, setFb] = useState(turn.feedback ?? 0);
   const [correcting, setCorrecting] = useState(false);
   const [correction, setCorrection] = useState("");
   const steps = turn.events.filter((e) => e.kind === "thought" || e.kind === "tool_call");
   const waiting = turn.events.some((e) => e.kind === "approval" && !e.payload.decision) && turn.streaming;
-  const sendFb = async (s: 1 | -1) => {
-    const next = fb === s ? 0 : s;
-    setFb(next);
-    if (next && turn.run_id) await api.runFeedback(turn.run_id, next as 1 | -1);
-  };
   return (
     <div className="mb-7">
       <div className="mb-3 flex justify-end">
@@ -351,8 +347,7 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
           {!turn.streaming && turn.answer && (
             <div className="mt-2 flex items-center gap-0.5 text-fg-3">
               <CopyButton text={turn.answer} />
-              <button type="button" title="有用" onClick={() => sendFb(1)} className={cn("rounded p-1 hover:bg-hover", fb > 0 && "text-ok")}><LuThumbsUp className="size-3.5" /></button>
-              <button type="button" title="没用" onClick={() => sendFb(-1)} className={cn("rounded p-1 hover:bg-hover", fb < 0 && "text-bad")}><LuThumbsDown className="size-3.5" /></button>
+              {turn.run_id && <FeedbackButtons runId={turn.run_id} mine={turn.feedback} onCorrect={turn.status === "success" ? onCorrect : undefined} />}
               {turn.run_id && turn.status === "success" && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPenLine className="size-3" />纠正</button>}
               {turn.run_id && <Link to={`/runs/${turn.run_id}`} className="ml-1 inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuExternalLink className="size-3" />运行详情</Link>}
             </div>

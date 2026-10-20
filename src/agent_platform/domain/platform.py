@@ -94,6 +94,7 @@ NotifyEvent = Literal[
     "run_succeeded",         # 运行成功
     "approval_requested",    # 有人/运行在等审批
     "process_stopped",       # 进程退出（含租约到期、异常退出）
+    "feedback_negative",     # 有人对一次运行（或其中一步）点了 👎
 ]
 
 

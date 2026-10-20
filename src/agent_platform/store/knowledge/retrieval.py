@@ -92,7 +92,7 @@ async def search(env: str, service: str, query: str, limit: int = 5,
     ]
 
 
-MANUAL_BONUS_POINTS = 3      # 人工录入 / 纠正的条目（source_run 为空）相当于多 3 个 👍
+MANUAL_BONUS_POINTS = 3      # 人工录入的条目（source_run 为空）相当于多 3 个 👍
 
 
 async def _weight_by_feedback(candidates: list, limit: int,
@@ -132,7 +132,7 @@ def _rrf_merge(trgm_rows, vec_rows, limit, k: int = 60):
 
 
 async def _search_vector(env, service, vec: list[float], limit):
-    lit = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+    lit = "[%s]" % ",".join(f"{x:.6f}" for x in vec)
     try:
         async with pool().connection() as conn:
             cur = await conn.execute(

@@ -1,8 +1,9 @@
 /**
- * 运行列表：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上（可分享、可回退）。
- * 环境默认跟随顶栏全局环境；每页条数取个人偏好。
+ * 运行页两个标签：
+ * - 运行：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上；环境默认跟随顶栏，每页条数取个人偏好。
+ * - 反馈：大家点的 👍👎（默认只看 👎），见 feedback-inbox.tsx。
  */
-import { LuActivity, LuChevronLeft, LuChevronRight, LuRefreshCw } from "react-icons/lu";
+import { LuActivity, LuChevronLeft, LuChevronRight, LuMessageSquareWarning, LuRefreshCw } from "react-icons/lu";
 
 import { useApiKeys, useMeta, useRuns, useTasks } from "@/api/hooks";
 import type { RunFilters, RunStatus } from "@/api/types";
@@ -10,11 +11,13 @@ import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { RUN_STATUS, TRIGGER } from "@/components/status";
 import { Button } from "@/components/ui/button";
+import { Tabs } from "@/components/ui/data";
 import { FilterSelect, SearchInput, Segmented } from "@/components/ui/form";
 import { Card, Dot, Empty } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
+import { FeedbackInbox, type InboxSearch } from "./feedback-inbox";
 import { RunsTable } from "./runs-table";
 
 const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
@@ -27,6 +30,21 @@ const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resu
 type Search = { status: string; hours: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
 
 export function RunsPage() {
+  const [s, setS] = useSearch<Search & InboxSearch & { view: string }>();
+  const view = s.view ?? "runs";
+  return (
+    <Page wide>
+      <PageHeader title="运行" description="每一次执行的事实记录：钉死任务 / 角色版本，全过程事件可回放；人给的评价集中在「反馈」" />
+      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : "feedback", cursor: undefined, score: undefined, reason: undefined })} tabs={[
+        { value: "runs", label: "运行", icon: <LuActivity /> },
+        { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
+      ]} />
+      {view === "runs" ? <RunList /> : <FeedbackInbox s={s} set={(patch) => setS(patch)} />}
+    </Page>
+  );
+}
+
+function RunList() {
   const [s, setS] = useSearch<Search>();
   const ui = useUi();
   const env = s.env ?? ui.env;
@@ -43,10 +61,7 @@ export function RunsPage() {
   const active = !!(s.status || s.hours || s.service || s.env !== undefined || s.task || s.trigger || s.caller || s.q || s.session_id);
 
   return (
-    <Page wide>
-      <PageHeader title="运行" description="每一次执行的事实记录：钉死任务 / 角色版本，全过程事件可回放"
-        actions={<Button variant="ghost" size="sm" icon={<LuRefreshCw className={cn(fetching && "animate-spin")} />} onClick={() => refetch()}>刷新</Button>} />
-
+    <>
       <div className="mb-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center rounded-md border border-line bg-sunken p-0.5">
@@ -65,6 +80,7 @@ export function RunsPage() {
           <div className="ml-auto flex items-center gap-2 text-xs text-fg-3">
             {ui.autoRefresh && <><Dot tone="ok" pulse /> 实时</>}
             {data && <span>共 {data.total} 条</span>}
+            <Button variant="ghost" size="sm" icon={<LuRefreshCw className={cn(fetching && "animate-spin")} />} onClick={() => refetch()}>刷新</Button>
           </div>
         </div>
         <FilterBar active={active} onClear={clear}>
@@ -92,7 +108,7 @@ export function RunsPage() {
           </div>
         )}
       </Card>
-    </Page>
+    </>
   );
 }
 

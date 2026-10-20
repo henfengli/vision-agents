@@ -4,6 +4,7 @@
  */
 import { ApiError } from "../client";
 import type {
+  FeedbackEntry, FeedbackReason,
   ApiKey, Approval, Asset, ConfigSection, Instance, Knowledge, Page, RunAccepted, RunListItem, SearchHit,
   ServiceSummary, Stats, Task, TaskSummary, UpcomingFire, Version,
 } from "../types";
@@ -84,6 +85,7 @@ function bump<T extends Ledgered>(key: string, target: T, patch: Partial<T>): T 
 on("GET", "/v1/meta", () => ({
   version: "6.0.0", envs: db.envs, default_env: db.settings.envs.default, me: ME,
   channels: Object.keys(db.settings.notifications.channels),
+  feedback_reasons: REASONS,
   features: { process_control: "systemd", vector_search: true },
   tools: [
     { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、工作目录可写、默认断网", group: "core", dangerous: true },
@@ -375,16 +377,41 @@ on("POST", "/v1/runs/:id/correct", (p, _q, body) => {
   const [task, subtask] = r.task.split(":");
   return submitRun({ task, subtask, service: r.service, env: r.env, input: { ...r.input, question: `[纠正] ${body.text}` }, session_id: r.session_id }, "correction");
 });
-on("POST", "/v1/runs/:id/feedback", (p, _q, body) => {
-  findRun(p.id).feedback = { score: body.score, comment: body.comment ?? "", at: now() };
-  return { ok: true };
-});
-on("POST", "/v1/runs/:id/events/:seq/feedback", (p, _q, body) => {
-  const ev = db.eventsOf(findRun(p.id)).find((e) => e.seq === Number(p.seq));
-  if (!ev) throw notFound("步骤");
-  ev.feedback = body.score || null;
-  return { ok: true };
-});
+// ———————— 反馈：一人一步一条，再提交即覆盖 ————————
+
+const REASONS: { value: FeedbackReason; label: string }[] = [
+  { value: "wrong_conclusion", label: "结论不对" }, { value: "wrong_definition", label: "口径 / 业务理解不对" },
+  { value: "wrong_data", label: "取数或查询有误" }, { value: "incomplete", label: "没答全" }, { value: "off_topic", label: "答非所问" },
+  { value: "wrong_tool", label: "工具或命令用错" }, { value: "detour", label: "绕远路 / 太慢" }, { value: "unsafe", label: "操作有风险" },
+  { value: "other", label: "其他" },
+];
+
+function putFeedback(runId: string, step: number, body: { score: 1 | -1; reasons?: FeedbackReason[]; comment?: string }): FeedbackEntry {
+  const r = findRun(runId);
+  if (step && !db.eventsOf(r).some((e) => e.seq === step)) throw notFound(`第 ${step} 步`);
+  const unknown = (body.reasons ?? []).filter((x) => !REASONS.some((y) => y.value === x));
+  if (unknown.length) throw new ApiError(422, "invalid_request", `未知的问题类型：${unknown.join("、")}`);
+  const old = r.feedback.find((f) => f.step_seq === step && f.created_by === ME.name);
+  const entry: FeedbackEntry = {
+    id: old?.id ?? Date.now(), run_id: runId, step_seq: step, score: body.score, reasons: body.reasons ?? [], comment: body.comment ?? "",
+    created_by: ME.name, created_at: old?.created_at ?? now(), updated_at: now(),
+  };
+  r.feedback = [...r.feedback.filter((f) => f !== old), entry];
+  return entry;
+}
+function removeFeedback(runId: string, step: number) {
+  const r = findRun(runId);
+  r.feedback = r.feedback.filter((f) => !(f.step_seq === step && f.created_by === ME.name));
+  return null;
+}
+on("PUT", "/v1/runs/:id/feedback", (p, _q, body) => putFeedback(p.id, 0, body));
+on("DELETE", "/v1/runs/:id/feedback", (p) => removeFeedback(p.id, 0));
+on("PUT", "/v1/runs/:id/events/:seq/feedback", (p, _q, body) => putFeedback(p.id, Number(p.seq), body));
+on("DELETE", "/v1/runs/:id/events/:seq/feedback", (p) => removeFeedback(p.id, Number(p.seq)));
+on("GET", "/v1/feedback", (_p, q) => db.runs.flatMap((r) => r.feedback.map((f) => ({ ...f, task: r.task, service: r.service, env: r.env, summary: r.summary, run_status: r.status })))
+  .filter((f) => (!q.score || f.score === Number(q.score)) && (!q.service || f.service === q.service) && (!q.env || f.env === q.env)
+    && taskMatch(q.task, f.task) && (!q.reason || f.reasons.includes(q.reason as FeedbackReason)) && (!q.hours || within(f.updated_at, Number(q.hours))))
+  .sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, Number(q.limit) || 100));
 
 interface SubmitBody { task: string; service?: string | null; env?: string | null; subtask?: string | null; input?: Record<string, unknown>; session_id?: string | null; memory?: object }
 
@@ -430,7 +457,7 @@ function submitRun(body: SubmitBody, trigger: string): RunAccepted {
     created_at: now(), finished_at: null, task_version: t.version, role_version: db.roles.find((r) => r.name === t.role)?.version ?? null,
     input, output: null, error_code: null, pending_approval: null, memory: body.memory ?? {},
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [], graph: null },
-    feedback: null,
+    feedback: [],
   };
   db.runs.unshift(run);
   let approval_id: number | null = null;

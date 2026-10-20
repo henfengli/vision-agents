@@ -107,7 +107,7 @@ agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
 | `rerun(run_id)` | 同样的输入新开一次运行 |
 | `resume(run_id)` | 失败的运行从断点续跑 |
 | `correct(run_id, text)` | 纠正结论：同会话重答，纠正内容沉淀为人工知识 |
-| `feedback(run_id, score, comment="")` | 评价：`1` 有用 / `-1` 没帮助 |
+| `feedback(run_id, score, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
 
 ### 事件
 

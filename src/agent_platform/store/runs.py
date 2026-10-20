@@ -170,7 +170,7 @@ async def list_filtered(*, status: str | None = None, env: str | None = None, se
     if backwards:
         rows.reverse()
     items = [_list_row(r) for r in rows]
-    key = lambda r: f"{r[15].isoformat()}|{r[0]}"
+    key = lambda r: f"{r[15].isoformat()}|{r[0]}"  # noqa: E731
     next_c = prev_c = None
     if rows:
         if (more and not backwards) or (backwards and cursor):
@@ -244,10 +244,10 @@ async def log_event(run_id: str, kind: str, payload: dict) -> int:
 async def events(run_id: str, after_seq: int = 0) -> list[dict]:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT seq, kind, payload, feedback, created_at FROM run_events WHERE run_id=%s AND seq>%s ORDER BY seq",
+            "SELECT seq, kind, payload, created_at FROM run_events WHERE run_id=%s AND seq>%s ORDER BY seq",
             (run_id, after_seq))
         rows = await cur.fetchall()
-    return [{"seq": s, "kind": k, "payload": p, "feedback": f, "at": t.isoformat()} for s, k, p, f, t in rows]
+    return [{"seq": s, "kind": k, "payload": p, "at": t.isoformat()} for s, k, p, t in rows]
 
 
 async def events_of(run_ids: list[str]) -> dict[str, list[dict]]:
@@ -255,19 +255,19 @@ async def events_of(run_ids: list[str]) -> dict[str, list[dict]]:
         return {}
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id, seq, kind, payload, feedback, created_at FROM run_events WHERE run_id = ANY(%s)"
+            "SELECT run_id, seq, kind, payload, created_at FROM run_events WHERE run_id = ANY(%s)"
             " ORDER BY run_id, seq", (run_ids,))
         rows = await cur.fetchall()
     out: dict[str, list[dict]] = {}
-    for rid, s, k, p, f, t in rows:
-        out.setdefault(rid, []).append({"seq": s, "kind": k, "payload": p, "feedback": f, "at": t.isoformat()})
+    for rid, s, k, p, t in rows:
+        out.setdefault(rid, []).append({"seq": s, "kind": k, "payload": p, "at": t.isoformat()})
     return out
 
 
-async def set_step_feedback(run_id: str, seq: int, score: int) -> bool:
+async def has_event(run_id: str, seq: int) -> bool:
     async with db.pool().connection() as conn:
-        cur = await conn.execute("UPDATE run_events SET feedback=%s WHERE run_id=%s AND seq=%s", (score or None, run_id, seq))
-        return bool(cur.rowcount)
+        cur = await conn.execute("SELECT 1 FROM run_events WHERE run_id=%s AND seq=%s", (run_id, seq))
+        return await cur.fetchone() is not None
 
 
 async def stage_payload(run_id: str, stage: str) -> dict | None:

@@ -27,6 +27,6 @@ async def load_mcp_tools(servers: dict[str, dict]) -> list:
         tools = await client.get_tools()
         log.info("MCP 加载 %d 个工具（%d 个 server）", len(tools), len(servers))
         return tools
-    except Exception:
+    except Exception:  # noqa: BLE001 —— MCP 不可用不阻断主流程
         log.exception("MCP 工具加载失败")
         return []

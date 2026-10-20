@@ -5,18 +5,19 @@
  */
 import { useMemo, useState } from "react";
 import {
-  LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuMessageSquare, LuPencilLine,
-  LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuThumbsDown, LuThumbsUp, LuWrench, LuZap, LuFlag,
+  LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuMessageSquare, LuMessageSquareWarning, LuPencilLine,
+  LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuWrench, LuZap, LuFlag,
 } from "react-icons/lu";
 
-import { api, useRun, useRunEvents } from "@/api/hooks";
+import { api, useMeta, useRun, useRunEvents } from "@/api/hooks";
 import type { Run, RunEvent } from "@/api/types";
+import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TriggerBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
 import { Field, Textarea } from "@/components/ui/form";
-import { Dialog, Tooltip, confirm, toast } from "@/components/ui/overlay";
+import { Dialog, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, ErrorState, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
@@ -26,8 +27,11 @@ import { GraphView } from "./graph-view";
 
 const LIVE = new Set(["queued", "running", "awaiting_approval"]);
 
-/** 👍 = 1，👎 = -1，没评 = 0 */
-type Score = -1 | 0 | 1;
+/** 当前用户对整次（step=0）或某一步的评价 */
+function useMine(run: Run) {
+  const { data: meta } = useMeta();
+  return (step: number) => run.feedback.find((f) => f.step_seq === step && f.created_by === meta?.me.name) ?? null;
+}
 
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -61,14 +65,14 @@ export function RunDetailPage() {
 
 function Header({ run }: { run: Run }) {
   const live = LIVE.has(run.status);
-  const [fb, setFb] = useState<Score>((run.feedback?.score ?? 0) as Score);
-  const feedback = async (score: 1 | -1) => {
-    const next = fb === score ? 0 : score;
-    setFb(next);
-    if (next) {
-      await api.runFeedback(run.run_id, next);
-      toast(next > 0 ? "已标记为有用" : "已标记为没帮助", { description: next < 0 ? "它沉淀的知识与案例会被降权" : "它沉淀的知识与案例会被加权" });
-    }
+  const mine = useMine(run)(0);
+  /** 👎 面板里勾了"按意见重答"：直接提交纠正，跳到新一轮 */
+  const correctWith = async (text: string) => {
+    try {
+      const r = await api.correct(run.run_id, text);
+      invalidate("runs");
+      navigate(`/runs/${r.run_id}`);
+    } catch (e) { toast.error("纠正失败", (e as Error).message); }
   };
   const cancel = async () => {
     if (!(await confirm({ title: "取消这次运行？", description: "终止执行并落 cancelled 终态；挂起的审批一并拒绝。", danger: true, confirmText: "取消运行" }))) return;
@@ -104,11 +108,10 @@ function Header({ run }: { run: Run }) {
         <span className="flex items-center font-mono">{run.run_id}<CopyButton text={run.run_id} /></span>
       </>}
       actions={<>
-        {!live && <div className="flex items-center rounded-md border border-line bg-panel">
-          <Tooltip content="有用"><button type="button" onClick={() => feedback(1)} className={cn("flex size-8 items-center justify-center rounded-l-md hover:bg-hover", fb > 0 ? "text-ok" : "text-fg-3")}><LuThumbsUp className="size-4" /></button></Tooltip>
-          <span className="h-4 w-px bg-line" />
-          <Tooltip content="没帮助"><button type="button" onClick={() => feedback(-1)} className={cn("flex size-8 items-center justify-center rounded-r-md hover:bg-hover", fb < 0 ? "text-bad" : "text-fg-3")}><LuThumbsDown className="size-4" /></button></Tooltip>
-        </div>}
+        {!live && (
+          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctWith}
+            onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
+        )}
         {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
         {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} onClick={cancel}>取消</Button>
@@ -239,7 +242,9 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
         actions={<Button size="xs" variant="ghost" onClick={() => setExpandAll((v) => !v)}>{expandAll ? "全部收起" : "全部展开"}</Button>} />
       {!events ? <div className="p-4"><Skeleton className="h-40" /></div> : (
         <ol className="relative px-4 py-3">
-          {steps.map((s, i) => <StepRow key={s.key} step={s} runId={run.run_id} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} />)}
+          {steps.map((s, i) => (
+            <StepRow key={s.key} step={s} run={run} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} />
+          ))}
           {live && (
             <li className="flex items-center gap-3 py-2 pl-[3px]">
               <span className="relative flex size-[18px] items-center justify-center"><span className="absolute size-2.5 animate-ping rounded-full bg-info/50" /><span className="size-2 rounded-full bg-info" /></span>
@@ -262,17 +267,14 @@ const STEP_ICON: Record<Step["kind"], { icon: React.ReactNode; cls: string }> = 
   artifact: { icon: <LuZap />, cls: "bg-accent-soft text-accent" },
 };
 
-function StepRow({ step, runId, offset, last, expandAll }: { step: Step; runId: string; offset: number; last: boolean; expandAll: boolean }) {
+function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean }) {
   const [open, setOpen] = useState<boolean | null>(null);
   const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval");
-  const [fb, setFb] = useState<Score>((step.ev.feedback ?? 0) as Score);
+  const mine = useMine(run)(step.seq);
+  const others = run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0);
+  const rateable = step.kind === "tool" || step.kind === "thought" || step.kind === "final";
   const p = step.ev.payload;
   const meta = STEP_ICON[step.kind];
-  const sendFb = async (score: 1 | -1) => {
-    const next = fb === score ? 0 : score;
-    setFb(next);
-    await api.stepFeedback(runId, step.seq, next);
-  };
   const title = step.kind === "tool"
     ? <span className="flex items-center gap-2"><code className="font-mono text-[12.5px] font-medium text-fg">{step.call?.payload.tool ?? step.result?.payload.tool}</code><span className="truncate text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
     : step.kind === "thought" ? "思考" : step.kind === "final" ? "结论" : step.kind === "error" ? "出错" : step.kind === "approval" ? (p.title ?? "审批") : (p.title ?? p.stage);
@@ -289,13 +291,16 @@ function StepRow({ step, runId, offset, last, expandAll }: { step: Step; runId: 
           {step.kind === "stage" && p.content && <span className="truncate text-[12px] text-fg-3">{String(p.content)}</span>}
           {right && <span className="shrink-0 text-[11.5px] tabular-nums text-fg-3">{right}</span>}
           <span className="w-14 shrink-0 text-right font-mono text-[11px] text-fg-3" title={clock(step.at)}>+{duration(Math.max(0, offset))}</span>
-          {(step.kind === "tool" || step.kind === "thought" || step.kind === "final") && (
-            <span className={cn("flex shrink-0 items-center gap-0.5", !fb && "opacity-0 group-hover:opacity-100")} onClick={(e) => e.stopPropagation()}>
-              <button type="button" onClick={() => sendFb(1)} className={cn("rounded p-1 hover:bg-hover", fb > 0 ? "text-ok" : "text-fg-3")}><LuThumbsUp className="size-3" /></button>
-              <button type="button" onClick={() => sendFb(-1)} className={cn("rounded p-1 hover:bg-hover", fb < 0 ? "text-bad" : "text-fg-3")}><LuThumbsDown className="size-3" /></button>
-            </span>
+          {rateable && (
+            <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} step={step.seq} mine={mine} size="sm"
+              onSaved={() => invalidate("runs")} className={cn("shrink-0", !mine && "opacity-0 group-hover:opacity-100 focus-within:opacity-100")} />
           )}
         </div>
+        {others.length > 0 && (
+          <div className="ml-6 mt-1 space-y-2 rounded-md border border-bad/20 bg-bad-soft/40 px-2.5 py-2">
+            {others.map((f) => <FeedbackItem key={f.id} entry={f} showStep={false} />)}
+          </div>
+        )}
         {expanded && collapsible && (
           <div className="mt-1.5 space-y-2 pl-6">
             {step.kind === "thought" && <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-fg-2">{String(p.content)}</div>}
@@ -371,6 +376,14 @@ function Sidebar({ run }: { run: Run }) {
           ]} />
         </div>
       </Card>
+      {run.feedback.length > 0 && (
+        <Card>
+          <CardHeader title="反馈" icon={<LuMessageSquareWarning />} description="整次运行与各步收到的评价；👎 同时推送到通知规则里的渠道" />
+          <ul className="divide-y divide-line">
+            {run.feedback.map((f) => <li key={f.id} className="px-4 py-2.5"><FeedbackItem entry={f} /></li>)}
+          </ul>
+        </Card>
+      )}
       {c.session_runs.length > 0 && (
         <Card>
           <CardHeader title="同会话的其他运行" description="故障周期 / 对话链" />

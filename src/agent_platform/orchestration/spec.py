@@ -48,5 +48,5 @@ class RunSpec(BaseModel):
         return self.model_dump(mode="json")
 
     @classmethod
-    def from_dict(cls, raw: dict) -> RunSpec:
+    def from_dict(cls, raw: dict) -> "RunSpec":
         return cls.model_validate(raw)

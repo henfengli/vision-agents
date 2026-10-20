@@ -23,8 +23,7 @@ prod 里 call = workflow.execute_activity，测试里 call = 直接 await。
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..domain.graph import GATE_RE, NodeDef, topo_layers
 

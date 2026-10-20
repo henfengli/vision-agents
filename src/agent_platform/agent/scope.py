@@ -8,10 +8,10 @@ agent 实例按角色缓存、跨运行复用，构建时拿不到运行信息�
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Iterator
 
 from ..domain import ServiceView
 

@@ -184,8 +184,14 @@ def main() -> None:
             conn.execute("""INSERT INTO artifacts (run_id, task, name, env, content, input_hash, status, created_at)
                             SELECT run_id, task_type, name, COALESCE(NULLIF(target_env, ''), %s), content, input_hash,
                                    status, created_at FROM _v5_artifacts""", (args.profile,))
-            conn.execute("""INSERT INTO feedback (run_id, session_id, kind, score, step_seq, comment, created_at)
-                            SELECT run_id, session_id, kind, score, step_seq, comment, created_at FROM _v5_feedback""")
+            # 反馈：v5 每点一下一行、没有操作人；v6 一人一步一条。每步只留最后一次评价，记在 v5 名下。
+            # v5 的纠正留痕（kind=correction）不搬：v6 的纠正本身就是一次运行。
+            conn.execute("""INSERT INTO feedback (run_id, step_seq, score, comment, created_by, created_at, updated_at)
+                            SELECT DISTINCT ON (run_id, COALESCE(step_seq, 0))
+                                   run_id, COALESCE(step_seq, 0), score, COALESCE(comment, ''), 'v5', created_at, created_at
+                            FROM _v5_feedback
+                            WHERE kind IN ('rating', 'step') AND score IN (1, -1) AND run_id IN (SELECT run_id FROM runs)
+                            ORDER BY run_id, COALESCE(step_seq, 0), created_at DESC""")
             conn.execute("""INSERT INTO approvals (kind, run_id, title, detail, status, decided_by, created_at, decided_at)
                             SELECT 'command', run_id, '危险命令（v5）', command,
                                    CASE status WHEN 'pending' THEN 'expired' ELSE status END, decided_by, created_at,

@@ -1,4 +1,5 @@
-"""请求体。响应形状见 views.py；前端类型 web/src/api/types.ts 与两者一一对应。"""
+"""请求体。响应形状见 views.py；前端类型 web/src/api/types.ts 与两者一一对应。
+反馈的请求体就是领域模型 domain.Feedback（校验问题类型），不在这里重复定义。"""
 
 from __future__ import annotations
 
@@ -46,15 +47,6 @@ class SubtaskBody(BaseModel):
     input: dict[str, Any] | None = None
     envs: list[str] | None = None
     enabled: bool | None = None
-
-
-class FeedbackBody(BaseModel):
-    score: Literal[1, -1]
-    comment: str = ""
-
-
-class StepFeedbackBody(BaseModel):
-    score: Literal[1, -1, 0] = Field(description="0 = 撤销")
 
 
 class CorrectBody(BaseModel):

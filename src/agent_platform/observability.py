@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Iterator
 
 from .config import LangfuseConfig
 
@@ -27,9 +26,7 @@ def setup(cfg: LangfuseConfig) -> None:
     try:
         from openinference.instrumentation.langchain import LangChainInstrumentor
         from opentelemetry import trace
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter,
-        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor

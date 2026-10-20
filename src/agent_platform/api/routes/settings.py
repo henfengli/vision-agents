@@ -90,7 +90,7 @@ async def test_channel(body: ChannelTest, rt: Runtime = RT, who: Caller = ADMIN)
                                                      text=f"{who.name} 在设置页发送的测试消息，收到即渠道可用。"))
     except Rejected:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 —— 把渠道侧的错误原样告诉操作人
         raise Rejected("channel_failed", f"发送失败：{type(e).__name__}: {str(e)[:300]}", 502) from e
     return {"ok": True}
 

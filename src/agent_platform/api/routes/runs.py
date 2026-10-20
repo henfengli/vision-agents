@@ -7,8 +7,8 @@
     GET  /v1/runs/{id}/stream?after=      事件推流（SSE），运行结束即关闭
     POST /v1/runs/{id}/cancel | rerun | resume
     POST /v1/runs/{id}/correct            纠正：同会话开新一轮 {text}
-    POST /v1/runs/{id}/feedback           评价 {score: 1|-1, comment}
-    POST /v1/runs/{id}/events/{seq}/feedback   单步评价 {score: 1|-1|0}
+
+反馈（评价）的端点在 feedback.py。
 """
 
 from __future__ import annotations
@@ -17,11 +17,10 @@ from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 
 from ...domain import Rejected, RunRequest, RunTrigger
-from ...store import feedback as feedback_store
 from ...store import runs
 from .. import views
 from ..deps import RT, WHO, Caller, Runtime
-from ..schemas import CorrectBody, FeedbackBody, RunBody, StepFeedbackBody
+from ..schemas import CorrectBody, RunBody
 from ..streaming import sse, tail
 
 router = APIRouter(prefix="/v1/runs")
@@ -109,22 +108,6 @@ async def resume(run_id: str, rt: Runtime = RT, who: Caller = WHO):
 
 @router.post("/{run_id}/correct", status_code=202)
 async def correct(run_id: str, body: CorrectBody, rt: Runtime = RT, who: Caller = WHO):
-    await feedback_store.add_correction((await _run(run_id))["session_id"], body.text, who.name)
+    """纠正本身就是一次运行（trigger=correction，输入里带纠正原文），不另外留档。"""
+    await _run(run_id)
     return (await rt.submitter.correct(run_id, body.text, who)).dump()
-
-
-@router.post("/{run_id}/feedback")
-async def feedback(run_id: str, body: FeedbackBody, _: Caller = WHO):
-    run = await _run(run_id)
-    await feedback_store.add(run_id, body.score, body.comment)
-    await feedback_store.propagate_to_memory(run["env"], run_id, body.score)
-    return {"ok": True}
-
-
-@router.post("/{run_id}/events/{seq}/feedback")
-async def step_feedback(run_id: str, seq: int, body: StepFeedbackBody, _: Caller = WHO):
-    if not await runs.set_step_feedback(run_id, seq, body.score):
-        raise Rejected.not_found(f"运行 {run_id} 的第 {seq} 步")
-    if body.score:
-        await feedback_store.add_step(run_id, seq, body.score)
-    return {"ok": True}

@@ -3,7 +3,7 @@
  * 让预览里的列表、统计、时间线看起来像一个跑了几天的真实平台。
  */
 import type {
-  ApiKey, Approval, Asset, Case, ChatTurn, Env, Instance, Knowledge, Policy, Role, Run, RunEvent,
+  ApiKey, Approval, Asset, Case, ChatTurn, Env, FeedbackReason, Instance, Knowledge, Policy, Role, Run, RunEvent,
   RunStatus, Service, SessionDetail, Settings, Task, Trigger,
 } from "../types";
 
@@ -173,7 +173,47 @@ export const tasks: Task[] = [
     service: "*", role: "data_searcher", form: "agent",
     input: { question: { type: "text", required: true, description: "问题" } },
     envs: [], triggers: [trig.chat(), trig.api()], deliver: null, timeout_s: 180,
+    profile: { conventions: "金额单位统一为元；日期按支付日；口径冲突时以指标字典为准" },
     version: 5, ...by("wangzh", 4 * DAY),
+  },
+  // 数据口径问答的对象 = 一个指标：每个指标挂自己的口径档案
+  {
+    ...taskBase, name: "data-qa:gmv", title: "GMV", description: "", service: "*", role: "data_searcher", form: "agent",
+    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa",
+    profile: { conventions: "GMV = 已支付订单金额（含运费），不扣退款；退款单独看 refund_amount", code_refs: "ads_gmv_daily.gmv / dwd_trade_order.pay_amount" },
+    version: 4, ...by("wangzh", 3 * DAY),
+  },
+  {
+    ...taskBase, name: "data-qa:retention_7d", title: "7 日留存", description: "", service: "*", role: "data_searcher", form: "agent",
+    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa",
+    profile: { conventions: "分母 = 当日新增用户（首次 app_open）；分子 = 第 7 天仍有 app_open；内部账号剔除" },
+    version: 2, ...by("zhaoq", 6 * DAY),
+  },
+  {
+    ...taskBase, name: "data-qa:refund_rate", title: "退款率", description: "", service: "*", role: "data_searcher", form: "agent",
+    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa", auto_created: true,
+    version: 1, ...by("auto:chat", 20 * HOUR),
+  },
+  {
+    ...taskBase, name: "pipeline-debug", title: "数据链路排查", description: "对话里排查某张表、某条链路为什么没数据或数据不对",
+    service: "dagster", role: "ops_analyst", form: "agent",
+    input: { question: { type: "text", required: true, description: "问题" }, date: { type: "str", description: "业务日期，默认昨天" } },
+    envs: ["prod", "test"], triggers: [trig.chat(), trig.api()], timeout_s: 600,
+    profile: { pitfalls: "先看上游分区是否到齐，再看本资产的物化日志" },
+    version: 3, ...by("lihf", 5 * DAY),
+  },
+  {
+    ...taskBase, name: "pipeline-debug:dwd_trade_order", title: "订单明细表", description: "", service: "dagster", role: "ops_analyst", form: "agent",
+    input: {}, envs: [], triggers: [], timeout_s: 600, extends: "pipeline-debug",
+    profile: { upstream: "ods_order、ods_payment（03:00 前到齐）", code_refs: "/srv/dagster/assets/dwd/trade_order.py" },
+    version: 2, ...by("lihf", 4 * DAY),
+  },
+  {
+    ...taskBase, name: "board-ops", title: "看板运维问答", description: "看板接口慢、页面报错、缓存、发布相关的问题",
+    service: "board", role: "ops_analyst", form: "agent",
+    input: { question: { type: "text", required: true, description: "问题" } },
+    envs: [], triggers: [trig.chat()], timeout_s: 300,
+    version: 1, ...by("chenyu", 9 * DAY),
   },
   {
     ...taskBase, name: "frontend-smoke", title: "看板冒烟测试", description: "GitLab 部署成功后跑冒烟脚本",
@@ -255,7 +295,8 @@ export interface MockRun extends Run {
 
 function makeRun(): MockRun {
   const t = rand();
-  const taskName = t < 0.34 ? "data-qa" : t < 0.58 ? "failure-analysis" : t < 0.72 ? "daily-inspection" : t < 0.82 ? "frontend-smoke" : t < 0.9 ? "config-audit" : t < 0.95 ? "memory-gardener" : "failure-analysis:dwd_trade_order";
+  const picked = t < 0.34 ? "data-qa" : t < 0.58 ? "failure-analysis" : t < 0.72 ? "daily-inspection" : t < 0.82 ? "frontend-smoke" : t < 0.9 ? "config-audit" : t < 0.95 ? "memory-gardener" : "failure-analysis:dwd_trade_order";
+  const taskName = picked === "data-qa" && rand() < 0.3 ? pick(["data-qa:gmv", "data-qa:retention_7d"]) : picked;
   const task = tasks.find((x) => x.name === taskName)!;
   const base = task.extends ? tasks.find((x) => x.name === task.extends)! : task;
   const ago = Math.floor(Math.pow(rand(), 1.6) * 72 * HOUR) + between(1, 20) * MIN;
@@ -289,7 +330,7 @@ function makeRun(): MockRun {
     task_version: base.version - (rand() < 0.2 ? 1 : 0), role_version: base.role ? roles.find((r) => r.name === base.role)!.version : null,
     input, output: null, error_code: null, pending_approval: null,
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [], graph: null },
-    feedback: rand() < 0.12 ? { score: rand() < 0.75 ? 1 : -1, comment: "", at: created } : null,
+    feedback: [],
     memory: {},
     _events: undefined,
   };
@@ -298,10 +339,32 @@ function makeRun(): MockRun {
 export const runs: MockRun[] = Array.from({ length: 260 }, () => makeRun())
   .sort((a, b) => b.created_at.localeCompare(a.created_at));
 
+// 反馈：约 15% 的已结束运行有人评价；负反馈带问题类型与说明，少数针对某一步
+const NEGATIVE: { reasons: FeedbackReason[]; comment: string; step?: number }[] = [
+  { reasons: ["wrong_definition"], comment: "GMV 不扣退款，退款单独看 refund_amount；这里把退款减掉了。" },
+  { reasons: ["wrong_data"], comment: "应该按支付日 pay_date 统计，不是下单日。" },
+  { reasons: ["incomplete"], comment: "只给了华东，没给分省明细。" },
+  { reasons: ["wrong_conclusion", "detour"], comment: "根因是上游 ods_payment 延迟，不是代码问题；查了半天无关的日志。" },
+  { reasons: ["wrong_tool"], comment: "这里应该查 test 的只读库，不该用 bash 去 grep 日志。", step: 4 },
+  { reasons: ["off_topic"], comment: "" },
+  { reasons: ["unsafe"], comment: "不要在 prod 上直接重启 webserver，先在 test 复现。", step: 3 },
+];
+const PEOPLE = ["wangzh", "zhaoq", "lihf", "chenyu"];
+for (const r of runs) {
+  if (r.status === "running" || r.status === "queued" || r.resolution !== "agent" || rand() > 0.15) continue;
+  const by = pick(PEOPLE);
+  const negative = rand() < 0.45;
+  const at = new Date(new Date(r.created_at).getTime() + between(5, 300) * 60_000).toISOString();
+  const base = { id: r.feedback.length + Math.floor(rand() * 1e6), run_id: r.run_id, created_by: by, created_at: at, updated_at: at };
+  if (!negative) { r.feedback.push({ ...base, step_seq: 0, score: 1, reasons: [], comment: rand() < 0.3 ? "结论准确，省了半小时。" : "" }); continue; }
+  const n = pick(NEGATIVE);
+  r.feedback.push({ ...base, step_seq: n.step ?? 0, score: -1, reasons: n.reasons, comment: n.comment });
+}
+
 // 会话：data-qa 的对话 run 串成会话；其余 run 自会话
 const sessionPool = Array.from({ length: 9 }, () => hex(12));
 for (const r of runs) {
-  if (r.task === "data-qa" && r.trigger.type === "chat") r.session_id = pick(sessionPool);
+  if (r.task.startsWith("data-qa") && r.trigger.type === "chat") r.session_id = (r.task === "data-qa" ? "" : r.task.split(":")[1] + "-") + pick(sessionPool);
   else if (r.task.startsWith("failure-analysis") && r.input.asset_key) r.session_id = `dagster:${r.input.asset_key}:infra:${r.created_at.slice(0, 10)}`;
   else r.session_id = r.run_id;
 }
@@ -327,7 +390,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
   const out: RunEvent[] = [];
   const push = (kind: RunEvent["kind"], payload: RunEvent["payload"], dt = 400) => {
     t += Math.round(dt * (0.5 + r()));
-    out.push({ seq: ++seq, kind, at: new Date(t).toISOString(), payload, feedback: null });
+    out.push({ seq: ++seq, kind, at: new Date(t).toISOString(), payload });
   };
   push("stage", { stage: "prepare", title: "准备", content: `任务 v${run.task_version} · 角色 ${run.role ?? "—"} v${run.role_version ?? "—"}` }, 200);
   if (run.resolution === "rule") {
@@ -527,14 +590,14 @@ export const assetList: Asset[] = [
 
 export function sessionsList(): SessionDetail[] {
   const map = new Map<string, MockRun[]>();
-  for (const r of runs) if (r.task === "data-qa" && r.trigger.type === "chat") map.set(r.session_id, [...(map.get(r.session_id) ?? []), r]);
+  for (const r of runs) if (r.task.startsWith("data-qa") && r.trigger.type === "chat") map.set(r.session_id, [...(map.get(r.session_id) ?? []), r]);
   return [...map.entries()].map(([sid, rs]) => {
     const asc = [...rs].sort((a, b) => a.created_at.localeCompare(b.created_at));
     const turns: ChatTurn[] = asc.map((r) => {
       const d = detailOf(r);
-      return { run_id: r.run_id, question: String(r.input.question), answer: d.output?.answer ?? null, status: r.status, events: eventsOf(r), feedback: r.feedback?.score ?? null, created_at: r.created_at };
+      return { run_id: r.run_id, question: String(r.input.question), answer: d.output?.answer ?? null, status: r.status, events: eventsOf(r), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "lihf") ?? null, created_at: r.created_at };
     });
-    return { session_id: sid, title: String(asc[0].input.question).slice(0, 28), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: "data-qa", runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
+    return { session_id: sid, title: String(asc[0].input.question).slice(0, 28), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[0].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
   }).sort((a, b) => b.last_at.localeCompare(a.last_at));
 }
 
@@ -560,6 +623,7 @@ export const settings = {
       { name: "自动运行失败", enabled: true, events: ["run_failed"], services: [], envs: [], tasks: [], triggers: ["schedule", "event"], channel: "default" },
       { name: "看板问答失败", enabled: true, events: ["run_failed"], services: ["board"], envs: ["prod"], tasks: ["data-qa"], triggers: [], channel: "data-team" },
       { name: "进程停止", enabled: false, events: ["process_stopped"], services: [], envs: ["prod"], tasks: [], triggers: [], channel: "ops-webhook" },
+      { name: "问答负反馈", enabled: true, events: ["feedback_negative"], services: [], envs: [], tasks: ["data-qa"], triggers: [], channel: "data-team" },
     ],
   }, 5, "wangzh", 2 * DAY),
   memory: entry("memory", { recall: true, save: true, handoff_summary: true, knowledge_limit: 5, asset_limit: 8 }, 1, "seed", 20 * DAY),

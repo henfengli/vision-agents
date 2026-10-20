@@ -22,6 +22,7 @@ notifications:
     - {name: 审批提醒, events: [approval_requested], channel: default}
     - {name: 自动运行失败, events: [run_failed], triggers: [schedule, event], channel: default}
     - {name: 进程停止, events: [process_stopped], envs: [prod], channel: default}
+    - {name: 负反馈, events: [feedback_negative], channel: default}
 
 memory:
   recall: true

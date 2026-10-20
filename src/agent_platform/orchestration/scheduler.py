@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from ..domain import TaskDef
 from ..domain.cron import next_fire
@@ -65,14 +65,8 @@ class Scheduler:
         return out
 
     async def sync(self) -> int:
-        from temporalio.client import (
-            Schedule,
-            ScheduleActionStartWorkflow,
-            ScheduleOverlapPolicy,
-            SchedulePolicy,
-            ScheduleSpec,
-            ScheduleUpdate,
-        )
+        from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleOverlapPolicy, SchedulePolicy,
+                                       ScheduleSpec, ScheduleUpdate)
         from temporalio.common import WorkflowIDReusePolicy
 
         from .workflows import ScheduleWorkflow
@@ -85,7 +79,7 @@ class Scheduler:
         for sid in existing - set(wanted):
             try:
                 await self._client.get_schedule_handle(sid).delete()
-            except Exception:
+            except Exception:  # noqa: BLE001 —— 单个失败不阻塞其余，下一轮对账再删
                 log.exception("删除定时 %s 失败", sid)
         for sid, f in wanted.items():
             schedule = Schedule(
@@ -99,13 +93,13 @@ class Scheduler:
                     await self._client.get_schedule_handle(sid).update(lambda _, s=schedule: ScheduleUpdate(schedule=s))
                 else:
                     await self._client.create_schedule(sid, schedule)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 log.exception("同步定时 %s 失败", sid)
         return len(wanted)
 
     async def upcoming(self, limit: int | None = None) -> list[dict]:
         """接下来的触发（本地按 cron 算，不问 Temporal）：[{task, trigger_id, service, env, at}]，按时间排序。"""
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         out = []
         for f in await self.wanted():
             at = next_fire(f.cron, f.timezone, now)

@@ -4,7 +4,7 @@
  */
 import { del, get, patch, post, put } from "./client";
 import type {
-  ApiKey, Approval, ApprovalFilters, Asset, Case, ConfigSection, ConfigSections, Instance, Knowledge,
+  ApiKey, Approval, ApprovalFilters, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, Case, ConfigSection, ConfigSections, Instance, Knowledge,
   KnowledgeRevision, MemoryFilters, MemoryHealth, Meta, Page, Policy, ResolvedRole, Role, Run, RunAccepted, RunEvent,
   RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary, ServiceView, SessionDetail, SessionSummary, Settings,
   Stats, SubtaskCreate, TaskSummary, UpcomingFire, Version,
@@ -61,8 +61,13 @@ export const api = {
   rerun: (id: string) => post<RunAccepted>(`/v1/runs/${enc(id)}/rerun`),
   resume: (id: string) => post<RunAccepted>(`/v1/runs/${enc(id)}/resume`),
   correct: (id: string, text: string) => post<RunAccepted>(`/v1/runs/${enc(id)}/correct`, { text }),
-  runFeedback: (id: string, score: 1 | -1, comment = "") => post(`/v1/runs/${enc(id)}/feedback`, { score, comment }),
-  stepFeedback: (id: string, seq: number, score: 1 | -1 | 0) => post(`/v1/runs/${enc(id)}/events/${seq}/feedback`, { score }),
+
+  // —— 反馈：step 为 0 表示整次运行；同一人再提交即覆盖 ——
+  rate: (id: string, step: number, body: FeedbackInput) =>
+    put<FeedbackEntry>(step ? `/v1/runs/${enc(id)}/events/${step}/feedback` : `/v1/runs/${enc(id)}/feedback`, body),
+  unrate: (id: string, step: number) =>
+    del(step ? `/v1/runs/${enc(id)}/events/${step}/feedback` : `/v1/runs/${enc(id)}/feedback`),
+  feedbackInbox: (f: FeedbackFilters) => get<FeedbackInboxItem[]>("/v1/feedback", { ...f }),
 
   // —— 对话 ——
   sessions: (f: { service?: string; env?: string; task?: string; q?: string } = {}) => get<SessionSummary[]>("/v1/sessions", f),
@@ -127,6 +132,7 @@ export const useApprovals = (f: ApprovalFilters = {}) => useQuery(["approvals", 
 export const useKnowledge = (f: MemoryFilters) => useQuery(["memory", "knowledge", f], () => api.knowledge(f));
 export const useAssets = (f: MemoryFilters & { kind?: string }) => useQuery(["memory", "assets", f], () => api.assets(f));
 export const useCases = (f: { service?: string; env?: string }) => useQuery(["memory", "cases", f], () => api.cases(f));
+export const useFeedbackInbox = (f: FeedbackFilters) => useQuery(["feedback", f], () => api.feedbackInbox(f));
 export const useSettings = () => useQuery(["settings"], api.settings);
 export const useApiKeys = () => useQuery(["settings", "api-keys"], api.apiKeys);
 export const useStats = (q: { hours?: number; env?: string; service?: string }) => useQuery(["stats", q], () => api.stats(q), { refetchInterval: 30_000 });

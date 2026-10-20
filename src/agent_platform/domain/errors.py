@@ -23,9 +23,9 @@ class Rejected(ValueError):
         self.detail = detail
 
     @classmethod
-    def not_found(cls, what: str) -> Rejected:
+    def not_found(cls, what: str) -> "Rejected":
         return cls("not_found", f"{what} 不存在", 404)
 
     @classmethod
-    def conflict(cls, message: str) -> Rejected:
+    def conflict(cls, message: str) -> "Rejected":
         return cls("conflict", message, 409)

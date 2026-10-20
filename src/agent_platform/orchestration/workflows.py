@@ -17,12 +17,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import (
-    ActivityError,
-    ApplicationError,
-    CancelledError,
-    TimeoutError,
-)
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, TimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from . import activities as act
