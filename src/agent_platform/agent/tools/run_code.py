@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from . import sandbox
 from .bash import build_safe_env
@@ -110,7 +111,7 @@ async def execute_code(
         await asyncio.wait_for(
             asyncio.gather(_serve(), _drain_stderr(), proc.wait()),
             timeout=timeout)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         return f"[执行超时（{timeout:.0f}s），进程已终止]\n" + "\n".join(output)

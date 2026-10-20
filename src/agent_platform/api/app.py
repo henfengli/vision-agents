@@ -18,7 +18,17 @@ from ..config import Settings
 from ..domain import Rejected
 from ..runtime import assemble
 from ..webui import mount_console
-from .routes import approvals, chat, definitions, memory, meta, runs, services, settings, tasks
+from .routes import (
+    approvals,
+    chat,
+    definitions,
+    memory,
+    meta,
+    runs,
+    services,
+    settings,
+    tasks,
+)
 
 log = logging.getLogger(__name__)
 

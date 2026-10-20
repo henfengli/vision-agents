@@ -28,7 +28,13 @@ from ...store import assets as assets_store
 from ...store import cases as cases_store
 from ...store import knowledge as knowledge_store
 from ..deps import ADMIN, RT, WHO, Caller, Runtime
-from ..schemas import AssetCreate, AssetPatch, KnowledgeCreate, KnowledgePatch, KnowledgeSearch
+from ..schemas import (
+    AssetCreate,
+    AssetPatch,
+    KnowledgeCreate,
+    KnowledgePatch,
+    KnowledgeSearch,
+)
 
 router = APIRouter(prefix="/v1")
 

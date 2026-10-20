@@ -39,7 +39,7 @@ async def _exec(*argv: str, timeout: float = 20.0) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         proc.kill()
         return 124, f"{argv[0]} 超时"
     return proc.returncode or 0, out.decode(errors="replace").strip()
@@ -210,7 +210,7 @@ class ProcessController:
         for row in await instances_store.expired_leases():
             try:
                 stopped.append(await self.stop(row["service"], row["env"], row["process"], by="lease"))
-            except Exception:  # noqa: BLE001 —— 单个失败不影响其余，下一轮再试
+            except Exception:
                 log.exception("租约到期停止 %s/%s/%s 失败", row["service"], row["env"], row["process"])
         return stopped
 
@@ -258,7 +258,7 @@ class ProcessController:
             try:
                 os.killpg(proc.pid, 15)
                 return await asyncio.wait_for(proc.wait(), 15)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 os.killpg(proc.pid, 9)
                 return await proc.wait()
             except ProcessLookupError:

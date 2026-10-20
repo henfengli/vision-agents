@@ -17,4 +17,4 @@ RT = Depends(get_runtime)
 WHO = Depends(current_caller)        # 任何有效凭据
 ADMIN = Depends(admin_caller)        # admin 范围的密钥 / 控制台管理员
 
-__all__ = ["ADMIN", "Caller", "RT", "Runtime", "WHO"]
+__all__ = ["ADMIN", "RT", "WHO", "Caller", "Runtime"]

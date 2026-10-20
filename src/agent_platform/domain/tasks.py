@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -125,7 +125,7 @@ class EventTrigger(_TriggerBase):
         return {k: data.get(v) for k, v in self.map.items() if data.get(v) is not None}
 
 
-Trigger = Annotated[Union[ApiTrigger, ChatTrigger, ScheduleTrigger, EventTrigger], Field(discriminator="type")]
+Trigger = Annotated[ApiTrigger | ChatTrigger | ScheduleTrigger | EventTrigger, Field(discriminator="type")]
 
 
 # ———————— 投递 / 去重 / 记忆 ————————

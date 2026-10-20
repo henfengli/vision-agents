@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import httpx
 
@@ -102,7 +103,20 @@ class AgentClient:
     def cancel(self, run_id: str) -> dict:
         return self._call("POST", f"/v1/runs/{run_id}/cancel")
 
+    def rerun(self, run_id: str) -> dict:
+        """同样的输入新开一次运行，返回回执。"""
+        return self._call("POST", f"/v1/runs/{run_id}/rerun")
+
+    def resume(self, run_id: str) -> dict:
+        """失败的运行从断点续跑（同一个 run_id），返回回执。"""
+        return self._call("POST", f"/v1/runs/{run_id}/resume")
+
+    def correct(self, run_id: str, text: str) -> dict:
+        """纠正一次结论：同会话开新一轮重答，纠正内容沉淀为人工知识。返回新运行的回执。"""
+        return self._call("POST", f"/v1/runs/{run_id}/correct", json={"text": text})
+
     def feedback(self, run_id: str, score: int, comment: str = "") -> None:
+        """score：1 有用 / -1 没帮助。"""
         self._call("POST", f"/v1/runs/{run_id}/feedback", json={"score": score, "comment": comment})
 
     # —— 事件 ——

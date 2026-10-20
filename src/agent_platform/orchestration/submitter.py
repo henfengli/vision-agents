@@ -15,7 +15,16 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass
 
-from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef, question_text
+from ..domain import (
+    SYSTEM,
+    TERMINAL,
+    Caller,
+    Rejected,
+    RunRequest,
+    RunTrigger,
+    TaskDef,
+    question_text,
+)
 from ..domain.tasks import check_task_name
 from ..registry import Registry
 from ..store import approvals as approvals_store
@@ -42,7 +51,7 @@ class Accepted:
         return asdict(self)
 
     @classmethod
-    def of(cls, run: dict, dedup: bool = False) -> "Accepted":
+    def of(cls, run: dict, dedup: bool = False) -> Accepted:
         return cls(run["run_id"], run["session_id"], run["status"], run.get("output"), dedup=dedup)
 
 

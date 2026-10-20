@@ -170,7 +170,7 @@ async def list_filtered(*, status: str | None = None, env: str | None = None, se
     if backwards:
         rows.reverse()
     items = [_list_row(r) for r in rows]
-    key = lambda r: f"{r[15].isoformat()}|{r[0]}"  # noqa: E731
+    key = lambda r: f"{r[15].isoformat()}|{r[0]}"
     next_c = prev_c = None
     if rows:
         if (more and not backwards) or (backwards and cursor):

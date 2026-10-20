@@ -23,7 +23,7 @@ def current_commit(code_path: str) -> str | None:
     try:
         out = subprocess.run(
             ["git", "-C", code_path, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, check=False,
         )
         head = out.stdout.strip() if out.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
@@ -92,26 +92,28 @@ async def search(env: str, service: str, query: str, limit: int = 5,
     ]
 
 
+MANUAL_BONUS_POINTS = 3      # 人工录入 / 纠正的条目（source_run 为空）相当于多 3 个 👍
+
+
 async def _weight_by_feedback(candidates: list, limit: int,
                               fb_per_point: float = 0.01) -> list:
-    """反馈加权终排：RRF 名次分 1/(60+rank) + 反馈分 × 系数（±5 封顶）。
+    """反馈加权终排：RRF 名次分 1/(60+rank) + (反馈分 + 人工加成) × 系数，反馈分 ±5 封顶。
 
-    单通道（仅 trgm/仅向量）也走同一公式——反馈对所有召回路径生效，
-    不再只当 trgm 的次序尾巴。候选集在 limit 截断前加权，高反馈的后排
-    条目能挤进前 limit。
+    单通道（仅 trgm/仅向量）也走同一公式——反馈对所有召回路径生效。
+    候选集在 limit 截断前加权，高反馈、人工写的后排条目能挤进前 limit。
     """
     if not candidates:
         return []
     ids = [r[0] for r in candidates]
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, COALESCE(feedback_score,0) FROM knowledge"
-            " WHERE id = ANY(%s)", (ids,))
-        fb = dict(await cur.fetchall())
+            "SELECT id, COALESCE(feedback_score, 0), source_run IS NULL FROM knowledge WHERE id = ANY(%s)", (ids,))
+        points = {i: max(-5, min(5, fb)) + (MANUAL_BONUS_POINTS if manual else 0)
+                  for i, fb, manual in await cur.fetchall()}
+
     def score(rank_row):
         rank, row = rank_row
-        clipped = max(-5, min(5, fb.get(row[0], 0)))
-        return 1.0 / (60 + rank + 1) + fb_per_point * clipped
+        return 1.0 / (60 + rank + 1) + fb_per_point * points.get(row[0], 0)
     ordered = sorted(enumerate(candidates), key=score, reverse=True)
     return [row for _, row in ordered[:limit]]
 
@@ -130,7 +132,7 @@ def _rrf_merge(trgm_rows, vec_rows, limit, k: int = 60):
 
 
 async def _search_vector(env, service, vec: list[float], limit):
-    lit = "[%s]" % ",".join(f"{x:.6f}" for x in vec)
+    lit = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
     try:
         async with pool().connection() as conn:
             cur = await conn.execute(

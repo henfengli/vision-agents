@@ -1,204 +1,92 @@
 # agent-platform
 
-内网平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程。
-**单部署多目标环境**：一套服务操作 prod/test/dev 多套业务环境（请求级 `env`
-字段区分），主机 + systemd 部署（无容器）。
+内网的 agent 平台，和若干业务项目（Dagster、board、配置中心等）部署在同一台机器上。
 
-## 架构一览
+- **项目调 agent**：业务项目通过 HTTP API 或 SDK 请 agent 做事，例如问数据口径、分析报错、跑检查。
+- **任务自己跑**：由定时、Dagster 失败、GitLab 部署或网页上点一下触发，无人值守跑完，结果推到钉钉或回调。
+- **agent 能碰到项目本身**：读部署目录和代码、读对应环境的配置、查只读库、按环境启停进程来复现问题。
+
+部署形态：单部署、主机 + systemd、不用容器。一套服务操作所有项目的 prod / test / dev。
+
+## 文档
+
+| 文档 | 读者 | 内容 |
+|---|---|---|
+| [设计文档](docs/设计文档.md) | 协作开发者 | 对象模型、关系规则、运行生命周期、代码地图 |
+| [外部接口文档](docs/外部接口文档.md) | 调用方 | `/v1` 全部端点、参数、原因码 |
+| [SDK开发指南](docs/SDK开发指南.md) | 业务项目 | Python SDK 与 `agent-chat` |
+| [部署指南](docs/部署指南.md) | 运维 | 安装、密钥、反代、进程启停、升级、排障 |
+
+## 一张图
 
 ```
-触发层    Dagster sensor / GitLab webhook / chat(CLI+Web SSE) / Temporal Schedule / SDK
-接入层    FastAPI /v1 + webhook（统一 bearer）/ Viewer（cookie 登录）
-编排层    Temporal：任务三形态 = 单 agent / 资产化任务图 / 内建处理器；
-          提交闸门链（env_gate → DB 策略）在提交路径上统一收口
-agent 层  DeepAgents 装配（roles/engine）+ 人工审批（approvals）+ 工具层（tools）
-记忆层    recall（运行前召回）/ distill（运行后沉淀）/ assets（任务资产：
-          方法/脚本/查询/基线，save_asset 沉淀、prepare 自动召回）/ gardener（夜间维护口子）
-存储层    Postgres：runs(含定义版本谱系)/run_events/definitions(角色/任务/策略)/
-          knowledge/cases/feedback/approvals/artifacts(产物血缘)/
-          asset_history/knowledge_history(内容历史：覆盖留档、可回滚)
-观测      Langfuse（prompt 源头 + OTEL trace + score 回写）+ Run Viewer（自托管页面）
-通知      钉钉中继（单向只发）
+入口      API / SDK · 对话（SSE）· 定时（cron × 环境）· 事件（/v1/events/{source}）· 控制台
+提交      Submitter：解析任务（子任务自动建）→ 服务 → 环境 → 调用方权限 → 输入校验
+          → 闸门链（服务停用 / 服务在该环境停用 / 任务停用 / 环境不允许 / 触发未声明 / 策略）
+          → 去重 → 建台账 → 审批或启动
+执行      Temporal RunWorkflow：prepare（档案、召回）→ agent / 任务图 / 内建 / 规则 → finalize（沉淀）→ deliver
+agent     按任务的角色装配：角色的提示词 + 工具白名单；工具绑定这次运行的 服务×环境
+存储      Postgres：定义（带版本）· API 密钥 · 运行与事件 · 审批 · 进程实例 · 知识 / 案例 / 方法 · 反馈
+控制台    React 单页应用，随 Python 包发布，同进程托管
 ```
 
-源码分层（依赖单向向下）见 `src/agent_platform/__init__.py` 的包注释。
+## 对象
 
-## 核心设计（一句话版）
+| 对象 | 是什么 |
+|---|---|
+| 服务 | 一个业务项目：目录、代码、各环境配置文件、只读库、进程、档案，以及在哪些环境启用 |
+| 角色 | 能力：系统提示 + 工具白名单，和服务无关 |
+| 任务 | 要做的事：输入、触发（api / chat / schedule / event）、投递、记忆开关、档案。归属一个服务、通用（`*`）或平台 |
+| 子任务 | `任务:对象名`，针对某张表、某条链路；只存差异，调用时点名不存在就自动建 |
+| 策略 | 提交前的输入闸门：拒绝或需审批 |
+| 平台配置 | 环境、审批、通知、记忆、进程默认值（设置页） |
+| API 密钥 | 调用方身份；`run` / `admin` 两种范围，可限定服务与环境 |
+| 运行 | 一次执行的事实记录，钉死定义版本，全过程可回放 |
+| 记忆 | 知识（事实）· 案例（教训）· 方法（做法），按 服务×环境 分区 |
 
-- **目标环境维度**：`settings.env` 只是实例标签（定义/种子按它存取）；run 操作的
-  业务环境由请求 `env` 决定——run 记录、记忆分区、产物复用分区、env_gate 与
-  策略 `envs` 过滤、域连接信息（`DomainConfig.envs` 覆盖）全部按它走。
-  不配 `target_envs` 即单环境，一切照旧。
-- **一切需求归一为任务声明**：新增需求 = Admin API 写一条任务定义，即时生效。
-  任务三种形态：单 agent 问答（默认）/ 资产化任务图（artifacts）/ 内建处理器（handler）。
-- **概念粒度总则**：一个概念 = 独立生命周期 + 独立归属 + 独立审计需求，
-  三缺一的维度做成字段/过滤器；跨域不加多域 run、role/task 互不越界、
-  caller 记身份 trigger_source 记来源——细则见设计文档 §3.0。
-- **资产化任务图**：节点是产物、边是依赖（数据流不是控制流）；动态性只收进
-  route（枚举选一）与 map（对上游 list 扇出）两个出口；拓扑分层 + 层内并行；
-  输入指纹未变的节点重跑时直接复用旧产物（选择性再物化）。
-- **提交闸门链**：先过开关（目标环境/服务/任务停用、任务环境门禁），再过
-  DB 声明策略（正则 + order）——deny 拒绝 / require_approval 挂起等审批，批准
-  即启动；拒绝统一带原因码（`error_code`）。与执行期危险命令审批两层互补。
-- **服务（域）**：与 agent 同机部署的业务项目。配置（代码路径/主机/只读库/
-  服务档案/环境覆盖/启停）与规则库都存定义库，服务页编辑、热生效、可回滚；
-  `conf/domains/<name>/` 只在库里没有该服务时播种一次（之后改文件不生效，
-  启动日志会提示）。
-- **子任务 + 档案**：`任务:对象名` 一层子任务，只存差异、其余继承；调用方
-  显式带 `subtask`（或直接提交完整名）选用，不存在即自动继承建桩。档案两层——
-  服务档案（该服务所有 run）+ 任务档案（该任务/子任务），自由键、逐字置顶注入，
-  只记代码和配置里读不出来的东西。见设计文档 §3.15。
-- **概念唯一 session_id**：会话由它标识；LangGraph thread 是实现细节，不出 engine 层。
-- **episode 会话**：`dagster:{asset}:{error_class}:{date}`，连续性由记忆层承载
-  （资产档案逐字保留 → 前序交接摘要四节模板 → 历史知识 RRF 混合检索 → 同类案例）。
-- **纠正式反馈**：`POST /v1/sessions/{sid}/feedback` 从 session 最近 run 继承任务上下文
-  重判，finalize 时只取代最近一次 run 沉淀的记忆，不误伤历史。
-- **任务资产**：知识记事实、案例记教训、**资产记方法**——run 用 `save_asset`
-  沉淀可复用的方法（procedure）/脚本/查询/基线。小文本入库全文召回；
-  大产出（如自动化前端测试脚本）收编成 `assets_dir` 目录包，召回只注入
-  引用卡（路径+清单），后续 run 直接执行不重写。prepare 按 环境+域+任务
-  召回并记复用数，首跑的调度任务会被引导探索后沉淀。**确定性靠资产
-  复用收敛出来，不靠平台写死**——扩展新任务仍是零成本自然语言。
-- **定时任务热生效**：管理页/API 保存任务定义即重同步 Temporal Schedule，
-  另有 5 分钟周期对账兜底。
-- **工具分层**：L0 bash（bwrap 沙箱：全盘只读/仅 scratch 可写/默认断网——
-  出网访问全部收口成薄工具，命令是 LLM 现场拼的，正则审批管不住 API 语义）/
-  L2 run_code（CodeAct，一次编排多工具）/
-  薄工具（sql_query、host_metrics、dingtalk_send、save_asset）/
-  MCP 桥（内部服务类型化接口；browser / datahub 直接用官方实现
-  @playwright/mcp、mcp-server-datahub，仓库只自带 dagster server，见 `mcp_servers/`）。
-- **安全**：systemd 物理收口 + bwrap 沙箱（含 `--unshare-pid --as-pid-1`：
-  调用结束沙箱内进程全灭，run 里 `&` 起的后台服务零泄漏）+ 危险模式人工审批（LISTEN/NOTIFY 唤醒）。
-
-## 快速开始
+## 开发
 
 ```bash
-pip install -e .            # 依赖见 pyproject.toml
-export MODEL_TOKEN_A=... AGENT_DB_PASSWORD=... DINGTALK_ACCESS_TOKEN=... AGENT_BEARER_TOKEN=...
-AGENT_ENV=dev uvicorn --factory agent_platform.main:build_app --host 127.0.0.1 --port 8100
+pip install -e .
+export AGENT_ROOT_TOKEN=dev-root AGENT_DB_PASSWORD=... MODEL_TOKEN_A=...
+temporal server start-dev &                       # 本地 Temporal
+AGENT_ENV=dev agent-platform check                # 连库、建表、播种
+AGENT_ENV=dev agent-platform serve                # http://127.0.0.1:8100，用 root token 登录控制台
 ```
 
-Run Viewer（服务端渲染：FastAPI 路由组上下文 + Jinja2 模板，`viewer/templates/`
-一页一模板）：总览 `/`（近 24h 聚合仪表盘：状态统计卡 + 最近 Runs + 待审批/
-最近失败 + 任务分布）、Runs 列表 `/runs`（v5.11.0 重做：状态/时间范围
-chips + 环境/域/来源下拉 + 任务名与关键词搜索 + tokens/时长/时间可排序
-表头 + keyset 双向分页，全部状态在 URL 上可分享）、详情 `/runs/{run_id}`
-（模型步骤行内联 Langfuse span 元信息——模型名/token/成本/真实耗时，
-经 observations API 取回按步骤序对齐，终态补拉一次覆盖入库延迟；
-标题行保留「在 Langfuse 打开 ↗」外链做深层排查）；**步骤时间线始终渲染，每步
-👍👎 节点级反馈**（kind=step 留痕 + 回写 Langfuse——score 直接挂对应
-span，等价 Annotate 但走 API 免登录；映射不上降级 trace 级 `step#seq`）；
-终态 run 头部带**重跑**按钮（失败 → 同 id 断点续跑，成功 → 同输入新开
-run 并跳过去重）、审批 `/approvals`（待办/已处理双 tab：待办按等待时长
-升序，已处理带结果与操作人留痕可审计；顶栏「审批」带待办数角标；
-钉钉卡片 deep-link 直达 `/approvals/{run_id}` 处理页）、管理页 `/admin`（角色/任务/策略的**列表 + 编辑器双栏**：左栏带
-版本号与近 24h 用量角标，右栏按已知字段出结构化表单（工具/域/环境给
-复选框），未知字段收进「高级 JSON」保存时合并、不静默丢字段；**版本
-时间线**点击两条即出**内联 diff**，角色可一键回滚到历史版本；保存走
-`/v1/admin/*` 既有 API，即新版本、热生效）、记忆页 `/memory`（**写入-召回-演化**全程可查 + 运营闭环：
-域侧栏带生效/失效角标；页头**健康度条**（生效/零召回/负反馈/代码
-漂移/待仲裁，零召回可一键过滤）；**召回埋点**（`recall_hits`：每次
-真实召回按序记录命中，试用单独标记不计使用）——条目卡带「近 30 天
-命中 N 次」，抽屉列最近命中 run 链接；**检索试用**直跑 `recall_block`
-本身，返回角色实际注入的 prompt 全文块 + 过滤后命中序；**手动新增
-条目**（upsert 幂等，立即参与召回）；编辑保存同步重算向量；**反馈
-闭环**——反馈分统一加权所有召回路径终排，负反馈条目抽屉内给出
-处置提示；条目点开右抽屉（编辑/来源 run/演化链/反馈留痕/**内容历史**
-——同 key 覆盖前的旧版留档，可一键恢复，v5.16.0/过期恢复）；
-**案例 tab** 报错案例库；**矛盾 tab** 向量相似度 ≥0.85 的生效条目对，
-一键保留其一。顶级**资产页** `/assets`（与记忆平级）：save_asset 沉淀的
-方法/脚本/查询/基线——卡片带复用数/生效状态/文件数，抽屉可看元数据、
-编辑摘要说明、过期止损；文件类资产逐个在线查看内容，手动登记支持文本类；
-类型/状态 chips + 名称搜索 + 分页（v5.11.0）；抽屉内展示历史版本留档
-（整替换的旧版，保留最近 5 版）并可一键回滚（当前版自动留档，回滚可逆，
-v5.15.0）；说明/文本内容同样有内容历史（覆盖自动留档最近 20 版，可恢复，
-v5.16.0）。
-对话页 `/chat`（会话侧栏 +
-历史回放 + Markdown 结论 + 折叠过程 + 结论 👍👎 直接反馈；可停止/重试；
-run 详情页「在对话中继续 →」带 session 跳回，续聊自动继承该 run 的
-上下文/记忆并回填域/角色/环境；配置了 `target_envs` 时带环境选择器）。
-
-主机监控：配好 `grafana:`（url + Prometheus 数据源 uid + 只读 token）并在域包
-`domain.yaml` 登记 `hosts` 后，角色可用 `host_metrics` 工具查部署机器的
-内存/负载/根盘（经 Grafana datasource proxy，指标集固定）。既有部署需在
-管理页给角色热加该工具。
-
-生产部署：`deploy/install.sh prod`（低权限用户 + systemd 加固）。
-Temporal server 见 `deploy/temporal-server.service`。
-**完整步骤（前置条件/密钥/反代/升级回滚/备份/排障）见 `docs/部署指南.md`。**
-
-## 同机业务服务：按需启动（svcrun）
-
-与 agent 同机的业务服务（Dagster、board、配置中心…）几乎只有配置文件不同，
-不必按环境各常驻一套。注册进 `conf/services.yaml` 后按需起停：
+控制台前端：
 
 ```bash
-python3 -m agent_platform.svcrun --list                 # 看注册表
-python3 -m agent_platform.svcrun dagster-webserver test # 前台起 test 环境
-python3 -m agent_platform.svcrun board test --print     # 只打印将执行的命令
+cd web && npm ci
+npm run dev:mock        # 带 mock 数据的开发服务器，不需要后端
+npm run build           # 产物写到 src/agent_platform/webui/dist
+npm run build:preview   # 单文件预览（mock 数据）：web/dist-preview/index.html
 ```
 
-bwrap 把选中环境的配置文件 bind 到服务本来就读的固定路径（服务零改动，
-不可能拿错环境），其他环境的配置文件遮蔽为 `/dev/null`；
-`--die-with-parent` 保证启动它的会话结束，服务自动结束。
-
-## 运维 API（/v1：人与 AI 共用）
-
-Viewer 只是这套 API 的一个客户端——初始化部署时由 AI 批量总结录入、日常运维
-由 AI 巡检操作，走的都是同一组端点（bearer 鉴权）。明细见设计文档 §3.13/§3.14；
-**逐端点契约见 `docs/外部接口文档.md`，业务方接入见 `docs/SDK开发指南.md`**。
-
-- 记忆：`GET/POST /v1/knowledge`、`/v1/knowledge/search`（召回试用）、
-  `/v1/knowledge/conflicts`（矛盾对）、`/v1/knowledge/{id}`（明细/改/expire/restore）、
-  `/v1/knowledge/{id}/history` + `POST .../history/{version}/restore`（内容历史）；
-  案例 `GET /v1/cases`
-- 资产：`GET/POST /v1/assets`、`/v1/assets/{id}`（明细含文件清单与历史版本
-  留档 revisions）、`/v1/assets/{id}/file`、`/v1/assets/{id}/rollback/{ts}`（回滚，
-  当前版自动留档可逆）、`/v1/assets/{id}/history` +
-  `POST .../history/{version}/restore`（说明/文本内容历史）、改/expire/restore
-- run 运维：`POST /v1/runs/{id}/rerun`（失败续跑/成功新开）、
-  `POST /v1/runs/{id}/steps/{seq}/feedback`（单步 👍👎）
-- 定义管理：`/v1/admin/{roles|tasks|policies}` CRUD + 单条读取 + history +
-  rollback（写即新版本、热生效）
-- 统计：`GET /v1/stats?hours=24`
-
-最小示例（AI 巡检：查近 24h 失败 → 续跑 → 沉淀一条知识）：
-
-```bash
-curl -s -H "Authorization: Bearer $AGENT_BEARER_TOKEN" "$BASE/v1/stats?hours=24"
-curl -s -X POST -H "Authorization: Bearer $AGENT_BEARER_TOKEN" "$BASE/v1/runs/<run_id>/rerun"
-curl -s -X POST -H "Authorization: Bearer $AGENT_BEARER_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"domain":"board","key":"毛利率口径","content":"……"}' "$BASE/v1/knowledge"
-```
-
-## 测试
-
-```bash
-python3 -m unittest discover -s tests    # 180 个用例；pgserver 不可用时 PG 用例自动跳过
-```
-
-## SDK（业务方接入）
+## 调用
 
 ```python
 from agent_client import AgentClient
-agent = AgentClient(server="board", role="data_searcher")
-print(agent.ask("3月以来 total_fee 是多少"))
+
+agent = AgentClient(service="board", env="test")       # AGENT_URL / AGENT_KEY
+agent.ask("3 月以来 total_fee 是多少")                   # 对话，自动续会话
+agent.run("failure-analysis", {...}, subtask="dwd_trade_order", env="prod")
 ```
 
-CLI：`agent-chat --server board --role data_searcher`（SSE 流式：工具调用
-实时逐行可见；SDK 侧 `ask_stream(question, on_event=...)`，同步阻塞版
-`ask()` 仍可用）
+```bash
+curl -X POST $AGENT_URL/v1/runs -H "Authorization: Bearer $AGENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"task":"data-qa","service":"board","env":"test","input":{"question":"7 天留存怎么算"},"wait":120}'
+```
 
 ## 目录
 
 ```
-src/agent_platform/   服务源码（分层见包注释）
-mcp_servers/          仓库自带的内部 MCP server（stdio）：dagster 报错分析（无现成实现）；
-                      browser / datahub 用官方包，settings.mcp_servers 里 npx/uvx 接入
-conf/                 base/common.yaml（共享默认）+ env/{dev,test,prod}.yaml（只写差异，深合并）
-deploy/               systemd unit + install.sh
-sdk/agent_client/     业务方客户端 + agent-chat CLI
-tests/                单测 + PG 集成测试
-docs/                 设计文档 + 部署指南 + SDK开发指南 + 外部接口文档 + 预览图
+src/agent_platform/   服务源码（地图见设计文档 §8）
+web/                  控制台源码
+sdk/agent_client/     Python SDK + agent-chat
+conf/                 部署配置（base + env 差异）与种子（只在库里没有时播种）
+deploy/               systemd 单元、polkit 规则、install.sh
+mcp_servers/          仓库自带的 MCP server
+scripts/migrate_v5.py 从 v5 迁移
+docs/                 文档
 ```

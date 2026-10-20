@@ -16,8 +16,20 @@ from typing import Any, Generic, TypeVar
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from .domain import (CONFIG_SECTIONS, EnvDef, EnvsConfig, PolicyDef, Rejected, ResolvedRole, RoleDef, RoleError,
-                     ServiceDef, TaskDef, merge_task, resolve_role)
+from .domain import (
+    CONFIG_SECTIONS,
+    EnvDef,
+    EnvsConfig,
+    PolicyDef,
+    Rejected,
+    ResolvedRole,
+    RoleDef,
+    RoleError,
+    ServiceDef,
+    TaskDef,
+    merge_task,
+    resolve_role,
+)
 from .domain.services import check_service_name
 from .domain.tasks import check_task_name, split_subtask_name
 from .store.definitions import DefinitionStore, Kind

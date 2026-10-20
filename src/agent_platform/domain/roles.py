@@ -44,7 +44,7 @@ def resolve_role(name: str, defs: dict[str, RoleDef]) -> ResolvedRole:
         chain.append((cur, defs[cur]))
         cur = defs[cur].extends
     chain.reverse()
-    (root_name, root), *children = chain
+    (_, root), *children = chain
     tools = list(root.tools)
     parts = [root.prompt] if root.prompt else []
     title, description = root.title, root.description

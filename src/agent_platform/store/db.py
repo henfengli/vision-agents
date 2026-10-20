@@ -281,7 +281,7 @@ OPTIONAL = [
 ]
 
 _dsn: str | None = None
-_pool: "AsyncConnectionPool | None" = None
+_pool: AsyncConnectionPool | None = None
 
 
 async def open_db(dsn: str) -> None:
@@ -312,7 +312,7 @@ async def close_db() -> None:
         _pool = None
 
 
-def pool() -> "AsyncConnectionPool":
+def pool() -> AsyncConnectionPool:
     if _pool is None:
         raise RuntimeError("DB 未初始化：先 await open_db(dsn)")
     return _pool

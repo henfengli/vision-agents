@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 from temporalio import activity
@@ -92,7 +93,7 @@ async def prepare(raw: dict) -> dict:
 
     role_version = None
     if spec.role:
-        role, versions = await d.registry.resolved_role(spec.role)
+        _role, versions = await d.registry.resolved_role(spec.role)
         role_version = versions[-1]
     await runs.set_status(spec.run_id, "running")
     await runs.set_versions(spec.run_id, task.version, role_version)
@@ -199,7 +200,7 @@ async def finalize(raw: dict, output: dict, resolution: str) -> None:
             await distill(d.model_pool, env=spec.env, service=spec.service, run_id=spec.run_id, task=spec.task,
                           run_input=spec.input, run_output=output, code_paths=spec.code_paths,
                           session_id=spec.session_id, handoff_summary=memory.handoff_summary)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("运行 %s 的记忆沉淀失败", spec.run_id)
     await _announce(d, spec, "run_succeeded", "运行成功", str(output.get("answer") or output)[:1500])
     if resolution == "rule":
@@ -240,7 +241,7 @@ async def deliver(raw: dict) -> None:
             await d.notifier.send(spec.deliver["channel"], Message(
                 title=f"{spec.task} · {_STATUS_TEXT.get(run['status'], run['status'])}", text=str(text)[:3000],
                 link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if activity.info().attempt < 3:
             raise                                   # 交给 Temporal 重试
         await runs.log_event(spec.run_id, "stage", {"stage": "deliver", "title": "结果投递失败",

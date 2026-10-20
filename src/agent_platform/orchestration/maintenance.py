@@ -43,7 +43,7 @@ class Maintenance:
     async def _safely(self, job) -> None:
         try:
             await job()
-        except Exception:  # noqa: BLE001 —— 一项失败不影响其余，下一轮再来
+        except Exception:
             log.exception("维护任务 %s 失败", getattr(job, "__name__", job))
 
     async def _expire_approvals(self) -> None:

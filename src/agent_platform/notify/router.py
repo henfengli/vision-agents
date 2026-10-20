@@ -50,7 +50,7 @@ class Notifier:
             try:
                 await _deliver(cfg.channels[name], msg, event)
                 sent.append(name)
-            except Exception:  # noqa: BLE001 —— 通知是旁路
+            except Exception:
                 log.exception("通知渠道 %s 发送失败（事件 %s）", name, event)
         return sent
 

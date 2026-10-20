@@ -128,6 +128,6 @@ async def _handoff_summary(pool: ModelPool, task: str,
         }])
         text = (resp.choices[0].message.content or "").strip()
         return text if text.startswith("##") else None
-    except Exception:  # noqa: BLE001 —— 摘要失败不影响主流程，但留痕
+    except Exception:
         log.exception("session 交接摘要生成失败（%s）", task)
         return None

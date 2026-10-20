@@ -55,7 +55,7 @@ class Runtime:
         async def run() -> None:
             try:
                 await self.scheduler.sync()
-            except Exception:  # noqa: BLE001 —— 维护循环每 5 分钟还会对账
+            except Exception:
                 log.exception("同步定时失败")
         self._background.append(asyncio.create_task(run()))
 
