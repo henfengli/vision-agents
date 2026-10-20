@@ -1,0 +1,16 @@
+# 提交策略：输入（JSON 文本）命中正则 → 拒绝或先审批。applies_to 各项为空表示不限。
+
+prod-destructive:
+  description: 生产环境里提到删除/清空类操作的请求先审批
+  order: 10
+  applies_to: {envs: [prod]}
+  match_regex: '\b(drop|delete|truncate)\b|清空|删除'
+  action: require_approval
+  message: 生产环境的破坏性操作需要人工确认
+
+no-secrets:
+  description: 输入里出现密钥/密码直接拒绝
+  order: 20
+  match_regex: '(password|secret|token)\s*[:=]'
+  action: deny
+  message: 请不要在请求里携带密钥

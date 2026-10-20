@@ -1,10 +1,10 @@
-"""Temporal Activities：run 执行的三个步骤。
+"""Temporal activities：一次运行的各个步骤。
 
-prepare_run → run_agent → finalize_run，每步独立重试/超时，
-Temporal 事件历史即执行台账；业务台账（runs/run_events）仍写 PG 供查询。
+    prepare → run_agent / 任务图节点 / run_builtin → finalize → deliver
+                                    └─ 任何一步失败 → fail → deliver
 
-依赖注入：Temporal 要求 activity 是模块级函数，不能走构造函数——
-Worker 启动时 configure() 注入 Deps，activity 体内禁止访问未注入的全局状态。
+每步独立重试与超时；运行台账（runs / run_events）写在 PG，供页面与接口查询。
+Temporal 要求 activity 是模块级函数，依赖在 worker 启动时 configure() 注入。
 """
 
 from __future__ import annotations
@@ -12,56 +12,44 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
+
+from .. import observability
+from ..agent import factory as agent_factory
+from ..agent import scope as run_scope
+from ..agent.approvals import ApprovalRejected, Gatekeeper
+from ..config import Settings
+from ..domain import Rejected, RunRequest, RunTrigger, compose_profile
+from ..domain.graph import NodeDef
+from ..memory import distill, recall
+from ..memory.gardener import run_gardener
+from ..notify import Message, Notifier
+from ..registry import Registry
+from ..store import artifacts as artifacts_store
+from ..store import assets as assets_store
+from ..store import cases as cases_store
+from ..store import knowledge as knowledge_store
+from ..store import runs
+from . import gates
+from .spec import RunSpec
 
 log = logging.getLogger(__name__)
 
 
-async def _with_heartbeat(awaitable, interval_s: float = 30.0):
-    """慢调用（推理型模型单次调用可超 120s 的 heartbeat_timeout）期间定期报活。
-
-    不报活会被 Temporal 误判 activity 卡死而超时杀掉。CancelledError 不吞
-    （取消语义靠它传播）；非 activity 上下文（FakeTemporalClient 内联执行）
-    时 heartbeat 抛普通异常，静默即可。
-    """
-    task = asyncio.ensure_future(awaitable)
-    while True:
-        done, _pending = await asyncio.wait({task}, timeout=interval_s)
-        if done:
-            return task.result()
-        try:
-            activity.heartbeat("running")
-        except Exception:  # noqa: BLE001 —— 不在 activity 上下文时静默
-            pass
-
-from ..agent.approvals import current_run_ctx, current_run_id
-from ..agent.roles import resolve
-from ..memory import distill, recall_block
-from ..store import artifacts as artifacts_store
-from ..store import assets as assets_store
-from ..store import cases as cases_store
-from ..store import definitions as definitions_store
-from ..store import knowledge as knowledge_store
-from ..store import runs
-from .spec import RunSpec
-from .tasks import compose_profile
-
-
 @dataclass
 class Deps:
-    settings: Any
-    engine: Any
+    settings: Settings
+    registry: Registry
+    factory: agent_factory.AgentFactory
+    gate: Gatekeeper
+    notifier: Notifier
     model_pool: Any
-    notifier: Any
-    langfuse: Any          # LangfuseClient | None
-    domains: Any = None    # DomainProvider（code_paths 等域配置的 DB 事实源）
-    switches: Any = None   # domains.Switches（启停读取面，判断在 policies）
-    tasks: Any = None      # TaskRegistry（档案拼装：子任务沿继承链合并）
+    submitter: Any          # 定时触发经提交端发起运行
 
 
 _deps: Deps | None = None
@@ -78,526 +66,385 @@ def _d() -> Deps:
     return _deps
 
 
-@activity.defn
-async def prepare_run(raw: dict) -> dict:
-    """步骤 1：建/更新台账行 + 谱系固定 + 角色解析 + 记忆召回 + 拼 prompt。
+def rejected(e: Rejected) -> ApplicationError:
+    """闸门拒绝 → 不重试的业务错误，原因码随错误带回 workflow。"""
+    return ApplicationError(e.message, e.code, type="Rejected", non_retryable=True)
 
-    API 触发时 run 行已由 Submitter 建好；调度触发（run_id 为空）时
-    在这里现场生成 run_id 并建行——activities 允许非确定性。
-    资产图任务（spec.artifacts 非空）不做单角色解析与召回：角色/产物
-    在节点物化时逐个解析；这里只固定任务版本、落图拓扑事件（Viewer 血缘图）。
-    """
+
+# ==================== 步骤 ====================
+
+
+@activity.defn
+async def prepare(raw: dict) -> dict:
+    """定版本、重过开关（1–4 环）、拼提示：档案 → 运行环境 → 召回 → 方法 → 问题。"""
     d = _d()
     spec = RunSpec.from_dict(raw)
-    # 停用兜底：调度触发的 run 不经提交端，在这里过同一处开关判断
-    # （policies.check_switches：环境/服务；任务级停用靠 sync_schedules
-    # 不建 schedule）。命中则失败落账带原因码，不进入召回与执行
-    switches = getattr(d, "switches", None)
-    if switches is not None:
-        from . import policies
-        blocked = await policies.check_switches(
-            None, spec.target_env or "", spec.domain, switches)
-        if blocked is not None:
-            if spec.run_id:
-                await runs.set_status(spec.run_id, "failed", output={
-                    "error": blocked.message, "error_code": blocked.code})
-            return spec.to_dict()
-    if not spec.run_id:
-        spec.run_id = uuid.uuid4().hex[:16]
-        spec.session_id = spec.run_id
-        await runs.create(spec.run_id, spec.task_type, spec.role,
-                          domain=spec.domain,
-                          trigger_source=spec.trigger or "schedule", caller="",
-                          input_data=spec.input, session_id=spec.session_id)
+    run = await runs.get(spec.run_id)
+    if run is None or run["status"] == "cancelled":
+        raise ApplicationError("运行已取消", type="Cancelled", non_retryable=True)
+    task = await d.registry.task(spec.task)
+    if task is None:
+        raise rejected(Rejected("unknown_task", f"任务 {spec.task} 已不存在"))
+    try:
+        await gates.check_switches(d.registry, task_name=spec.task, task=task.spec, service=spec.service, env=spec.env)
+    except Rejected as e:
+        raise rejected(e) from None
+
+    role_version = None
+    if spec.role:
+        role, versions = await d.registry.resolved_role(spec.role)
+        role_version = versions[-1]
     await runs.set_status(spec.run_id, "running")
-    current_run_id.set(spec.run_id)
+    await runs.set_versions(spec.run_id, task.version, role_version)
 
-    # 谱系固定：记录本 run 实际使用的定义版本——事后排查"当时用的是哪版
-    # prompt"靠它，而不是靠猜。版本取 prepare 这一刻的生效版本（直读库）。
-    task_version = await definitions_store.active_version(
-        "task", d.settings.env, spec.task_type)
-    role_version = (await definitions_store.active_version(
-        "role", d.settings.env, spec.role)) if spec.role else None
-    await runs.set_def_versions(spec.run_id, task_version, role_version)
-
-    if spec.artifacts is not None:
-        from .artgraph import NodeDef, topo_layers
-        nodes = {n: NodeDef.model_validate(nd) for n, nd in spec.artifacts.items()}
-        topo_layers(nodes)  # 声明期校验：环/悬空依赖在 prepare 即失败
-        await runs.log_event(spec.run_id, "graph", {
-            "nodes": [{"id": n, "label": n} for n in nodes],
-            "edges": [{"source": dep, "target": n}
-                      for n, node in nodes.items() for dep in node.deps]})
+    if spec.form == "rule":
+        out = spec.rule_output or {}
+        await runs.log_event(spec.run_id, "stage", {
+            "stage": "rule", "title": f"规则先行命中 · {out.get('category')}",
+            "content": f"报错匹配规则 `{out.get('pattern')}`，直接给出结论，未调用模型。"})
+        return spec.to_dict()
+    if spec.form == "graph":
+        nodes = {n: NodeDef.model_validate(x) for n, x in (spec.graph or {}).items()}
+        await runs.log_event(spec.run_id, "stage", {
+            "stage": "graph", "title": f"任务图 · {len(nodes)} 个节点",
+            "nodes": [{"id": n, "kind": _node_kind(x)} for n, x in nodes.items()],
+            "edges": [{"from": dep, "to": n} for n, x in nodes.items() for dep in x.deps]})
+        return spec.to_dict()
+    if spec.form != "agent":
         return spec.to_dict()
 
-    role = resolve(spec.role, await d.engine.roles())
-    spec.domain = spec.domain or (role.domains[0] if role.domains else None)
-    # 目标环境：run 操作哪套业务环境——域连接信息（code_paths/只读库）与
-    # 记忆分区都按它解析；定义版本仍按实例标签固定（一套部署一套定义）。
-    # 域连接信息走 DomainProvider（DB 事实源），取不到再退 settings 种子
-    t_env = spec.effective_env(d.settings.env)
-    dom_provider = getattr(d, "domains", None)
-    dom_cfg = (dom_provider.get(spec.domain) if dom_provider is not None
-               else None) or d.settings.domains.get(spec.domain or "")
-    if spec.domain and dom_cfg is not None:
-        spec.code_paths = dom_cfg.for_env(t_env).code_paths
-    # 档案（服务档案 + 任务/子任务档案）：所有入口（提交/调度/续跑）都在
-    # 这里按 run 的服务与目标环境现取现拼，一处实现；结尾置顶注入
-    task_registry = getattr(d, "tasks", None)
-    if task_registry is not None:
-        task_def = await task_registry.resolve(spec.task_type)
-        svc_profile = (dom_cfg.for_env(t_env).profile
-                       if spec.domain and dom_cfg is not None else {})
-        spec.profile = compose_profile(spec.domain, svc_profile, task_def)
-    # save_asset 等工具的默认值上下文（域/任务/目标环境）
-    current_run_ctx.set({"env": t_env, "domain": spec.domain or "",
-                         "task": spec.task_type})
+    view = await _view(d, spec)
+    spec.code_paths = view.code_paths if view else []
+    if spec.resume:                      # 续跑：提示已在 checkpoint 里，不重新拼
+        return spec.to_dict()
 
-    spec.prompt = spec.question
-    if not spec.resume:
-        # 任务资产：历史运行沉淀的方法/产物——先占位，召回块随后压到它前面，
-        # 最终顺序 = 记忆召回 → 任务资产 → 问题（资产贴着问题，最贴近执行）
-        assets = await assets_store.search_active(
-            t_env, spec.domain or "", spec.task_type)
-        if assets:
-            block = _asset_block(assets)
-            spec.prompt = f"{block}\n\n{spec.prompt}"
-            await assets_store.mark_used([a["id"] for a in assets])
-            await runs.log_event(spec.run_id, "note",
-                                 {"stage": "assets",
-                                  "asset_ids": [a["id"] for a in assets],
-                                  "content": block})
-        elif spec.trigger == "schedule" and "save_asset" in role.tools:
-            # 首跑提示：调度任务没有既定方法时，引导探索后沉淀——
-            # 确定性不靠平台写死，靠资产复用收敛出来
-            spec.prompt = ("[任务资产] 本任务暂无既定方法沉淀。探索完成后请用 "
-                           "save_asset 把可复用的方法(procedure)/查询(query)/"
-                           "基线(baseline)沉淀下来，后续调度将自动召回遵循。\n\n"
-                           + spec.prompt)
-        recalled = await recall_block(
-            t_env, spec.domain, spec.question,
-            error_text=spec.error_text, domain_code_paths=spec.code_paths,
-            embedder=d.model_pool.embed, session_id=spec.session_id,
-            run_id=spec.run_id, task=spec.task_type)
-        if recalled:
-            spec.prompt = f"{recalled}\n\n{spec.prompt}"
-            await runs.log_event(spec.run_id, "note",
-                                 {"stage": "recall", "content": recalled})
-    if spec.profile:
-        # 档案：逐字保留、置于一切之上；原文落事件，详情页展示的就是
-        # 注入的那段，不靠回推
-        spec.prompt = f"{spec.profile}\n\n{spec.prompt}"
-        await runs.log_event(spec.run_id, "note",
-                             {"stage": "profile", "content": spec.profile})
+    parts: list[str] = []
+    service_profile = view.profile if view else {}
+    profile = compose_profile(spec.service, service_profile, spec.task, task.spec.profile)
+    if profile:
+        parts.append(profile)
+        await runs.log_event(spec.run_id, "stage", {"stage": "profile", "title": "档案", "content": profile})
+    if view:
+        parts.append(view.prompt_block())
+
+    if spec.recall and spec.service:
+        memory = await d.registry.config("memory")
+        found = await recall(env=spec.env, service=spec.service, task=spec.task, query=spec.question,
+                             error_text=spec.error_text, code_paths=spec.code_paths, session_id=spec.session_id,
+                             run_id=spec.run_id, limit=memory.knowledge_limit, embedder=d.model_pool.embed)
+        if found.text:
+            parts.append(found.text)
+            await runs.log_event(spec.run_id, "stage", {
+                "stage": "recall", "title": f"召回 · 知识 {len(found.knowledge)} 条" + (" · 同类案例 1 条" if found.case_id else ""),
+                "content": found.text, "hits": found.knowledge, "case_id": found.case_id})
+        methods = await assets_store.search_active(spec.env, spec.service, spec.task.split(":")[0], limit=memory.asset_limit)
+        if methods:
+            block = _methods_block(methods)
+            parts.append(block)
+            await assets_store.mark_used([a["id"] for a in methods])
+            await runs.log_event(spec.run_id, "stage", {
+                "stage": "assets", "title": f"方法 · {len(methods)} 条", "content": block,
+                "assets": [{"id": a["id"], "kind": a["kind"], "name": a["name"]} for a in methods]})
+
+    parts.append(spec.question)
+    spec.prompt = "\n\n".join(parts)
     return spec.to_dict()
 
 
 @activity.defn
 async def run_agent(raw: dict) -> dict:
-    """步骤 2：DeepAgents 执行。崩溃由 Temporal 按策略重试本步骤。
-
-    审批等待（危险命令）在本 activity 内通过 DB+NOTIFY 挂起，
-    hook 每轮等待调 activity.heartbeat()——Temporal 视为活跃，不占额外资源。
-    """
+    """按任务的角色装配 agent 执行；会话即 LangGraph thread，续跑从 checkpoint 接着走。"""
     d = _d()
     spec = RunSpec.from_dict(raw)
-    agent = await d.engine.agent()
-    # session_id 即 LangGraph thread：同一 session 自动续上下文；缺省退回 run_id
-    config = {"configurable": {"thread_id": spec.session_id or spec.run_id}}
-
-    with _run_span(d, spec) as span:
-        if span is not None:
-            ctx = span.get_span_context()
-            await runs.log_event(spec.run_id, "trace",
-                                 {"trace_id": format(ctx.trace_id, "032x"),
-                                  "span_id": format(ctx.span_id, "016x")})
-        if spec.resume:
-            await runs.log_event(spec.run_id, "note",
-                                 {"stage": "resume", "session_id": spec.session_id})
-            result = await _with_heartbeat(
-                _invoke_streaming(agent, None, config, spec.run_id))
-        else:
-            result = await _with_heartbeat(_invoke_streaming(
-                agent, {"messages": [{"role": "user", "content": spec.prompt}]},
-                config, spec.run_id))
-
-    output_text = _extract_final_text(result)
-    await runs.log_event(spec.run_id, "llm",
-                         {"stage": "final", "content": output_text})
-    return {"answer": output_text}
+    role, versions = await d.registry.resolved_role(spec.role or "")
+    agent = await d.factory.agent_for(role, versions)
+    with run_scope.bind(await _scope(d, spec, role.tools)), \
+            observability.run_span("agent.run", run_id=spec.run_id, task=spec.task, service=spec.service, env=spec.env):
+        answer = await _heartbeating(agent_factory.invoke(
+            agent, spec.run_id, thread_id=spec.session_id, prompt=None if spec.resume else spec.prompt))
+    await runs.log_event(spec.run_id, "final", {"content": answer})
+    return {"answer": answer}
 
 
 @activity.defn
-async def finalize_run(raw: dict, output: dict) -> dict:
-    """步骤 3：状态落库 + 记忆沉淀（含纠正反馈的旧记忆取代）。"""
+async def run_builtin(raw: dict) -> dict:
+    """内建任务：不过模型的确定性维护作业。"""
     d = _d()
     spec = RunSpec.from_dict(raw)
-    await runs.set_status(spec.run_id, "success", output=output)
-    # 纠正式反馈：新结论沉淀前，把本 session 最近一次 run 沉淀的记忆标记为被取代。
-    # 只杀最近的判断——纠正针对的是上一次结论，不误伤 session 里沉淀正确的历史知识。
-    t_env = spec.effective_env(d.settings.env)  # 记忆按目标环境分区
-    if spec.correction and spec.session_id:
-        last = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
-        old_ids = [last["run_id"]] if last else []
-        await knowledge_store.supersede_by_runs(t_env, old_ids, spec.run_id)
-        await cases_store.supersede_by_runs(t_env, old_ids, spec.run_id)
-    try:
-        await distill(d.model_pool, t_env, spec.domain,
-                      spec.run_id, spec.task_type,
-                      {"question": spec.question, "error": spec.error_text},
-                      output, spec.code_paths, session_id=spec.session_id)
-    except Exception:  # noqa: BLE001 —— 沉淀失败不影响主流程，但必须留痕
-        log.exception("run %s 记忆沉淀失败（记忆层将缺失本次沉淀）", spec.run_id)
+    handler = BUILTINS.get(spec.handler or "")
+    if handler is None:
+        raise ApplicationError(f"未知的内建处理器：{spec.handler}（可用：{'、'.join(BUILTINS)}）",
+                               "invalid_definition", type="Rejected", non_retryable=True)
+    output = await _heartbeating(handler(d, spec))
+    await runs.log_event(spec.run_id, "final", {"content": json.dumps(output, ensure_ascii=False, indent=2)})
     return output
 
 
 @activity.defn
-async def mark_failed(raw: dict, error: str) -> None:
+async def finalize(raw: dict, output: dict, resolution: str) -> None:
+    """落成功、处理纠正、沉淀记忆、发通知。沉淀失败不翻案运行结果。"""
+    d = _d()
     spec = RunSpec.from_dict(raw)
-    await runs.log_event(spec.run_id, "note",
-                         {"stage": "error", "error": error[:2000]})
-    await runs.set_status(spec.run_id, "failed",
-                          output={"error": error[:4000]})
+    if await _cancelled(spec.run_id):
+        return
+    await runs.set_status(spec.run_id, "success", output=output, resolution=resolution)
+    if spec.correction:
+        previous = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
+        if previous:
+            await knowledge_store.supersede_by_runs(spec.env, [previous["run_id"]], spec.run_id)
+            await cases_store.supersede_by_runs(spec.env, [previous["run_id"]], spec.run_id)
+    if spec.save and spec.service and resolution == "agent":
+        memory = await d.registry.config("memory")
+        try:
+            await distill(d.model_pool, env=spec.env, service=spec.service, run_id=spec.run_id, task=spec.task,
+                          run_input=spec.input, run_output=output, code_paths=spec.code_paths,
+                          session_id=spec.session_id, handoff_summary=memory.handoff_summary)
+        except Exception:  # noqa: BLE001
+            log.exception("运行 %s 的记忆沉淀失败", spec.run_id)
+    await _announce(d, spec, "run_succeeded", "运行成功", str(output.get("answer") or output)[:1500])
+    if resolution == "rule":
+        await runs.log_event(spec.run_id, "final", {"content": output.get("answer", "")})
 
 
 @activity.defn
-async def deliver_output(raw: dict) -> None:
-    """步骤 4（可选）：按任务声明的 output_channel 投递终态结果。
-
-    caller = 不投递（调用方轮询）；http = POST 回调（run_id/status/output）；
-    dingtalk = 中继 markdown 卡。投递走独立 activity 白嫖 Temporal 重试；
-    最终失败只留 deliver_failed 事件——结果已在台账，投递失败不翻案。
-    """
+async def fail(raw: dict, message: str, code: str) -> None:
     d = _d()
     spec = RunSpec.from_dict(raw)
-    channel = spec.output_channel or "caller"
-    if channel == "caller":
+    if await _cancelled(spec.run_id):
+        return
+    await runs.log_event(spec.run_id, "error", {"title": code, "content": message[:4000]})
+    await runs.set_status(spec.run_id, "failed", output={"error": message[:4000]}, error_code=code)
+    await _announce(d, spec, "run_failed", "运行失败", f"`{code}` {message[:1200]}")
+
+
+@activity.defn
+async def deliver(raw: dict) -> None:
+    """按任务声明把终态结果推出去（通知渠道 / HTTP 回调）。投递失败只留事件，不改运行结果。"""
+    d = _d()
+    spec = RunSpec.from_dict(raw)
+    if not spec.deliver:
         return
     run = await runs.get(spec.run_id)
     if run is None:
         return
     output = run.get("output") or {}
     try:
-        if channel == "http":
-            if not spec.output_callback:
-                return
-            payload = {"run_id": spec.run_id, "task_type": spec.task_type,
-                       "status": run["status"], "output": output}
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(spec.output_callback, json=payload)
+        if spec.deliver.get("url"):
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(spec.deliver["url"], json={
+                    "run_id": spec.run_id, "task": spec.task, "service": spec.service, "env": spec.env,
+                    "status": run["status"], "output": output})
                 resp.raise_for_status()
-        elif channel == "dingtalk":
-            if d.notifier is None:
-                return
-            text = output.get("answer") or json.dumps(
-                output, ensure_ascii=False, default=str)[:1500]
-            await d.notifier.send_markdown(
-                f"[{spec.task_type}] {run['status']}", text[:1500])
         else:
-            return  # 未知通道按不投递处理（写入期已校验，这里是双保险）
+            text = output.get("answer") or output.get("error") or json.dumps(output, ensure_ascii=False)[:1500]
+            await d.notifier.send(spec.deliver["channel"], Message(
+                title=f"{spec.task} · {_STATUS_TEXT.get(run['status'], run['status'])}", text=str(text)[:3000],
+                link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"))
     except Exception as e:  # noqa: BLE001
-        try:
-            final = activity.info().attempt >= 3
-        except Exception:  # noqa: BLE001 —— 非 activity 上下文（测试内联）
-            final = True
-        if not final:
-            raise  # 交给 Temporal 重试
-        log.exception("run %s 结果投递失败（channel=%s）", spec.run_id, channel)
-        await runs.log_event(spec.run_id, "note", {
-            "stage": "deliver_failed", "channel": channel,
-            "error": str(e)[:500]})
+        if activity.info().attempt < 3:
+            raise                                   # 交给 Temporal 重试
+        await runs.log_event(spec.run_id, "stage", {"stage": "deliver", "title": "结果投递失败",
+                                                    "content": f"{type(e).__name__}: {str(e)[:500]}"})
 
 
-# ==================== 内部工具 ====================
-
-
-def _asset_block(assets: list[dict], content_limit: int = 4000) -> str:
-    """任务资产注入块（渐进式披露）：文本资产全文给（它就是指令）；
-    文件资产只给引用卡（路径+清单），agent 用 bash 直接读/执行——
-    代码不进上下文，只有执行输出进。单条说明截断保护 prompt 体积。"""
-    lines = ["[任务资产——历史运行沉淀；文件类直接用路径读取/执行，不要重写；"
-             "发现已过时请用 save_asset 更新]"]
-    for a in assets:
-        scope = f"任务 {a['task']}" if a["task"] else "域级通用"
-        head = (f"### {a['kind']}:{a['name']}"
-                f"（{scope}，已复用 {a['use_count']} 次）")
-        if a.get("path"):
-            files = assets_store.list_files(a["path"])
-            listing = "、".join(f["name"] for f in files[:8])
-            if len(files) > 8:
-                listing += f" …（共 {len(files)} 个）"
-            body = (f"{a['summary']}\n路径：{a['path']}"
-                    + (f"\n说明：{a['content']}" if a["content"] else "")
-                    + (f"\n文件：{listing}" if listing else ""))
-            lines.append(head + "\n" + body)
-            continue
-        content = a["content"]
-        if len(content) > content_limit:
-            content = content[:content_limit] + "\n…[内容过长已截断]"
-        lines.append(f"{head}\n{a['summary']}\n{content}")
-    return "\n\n".join(lines)
-
-
-class _NullSpan:
-    def __enter__(self):
+@activity.defn
+async def fire_schedule(task: str, trigger_id: str, env: str) -> str | None:
+    """定时触发：和 API 走同一个提交入口（同样的闸门、去重、台账），只是身份是 schedule。"""
+    d = _d()
+    entry = await d.registry.task(task)
+    trigger = entry.spec.trigger(trigger_id) if entry else None
+    if trigger is None or trigger.type != "schedule":
+        log.warning("定时触发 %s/%s 已不存在，忽略本次", task, trigger_id)
         return None
-
-    def __exit__(self, *a):
-        return False
-
-
-def _run_span(d: Deps, spec: RunSpec):
-    """Langfuse run span：挂业务属性；未启用观测时是空上下文。"""
-    from ..langfuse import tracer
-    t = tracer()
-    if t is None:
-        return _NullSpan()
-    return t.start_as_current_span(
-        "agent.run",
-        attributes={"agent.run_id": spec.run_id,
-                    "agent.task_type": spec.task_type,
-                    "agent.role": spec.role,
-                    "agent.env": d.settings.env,
-                    "agent.target_env": spec.effective_env(d.settings.env),
-                    "agent.session_id": spec.session_id or ""})
+    base, obj = task.split(":", 1) if ":" in task else (task, None)
+    req = RunRequest(task=base, subtask=obj, env=env, input=trigger.input,
+                     service=trigger.service if entry.spec.service == "*" else None)
+    try:
+        accepted = await d.submitter.submit(req, trigger=RunTrigger(type="schedule", id=trigger_id, caller="schedule"))
+    except Rejected as e:
+        log.warning("定时触发 %s/%s@%s 被拒：%s（%s）", task, trigger_id, env, e.message, e.code)
+        return None
+    return accepted.run_id
 
 
-async def _invoke_streaming(agent: Any, payload: Any, config: dict,
-                            run_id: str) -> dict:
-    """事件流执行：模型步/工具调用实时落 PG 台账（SSE 与 Viewer 数据源）。"""
-    if not hasattr(agent, "astream_events"):
-        return await agent.ainvoke(payload, config=config)
+# ==================== 任务图节点 ====================
+# 解释器（纯逻辑）在 artgraph.py；这里是它的 IO 落点。产物经 artifacts 表流转。
 
-    async for ev in agent.astream_events(payload, config=config, version="v2"):
-        node = (ev.get("metadata") or {}).get("langgraph_node", "")
-        name = ev.get("name", "")
-        kind, data = ev.get("event", ""), ev.get("data") or {}
-        if kind == "on_tool_start":
-            await runs.log_event(run_id, "tool_call",
-                                 {"node": node, "tool": name,
-                                  "args": _clip(data.get("input"))})
-        elif kind == "on_tool_end":
-            await runs.log_event(run_id, "tool_result",
-                                 {"node": node, "tool": name,
-                                  "output": _clip(data.get("output"))})
-        elif kind == "on_chat_model_end":
-            msg = data.get("output")
-            content = getattr(msg, "content", "") if msg is not None else ""
-            if content:
-                await runs.log_event(run_id, "thought",
-                                     {"node": node, "content": _clip(content)})
-
-    snap = await agent.aget_state(config)
-    return {"messages": (snap.values.get("messages") if snap else []) or []}
-
-
-def _clip(value: Any, limit: int = 2000) -> str:
-    text = value if isinstance(value, str) else repr(value)
-    return text if len(text) <= limit else text[:limit] + "…[截断]"
-
-
-def _extract_final_text(result: dict) -> str:
-    messages = result.get("messages") or []
-    if not messages:
-        return ""
-    last = messages[-1]
-    content = getattr(last, "content", None) or last.get("content", "")
-    return content if isinstance(content, str) else str(content)
-
-
-# ==================== 资产化任务图 activities ====================
-# 解释器（纯逻辑）在 artgraph.py；这里是它的全部 IO 落点。
-# 节点产物经 artifacts 表流转；执行细节落 run_events 台账（Viewer 可见）。
-
-# code 节点的确定性函数注册表：内核代码登记（要 code review 的逻辑本就该在代码里），
-# 域包/任务定义只引用名字。用法：@code_node("inspection.collect_scope")
-CODE_NODES: dict[str, Callable[..., Any]] = {}
+# code 节点的确定性函数：在内核代码里登记（@code_node("名字")），任务定义只引用名字
+CODE_NODES: dict[str, Callable[[dict], Any]] = {}
 
 
 def code_node(name: str):
-    def deco(fn):
+    def register(fn):
         CODE_NODES[name] = fn
         return fn
-    return deco
-
-
-def _summarize(content: Any, limit: int = 500) -> str:
-    text = content if isinstance(content, str) else json.dumps(
-        content, ensure_ascii=False, default=str)
-    return text if len(text) <= limit else text[:limit] + "…[截断，完整内容用 read_artifact 读取]"
+    return register
 
 
 @activity.defn
-async def art_materialize(raw: dict, name: str, node_def: dict,
-                          payload: dict) -> dict:
-    """物化一个产物节点：输入指纹未变直接复用旧产物，否则按类型执行。
-
-    payload: {"deps": {名: 内容}} 或 map 扇出时的 {"item", "index", "deps"}。
-    """
+async def art_materialize(raw: dict, name: str, node: dict, payload: dict) -> dict:
+    """物化一个节点：输入指纹没变就复用旧产物，否则按节点类型执行。"""
     d = _d()
     spec = RunSpec.from_dict(raw)
-    t_env = spec.effective_env(d.settings.env)  # 产物复用按目标环境分区
-    hash_ = artifacts_store.input_hash(
-        {"name": name, "node": node_def}, payload)
-
-    reused = await artifacts_store.find_reusable(
-        spec.task_type, name, hash_, prefer_run=spec.run_id,
-        target_env=t_env)
+    fingerprint = artifacts_store.input_hash({"name": name, "node": node}, payload)
+    reused = await artifacts_store.find_reusable(spec.task, name, fingerprint, prefer_run=spec.run_id, env=spec.env)
     if reused is not None:
-        await artifacts_store.put(spec.run_id, spec.task_type, name,
-                                  reused["content"], hash_, status="reused",
-                                  target_env=t_env)
-        await runs.log_event(spec.run_id, "note",
-                             {"stage": "artifact", "node": name,
-                              "status": "reused", "reason": "输入指纹未变"})
-        return {"content": reused["content"], "reused": True}
+        await artifacts_store.put(spec.run_id, spec.task, name, reused["content"], fingerprint, status="reused", env=spec.env)
+        await runs.log_event(spec.run_id, "artifact", {"node": name, "status": "reused", "content": "输入未变，复用上次产物"})
+        return {"content": reused["content"]}
 
-    await runs.log_event(spec.run_id, "note",
-                         {"stage": "artifact", "node": name, "status": "start"})
-    content = await _execute_node(d, spec, name, node_def, payload)
-    await artifacts_store.put(spec.run_id, spec.task_type, name, content, hash_,
-                              target_env=t_env)
-    await runs.log_event(spec.run_id, "note",
-                         {"stage": "artifact", "node": name,
-                          "status": "materialized",
-                          "content": _summarize(content)})
-    return {"content": content, "reused": False}
+    await runs.log_event(spec.run_id, "artifact", {"node": name, "status": "running"})
+    try:
+        content = await _heartbeating(_execute_node(d, spec, name, NodeDef.model_validate(node), payload))
+    except Exception as e:
+        await artifacts_store.mark(spec.run_id, spec.task, name, "failed", env=spec.env)
+        await runs.log_event(spec.run_id, "artifact", {"node": name, "status": "failed", "content": str(e)[:1000]})
+        raise
+    await artifacts_store.put(spec.run_id, spec.task, name, content, fingerprint, env=spec.env)
+    await runs.log_event(spec.run_id, "artifact", {"node": name, "status": "materialized", "content": _summary(content)})
+    return {"content": content}
 
 
-async def _execute_node(d: Deps, spec: RunSpec, name: str, node_def: dict,
-                        payload: dict) -> Any:
-    deps = payload.get("deps") or {}
-    if node_def.get("code"):
-        fn = CODE_NODES.get(node_def["code"])
+@activity.defn
+async def art_gate(raw: dict, name: str, when: str) -> bool:
+    """闸门节点：条件命中后等人放行。拒绝或超时 = 节点跳过。"""
+    d = _d()
+    spec = RunSpec.from_dict(raw)
+    with run_scope.bind(await _scope(d, spec, [])):
+        try:
+            await d.gate.hold(kind="artifact", title=f"任务图节点 {name} · {spec.task}",
+                              detail=f"条件 {when} 已命中，放行后物化节点 {name}", payload={"node": name})
+            return True
+        except ApprovalRejected:
+            await artifacts_store.mark(spec.run_id, spec.task, name, "rejected", env=spec.env)
+            await runs.log_event(spec.run_id, "artifact", {"node": name, "status": "rejected"})
+            return False
+
+
+@activity.defn
+async def art_mark(raw: dict, name: str, status: str) -> None:
+    spec = RunSpec.from_dict(raw)
+    await artifacts_store.mark(spec.run_id, spec.task, name, status, env=spec.env)
+    await runs.log_event(spec.run_id, "artifact", {"node": name, "status": status})
+
+
+async def _execute_node(d: Deps, spec: RunSpec, name: str, node: NodeDef, payload: dict) -> Any:
+    deps_text = "\n".join(f"- {k}: {_summary(v)}" for k, v in (payload.get("deps") or {}).items()) or "（无）"
+    if node.code:
+        fn = CODE_NODES.get(node.code)
         if fn is None:
-            raise ValueError(f"code 节点 {node_def['code']} 未在 CODE_NODES 注册")
+            raise ApplicationError(f"code 节点 {node.code} 没有在内核登记", type="Rejected", non_retryable=True)
         result = fn(payload)
-        return await result if hasattr(result, "__await__") else result
+        return await result if asyncio.iscoroutine(result) else result
 
-    if node_def.get("route"):
-        route = node_def["route"]
-        choices = route["choices"]
-        deps_text = "\n".join(f"- {k}: {_summarize(v)}" for k, v in deps.items())
+    if node.route:
+        choices = node.route["choices"]
         resp = await d.model_pool.chat([
-            {"role": "system",
-             "content": f"你是分诊器（{route.get('by', 'router')}）。"
-                        f"只能回复以下枚举之一，不要任何其他字符：{choices}"},
-            {"role": "user",
-             "content": f"任务：{spec.task_type}\n输入：{_summarize(spec.input)}\n"
-                        f"依赖产物：\n{deps_text}"}])
+            {"role": "system", "content": f"你是分诊器。只能回复以下取值之一，不要任何其他字符：{choices}"},
+            {"role": "user", "content": f"任务：{spec.task}\n输入：{_summary(spec.input)}\n依赖产物：\n{deps_text}"}])
         choice = (resp.choices[0].message.content or "").strip().strip('"')
         if choice not in choices:
-            raise ValueError(f"route 节点 {name} 返回枚举外取值：{choice!r}")
+            raise ValueError(f"route 节点 {name} 返回了取值范围外的结果：{choice!r}")
         return choice
 
-    # agent 节点：角色 + 契约 + 依赖产物清单（大产物由 agent 用工具按需读）
-    agent_cfg = node_def["agent"]
-    role_name = agent_cfg["role"]
-    deps_text = "\n".join(f"- {k}: {_summarize(v)}" for k, v in deps.items()) or "（无）"
+    role, versions = await d.registry.resolved_role(node.agent["role"])
+    agent = await d.factory.agent_for(role, versions)
     item = payload.get("item")
-    question = (
-        f"你是 {role_name}。本次是资产图任务的节点 {name}。\n"
-        f"产出契约：{agent_cfg.get('contract', '按角色职责产出')}\n"
-        f"任务输入：{_summarize(spec.input)}\n"
-        + (f"本次处理对象（第 {payload.get('index', 0) + 1} 项）："
-           f"{_summarize(item, 1000)}\n" if payload.get("item") is not None else "")
-        + f"依赖产物（摘要；完整内容用 read_artifact 工具按名字读取）：\n{deps_text}\n"
-          f"要求：只输出本节点产物的 JSON 内容本身，不要解释。")
-    agent = await d.engine.agent()
-    config = {"configurable": {"thread_id": f"{spec.run_id}:{name}"}}
-    result = await _invoke_streaming(agent, {"messages": [
-        {"role": "user", "content": question}]}, config, spec.run_id)
-    text = _extract_final_text(result)
-    try:  # 契约产物尽量结构化；模型多说话就保留原文
-        return json.loads(text.strip().removeprefix("```json")
-                          .removesuffix("```").strip())
-    except (json.JSONDecodeError, AttributeError):
+    prompt = (f"本次是任务图 {spec.task} 的节点 {name}。\n"
+              f"产出要求：{node.agent.get('contract') or '按角色职责产出'}\n"
+              f"任务输入：{_summary(spec.input)}\n"
+              + (f"本次处理对象（第 {payload.get('index', 0) + 1} 项）：{_summary(item, 1000)}\n" if item is not None else "")
+              + f"上游产物（摘要；完整内容用 read_artifact 按名字读取）：\n{deps_text}\n"
+              "只输出本节点产物（JSON 优先），不要解释。")
+    with run_scope.bind(await _scope(d, spec, role.tools)):
+        text = await agent_factory.invoke(agent, spec.run_id, thread_id=f"{spec.run_id}:{name}:{payload.get('index', 0)}",
+                                          prompt=prompt)
+    try:
+        return json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())
+    except json.JSONDecodeError:
         return text
 
 
-@activity.defn
-async def art_gate(run_id: str, node: str, summary: str) -> bool:
-    """产物闸门：人工审批通过才物化。拒绝/超时 = 节点记 rejected（跳过）。"""
-    from ..agent import approvals
-    d = _d()
-    approval_id = await approvals.request_approval(
-        run_id, f"产物门禁｜节点 {node}\n{summary}")
-    if d.notifier is not None:
-        await d.notifier.send_action_card(
-            "产物待审批", f"run `{run_id}` 的节点 `{node}`：\n{summary}",
-            "去审批", f"{d.settings.viewer_base_url}/approvals/{run_id}")
-    try:
-        await approvals.wait_decision(approval_id)
-        return True
-    except Exception:  # 拒绝或超时：安全侧默认，不物化
-        spec_task, t_env = "", ""
-        run = await runs.get(run_id)
-        if run:
-            spec_task = run["task_type"]
-            t_env = run.get("target_env") or ""
-        await artifacts_store.mark(run_id, spec_task, node, "rejected",
-                                   target_env=t_env)
-        return False
+# ==================== 内建任务 ====================
 
 
-@activity.defn
-async def art_mark(run_id: str, task_type: str, name: str, status: str,
-                   target_env: str = "") -> None:
-    """记录节点跳过/拒绝状态（Viewer 血缘图染色的数据源）。"""
-    await artifacts_store.mark(run_id, task_type, name, status,
-                               target_env=target_env)
-    await runs.log_event(run_id, "note",
-                         {"stage": "artifact", "node": name, "status": status})
-
-
-# ==================== 内建任务处理器（#5 园丁等的口子） ====================
-
-
-@activity.defn
-async def run_builtin_task(raw: dict) -> dict:
-    """内建任务：不过模型的确定性维护作业（如 memory-gardener）。
-
-    单 activity 完成 建行→执行→落终态：维护作业允许整体重试，
-    无需拆步骤。新增内建任务 = 在 HANDLERS 登记一个 async 函数。
-    """
-    d = _d()
-    spec = RunSpec.from_dict(raw)
-    if not spec.run_id:
-        spec.run_id = uuid.uuid4().hex[:16]
-        spec.session_id = spec.run_id
-        await runs.create(spec.run_id, spec.task_type, spec.role,
-                          domain=spec.domain,
-                          trigger_source=spec.trigger or "schedule", caller="",
-                          input_data=spec.input, session_id=spec.session_id)
-    await runs.set_status(spec.run_id, "running")
-    task_version = await definitions_store.active_version(
-        "task", d.settings.env, spec.task_type)
-    await runs.set_def_versions(spec.run_id, task_version, None)
-
-    handler = HANDLERS.get(spec.handler or "")
-    if handler is None:
-        raise ValueError(f"未知内建任务处理器：{spec.handler}")
-    try:
-        output = await handler(d)
-    except Exception as e:
-        await runs.set_status(spec.run_id, "failed",
-                              output={"error": str(e)[:4000]})
-        raise
-    await runs.set_status(spec.run_id, "success", output=output)
-    return output
-
-
-async def _gardener_handler(d: Deps) -> dict:
-    """园丁按目标环境逐个巡检：记忆分区与域连接信息都按目标环境解析。"""
-    from ..memory.gardener import run_gardener
+async def _gardener(d: Deps, spec: RunSpec) -> dict:
+    services = await d.registry.services()
     report = {}
-    for env in d.settings.target_envs or [d.settings.env]:
-        doms = {name: dom.for_env(env)
-                for name, dom in d.settings.domains.items()}
-        report[env] = await run_gardener(env, doms)
+    for env in (await d.registry.envs()).names:
+        report[env] = await run_gardener(env, {s.name: s.spec.view(s.name, env).code_paths for s in services})
     return report
 
 
-HANDLERS: dict[str, Callable[[Deps], Awaitable[dict]]] = {
-    "memory-gardener": _gardener_handler,
+BUILTINS: dict[str, Callable[[Deps, RunSpec], Awaitable[dict]]] = {
+    "memory-gardener": _gardener,
 }
+
+
+# ==================== 小工具 ====================
+
+_STATUS_TEXT = {"success": "成功", "failed": "失败", "cancelled": "已取消"}
+
+
+async def _view(d: Deps, spec: RunSpec):
+    if not spec.service:
+        return None
+    s = await d.registry.service(spec.service)
+    return s.spec.view(spec.service, spec.env) if s else None
+
+
+async def _scope(d: Deps, spec: RunSpec, tools: list[str]) -> run_scope.RunScope:
+    env = await d.registry.env(spec.env)
+    return run_scope.RunScope(
+        run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
+        service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
+        notify_channel=(spec.deliver or {}).get("channel"))
+
+
+async def _cancelled(run_id: str) -> bool:
+    run = await runs.get(run_id)
+    return run is None or run["status"] == "cancelled"
+
+
+async def _announce(d: Deps, spec: RunSpec, event: str, title: str, text: str) -> None:
+    await d.notifier.emit(event, Message(
+        title=f"{title}：{spec.task}", text=f"{spec.service or '平台'} · {spec.env} · {spec.trigger.type}\n\n{text}",
+        link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"),
+        service=spec.service, env=spec.env, task=spec.task, trigger=spec.trigger.type)
+
+
+async def _heartbeating(awaitable, every_s: float = 30.0):
+    """慢步骤（模型单次调用可能超过 heartbeat 超时）期间定期报活；取消照常传播。"""
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=every_s)
+        if done:
+            return task.result()
+        activity.heartbeat("running")
+
+
+def _methods_block(methods: list[dict], limit: int = 4000) -> str:
+    """方法注入块：文本方法给全文；文件方法只给路径与清单，由 agent 直接读取/执行。"""
+    lines = ["[方法——过去运行沉淀的做法；文件类直接用路径读取或执行，不要重写；过时了用 save_asset 更新]"]
+    for a in methods:
+        scope = f"任务 {a['task']}" if a["task"] else "服务通用"
+        head = f"### {a['kind']}:{a['name']}（{scope}，已复用 {a['use_count']} 次）\n{a['summary']}"
+        if a.get("path"):
+            files = assets_store.list_files(a["path"])
+            listing = "、".join(f["name"] for f in files[:8]) + (f" …共 {len(files)} 个" if len(files) > 8 else "")
+            lines.append(f"{head}\n路径：{a['path']}\n文件：{listing}" + (f"\n说明：{a['content']}" if a["content"] else ""))
+        else:
+            body = a["content"] if len(a["content"]) <= limit else a["content"][:limit] + "\n…[已截断]"
+            lines.append(f"{head}\n{body}")
+    return "\n\n".join(lines)
+
+
+def _summary(content: Any, limit: int = 500) -> str:
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+    return text if len(text) <= limit else text[:limit] + "…[截断]"
+
+
+def _node_kind(node: NodeDef) -> str:
+    if node.map:
+        return "map"
+    return "code" if node.code else "route" if node.route else "agent"

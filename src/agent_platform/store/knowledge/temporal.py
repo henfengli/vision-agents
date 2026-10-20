@@ -18,15 +18,15 @@ async def supersede_by_runs(env: str, run_ids: list[str],
         return cur.rowcount
 
 
-async def supersede_keys(env: str, domain: str, keys: list[str],
+async def supersede_keys(env: str, service: str, keys: list[str],
                          superseded_by: str) -> int:
     if not keys:
         return 0
     async with pool().connection() as conn:
         cur = await conn.execute(
             "UPDATE knowledge SET valid_to=now(), superseded_by=%s"
-            " WHERE env=%s AND domain=%s AND key = ANY(%s) AND valid_to IS NULL",
-            (superseded_by, env, domain, keys))
+            " WHERE env=%s AND service=%s AND key = ANY(%s) AND valid_to IS NULL",
+            (superseded_by, env, service, keys))
         return cur.rowcount
 
 

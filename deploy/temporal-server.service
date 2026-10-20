@@ -11,7 +11,7 @@ Group=agent-svc
 # 不依赖 Postgres；生产建议改为集群模式 + Postgres 持久层（见 README 部署节）
 ExecStart=/usr/local/bin/temporal server start-dev \
   --db-filename /var/lib/temporal/history.db \
-  --ip 127.0.0.1 --port 7233 --ui-port 8080
+  --ip 127.0.0.1 --port 7233 --ui-port 8233
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

@@ -1,84 +1,70 @@
-"""运行前召回：知识库 + 案例库命中结果注入角色 prompt。
+"""运行前召回：把过去沉淀的东西拼成一段文字，放进本次运行的提示里。
 
-知识条目带 code_ref：召回时校验其 commit 与当前代码是否一致，
-不一致即弃用（标记 expired），避免拿过期口径答问题。
+自上而下三层：
+1. 前序会话交接摘要——同一类事件的上一个会话结论（会话名形如 dagster:<asset>:<错误类>:<日期>，
+   去掉最后一段就是"同一类"）
+2. 历史知识——混合检索（pg_trgm + pgvector，RRF 融合，反馈加权）；code_ref 对不上当前代码的
+   当场标为过期、不再使用；本任务谱系沉淀的排前面
+3. 同类案例——按报错指纹精确匹配
+
+命中的知识写 recall_hits（记忆页的"30 天命中"、零召回统计都来自它）。
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 
 from ..store import cases as cases_store
 from ..store import knowledge as knowledge_store
 
 
-def _task_lineage(task: str) -> set[str]:
-    """任务谱系链：'a:b:c' → {'a:b:c', 'a:b', 'a', ''}（含无归属的通用知识）。"""
-    chain = {""}
-    parts = task.split(":") if task else []
-    for i in range(1, len(parts) + 1):
-        chain.add(":".join(parts[:i]))
-    return chain
+@dataclass
+class Recalled:
+    text: str = ""
+    knowledge: list[dict] = field(default_factory=list)    # [{id, key, rank}]
+    case_id: int | None = None
 
 
-async def recall_block(env: str, domain: str | None, query: str,
-                       error_text: str | None = None,
-                       domain_code_paths: list[str] | None = None,
-                       embedder=None, session_id: str | None = None,
-                       run_id: str | None = None,
-                       task: str = "",
-                       source: str = "recall") -> str:
-    """拼召回文本块；无命中返回空串。
-
-    层次（自上而下）：前序 episode 交接摘要（同资产同故障类的最近摘要，连续性由记忆而非 thread 承载）
-    → 历史知识（混合检索 + commit 校验）→ 同类案例。
-
-    副作用：最终命中的知识条目写 recall_hits 埋点（记忆运营数据源）；
-    run_id 为空（页面试用）时 source 传 playground，不算真实使用。
-    """
+async def recall(*, env: str, service: str, task: str, query: str, error_text: str = "",
+                 code_paths: list[str], session_id: str | None, run_id: str | None,
+                 limit: int = 5, embedder=None, source: str = "recall") -> Recalled:
+    """source="playground" 表示控制台试检索，不计入命中统计。"""
     sections: list[str] = []
+    out = Recalled()
 
-    if session_id and ":" in session_id:
-        prefix = session_id.rsplit(":", 1)[0]  # 去掉 episode 段
-        summaries = await knowledge_store.latest_session_summaries(env, prefix)
+    if session_id and session_id.count(":") >= 2:
+        summaries = await knowledge_store.latest_session_summaries(env, session_id.rsplit(":", 1)[0])
         if summaries:
-            sections.append("[前序会话交接摘要]\n" + "\n\n".join(
-                s["content"] for s in summaries))
+            sections.append("[前序会话交接摘要]\n" + "\n\n".join(s["content"] for s in summaries))
 
-    if domain:
-        entries = await knowledge_store.search(env, domain, query, embedder=embedder)
+    if limit:
         fresh = []
-        for e in entries:
-            # is_entry_fresh 里跑 git subprocess，to_thread 避免阻塞事件循环
-            if await asyncio.to_thread(
-                    knowledge_store.is_entry_fresh, e["code_ref"],
-                    domain_code_paths or []):
+        for e in await knowledge_store.search(env, service, query, limit=limit, embedder=embedder):
+            if await asyncio.to_thread(knowledge_store.is_entry_fresh, e["code_ref"], code_paths):
                 fresh.append(e)
             else:
                 await knowledge_store.mark_expired(e["id"])
         if fresh:
-            # 任务谱系分区：本任务（及父任务链）沉淀的知识优先，无归属/
-            # 异谱系（兄弟子任务的特异性结论）排后并标来源任务——
-            # 通用任务总结的"某个具体对象"的知识不会抢先喂给别的子任务
-            lineage = _task_lineage(task)
-            same = [e for e in fresh if e.get("task", "") in lineage]
-            other = [e for e in fresh if e.get("task", "") not in lineage]
-            ordered = same + other
-            await knowledge_store.record_hits(env, domain, ordered,
-                                              run_id=run_id, source=source)
-            lines = ["[历史知识]"] + [
-                f"- {e['key']}: {e['content']}（来源 run {e['source_run'] or '未知'}"
-                + (f"，沉淀自任务 {e['task']}）" if e.get("task")
-                   and e["task"] not in lineage else "）")
-                for e in ordered]
+            base = task.split(":")[0]
+            mine = [e for e in fresh if e.get("task") in ("", task, base)]
+            others = [e for e in fresh if e not in mine]          # 兄弟子任务的结论：排后并标来源
+            ordered = mine + others
+            out.knowledge = [{"id": e["id"], "key": e["key"], "rank": i + 1} for i, e in enumerate(ordered)]
+            if run_id or source != "recall":
+                await knowledge_store.record_hits(env, service, ordered, run_id=run_id, source=source)
+            lines = ["[历史知识——过去运行沉淀，可能过时；与代码或数据矛盾时以实际为准]"]
+            for e in ordered:
+                origin = f"，沉淀自任务 {e['task']}" if e in others else ""
+                lines.append(f"- {e['key']}: {e['content']}（来源运行 {e['source_run'] or '人工录入'}{origin}）")
             sections.append("\n".join(lines))
 
     if error_text:
-        case = await cases_store.search_by_error(env, error_text)
+        case = await cases_store.search_by_error(env, service, error_text)
         if case:
-            sections.append(
-                "[同类案例]\n"
-                f"- {case['date'][:10]} 同类报错结论（{case['category']}，"
-                f"👍×{case['thumbs_up']}）：{case['conclusion']}")
+            out.case_id = case["id"]
+            sections.append(f"[同类案例]\n- {case['date'][:10]} 的同类报错结论（{case['category']}，"
+                            f"👍×{case['thumbs_up']}）：{case['conclusion']}")
 
-    return "\n\n".join(sections)
+    out.text = "\n\n".join(sections)
+    return out

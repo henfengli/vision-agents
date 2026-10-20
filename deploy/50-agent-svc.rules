@@ -1,0 +1,10 @@
+// /etc/polkit-1/rules.d/50-agent-svc.rules
+// 允许平台用户 agent-svc 启停 agent-svc@*.service（且只能是这些单元）。
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "agent-svc" &&
+        /^agent-svc@.+\.service$/.test(action.lookup("unit")) &&
+        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
+        return polkit.Result.YES;
+    }
+});

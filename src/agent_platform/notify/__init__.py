@@ -1,5 +1,6 @@
-"""通知层：钉钉单向中继（只发不收）。"""
+"""通知：按设置里的规则把平台事件发到钉钉 / Webhook 渠道（router），钉钉中继封装（dingtalk）。"""
 
 from .dingtalk import DingTalkRelay, RelayError
+from .router import Message, Notifier
 
-__all__ = ["DingTalkRelay", "RelayError"]
+__all__ = ["DingTalkRelay", "Message", "Notifier", "RelayError"]

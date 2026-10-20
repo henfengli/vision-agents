@@ -1,0 +1,23 @@
+title: Dagster 数据编排
+description: 数仓 ETL 编排：ods → dwd → ads 三层资产，按天物化
+root: /srv/dagster
+code_paths: [/srv/dagster]
+hosts: [10.0.0.11]
+configs:
+  - {canonical: /srv/dagster/dagster.yaml, template: "/srv/dagster/conf/dagster.{env}.yaml"}
+  - {canonical: /srv/dagster/workspace.yaml, template: "/srv/dagster/conf/workspace.{env}.yaml"}
+processes:
+  webserver:
+    cmd: [/srv/dagster/venv/bin/dagster-webserver, -w, workspace.yaml, -p, "{port}"]
+    workdir: /srv/dagster
+    ports: {prod: 3000, test: 3001, dev: 3002}
+  daemon:
+    cmd: [/srv/dagster/venv/bin/dagster-daemon, run, -w, workspace.yaml]
+    workdir: /srv/dagster
+envs:
+  prod: {hosts: [10.0.0.11, 10.0.0.12], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@prod-db:5432/dagster"}
+  test: {hosts: [10.0.1.11], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@test-db:5432/dagster"}
+profile:
+  conventions: 资产按 dt 分区（yyyy-mm-dd），T+1 物化；ads 层依赖 dwd 全部完成
+  no_go: prod 不手工触发 backfill，需走变更单
+  pitfalls: 上游 ods_order 延迟到 03:00 后会导致 dwd_trade_order 级联失败，先看上游

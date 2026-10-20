@@ -25,42 +25,34 @@ def fingerprint(error_text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:16]
 
 
-async def add(env: str, domain: str | None, error_text: str, category: str,
+async def add(env: str, service: str | None, error_text: str, category: str,
               conclusion: str, source_run: str) -> None:
-    """同指纹已有案例则覆盖结论并刷新时间，不重复建行。"""
+    """同 (环境, 服务, 指纹) 已有案例则覆盖结论并刷新时间，不重复建行。"""
+    fp = fingerprint(error_text)
+    async with pool().connection() as conn:
+        await conn.execute(
+            "INSERT INTO cases (env, service, fingerprint, category, conclusion, source_run)"
+            " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (env, service, fingerprint) DO UPDATE SET"
+            " category=EXCLUDED.category, conclusion=EXCLUDED.conclusion, source_run=EXCLUDED.source_run,"
+            " valid_to=NULL, superseded_by=NULL, created_at=now()",
+            (env, service or "", fp, category, conclusion, source_run))
+
+
+async def search_by_error(env: str, service: str | None, error_text: str) -> dict | None:
     fp = fingerprint(error_text)
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id FROM cases WHERE env=%s AND fingerprint=%s", (env, fp))
-        row = await cur.fetchone()
-        if row:
-            await conn.execute(
-                "UPDATE cases SET conclusion=%s, source_run=%s, created_at=now()"
-                " WHERE id=%s", (conclusion, source_run, row[0]))
-        else:
-            await conn.execute(
-                "INSERT INTO cases (env, domain, fingerprint, category, conclusion, source_run)"
-                " VALUES (%s,%s,%s,%s,%s,%s)",
-                (env, domain, fp, category, conclusion, source_run))
-
-
-async def search_by_error(env: str, error_text: str) -> dict | None:
-    fp = fingerprint(error_text)
-    async with pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT category, conclusion, thumbs_up, thumbs_down, created_at"
-            " FROM cases WHERE env=%s AND fingerprint=%s AND valid_to IS NULL",
-            (env, fp))
+            "SELECT id, category, conclusion, thumbs_up, thumbs_down, created_at"
+            " FROM cases WHERE env=%s AND service=%s AND fingerprint=%s AND valid_to IS NULL",
+            (env, service or "", fp))
         row = await cur.fetchone()
     if not row:
         return None
-    return {"category": row[0], "conclusion": row[1],
-            "thumbs_up": row[2], "thumbs_down": row[3],
-            "date": row[4].isoformat()}
+    return {"id": row[0], "category": row[1], "conclusion": row[2],
+            "thumbs_up": row[3], "thumbs_down": row[4], "date": row[5].isoformat()}
 
 
-async def supersede_by_runs(env: str, run_ids: list[str],
-                            superseded_by: str) -> int:
+async def supersede_by_runs(env: str, run_ids: list[str], superseded_by: str) -> int:
     """事实时序化：把若干 run 沉淀的案例标记为被取代（软过期）。"""
     if not run_ids:
         return 0
@@ -72,25 +64,26 @@ async def supersede_by_runs(env: str, run_ids: list[str],
         return cur.rowcount
 
 
-async def list_all(env: str, domain: str | None = None,
-                   limit: int = 200) -> list[dict]:
-    """记忆页案例 tab：全量列出（含失效，状态列展示）。"""
-    where = "WHERE env=%s"
-    params: list = [env]
-    if domain:
-        where += " AND domain=%s"
-        params.append(domain)
-    params.append(limit)
+async def list_entries(env: str | None = None, service: str | None = None, limit: int = 300) -> list[dict]:
+    conds, params = [], []
+    if env:
+        conds.append("env=%s"); params.append(env)
+    if service:
+        conds.append("service=%s"); params.append(service)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, fingerprint, category, conclusion, source_run,"
-            " thumbs_up, thumbs_down, valid_to IS NOT NULL, superseded_by,"
-            " created_at FROM cases " + where +
-            " ORDER BY created_at DESC LIMIT %s", tuple(params))
+            "SELECT id, service, env, fingerprint, category, conclusion, source_run, thumbs_up, thumbs_down,"
+            " valid_to IS NOT NULL, created_at FROM cases" + where + " ORDER BY created_at DESC LIMIT %s",
+            (*params, limit))
         rows = await cur.fetchall()
-    return [{"id": r[0], "domain": r[1], "fingerprint": r[2],
-             "category": r[3], "conclusion": r[4], "source_run": r[5],
-             "thumbs_up": r[6], "thumbs_down": r[7], "superseded": r[8],
-             "superseded_by": r[9],
-             "created_at": r[10].isoformat() if r[10] else None}
-            for r in rows]
+    return [{"id": r[0], "service": r[1] or None, "env": r[2], "fingerprint": r[3], "category": r[4],
+             "conclusion": r[5], "source_run": r[6], "thumbs_up": r[7], "thumbs_down": r[8],
+             "status": "superseded" if r[9] else "active", "updated_at": r[10].isoformat()} for r in rows]
+
+
+async def expire(case_id: int) -> bool:
+    """人工作废一条案例（不再被召回）。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute("UPDATE cases SET valid_to=COALESCE(valid_to, now()) WHERE id=%s", (case_id,))
+        return bool(cur.rowcount)

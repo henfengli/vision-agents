@@ -1,400 +1,389 @@
-"""runs / run_events：执行台账。
+"""runs / run_events：运行台账。
 
-session_id 是会话唯一标识（LangGraph thread 是它的实现细节，不出 engine 层）。
-run 状态机：queued → running → success / failed。
-
-caller 约定（粒度总则见设计文档 §3.0）：caller 记「身份」、trigger_source
-记「来源通道」，两列各管一件事。caller 永不为空——调用方没给身份时在本
-模块漏斗里回退为 trigger_source（调度跑的 caller 就是 "schedule"），
-审计查询不需要 COALESCE。有身份时调用方给纯身份（服务名/用户名），
-不要在 caller 里重复来源前缀。
+状态机：queued →（awaiting_approval →）running → success | failed | cancelled。
+started_at 在第一次进入 running 时落，finished_at 在进入终态时落——耗时、
+时间线偏移、SLA 统计都从这两列算，不从事件里猜。
+caller 永不为空：调用方没给身份时回退为触发类型（定时跑的 caller 就是 schedule）。
 """
+
 from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 
 from . import db
 
+_LIST_COLS = ("run_id, session_id, task, role, service, env, status, resolution, trigger_type, trigger_id,"
+              " trigger_source, caller, summary, tokens, duration_ms, created_at, finished_at")
 
-async def create(run_id: str, task_type: str, role: str, domain: str | None,
-                 trigger_source: str, caller: str, input_data: dict,
-                 dedup_key: str = "", session_id: str | None = None,
-                 target_env: str = "") -> None:
-    # 唯一建行漏斗：身份缺失回退来源通道，保证 caller 非空
-    caller = (caller or "").strip() or trigger_source
+
+def _iso(v: datetime | None) -> str | None:
+    return v.isoformat() if v else None
+
+
+def _list_row(r) -> dict:
+    return {
+        "run_id": r[0], "session_id": r[1], "task": r[2], "role": r[3], "service": r[4], "env": r[5],
+        "status": r[6], "resolution": r[7],
+        "trigger": {"type": r[8], "id": r[9], "source": r[10], "caller": r[11]},
+        "summary": r[12], "tokens": r[13], "duration_ms": r[14],
+        "created_at": r[15].isoformat(), "finished_at": _iso(r[16]),
+    }
+
+
+def _row(cur, row) -> dict:
+    d = {c.name: v for c, v in zip(cur.description, row)}
+    for k in ("created_at", "started_at", "finished_at"):
+        d[k] = _iso(d.get(k))
+    d["trigger"] = {"type": d.pop("trigger_type"), "id": d.pop("trigger_id"), "source": d.pop("trigger_source"), "caller": d["caller"]}
+    return d
+
+
+async def create(*, run_id: str, session_id: str, task: str, role: str | None, service: str | None, env: str,
+                 trigger_type: str, trigger_id: str | None, trigger_source: str | None, caller: str | None,
+                 summary: str, input_data: dict, memory: dict | None = None, status: str = "queued",
+                 dedup_key: str | None = None, idempotency_key: str | None = None,
+                 output: dict | None = None, resolution: str | None = None) -> None:
+    """output + resolution 只在规则先行命中时预先给出（结论在提交时就有了）。"""
     async with db.pool().connection() as conn:
         await conn.execute(
-            "INSERT INTO runs (run_id, session_id, task_type, role, domain,"
-            " target_env, trigger_source, caller, input, status, dedup_key)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)",
-            (run_id, session_id or run_id, task_type, role, domain, target_env,
-             trigger_source, caller, json.dumps(input_data), dedup_key))
+            "INSERT INTO runs (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,"
+            " caller, summary, input, memory, status, dedup_key, idempotency_key, output, resolution)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,
+             (caller or "").strip() or trigger_type, summary[:300], json.dumps(input_data, ensure_ascii=False, default=str),
+             json.dumps(memory or {}), status, dedup_key or None, idempotency_key or None,
+             json.dumps(output, ensure_ascii=False) if output is not None else None, resolution))
 
 
 async def get(run_id: str) -> dict | None:
     async with db.pool().connection() as conn:
-        cur = await conn.execute("SELECT * FROM runs WHERE run_id = %s", (run_id,))
+        cur = await conn.execute("SELECT * FROM runs WHERE run_id=%s", (run_id,))
         row = await cur.fetchone()
-    return _row_to_dict(cur, row) if row else None
+    return _row(cur, row) if row else None
 
 
-async def set_status(run_id: str, status: str, output: dict | None = None,
-                     tokens: int = 0, duration_ms: int = 0) -> None:
+async def set_status(run_id: str, status: str, *, output: dict | None = None, resolution: str | None = None,
+                     error_code: str | None = None, tokens: int | None = None) -> None:
+    """改状态；首次 running 落 started_at，终态落 finished_at 与耗时。"""
+    terminal = status in ("success", "failed", "cancelled")
     async with db.pool().connection() as conn:
         await conn.execute(
-            "UPDATE runs SET status=%s, output=%s, tokens=%s, duration_ms=%s"
+            "UPDATE runs SET status=%s,"
+            " output=COALESCE(%s::jsonb, output), resolution=COALESCE(%s, resolution),"
+            " error_code=COALESCE(%s, error_code), tokens=COALESCE(%s, tokens),"
+            " started_at=CASE WHEN %s='running' AND started_at IS NULL THEN now() ELSE started_at END,"
+            " finished_at=CASE WHEN %s THEN now() ELSE finished_at END,"
+            " duration_ms=CASE WHEN %s THEN (EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
+            "   ELSE duration_ms END"
             " WHERE run_id=%s",
-            (status, json.dumps(output or {}), tokens, duration_ms, run_id))
+            (status, json.dumps(output, ensure_ascii=False, default=str) if output is not None else None,
+             resolution, error_code, tokens, status, terminal, terminal, run_id))
 
 
-async def find_by_dedup(dedup_key: str, window_s: int) -> dict | None:
-    """时间窗内同 dedup_key 的成功 run（重复触发直接去重）。"""
-    if not dedup_key:
-        return None
+async def set_versions(run_id: str, task_version: int | None, role_version: int | None) -> None:
+    async with db.pool().connection() as conn:
+        await conn.execute("UPDATE runs SET task_version=%s, role_version=%s WHERE run_id=%s",
+                           (task_version, role_version, run_id))
+
+
+async def add_tokens(run_id: str, n: int) -> None:
+    if n:
+        async with db.pool().connection() as conn:
+            await conn.execute("UPDATE runs SET tokens=COALESCE(tokens,0)+%s WHERE run_id=%s", (n, run_id))
+
+
+async def find_dedup(dedup_key: str, window_s: int) -> dict | None:
+    """时间窗内同键的成功运行（任务声明的去重）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT * FROM runs WHERE dedup_key = %s AND status = 'success'"
-            " AND created_at > now() - make_interval(secs => %s)"
-            " ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
+            "SELECT * FROM runs WHERE dedup_key=%s AND status='success'"
+            " AND created_at > now() - make_interval(secs => %s) ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
         row = await cur.fetchone()
-    return _row_to_dict(cur, row) if row else None
+    return _row(cur, row) if row else None
 
 
-_IDEM_PREFIX = "idem:"
-_IDEM_WINDOW_S = 86400  # 幂等键 24h 有效（Stripe 同款窗口）
-
-
-def idempotency_dedup_key(key: str) -> str:
-    """调用方幂等键 → dedup_key 列的存储形态（复用 idx_runs_dedup 索引）。"""
-    return f"{_IDEM_PREFIX}{key}"
-
-
-async def find_by_idempotency(key: str) -> dict | None:
-    """幂等键查重：命中排队/运行中/成功的 run。
-
-    与任务级 dedup 的差异：提交重试场景要拦住"第一个 run 还在跑"的
-    重复提交，所以非终态也命中；失败的 run 允许同键重提（修正后重试是
-    合理用法，Stripe 幂等键同款语义）。
-    """
+async def find_idempotent(key: str) -> dict | None:
+    """调用方幂等键：24h 内非失败的运行都命中（排队/运行中也算），失败允许同键重提。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT * FROM runs WHERE dedup_key = %s"
-            " AND status IN ('queued','running','success')"
-            " AND created_at > now() - make_interval(secs => %s)"
-            " ORDER BY created_at DESC LIMIT 1",
-            (idempotency_dedup_key(key), _IDEM_WINDOW_S))
-        row = await cur.fetchone()
-    return _row_to_dict(cur, row) if row else None
-
-
-async def list_by_session(session_id: str, exclude: str = "",
-                          limit: int = 50) -> list[dict]:
-    """同会话的全部 run（按时间正序）：run 详情「会话链/故障周期」用。"""
-    async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            f"SELECT {_LIST_COLS} FROM runs WHERE session_id = %s"
-            " AND run_id <> %s ORDER BY created_at LIMIT %s",
-            (session_id, exclude, limit))
-        rows = await cur.fetchall()
-    return [_list_row(r) for r in rows]
-
-
-async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
-    """会话最近一个 run 的概要（correction 继承 task_type/role/domain/env 用）。"""
-    async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT run_id, task_type, role, domain, input, target_env FROM runs"
-            " WHERE session_id = %s AND run_id <> %s"
-            " ORDER BY created_at DESC LIMIT 1", (session_id, exclude))
+            "SELECT * FROM runs WHERE idempotency_key=%s AND created_at > now() - interval '24 hours'", (key,))
         row = await cur.fetchone()
     if not row:
         return None
-    return {"run_id": row[0], "task_type": row[1], "role": row[2],
-            "domain": row[3], "input": row[4], "target_env": row[5]}
+    r = _row(cur, row)
+    if r["status"] == "failed":
+        async with db.pool().connection() as conn:   # 释放唯一键，允许重提
+            await conn.execute("UPDATE runs SET idempotency_key=NULL WHERE run_id=%s", (r["run_id"],))
+        return None
+    return r
 
 
-# 允许排序的列 → SQL 表达式（duration/tokens 可能 NULL，COALESCE 垫底）
-_SORTS = {"created_at": "created_at", "duration_ms": "COALESCE(duration_ms,-1)",
-          "tokens": "COALESCE(tokens,-1)"}
-
-_LIST_COLS = ("run_id, session_id, task_type, role, domain, target_env,"
-              " status, trigger_source, caller, tokens, duration_ms,"
-              " created_at")
-
-
-async def list_filtered(*, target_env: str | None = None,
-                        status: str | None = None, domain: str | None = None,
-                        task: str | None = None, source: str | None = None,
-                        session: str | None = None,
-                        q: str | None = None, hours: int | None = None,
-                        sort: str = "created_at", asc: bool = False,
-                        after: str | None = None, before: str | None = None,
-                        limit: int = 50) -> tuple[list[dict], int, str | None,
-                                                  str | None]:
-    """Runs 列表页查询：显式过滤 + keyset 双向翻页 + 同条件总数。
-
-    返回 (rows, total, next_cursor, prev_cursor)。keyset 而非 OFFSET：
-    runs 持续追加，OFFSET 深翻页会漏/重行。光标 = 排序值|created_at|run_id
-    （后两者决胜保证稳定序），after=下一页 / before=上一页。
-    """
-    sortcol = _SORTS.get(sort, "created_at")
+async def list_filtered(*, status: str | None = None, env: str | None = None, service: str | None = None,
+                        task: str | None = None, trigger: str | None = None, caller: str | None = None,
+                        session: str | None = None, q: str | None = None, hours: int | None = None,
+                        cursor: str | None = None, limit: int = 30) -> dict:
+    """列表：平面过滤 + keyset 翻页（created_at, run_id 倒序）。cursor = "next:<ts>|<id>" 或 "prev:<ts>|<id>"。"""
     conds: list[str] = []
-    params: list = []
-    for clause, val in (("target_env=%s", target_env), ("status=%s", status),
-                        ("domain=%s", domain), ("task_type=%s", task),
-                        ("session_id=%s", session),
-                        ("trigger_source=%s", source)):
+    params: list[Any] = []
+    for clause, val in (("status=%s", status), ("env=%s", env), ("service=%s", service), ("trigger_type=%s", trigger),
+                        ("caller=%s", caller), ("session_id=%s", session)):
         if val:
             conds.append(clause)
             params.append(val)
+    if task:
+        conds.append("(task=%s OR task LIKE %s)")
+        params += [task, task + ":%"]
     if hours:
         conds.append("created_at > now() - make_interval(hours => %s)")
         params.append(hours)
     if q:
-        conds.append("(run_id ILIKE %s OR input->>'question' ILIKE %s)")
+        conds.append("(run_id LIKE %s OR summary ILIKE %s)")
         params += [q + "%", "%" + q + "%"]
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    limit = max(1, min(limit, 200))
+
+    page_conds, page_params, backwards = list(conds), list(params), False
+    if cursor:
+        direction, _, key = cursor.partition(":")
+        ts, _, rid = key.partition("|")
+        try:
+            datetime.fromisoformat(ts)
+        except ValueError:
+            raise ValueError("非法的分页游标") from None
+        backwards = direction == "prev"
+        page_conds.append(f"(created_at, run_id) {'>' if backwards else '<'} (%s::timestamptz, %s)")
+        page_params += [ts, rid]
+    pwhere = (" WHERE " + " AND ".join(page_conds)) if page_conds else ""
+    order = "ASC" if backwards else "DESC"
 
     async with db.pool().connection() as conn:
         cur = await conn.execute("SELECT count(*) FROM runs" + where, params)
         total = (await cur.fetchone())[0]
-
-        page_conds, page_params = list(conds), list(params)
-        cursor = after or before
-        going_forward = before is None       # before=翻回上一页：反向取再翻转
-        natural_desc = not asc               # 排序方向（默认 desc）
-        if cursor:
-            # 手改 URL 的光标不送到 PG（cast 失败是 500）：格式不对就 400
-            parts = cursor.split("|", 2)
-            if len(parts) != 3:
-                raise ValueError("非法分页光标")
-            sv, ts, rid = parts
-            try:
-                datetime.fromisoformat(ts)
-            except ValueError:
-                raise ValueError("非法分页光标（时间戳无法解析）") from None
-            # 取「更大」还是「更小」由 排序方向×翻页方向 共同决定：
-            # after 沿排序方向继续（desc 取更小），before 取另一侧
-            take_gt = (asc == going_forward)
-            op = ">" if take_gt else "<"
-            page_conds.append(f"({sortcol}, created_at, run_id) {op}"
-                              " (%s, %s::timestamptz, %s)")
-            page_params += [sv, ts, rid]
-        pwhere = (" WHERE " + " AND ".join(page_conds)) if page_conds else ""
-        order = "DESC" if natural_desc == going_forward else "ASC"
         cur = await conn.execute(
-            f"SELECT {_LIST_COLS} FROM runs{pwhere}"
-            f" ORDER BY {sortcol} {order}, created_at {order}, run_id {order}"
-            " LIMIT %s", (*page_params, limit + 1))
+            f"SELECT {_LIST_COLS} FROM runs{pwhere} ORDER BY created_at {order}, run_id {order} LIMIT %s",
+            (*page_params, limit + 1))
         rows = await cur.fetchall()
-
-    has_more = len(rows) > limit
+    more = len(rows) > limit
     rows = rows[:limit]
-    if not going_forward:
+    if backwards:
         rows.reverse()
-
-    def _cursor(r) -> str:
-        sv = {"duration_ms": r[10], "tokens": r[9]}.get(sort)
-        if sv is None:  # NULL 与 COALESCE 对齐；created_at 用 isoformat
-            sv = -1 if sort in ("duration_ms", "tokens") else r[11].isoformat()
-        return f"{sv}|{r[11].isoformat()}|{r[0]}"
-
+    items = [_list_row(r) for r in rows]
+    key = lambda r: f"{r[15].isoformat()}|{r[0]}"  # noqa: E731
     next_c = prev_c = None
     if rows:
-        if going_forward:
-            next_c = _cursor(rows[-1]) if has_more else None
-            prev_c = _cursor(rows[0]) if (after or before) else None
-        else:
-            prev_c = _cursor(rows[0]) if has_more else None
-            next_c = _cursor(rows[-1])
-    return ([_list_row(r) for r in rows], total, next_c, prev_c)
+        if (more and not backwards) or (backwards and cursor):
+            next_c = "next:" + key(rows[-1])
+        if (more and backwards) or (cursor and not backwards):
+            prev_c = "prev:" + key(rows[0])
+    return {"items": items, "total": total, "next_cursor": next_c, "prev_cursor": prev_c}
 
 
-def _list_row(r) -> dict:
-    return {"run_id": r[0], "session_id": r[1], "task_type": r[2],
-            "role": r[3], "domain": r[4], "target_env": r[5], "status": r[6],
-            "trigger_source": r[7], "caller": r[8], "tokens": r[9],
-            "duration_ms": r[10], "created_at": r[11].isoformat()}
-
-
-async def list_recent(target_env: str | None = None, limit: int = 100) -> list[dict]:
-    """最近 run 概要（总览面板/API）；列表页请用 list_filtered。"""
-    rows, _, _, _ = await list_filtered(target_env=target_env, limit=limit)
-    return rows
-
-
-async def session_exists(session_id: str) -> bool:
+async def by_session(session_id: str, exclude: str = "", limit: int = 50) -> list[dict]:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT 1 FROM runs WHERE session_id = %s LIMIT 1", (session_id,))
-        return await cur.fetchone() is not None
+            f"SELECT {_LIST_COLS} FROM runs WHERE session_id=%s AND run_id<>%s ORDER BY created_at LIMIT %s",
+            (session_id, exclude, limit))
+        return [_list_row(r) for r in await cur.fetchall()]
 
 
-async def list_sessions(limit: int = 30) -> list[dict]:
-    """最近 web 会话（按最后活动倒序）：预览取会话内第一个问题。"""
+async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT session_id,"
-            " max(created_at) AS last_at, count(*) AS runs,"
-            " (array_agg(input->>'question' ORDER BY created_at))[1] AS first_q,"
-            " (array_agg(role ORDER BY created_at DESC))[1] AS role,"
-            " (array_agg(domain ORDER BY created_at DESC))[1] AS domain,"
-            " (array_agg(target_env ORDER BY created_at DESC))[1] AS env"
-            " FROM runs WHERE trigger_source = 'web_chat'"
-            " GROUP BY session_id ORDER BY last_at DESC LIMIT %s", (limit,))
+            "SELECT * FROM runs WHERE session_id=%s AND run_id<>%s ORDER BY created_at DESC LIMIT 1", (session_id, exclude))
+        row = await cur.fetchone()
+    return _row(cur, row) if row else None
+
+
+async def sessions(*, service: str | None = None, env: str | None = None, task: str | None = None,
+                   q: str | None = None, limit: int = 100) -> list[dict]:
+    """对话会话（chat 触发的运行按 session 聚合），按最后活动倒序。过滤作用在会话的任一轮上。"""
+    conds, params = ["trigger_type IN ('chat','correction')"], []
+    for clause, val in (("service=%s", service), ("env=%s", env), ("split_part(task, ':', 1)=%s", task)):
+        if val:
+            conds.append(clause)
+            params.append(val)
+    having, params_q = (" HAVING bool_or(summary ILIKE %s)", ["%" + q + "%"]) if q else ("", [])
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT session_id, max(created_at), count(*),"
+            " (array_agg(summary ORDER BY created_at))[1],"
+            " (array_agg(service ORDER BY created_at DESC))[1], (array_agg(env ORDER BY created_at DESC))[1],"
+            " (array_agg(task ORDER BY created_at DESC))[1]"
+            f" FROM runs WHERE {' AND '.join(conds)} GROUP BY session_id{having}"
+            " ORDER BY max(created_at) DESC LIMIT %s", (*params, *params_q, limit))
         rows = await cur.fetchall()
-    return [{"session_id": r[0], "last_at": r[1].isoformat(), "runs": r[2],
-             "first_q": r[3] or "", "role": r[4], "domain": r[5], "env": r[6]}
-            for r in rows]
+    return [{"session_id": r[0], "last_at": r[1].isoformat(), "runs": r[2], "title": (r[3] or "")[:60],
+             "service": r[4], "env": r[5], "task": r[6]} for r in rows]
 
 
 async def of_session(session_id: str) -> list[dict]:
-    """会话全部 run（正序）：对话页历史回放用。"""
     async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT run_id, role, domain, target_env, status, input, output,"
-            " created_at FROM runs WHERE session_id = %s"
-            " ORDER BY created_at", (session_id,))
+        cur = await conn.execute("SELECT * FROM runs WHERE session_id=%s ORDER BY created_at", (session_id,))
         rows = await cur.fetchall()
-    return [{"run_id": r[0], "role": r[1], "domain": r[2], "target_env": r[3],
-             "status": r[4], "input": r[5], "output": r[6],
-             "created_at": r[7].isoformat()} for r in rows]
+        return [_row(cur, r) for r in rows]
 
 
-async def log_event(run_id: str, kind: str, payload: dict) -> None:
-    """追加事件；seq = 当前 max+1。
+# ———————— 事件 ————————
 
-    并发安全：同一 run 的并行写入（资产图层内并行节点同时落事件）先取
-    pg_advisory_xact_lock 按 run_id 串行化，max(seq)+1 不会撞号——SSE 按
-    seq 增量拉取，重复 seq 会丢事件。连接上下文整体一个事务，锁随事务释放。
-    另有 (run_id, seq) 唯一索引兜底（db.py MIGRATIONS）。
-    """
+async def log_event(run_id: str, kind: str, payload: dict) -> int:
+    """追加事件，返回 seq，并 pg_notify('run_events', run_id) 唤醒正在推流的连接。
+    同一运行的并发写（任务图层内并行）用 advisory 锁串行化取号。"""
     async with db.pool().connection() as conn:
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (run_id,))
-        await conn.execute(
-            "INSERT INTO run_events (run_id, seq, kind, payload) VALUES ("
-            "%s, COALESCE((SELECT max(seq) FROM run_events WHERE run_id=%s), 0) + 1,"
-            " %s, %s)", (run_id, run_id, kind, json.dumps(payload)))
+        cur = await conn.execute(
+            "INSERT INTO run_events (run_id, seq, kind, payload) VALUES"
+            " (%s, COALESCE((SELECT max(seq) FROM run_events WHERE run_id=%s), 0) + 1, %s, %s) RETURNING seq",
+            (run_id, run_id, kind, json.dumps(payload, ensure_ascii=False, default=str)))
+        seq = (await cur.fetchone())[0]
+        await conn.execute("SELECT pg_notify('run_events', %s)", (run_id,))
+        return seq
 
 
-async def get_events(run_id: str, after_seq: int = -1) -> list[dict]:
-    """run 的事件流。after_seq 推进 SQL：SSE/详情页按 seq 增量轮询，
-    全量拉取再内存过滤会让长 run 的轮询总量变成 O(N²)。
-
-    默认 -1 = 全量：log_event 的 seq 从 1 起，但直插/种子里存在 seq=0
-    的事件（如 trace），过滤条件必须写成 seq > after_seq 且默认 -1，
-    调用方传 0 会恰好丢掉 seq=0。"""
+async def events(run_id: str, after_seq: int = 0) -> list[dict]:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT seq, kind, payload, created_at FROM run_events"
-            " WHERE run_id = %s AND seq > %s ORDER BY seq",
+            "SELECT seq, kind, payload, feedback, created_at FROM run_events WHERE run_id=%s AND seq>%s ORDER BY seq",
             (run_id, after_seq))
         rows = await cur.fetchall()
-    return [{"seq": r[0], "kind": r[1], "payload": r[2],
-             "created_at": r[3].isoformat()} for r in rows]
+    return [{"seq": s, "kind": k, "payload": p, "feedback": f, "at": t.isoformat()} for s, k, p, f, t in rows]
 
 
-async def get_graph_event(run_id: str) -> dict | None:
-    """资产图 run 的最新拓扑事件（详情页每轮都要，与事件增量拉取解耦）。"""
-    async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT payload FROM run_events WHERE run_id = %s AND kind = 'graph'"
-            " ORDER BY seq DESC LIMIT 1", (run_id,))
-        row = await cur.fetchone()
-    return row[0] if row and isinstance(row[0], dict) else None
-
-
-async def events_of_runs(run_ids: list[str]) -> dict[str, list[dict]]:
-    """批量取多个 run 的事件（会话历史回放）：一次查询，按 run 分组。
-    逐 run 调 get_events 是 N+1。"""
+async def events_of(run_ids: list[str]) -> dict[str, list[dict]]:
     if not run_ids:
         return {}
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id, seq, kind, payload, created_at FROM run_events"
-            " WHERE run_id = ANY(%s) ORDER BY run_id, seq", (run_ids,))
+            "SELECT run_id, seq, kind, payload, feedback, created_at FROM run_events WHERE run_id = ANY(%s)"
+            " ORDER BY run_id, seq", (run_ids,))
         rows = await cur.fetchall()
     out: dict[str, list[dict]] = {}
-    for rid, seq, kind, payload, created in rows:
-        out.setdefault(rid, []).append(
-            {"seq": seq, "kind": kind, "payload": payload,
-             "created_at": created.isoformat()})
+    for rid, s, k, p, f, t in rows:
+        out.setdefault(rid, []).append({"seq": s, "kind": k, "payload": p, "feedback": f, "at": t.isoformat()})
     return out
 
 
-async def set_def_versions(run_id: str, task_version: int | None,
-                           role_version: int | None) -> None:
-    """固定谱系：run 实际使用的任务/角色定义版本（prepare_run 时写入一次）。"""
+async def set_step_feedback(run_id: str, seq: int, score: int) -> bool:
     async with db.pool().connection() as conn:
-        await conn.execute(
-            "UPDATE runs SET task_version=%s, role_version=%s WHERE run_id=%s",
-            (task_version, role_version, run_id))
+        cur = await conn.execute("UPDATE run_events SET feedback=%s WHERE run_id=%s AND seq=%s", (score or None, run_id, seq))
+        return bool(cur.rowcount)
 
 
-async def count_recent_with_version(kind: str, name: str, version: int,
-                                    hours: int = 24) -> int:
-    """近 N 小时使用某定义版本的 run 数——Admin 保存新版本时的影响面提示。"""
-    column, ver_column = (("role", "role_version") if kind == "role"
-                          else ("task_type", "task_version"))
+async def stage_payload(run_id: str, stage: str) -> dict | None:
+    """最近一条某阶段事件的 payload（详情页取注入的档案、召回结果等）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            f"SELECT count(*) FROM runs WHERE {column}=%s AND {ver_column}=%s"
-            f" AND created_at > now() - make_interval(hours => %s)",
-            (name, version, hours))
-        return (await cur.fetchone())[0]
+            "SELECT payload FROM run_events WHERE run_id=%s AND kind='stage' AND payload->>'stage'=%s"
+            " ORDER BY seq DESC LIMIT 1", (run_id, stage))
+        row = await cur.fetchone()
+    return row[0] if row else None
 
 
-async def usage_24h() -> dict:
-    """近 24h 各角色/任务的 run 数与成功数——管理页列表的影响面列。
+# ———————— 聚合 ————————
 
-    返回 {"role": {名: {"runs": n, "ok": n}}, "task": {...}}。
+async def stats(hours: int = 24, env: str | None = None, service: str | None = None) -> dict:
+    conds = ["created_at > now() - make_interval(hours => %s)"]
+    params: list[Any] = [hours]
+    if env:
+        conds.append("env=%s"); params.append(env)
+    if service:
+        conds.append("service=%s"); params.append(service)
+    where = " WHERE " + " AND ".join(conds)
+    buckets = 24 if hours <= 24 else 36
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(f"SELECT status, count(*), COALESCE(sum(tokens),0) FROM runs{where} GROUP BY status", params)
+        by_status = {s: (n, t) for s, n, t in await cur.fetchall()}
+        cur = await conn.execute(
+            f"SELECT env, count(*), count(*) FILTER (WHERE status='success'), count(*) FILTER (WHERE status='failed')"
+            f" FROM runs{where} GROUP BY env", params)
+        by_env = {e: {"runs": n, "success": s, "failed": f} for e, n, s, f in await cur.fetchall()}
+        cur = await conn.execute(
+            f"SELECT width_bucket(EXTRACT(EPOCH FROM created_at), EXTRACT(EPOCH FROM now() - make_interval(hours => %s)),"
+            f" EXTRACT(EPOCH FROM now()), %s) AS b,"
+            f" count(*) FILTER (WHERE status='success'), count(*) FILTER (WHERE status='failed'),"
+            f" count(*) FILTER (WHERE status NOT IN ('success','failed'))"
+            f" FROM runs{where} GROUP BY b ORDER BY b", [hours, buckets, *params])
+        series_rows = {b: (s, f, o) for b, s, f, o in await cur.fetchall()}
+        cur = await conn.execute(
+            f"SELECT split_part(task, ':', 1), service, count(*),"
+            f" (array_agg(COALESCE(output->>'error', '') ORDER BY created_at DESC))[1]"
+            f" FROM runs{where} AND status='failed' GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 5", params)
+        failures = [{"task": t, "service": s, "failed": n, "last_error": (e or "")[:300]} for t, s, n, e in await cur.fetchall()]
+        cur = await conn.execute(
+            "SELECT count(*) FILTER (WHERE status='running'), (SELECT count(*) FROM approvals WHERE status='pending')"
+            " FROM runs WHERE status='running'" + (" AND env=%s" if env else ""), [env] if env else [])
+        running, awaiting = await cur.fetchone()
+        cur = await conn.execute("SELECT now()")
+        now = (await cur.fetchone())[0]
+    from datetime import timedelta
+    step = timedelta(hours=hours) / buckets
+    start = now - timedelta(hours=hours)
+    series = []
+    for i in range(1, buckets + 1):
+        s, f, o = series_rows.get(i, (0, 0, 0))
+        series.append({"t": (start + step * (i - 1)).isoformat(), "success": s, "failed": f, "other": o})
+    total = sum(n for n, _ in by_status.values())
+    return {
+        "hours": hours,
+        "totals": {"runs": total, "success": by_status.get("success", (0, 0))[0], "failed": by_status.get("failed", (0, 0))[0],
+                   "running": running or 0, "awaiting": awaiting or 0},
+        "by_env": by_env, "series": series, "top_failures": failures,
+        "tokens": sum(t for _, t in by_status.values()),
+    }
+
+
+async def task_stats(hours: int = 24) -> dict[str, dict]:
+    """每个任务近 N 小时的统计与最近一次运行。
+
+    同时给两种口径：子任务名自己的（"failure-analysis:asset_a"），和父任务连同全部子任务的
+    （键为父任务名，"failure-analysis"）。返回 {name: {"runs", "success", "failed", "p50_ms", "last_run"}}。
     """
-    out = {"role": {}, "task": {}}
+    out: dict[str, dict] = {}
     async with db.pool().connection() as conn:
-        for col, key in (("role", "role"), ("task_type", "task")):
+        for key in ("task", "split_part(task, ':', 1)"):
             cur = await conn.execute(
-                f"SELECT {col}, count(*),"
-                f" count(*) FILTER (WHERE status='success') FROM runs"
-                f" WHERE created_at > now() - interval '24 hours'"
-                f" GROUP BY {col}")
-            out[key] = {name: {"runs": n, "ok": ok}
-                        for name, n, ok in await cur.fetchall()}
+                f"SELECT {key}, count(*), count(*) FILTER (WHERE status='success'),"
+                f" count(*) FILTER (WHERE status='failed'), percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)"
+                f" FROM runs WHERE created_at > now() - make_interval(hours => %s) GROUP BY 1", (hours,))
+            for name, n, s, f, p in await cur.fetchall():
+                out[name] = {"runs": n, "success": s, "failed": f, "p50_ms": int(p) if p is not None else None}
+            cur = await conn.execute(
+                f"SELECT DISTINCT ON ({key}) {key}, run_id, status, created_at FROM runs ORDER BY {key}, created_at DESC")
+            for name, run_id, status, at in await cur.fetchall():
+                out.setdefault(name, {"runs": 0, "success": 0, "failed": 0, "p50_ms": None})
+                out[name]["last_run"] = {"run_id": run_id, "status": status, "created_at": at.isoformat()}
     return out
 
 
-async def trace_id_of(run_id: str) -> str:
-    """从台账事件取 Langfuse trace_id（未启用观测时为空串）。"""
-    events = await get_events(run_id)
-    return next((e["payload"].get("trace_id") for e in events
-                 if e["kind"] == "trace" and isinstance(e["payload"], dict)), "")
-
-
-async def overview(hours: int = 24) -> dict:
-    """总览页聚合：近 N 小时状态计数 + 任务分布 + 最近失败 5 条。"""
+async def service_health(hours: int = 24) -> dict[tuple[str, str], dict]:
+    """(服务, 环境) → 近 N 小时运行/失败 + 最近一次运行。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT status, count(*) FROM runs"
-            " WHERE created_at > now() - make_interval(hours => %s)"
-            " GROUP BY status", (hours,))
-        by_status = dict(await cur.fetchall())
+            "SELECT service, env, count(*), count(*) FILTER (WHERE status='failed') FROM runs"
+            " WHERE service IS NOT NULL AND created_at > now() - make_interval(hours => %s) GROUP BY 1, 2", (hours,))
+        counts = {(s, e): (n, f) for s, e, n, f in await cur.fetchall()}
         cur = await conn.execute(
-            "SELECT task_type, count(*),"
-            " count(*) FILTER (WHERE status='success'),"
-            " count(*) FILTER (WHERE status='failed')"
-            " FROM runs WHERE created_at > now() - make_interval(hours => %s)"
-            " GROUP BY task_type ORDER BY count(*) DESC LIMIT 8", (hours,))
-        tasks = [{"task_type": r[0], "total": r[1], "success": r[2],
-                  "failed": r[3]} for r in await cur.fetchall()]
-        cur = await conn.execute(
-            "SELECT run_id, task_type, role, target_env, created_at FROM runs"
-            " WHERE status='failed' ORDER BY created_at DESC LIMIT 5")
-        failed = [{"run_id": r[0], "task_type": r[1], "role": r[2],
-                   "target_env": r[3], "created_at": r[4].isoformat()}
-                  for r in await cur.fetchall()]
-    return {"by_status": by_status, "tasks": tasks, "failed": failed,
-            "hours": hours}
+            "SELECT DISTINCT ON (service, env) service, env, run_id, status, created_at FROM runs"
+            " WHERE service IS NOT NULL ORDER BY service, env, created_at DESC")
+        last = {(s, e): {"run_id": r, "status": st, "created_at": c.isoformat()} for s, e, r, st, c in await cur.fetchall()}
+    keys = set(counts) | set(last)
+    return {k: {"runs_24h": counts.get(k, (0, 0))[0], "failed_24h": counts.get(k, (0, 0))[1], "last_run": last.get(k)} for k in keys}
 
 
-def _row_to_dict(cur, row) -> dict:
-    return {d.name: v for d, v in zip(cur.description, row)}
+async def search(term: str, limit: int = 8) -> list[dict]:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_LIST_COLS} FROM runs WHERE run_id LIKE %s OR summary ILIKE %s ORDER BY created_at DESC LIMIT %s",
+            (term + "%", "%" + term + "%", limit))
+        return [_list_row(r) for r in await cur.fetchall()]
+
+
+async def stale_running(older_than_s: int) -> list[str]:
+    """长时间停在 running 却没有任何新事件的运行（worker 崩溃遗留），启动对账用。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT r.run_id FROM runs r WHERE r.status IN ('running','queued')"
+            " AND COALESCE((SELECT max(created_at) FROM run_events e WHERE e.run_id=r.run_id), r.created_at)"
+            "   < now() - make_interval(secs => %s)", (older_than_s,))
+        return [r[0] for r in await cur.fetchall()]

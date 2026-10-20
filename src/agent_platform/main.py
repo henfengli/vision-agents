@@ -1,374 +1,84 @@
-"""服务装配与启动入口：uvicorn --factory agent_platform.main:build_app
+"""命令行入口。
 
-真两阶段装配：
-- build_app()（同步）：只建裸 app（health + 异常处理），不碰任何外部连接
-- lifespan（uvicorn loop 内）：assemble_runtime() 完成全部真实装配——
-  DB 池 → 建表 → 种子 → 连 Temporal → Submitter/Engine/Worker → 挂业务路由
-  → 同步 Schedules；关闭时逆序释放
+    agent-platform serve [--host 127.0.0.1] [--port 8100] [--no-worker]   接口 + 控制台（默认同进程跑 worker）
+    agent-platform worker                                                  只跑 Temporal Worker 与维护循环
+    agent-platform check                                                   读配置、连库、播种，然后退出
 
-连接池与后台任务都绑定创建它们的 loop：全部组件都在 lifespan 内创建，
-没有同步装配期占位，没有延迟绑定。
+uvicorn 直接起：uvicorn --factory agent_platform.main:app
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
-import os
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+import signal
 
-from .agent.approvals import make_review_hook
-from .agent.engine import Engine
-from .agent.tools.mcp_bridge import load_mcp_tools
-from .agent.tools.registry import ToolRegistry
-from .api import create_app, make_api_router, make_ops_router
-from .api.auth import make_auth_dependency
-from .config import Settings, load_settings
-from .langfuse import LangfuseClient, setup_observability
-from .model import ModelPool
-from .notify import DingTalkRelay
-from .orchestration import activities
-from .orchestration.submitter import Submitter
-from .orchestration.tasks import TaskRegistry
-from .orchestration.worker import create_worker
-from .orchestration.workflows import sync_schedules
-from .store import db
-from .store.definitions import DefinitionStore
-from .triggers import chat as chat_trigger
-from .triggers import dagster_sensor, gitlab_webhook
-from .viewer import make_viewer_router
-
-log = logging.getLogger(__name__)
-
-# 首次启动的种子角色/任务：空库时写入，之后由 Admin API 管理（含版本历史）
-SEED_ROLES = [
-    {"name": "data_searcher",
-     "description": "数据口径查询：先查知识库，再读代码分析口径，再查只读库",
-     "domains": ["board", "config-center"],
-     # write_file/edit_file 由文件系统中间件统一注入（真实磁盘 root=scratch，
-     # 见 engine.py），白名单声明仅作意图文档；read_file/grep 同理
-     "tools": ["bash", "run_code", "sql_query", "save_asset", "read_file",
-              "write_file", "edit_file", "grep"],
-     "prompt": "你是数据查询助手。工作约定：\n"
-               "1. 先查知识库是否已有该指标口径；命中直接回答并附来源。\n"
-               "2. 未命中：在业务域代码目录检索指标定义（grep），读懂计算逻辑。\n"
-               "3. 按口径拼 SQL 查只读库；查询必带 LIMIT 100。\n"
-               "4. 回答结构：数值 + 口径说明 + 代码位置 + 执行的 SQL。\n"
-               "5. 文件编辑纪律：新建用 write_file，小改用 edit_file"
-               "（先 read_file 再改）；文件工具的 / 根目录就是 bash 的"
-               "工作目录（scratch），写 /x.py 后 bash 直接 python3 x.py。\n"
-               "6. 写完脚本必须 bash 验证通过（.py 先 python3 -m py_compile）"
-               "再 save_asset 收编——收编有编译检查，不跑通会被拒收。"},
-    {"name": "ops_analyst",
-     "description": "Dagster 报错分析：区分代码/数据/基础设施/上游问题",
-     "domains": ["dagster", "board"],
-     "tools": ["bash", "run_code", "sql_query", "host_metrics", "read_file",
-              "write_file", "edit_file", "grep", "dingtalk_send",
-              "save_asset"],
-     "prompt": "你是运维分析助手。分析步骤：\n"
-               "1. 参考同类案例（如 prompt 中已注入）。\n"
-               "2. 用 curl 查 Dagster GraphQL 拿报错堆栈与上游状态。\n"
-               "3. 读对应代码与最近变更；必要时查只读库验证数据假设。\n"
-               "4. 输出结构化结论：category(code/data/infra/upstream)、confidence、evidence、suggestion。\n"
-               "5. 文件编辑纪律：新建用 write_file，小改用 edit_file"
-               "（先 read_file 再改）；文件工具的 / 根目录就是 bash 的"
-               "工作目录（scratch），写 /fix.py 后 bash 直接 python3 fix.py。\n"
-               "6. 写完脚本必须 bash 验证通过（.py 先 python3 -m py_compile）"
-               "再 save_asset 收编——收编有编译检查，不跑通会被拒收。"},
-]
-
-SEED_TASKS = [
-    {"name": "data-qa", "role": "data_searcher",
-     "triggers": ["sdk", "cli", "web_chat"],
-     "input_schema": {"question": "str"},
-     "output_channel": "caller", "timeout_s": 180},
-    {"name": "daily-inspection", "role": "ops_analyst",
-     "triggers": ["schedule"], "input_schema": {"scope": "str"},
-     "output_channel": "dingtalk", "timeout_s": 900},
-    # 记忆园丁（#5 口子）：内建处理器，默认不带 schedule 不自动跑；
-    # 要开夜间整理：Admin 给它加 schedule: "0 3 * * *"
-    {"name": "memory-gardener", "handler": "memory-gardener",
-     "triggers": ["sdk", "schedule"], "output_channel": "dingtalk",
-     "timeout_s": 1800},
-]
-# 域级种子任务住在域包里：failure-analysis → conf/domains/dagster/tasks.yaml
-#                        frontend-smoke  → conf/domains/board/tasks.yaml
+from .config import load_settings
 
 
-@dataclass
-class Runtime:
-    """lifespan 内装配出的全部运行时组件。"""
-    settings: Settings
-    defs: DefinitionStore
-    tasks: TaskRegistry
-    submitter: Submitter
-    engine: Engine
-    relay: DingTalkRelay
-    langfuse: LangfuseClient
-    tool_names: list[str] = field(default_factory=list)  # 管理页角色编辑器复选框
-    embedder: object = None  # 记忆页检索试用（model_pool.embed）
-    resync_schedules: object = None  # 任务保存后热同步 Temporal Schedules
-    temporal_client: object = None
-    worker: object = None
-    rule_provider: object = None     # 规则库运行期源（rules.RuleProvider）
-    domain_provider: object = None   # 域注册表（domains.DomainProvider）
-    env_gate: object = None          # 环境启停（domains.EnvGate）
-    _worker_task: asyncio.Task | None = field(default=None, repr=False)
-    _sync_task: asyncio.Task | None = field(default=None, repr=False)
+def app():
+    """uvicorn --factory 入口：读 AGENT_ENV 对应的部署配置。"""
+    from .api import create_app
+    return create_app(load_settings())
 
-    async def stop(self) -> None:
-        if self.worker is not None:
-            await self.worker.shutdown()
-        if self._worker_task is not None:
-            self._worker_task.cancel()
-        if self._sync_task is not None:
-            self._sync_task.cancel()
-        await self.langfuse.flush()  # 冲刷 SDK 的 score 批量队列
-        await self.engine.close()
+
+def _serve(args) -> None:
+    import uvicorn
+
+    from .api import create_app
+    uvicorn.run(create_app(load_settings(), worker=not args.no_worker), host=args.host, port=args.port,
+                log_level="info", proxy_headers=True)
+
+
+def _worker(_args) -> None:
+    from .runtime import assemble
+
+    async def run() -> None:
+        rt = await assemble(load_settings())
+        await rt.start_worker()
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        await stop.wait()
+        await rt.close()
+
+    asyncio.run(run())
+
+
+def _check(_args) -> None:
+    from .registry import Registry
+    from .store import db
+    from .store.definitions import DefinitionStore
+
+    async def run() -> None:
+        settings = load_settings()
+        await db.open_db(settings.db_dsn)
+        registry = Registry(DefinitionStore())
+        await registry.seed(settings.seeds_dir)
+        envs = await registry.envs()
+        print(f"配置 {settings.profile} 正常；环境 {'、'.join(envs.names)}（默认 {envs.default}）；"
+              f"服务 {len(await registry.services())} 个，任务 {len(await registry.tasks())} 个")
         await db.close_db()
 
-
-async def assemble_runtime(settings: Settings) -> Runtime:
-    """全部真实装配。必须在目标事件循环内调用（lifespan 或测试的 loop）。"""
-    setup_observability(settings.langfuse)  # Langfuse OTEL（空操作可关）
-    await db.open_db(settings.db_dsn)
-    os.makedirs(settings.assets_dir, exist_ok=True)  # 资产库目录（文件载体）
-
-    defs = DefinitionStore()
-    await seed_if_empty(defs, settings.env, domains=settings.domains)
-    # 规则库（顶层服务）：域包 rules.yaml 首次播种进 definitions，之后
-    # 管理页编辑的版本为准（已有定义不覆盖）
-    from . import rules as rules_svc
-    await rules_svc.seed_from_domain_packs(defs, settings.env,
-                                           settings.domains)
-    rule_provider = rules_svc.RuleProvider(
-        defs, settings.env,
-        fallback={name: (pack.rules or [])
-                  for name, pack in settings.domains.items()})
-    # 域（服务）注册表：conf/domains 播种进 definitions，之后 DB 是事实源
-    # （服务页创建/编辑/启停/回滚，5s 热生效）；文件只兜底首次启动
-    from . import domains as domains_svc
-    domain_provider = domains_svc.DomainProvider(defs, settings.env,
-                                                 settings.domains)
-    await domain_provider.seed_from_packs()
-    await domain_provider.refresh()
-    env_gate = domains_svc.EnvGate(defs, settings.env)
-    tasks = TaskRegistry(defs, settings.env)
-    langfuse = LangfuseClient(settings.langfuse)
-    relay = DingTalkRelay(settings.dingtalk_relay_url, settings.dingtalk_token)
-    model_pool = ModelPool(settings.model.url, settings.model.name,
-                           settings.model.tokens, settings.model.max_concurrency,
-                           embedding_name=settings.model.embedding_name)
-
-    # 审批通知：工具命中危险模式 → 钉钉 actionCard → Viewer 审批页
-    review_hook = None
-    if settings.approvals.enabled:
-        async def approval_notify(run_id: str, command: str) -> None:
-            await relay.send_action_card(
-                "危险操作待审批", f"run `{run_id}` 请求执行：\n```\n{command}\n```",
-                "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
-        review_hook = make_review_hook(settings.approvals.danger_patterns,
-                                       approval_notify)
-
-    # save_asset 工具：上下文默认值由 prepare_run 注入的 ContextVar 提供，
-    # 模型只需给 name/kind/summary/content 四要素
-    _ASSET_KINDS = ("procedure", "script", "query", "baseline")
-
-    async def write_asset(name: str, kind: str, summary: str, content: str,
-                          files: list[str], domain: str, task: str) -> str:
-        from .agent.approvals import current_run_ctx, current_run_id
-        from .store import assets as assets_store
-        if kind not in _ASSET_KINDS:
-            return f"[失败] kind 必须是 {'/'.join(_ASSET_KINDS)}"
-        if not name.strip():
-            return "[失败] name 不能为空"
-        if not content.strip() and not files:
-            return "[失败] content 与 files 至少给一样"
-        ctx = current_run_ctx.get({})
-        dom = domain or ctx.get("domain") or next(iter(settings.domains), "")
-        if not dom:
-            return "[失败] 无可用 domain，请显式指定"
-        tsk = task or ctx.get("task") or ""
-        env = ctx.get("env") or settings.env
-        path = None
-        if files:  # 收编 scratch 文件进资产库（整替换，旧版留档），拿稳定路径
-            lint_errors = await asyncio.to_thread(
-                assets_store.python_lint_errors, settings.scratch_dir, files)
-            if lint_errors:  # 坏脚本不收编：先 bash 修好跑通再来
-                return ("[失败] 收编前编译检查未通过，先修好再保存：\n"
-                        + "\n".join(lint_errors[:10]))
-            try:
-                path, n_files, n_bytes = await asyncio.to_thread(
-                    assets_store.collect_files, settings.assets_dir,
-                    env, dom, tsk, kind, name.strip(), files,
-                    settings.scratch_dir)
-            except ValueError as e:
-                return f"[失败] {e}"
-        await assets_store.upsert(
-            env, dom, tsk, kind, name.strip(), summary.strip(), content,
-            source_run=current_run_id.get() or None, path=path)
-        scope = f"{dom}/{tsk}" if tsk else f"{dom}（域级通用）"
-        if path:
-            return (f"已沉淀资产 {kind}:{name}（{scope}，{n_files} 个文件 "
-                    f"{n_bytes // 1024}KB）→ {path}，后续 run 直接引用该路径")
-        return f"已沉淀资产 {kind}:{name}（{scope}），后续 run 将自动召回"
-
-    extra_tools = await load_mcp_tools(settings.mcp_servers)
-
-    def sql_dsn(domain: str | None) -> str | None:
-        dom = domain or next(iter(domain_provider.all()), None)
-        cfg = domain_provider.get(dom)
-        return cfg.readonly_dsn if cfg else None
-
-    def host_resolver(domain: str | None, env: str | None):
-        """(domain, env) → (部署主机列表, GrafanaConfig)。主机按目标环境取 envs 覆盖值。"""
-        dom = domain or next(iter(domain_provider.all()), None)
-        cfg = domain_provider.get(dom)
-        if cfg is None:
-            return [], settings.grafana
-        tenv = settings.resolve_target_env(env)
-        return cfg.for_env(tenv).hosts, settings.grafana
-
-    tool_registry = ToolRegistry(settings.scratch_dir, relay=relay,
-                                 review=review_hook,
-                                 asset_writer=write_asset,
-                                 sql_dsn=sql_dsn,
-                                 host_resolver=(host_resolver
-                                                if settings.grafana else None),
-                                 extra_tools=extra_tools)
-    engine = Engine(settings, defs, tool_registry, langfuse=langfuse)
-
-    from temporalio.client import Client
-    temporal_client = await Client.connect(
-        settings.temporal.address, namespace=settings.temporal.namespace)
-
-    # 任务级提交闸门（policies.py）的钉钉通知：与工具级审批同一通道
-    async def submit_gate_notify(run_id: str, summary: str) -> None:
-        await relay.send_action_card(
-            "任务提交待审批", f"run `{run_id}`：\n{summary}",
-            "去审批", f"{settings.viewer_base_url}/approvals/{run_id}")
-
-    submitter = Submitter(temporal_client, tasks,
-                          settings.temporal.task_queue, settings.env,
-                          defs=defs, approval_notifier=submit_gate_notify,
-                          target_envs=settings.target_envs,
-                          default_target_env=settings.default_target_env,
-                          domain_provider=domain_provider, env_gate=env_gate)
-
-    worker = await create_worker(
-        temporal_client,
-        activities.Deps(settings=settings, engine=engine,
-                        model_pool=model_pool, notifier=relay,
-                        langfuse=langfuse, domains=domain_provider,
-                        switches=domains_svc.Switches(domain_provider,
-                                                      env_gate),
-                        tasks=tasks),
-        settings.temporal.task_queue)
-
-    async def resync_schedules() -> int:
-        """任务/域定义保存后立即重同步 Temporal Schedules（热生效）；
-        失败只留痕——周期对账兜底，不阻断保存。
-        停用域的调度任务不建 schedule（先 refresh 再取停用集合）。"""
-        try:
-            await domain_provider.refresh()
-            disabled = {n for n in domain_provider.names()
-                        if not domain_provider.enabled(n)}
-            return await sync_schedules(temporal_client, await tasks.list(),
-                                        settings.temporal.task_queue,
-                                        disabled_domains=disabled)
-        except Exception:  # noqa: BLE001 — Temporal 抖动不应让定义保存失败
-            log.exception("热同步 Temporal Schedule 失败")
-            return 0
-
-    async def _schedule_reconcile() -> None:
-        # 兜底对账：热同步失败/外部改库时，5 分钟内自愈到与任务定义一致
-        while True:
-            await asyncio.sleep(300)
-            await resync_schedules()
-
-    rt = Runtime(settings=settings, defs=defs, tasks=tasks,
-                 submitter=submitter, engine=engine, relay=relay,
-                 langfuse=langfuse, tool_names=tool_registry.catalog_names,
-                 embedder=model_pool.embed,
-                 resync_schedules=resync_schedules,
-                 temporal_client=temporal_client,
-                 worker=worker,
-                 rule_provider=rule_provider,
-                 domain_provider=domain_provider, env_gate=env_gate,
-                 _worker_task=asyncio.create_task(worker.run()),
-                 _sync_task=asyncio.create_task(_schedule_reconcile()))
-
-    n = await sync_schedules(
-        temporal_client, await tasks.list(), settings.temporal.task_queue,
-        disabled_domains={d for d in domain_provider.names()
-                          if not domain_provider.enabled(d)})
-    if n:
-        log.info("同步 %d 个 Temporal Schedule", n)
-    return rt
+    asyncio.run(run())
 
 
-async def seed_if_empty(defs: DefinitionStore, env: str,
-                        domains: dict | None = None) -> None:
-    if await defs.list_active("role", env):
-        return
-    for role in SEED_ROLES:
-        await defs.put("role", env, role["name"],
-                       {k: v for k, v in role.items() if k != "name"},
-                       updated_by="seed")
-    tasks = list(SEED_TASKS)
-    for dom in (domains or {}).values():  # 域包自带种子任务（域知识随域走）
-        tasks.extend(getattr(dom, "seed_tasks", None) or [])
-    for task in tasks:
-        await defs.put("task", env, task["name"],
-                       {k: v for k, v in task.items() if k != "name"},
-                       updated_by="seed")
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    ap = argparse.ArgumentParser(prog="agent-platform")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    serve = sub.add_parser("serve", help="接口 + 控制台")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8100)
+    serve.add_argument("--no-worker", action="store_true", help="worker 单独部署时用")
+    serve.set_defaults(fn=_serve)
+    sub.add_parser("worker", help="只跑 worker").set_defaults(fn=_worker)
+    sub.add_parser("check", help="检查配置与数据库并播种").set_defaults(fn=_check)
+    args = ap.parse_args(argv)
+    args.fn(args)
 
 
-def build_app(settings: Settings | None = None):
-    settings = settings or load_settings()
-
-    @asynccontextmanager
-    async def lifespan(app):
-        rt = await assemble_runtime(settings)
-        # 所有 /v1 入口（含 webhook）统一挂 bearer 鉴权；Viewer 用 cookie 登录
-        auth = make_auth_dependency(settings.bearer_token)
-
-        async def _rules_for(domain: str, _error: str) -> list[dict]:
-            return await rt.rule_provider.rules_for(domain)
-
-        for r in (
-            make_api_router(settings, rt.submitter, rt.tasks, rt.defs,
-                            langfuse=rt.langfuse,
-                            schedule_sync=rt.resync_schedules,
-                            domain_provider=rt.domain_provider),
-            make_ops_router(settings, embedder=rt.embedder,
-                            domain_cfgs=rt.domain_provider.all()),
-            dagster_sensor.make_router(
-                rt.submitter, rt.relay, auth=auth,
-                classifier=_rules_for,
-                session_template=lambda: getattr(
-                    rt.domain_provider.get("dagster"), "session_template",
-                    None)),
-            gitlab_webhook.make_router(rt.submitter, auth=auth),
-            chat_trigger.make_router(rt.submitter, auth=auth),
-        ):
-            app.include_router(r)
-        app.include_router(make_viewer_router(
-            rt.submitter, rt.defs, settings.env,
-            langfuse=rt.langfuse, token=settings.bearer_token,
-            domains=list(rt.domain_provider.all()),
-            target_envs=settings.target_envs or None,
-            tool_names=rt.tool_names,
-            domain_cfgs=rt.domain_provider.all(),
-            domain_provider=rt.domain_provider, env_gate=rt.env_gate))
-        try:
-            yield
-        finally:
-            await rt.stop()
-
-    return create_app(settings, lifespan=lifespan)
-
-
-# uvicorn 入口用工厂模式（--factory agent_platform.main:build_app）：
-# 延迟到 worker 进程内才读配置/装配，避免 import 期副作用。
+if __name__ == "__main__":
+    main()

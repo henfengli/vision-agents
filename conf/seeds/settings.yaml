@@ -1,0 +1,35 @@
+# 平台配置的初始值（设置页里能改的那些）。只在库里还没有这一节时写入一次。
+# 值里可以用 ${环境变量}，取不到时为空。
+
+envs:
+  default: test                       # 请求不带 env 时打到测试环境：生产必须显式指定
+  items:
+    - {name: prod, title: 生产, protected: true, color: red, description: 线上环境，危险命令与进程启停需审批}
+    - {name: test, title: 测试, color: amber, description: 集成测试环境，数据每周从生产脱敏同步}
+    - {name: dev, title: 开发, color: blue, description: 开发自测}
+
+approvals:
+  required_in: protected              # 危险命令只在受保护环境审批；改成 all 则处处审批
+  timeout_minutes: 30
+
+notifications:
+  channels:
+    default:
+      type: dingtalk
+      url: "https://alert-notification.ipa.zs/robot/send"
+      token: "${DINGTALK_ACCESS_TOKEN}"
+  rules:
+    - {name: 审批提醒, events: [approval_requested], channel: default}
+    - {name: 自动运行失败, events: [run_failed], triggers: [schedule, event], channel: default}
+    - {name: 进程停止, events: [process_stopped], envs: [prod], channel: default}
+
+memory:
+  recall: true
+  save: true
+  handoff_summary: true
+  knowledge_limit: 5
+  asset_limit: 8
+
+processes:
+  default_lease_hours: 2
+  max_lease_hours: 24

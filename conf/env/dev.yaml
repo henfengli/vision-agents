@@ -1,9 +1,8 @@
-# 开发环境：本机默认、审批关闭、Langfuse 关闭（继承 common.yaml，只写差异）
+# 开发机：本地 Postgres + 本地 Temporal（temporal server start-dev），进程用本地子进程启停。
+db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
+root_token: "${AGENT_ROOT_TOKEN}"
+public_url: "http://127.0.0.1:8100"
+
 model:
   tokens: ["${MODEL_TOKEN_A}"]
   max_concurrency: 20
-
-db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
-dingtalk_token: "${DINGTALK_ACCESS_TOKEN}"
-bearer_token: "${AGENT_BEARER_TOKEN}"
-viewer_base_url: "http://127.0.0.1:8100"

@@ -1,15 +1,14 @@
-"""agent-client：服务端 HTTP API 的薄封装（纯转发无逻辑）。
+"""agent-client：/v1 接口的薄封装。HTTP 接口是唯一契约，项目里也可以照抄这一个文件。
 
-用法：
     from agent_client import AgentClient
-    agent = AgentClient(server="board", role="data_searcher")
-    answer = agent.ask("3月以来 total_fee 是多少")
-    agent.set_session(session_id="board-fee-202610").ask("环比 2 月呢")
-    run = agent.submit_and_wait("data-qa", {"server": "board", "question": "..."},
-                                idempotency_key="fee-202610")
 
-配置：AGENT_BASE_URL / AGENT_TOKEN 环境变量，或构造时显式传入。
-业务方也可照抄本文件为自己服务内的 agent_client.py 模块——HTTP API 是唯一契约。
+    agent = AgentClient(service="board", env="test")           # AGENT_URL / AGENT_KEY 环境变量
+    agent.ask("3 月以来 total_fee 是多少")                       # 对话：服务的对话任务；同一个对象自动续会话
+    agent.ask("环比 2 月呢")
+    run = agent.run("frontend-smoke", {"version": "1.2.0"})     # 任务：等到结束，返回运行详情
+    run = agent.run("failure-analysis", {...}, subtask="ods_orders", wait=False)   # 只提交
+
+出错抛 AgentError，e.code 是服务端的原因码（如 task_disabled、service_env_disabled、policy）。
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import httpx
 
@@ -25,146 +24,115 @@ TERMINAL = ("success", "failed", "cancelled")
 
 
 class AgentError(RuntimeError):
-    pass
+    def __init__(self, status: int, code: str, message: str, detail: Any = None):
+        super().__init__(f"[{code}] {message}")
+        self.status, self.code, self.message, self.detail = status, code, message, detail
 
 
 class AgentClient:
-    def __init__(self, server: str, role: str,
-                 base_url: str | None = None, token: str | None = None,
-                 env: str | None = None, timeout: float = 300.0):
-        self.server = server
-        self.role = role
-        self.env = env                 # 目标业务环境；None = 服务端默认
+    def __init__(self, service: str | None = None, env: str | None = None, *, url: str | None = None,
+                 key: str | None = None, timeout: float = 330.0):
+        """service / env：这个客户端默认操作的服务和环境（每次调用也可以单独指定）。"""
+        self.service = service
+        self.env = env
         self.session_id: str | None = None
-        self._base = (base_url or os.environ.get("AGENT_BASE_URL", "")).rstrip("/")
-        self._token = token or os.environ.get("AGENT_TOKEN", "")
-        self._timeout = timeout
-        if not self._base:
-            raise AgentError("缺少 base_url：传参或设置 AGENT_BASE_URL")
+        base = (url or os.environ.get("AGENT_URL", "")).rstrip("/")
+        if not base:
+            raise ValueError("缺少服务地址：传 url= 或设置 AGENT_URL")
+        self._http = httpx.Client(base_url=base, timeout=timeout,
+                                  headers={"Authorization": f"Bearer {key or os.environ.get('AGENT_KEY', '')}"})
 
-    def set_session(self, session_id: str) -> "AgentClient":
-        """链式指定会话：同 session_id 自动续上下文（服务端 checkpointer 持久化）。"""
-        self.session_id = session_id
-        return self
+    # —— 对话 ——
 
-    def ask(self, question: str) -> str:
-        """同步问答（短任务）。超时未完成时返回提示，可用 run_id 轮询。"""
-        data = self._post("/v1/chat", {
-            "server": self.server, "role": self.role,
-            "question": question, "session_id": self.session_id,
-            "env": self.env,
-        })
-        self.session_id = data.get("session_id", self.session_id)
-        output = data.get("output") or {}
-        if "answer" in output:
-            return output["answer"]
-        return data.get("note") or str(output)
-
-    def ask_stream(self, question: str,
-                   on_event: Callable[[dict], None] | None = None) -> str:
-        """流式问答（/v1/chat/stream，SSE）：on_event 逐事件回调，返回最终回答。
-
-        事件类型：run（拿到 run_id/session_id）/ tool_call / tool_result /
-        thought / note / final（终态 + output）/ timeout（超时但 run 还在跑，
-        可拿 run_id 用 wait 继续等）。进度展示订阅 on_event 即可。
-        """
-        answer = ""
-        payload = {"server": self.server, "role": self.role,
-                   "question": question, "session_id": self.session_id,
-                   "env": self.env}
-        with self._client() as c:
-            with c.stream("POST", "/v1/chat/stream", json=payload) as resp:
-                if resp.status_code != 200:
-                    raise AgentError(f"/v1/chat/stream 返回 {resp.status_code}: "
-                                     f"{resp.read()[:200]!r}")
-                for line in resp.iter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    ev = json.loads(line[6:])
-                    if on_event:
-                        on_event(ev)
-                    t = ev.get("type")
-                    if t == "run":
-                        self.session_id = ev.get("session_id", self.session_id)
-                    elif t == "final":
-                        out = ev.get("output") or {}
-                        answer = out.get("answer") or str(out)
-                    elif t == "timeout":
-                        raise AgentError(
-                            f"流式等待超时，run {ev.get('run_id')} 仍在执行，"
-                            "可用 wait(run_id) 继续轮询")
+    def ask(self, message: str, *, task: str | None = None, new_session: bool = False,
+            on_event: Callable[[dict], None] | None = None, **input_fields: Any) -> str:
+        """发一条消息，返回回答。默认续上一轮的会话；new_session=True 另起一个。
+        on_event 可订阅过程（stage / thought / tool_call / tool_result / approval）。"""
+        if new_session:
+            self.session_id = None
+        body = {"message": message, "session_id": self.session_id, "service": self.service, "env": self.env,
+                "task": task, "input": input_fields}
+        answer, status = "", None
+        for ev in self._sse("/v1/chat", body):
+            if ev["type"] == "run":
+                self.session_id = ev["session_id"]
+            elif ev["type"] == "error":
+                raise AgentError(400, ev["code"], ev["message"])
+            elif ev["type"] == "final":
+                status, output = ev["status"], ev.get("output") or {}
+                answer = output.get("answer") or output.get("error") or ""
+            elif on_event:
+                on_event(ev)
+        if status != "success":
+            raise AgentError(500, f"run_{status}", answer or "运行没有成功结束")
         return answer
 
-    def submit(self, task_type: str, input_data: dict[str, Any],
-               idempotency_key: str | None = None,
-               subtask: str | None = None) -> dict:
-        """异步任务：立即返回 run_id，用 wait/get_task 轮询或走任务的输出通道。
+    # —— 任务 ——
 
-        idempotency_key：24h 内同键重提返回首个 run（网络重试安全）。
-        subtask：显式子任务对象名——跑 "{task_type}:{subtask}"（专属档案/
-        知识归属），不存在时服务端自动继承 task_type 建桩。
-        """
-        headers = ({"Idempotency-Key": idempotency_key}
-                   if idempotency_key else None)
-        body = {"task_type": task_type, "input": input_data, "env": self.env}
-        if subtask:
-            body["subtask"] = subtask
-        return self._post("/v1/tasks", body, headers=headers)
+    def run(self, task: str, input: dict[str, Any] | None = None, *, subtask: str | None = None,
+            service: str | None = None, env: str | None = None, wait: bool | float = True,
+            idempotency_key: str | None = None, recall: bool | None = None, save: bool | None = None) -> dict:
+        """发起一次任务运行。
+        wait=True 等到结束；wait=秒数 最多等这么久；wait=False 立即返回回执 {run_id, status, …}。
+        等到了返回运行详情（status / output / 过程上下文）。"""
+        server_wait = 0 if not wait else 300 if wait is True else min(float(wait), 300)
+        body = {"task": task, "subtask": subtask, "service": service or self.service, "env": env or self.env,
+                "input": input or {}, "memory": {"recall": recall, "save": save}, "wait": server_wait}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        accepted = self._call("POST", "/v1/runs", json=body, headers=headers)
+        if not wait or accepted["status"] == "awaiting_approval":
+            return accepted
+        return self.wait(accepted["run_id"], timeout=None if wait is True else float(wait))
 
-    def submit_and_wait(self, task_type: str, input_data: dict[str, Any],
-                        timeout: float = 300.0,
-                        idempotency_key: str | None = None,
-                        subtask: str | None = None) -> dict:
-        """提交并等到终态，返回 run 视图。待审批时立即返回（不等审批）。"""
-        submitted = self.submit(task_type, input_data,
-                                idempotency_key=idempotency_key,
-                                subtask=subtask)
-        if submitted.get("status") == "awaiting_approval":
-            return submitted
-        return self.wait(submitted["run_id"], timeout=timeout)
+    def get(self, run_id: str) -> dict:
+        return self._call("GET", f"/v1/runs/{run_id}")
 
-    def wait(self, run_id: str, timeout: float = 300.0,
-             interval: float = 2.0) -> dict:
-        """轮询直到终态（success/failed/cancelled），返回 run 视图。"""
-        deadline = time.monotonic() + timeout
+    def wait(self, run_id: str, timeout: float | None = None) -> dict:
+        """等到终态或超时，返回运行详情。timeout=None 一直等。"""
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            run = self.get_task(run_id)
-            if run.get("status") in TERMINAL:
+            run = self.get(run_id)
+            if run["status"] in TERMINAL or (deadline is not None and time.monotonic() >= deadline):
                 return run
-            if time.monotonic() >= deadline:
-                raise AgentError(f"等待 run {run_id} 超时（{timeout}s）")
-            time.sleep(interval)
+            time.sleep(2)
 
-    def get_task(self, run_id: str) -> dict:
-        with self._client() as c:
-            resp = c.get(f"/v1/tasks/{run_id}")
-        if resp.status_code != 200:
-            raise AgentError(f"get_task {run_id} 返回 {resp.status_code}: "
-                             f"{resp.text[:200]}")
-        return resp.json()
+    def events(self, run_id: str, after: int = 0) -> list[dict]:
+        return self._call("GET", f"/v1/runs/{run_id}/events", params={"after": after})
 
-    def events(self, run_id: str, after_seq: int = -1) -> list[dict]:
-        """run 事件流（after_seq 增量）：观测执行进度用。"""
-        with self._client() as c:
-            resp = c.get(f"/v1/runs/{run_id}/events",
-                         params={"after_seq": after_seq})
-        if resp.status_code != 200:
-            raise AgentError(f"events {run_id} 返回 {resp.status_code}: "
-                             f"{resp.text[:200]}")
-        return resp.json()["events"]
+    def cancel(self, run_id: str) -> dict:
+        return self._call("POST", f"/v1/runs/{run_id}/cancel")
 
-    def cancel(self, run_id: str, by: str = "") -> dict:
-        """取消运行中/排队中的 run；已终态返回 409。"""
-        return self._post(f"/v1/runs/{run_id}/cancel", {"by": by})
+    def feedback(self, run_id: str, score: int, comment: str = "") -> None:
+        self._call("POST", f"/v1/runs/{run_id}/feedback", json={"score": score, "comment": comment})
 
-    def _post(self, path: str, payload: dict,
-              headers: dict | None = None) -> dict:
-        with self._client() as c:
-            resp = c.post(path, json=payload, headers=headers or {})
-        if resp.status_code != 200:
-            raise AgentError(f"{path} 返回 {resp.status_code}: {resp.text[:200]}")
-        return resp.json()
+    # —— 事件 ——
 
-    def _client(self) -> httpx.Client:
-        return httpx.Client(base_url=self._base, timeout=self._timeout,
-                            headers={"Authorization": f"Bearer {self._token}"})
+    def emit(self, source: str, payload: dict, event: str | None = None) -> dict:
+        """把一个事件推给平台（POST /v1/events/{source}），返回匹配到的任务与运行。"""
+        headers = {"X-Event": event} if event else {}
+        return self._call("POST", f"/v1/events/{source}", json=payload, headers=headers)
+
+    # —— 底层 ——
+
+    def _call(self, method: str, path: str, **kw: Any) -> Any:
+        resp = self._http.request(method, path, **kw)
+        if resp.status_code >= 400:
+            raise _error(resp)
+        return resp.json() if resp.content else None
+
+    def _sse(self, path: str, body: dict) -> Iterator[dict]:
+        with self._http.stream("POST", path, json=body, headers={"Accept": "text/event-stream"}) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                raise _error(resp)
+            for line in resp.iter_lines():
+                if line.startswith("data: "):
+                    yield json.loads(line[6:])
+
+
+def _error(resp: httpx.Response) -> AgentError:
+    try:
+        err = resp.json()["error"]
+        return AgentError(resp.status_code, err["code"], err["message"], err.get("detail"))
+    except (ValueError, KeyError, TypeError):
+        return AgentError(resp.status_code, f"http_{resp.status_code}", resp.text[:300])

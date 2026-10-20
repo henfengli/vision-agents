@@ -1,34 +1,43 @@
-# 三环境共享的默认配置；env/{ENV}.yaml 只写与这里的差异（深合并，dict 递归覆盖）。
+# 部署配置（所有机器共享的默认值）。env/{AGENT_ENV}.yaml 只写差异（深合并）；${VAR} 从环境变量取。
+#
+# 这里只放"这台平台怎么跑起来"：数据库、模型、Temporal、引导密钥、外部系统地址。
+# 服务 / 角色 / 任务 / 策略与平台配置（环境、审批、通知、记忆、进程）都在控制台里改，存库、带版本；
+# conf/seeds/ 只在库里还没有对应对象时播种一次。
 
 model:
   url: https://internal-llm/v1
   name: internal-model-v3
   max_concurrency: 10
-
-dingtalk_relay_url: "https://alert-notification.ipa.zs/robot/send"
-scratch_dir: /var/lib/agent-platform/scratch
-
-approvals:
-  enabled: false
-  danger_patterns: ['\brm\s+-[rf]', '\bdrop\b', '\btruncate\b', '\bkill\b', '\bsystemctl\b']
+  # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索
 
 temporal:
   address: 127.0.0.1:7233
   namespace: default
   task_queue: agent-platform
 
+process_control:
+  backend: local                    # systemd（生产）/ local（开发机）/ off
+  unit: agent-svc                   # systemd 模板单元名：agent-svc@<服务:环境:进程>.service
+
 langfuse:
-  enabled: false                   # 默认关闭：角色读 PG，trace 不发送
+  enabled: false                    # 可选的后台链路追踪（OTEL → Langfuse），页面不依赖它
   host: http://127.0.0.1:3000
   public_key: ""
   secret_key: ""
 
-# Grafana 监控（host_metrics 工具）：datasource_uid 是 Prometheus 类型数据源的 uid，
-# token 用只读 service account；整段不配则工具不注册。
+# Grafana（host_metrics 工具用）：datasource_uid 是 Prometheus 数据源的 uid，token 用只读账号。整段不配则工具不出现。
 # grafana:
 #   url: http://grafana.internal:3000
 #   datasource_uid: prometheus
 #   token: "${GRAFANA_TOKEN}"
 
-# 业务域已迁出内核：见 conf/domains/<name>/ 域包
-#（domain.yaml/rules.yaml/session.yaml/tasks.yaml）
+# 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}，工具会出现在角色的工具列表里
+# mcp_servers:
+#   dagster:
+#     transport: stdio
+#     command: python
+#     args: ["/opt/agent-platform/mcp_servers/dagster_mcp.py"]
+#   browser:
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--output-dir", "/var/lib/agent-platform/scratch"]

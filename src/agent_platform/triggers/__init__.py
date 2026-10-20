@@ -1,6 +1,4 @@
-"""触发层：外部事件 → run。
+"""事件触发：统一入口 POST /v1/events/{source}（events）+ 各系统的回调解析（sources）。
 
-- dagster_sensor  Dagster 报错回调（规则先行分类，疑难才建 run）
-- gitlab_webhook  部署完成 → 冒烟任务
-- chat            CLI/Web 对话（含 SSE 流式）
+定时触发在 orchestration/scheduler.py；API / 对话直接走提交端。
 """

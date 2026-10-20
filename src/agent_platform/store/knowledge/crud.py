@@ -24,18 +24,18 @@ _HISTORY_KEEP = 20
 # upsert 的两种形态写成两个具名常量，不用 format 拼（全库只此两处，
 # 读一遍即可懂）：差别仅是有无 embedding 一列。
 _SQL_UPSERT = (
-    "INSERT INTO knowledge (env, domain, task, key, content, source_run,"
+    "INSERT INTO knowledge (env, service, task, key, content, source_run,"
     " code_ref) VALUES (%s,%s,%s,%s,%s,%s,%s)"
-    " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " ON CONFLICT (env, service, key) DO UPDATE SET"
     " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
     " code_ref=EXCLUDED.code_ref,"
     " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
     " expired=false, created_at=now()")
 _SQL_UPSERT_WITH_VEC = (
-    "INSERT INTO knowledge (env, domain, task, key, content, source_run,"
+    "INSERT INTO knowledge (env, service, task, key, content, source_run,"
     " code_ref, embedding) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::vector)"
-    " ON CONFLICT (env, domain, key) DO UPDATE SET"
+    " ON CONFLICT (env, service, key) DO UPDATE SET"
     " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
     " code_ref=EXCLUDED.code_ref,"
@@ -43,37 +43,37 @@ _SQL_UPSERT_WITH_VEC = (
     " expired=false, created_at=now(), embedding=EXCLUDED.embedding")
 
 
-async def _put_history(conn, env: str, domain: str, key: str, content: str,
+async def _put_history(conn, env: str, service: str, key: str, content: str,
                        code_ref: dict | None, source: str) -> None:
     """把旧内容快照进 knowledge_history（版本 = key 内递增）并裁剪到最近 N 版。"""
     cur = await conn.execute(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM knowledge_history"
-        " WHERE env=%s AND domain=%s AND key=%s", (env, domain, key))
+        " WHERE env=%s AND service=%s AND key=%s", (env, service, key))
     version = (await cur.fetchone())[0]
     await conn.execute(
-        "INSERT INTO knowledge_history (env, domain, key, version, content,"
+        "INSERT INTO knowledge_history (env, service, key, version, content,"
         " code_ref, source) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (env, domain, key, version, content,
+        (env, service, key, version, content,
          json.dumps(code_ref) if code_ref else None, source))
     await conn.execute(
         "DELETE FROM knowledge_history"
-        " WHERE env=%s AND domain=%s AND key=%s AND version <= %s",
-        (env, domain, key, version - _HISTORY_KEEP))
+        " WHERE env=%s AND service=%s AND key=%s AND version <= %s",
+        (env, service, key, version - _HISTORY_KEEP))
 
 
-async def _snapshot_if_changed(conn, env: str, domain: str, key: str,
+async def _snapshot_if_changed(conn, env: str, service: str, key: str,
                                content: str, code_ref: dict | None,
                                source: str) -> None:
     """覆盖前快照旧内容（与本次写入相同则不记，防止重跑刷屏）。"""
     cur = await conn.execute(
         "SELECT content, code_ref FROM knowledge"
-        " WHERE env=%s AND domain=%s AND key=%s", (env, domain, key))
+        " WHERE env=%s AND service=%s AND key=%s", (env, service, key))
     old = await cur.fetchone()
     if old and (old[0] != content or (old[1] or None) != (code_ref or None)):
-        await _put_history(conn, env, domain, key, old[0], old[1], source)
+        await _put_history(conn, env, service, key, old[0], old[1], source)
 
 
-async def upsert(env: str, domain: str, key: str, content: str,
+async def upsert(env: str, service: str, key: str, content: str,
                  source_run: str | None = None, code_ref: dict | None = None,
                  task: str = "", embedder=None) -> None:
     """幂等 upsert（同 key 整替换）；embedder 存在时同步写入向量。
@@ -84,14 +84,14 @@ async def upsert(env: str, domain: str, key: str, content: str,
         vecs = await embedder([f"{key} {content}"])
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
-    params = (env, domain, task, key, content, source_run,
+    params = (env, service, task, key, content, source_run,
               json.dumps(code_ref) if code_ref else None)
     source = source_run or "upsert"
     if vec is not None:
         try:
             # 独立连接：失败后 PG 事务中止，不能在同一连接上继续
             async with pool().connection() as conn, conn.transaction():
-                await _snapshot_if_changed(conn, env, domain, key, content,
+                await _snapshot_if_changed(conn, env, service, key, content,
                                            code_ref, source)
                 await conn.execute(_SQL_UPSERT_WITH_VEC, (*params, vec))
             return
@@ -101,24 +101,24 @@ async def upsert(env: str, domain: str, key: str, content: str,
                 _vec_fallback_warned = True
                 log.warning("向量写入失败，知识库退化为纯文本检索（仅首次告警）：%s", e)
     async with pool().connection() as conn, conn.transaction():
-        await _snapshot_if_changed(conn, env, domain, key, content, code_ref,
+        await _snapshot_if_changed(conn, env, service, key, content, code_ref,
                                    source)
         await conn.execute(_SQL_UPSERT, params)
 
 
-async def list_content_history(env: str, domain: str, key: str) -> list[dict]:
+async def list_content_history(env: str, service: str, key: str) -> list[dict]:
     """内容历史（新版本在前）：回滚选择与审计用。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT version, content, code_ref, source, created_at"
-            " FROM knowledge_history WHERE env=%s AND domain=%s AND key=%s"
-            " ORDER BY version DESC", (env, domain, key))
+            " FROM knowledge_history WHERE env=%s AND service=%s AND key=%s"
+            " ORDER BY version DESC", (env, service, key))
         rows = await cur.fetchall()
     return [{"version": r[0], "content": r[1], "code_ref": r[2],
              "source": r[3], "created_at": r[4].isoformat()} for r in rows]
 
 
-async def restore_content(env: str, domain: str, key: str, version: int,
+async def restore_content(env: str, service: str, key: str, version: int,
                           embedder=None) -> None:
     """把历史版本写回主表（当前内容先快照，回滚可逆）。版本不存在 KeyError。
 
@@ -128,26 +128,26 @@ async def restore_content(env: str, domain: str, key: str, version: int,
     async with pool().connection() as conn, conn.transaction():
         cur = await conn.execute(
             "SELECT content, code_ref FROM knowledge_history"
-            " WHERE env=%s AND domain=%s AND key=%s AND version=%s",
-            (env, domain, key, version))
+            " WHERE env=%s AND service=%s AND key=%s AND version=%s",
+            (env, service, key, version))
         hist = await cur.fetchone()
         if hist is None:
             raise KeyError(f"无历史版本 v{version}")
         cur = await conn.execute(
             "SELECT content, code_ref FROM knowledge"
-            " WHERE env=%s AND domain=%s AND key=%s", (env, domain, key))
+            " WHERE env=%s AND service=%s AND key=%s", (env, service, key))
         cur_row = await cur.fetchone()
         if cur_row is None:
             raise KeyError("条目本体不存在")
         if (cur_row[0], cur_row[1]) != (hist[0], hist[1]):
-            await _put_history(conn, env, domain, key, cur_row[0], cur_row[1],
+            await _put_history(conn, env, service, key, cur_row[0], cur_row[1],
                                f"rollback-to-v{version}")
         await conn.execute(
             "UPDATE knowledge SET content=%s, code_ref=%s, valid_from=now(),"
             " valid_to=NULL, expired=false, superseded_by=NULL,"
-            " created_at=now() WHERE env=%s AND domain=%s AND key=%s",
+            " created_at=now() WHERE env=%s AND service=%s AND key=%s",
             (hist[0], json.dumps(hist[1]) if hist[1] else None,
-             env, domain, key))
+             env, service, key))
     if embedder is not None:
         try:
             vecs = await embedder([f"{key} {hist[0]}"])
@@ -156,8 +156,8 @@ async def restore_content(env: str, domain: str, key: str, version: int,
                 async with pool().connection() as conn:
                     await conn.execute(
                         "UPDATE knowledge SET embedding=%s::vector"
-                        " WHERE env=%s AND domain=%s AND key=%s",
-                        (vec, env, domain, key))
+                        " WHERE env=%s AND service=%s AND key=%s",
+                        (vec, env, service, key))
         except Exception as e:  # noqa: BLE001 —— 向量失败退化为纯文本检索
             log.warning("回滚后重算向量失败（不影响回滚本身）：%s", e)
 
@@ -166,13 +166,13 @@ async def get_entry(entry_id: int) -> dict | None:
     """整行详情（记忆页抽屉用）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, env, domain, key, content, expired, valid_from, valid_to,"
+            "SELECT id, env, service, key, content, expired, valid_from, valid_to,"
             " superseded_by, feedback_score, source_run, code_ref, created_at, task"
             " FROM knowledge WHERE id=%s", (entry_id,))
         row = await cur.fetchone()
     if not row:
         return None
-    return {"id": row[0], "env": row[1], "domain": row[2], "key": row[3],
+    return {"id": row[0], "env": row[1], "service": row[2], "key": row[3],
             "content": row[4], "expired": row[5],
             "valid_from": row[6].isoformat() if row[6] else None,
             "valid_to": row[7].isoformat() if row[7] else None,
@@ -190,27 +190,27 @@ async def restore(entry_id: int) -> None:
             " superseded_by=NULL, valid_from=now() WHERE id=%s", (entry_id,))
 
 
-async def domain_stats(env: str) -> dict[str, dict]:
-    """按域聚合条目数：{domain: {active, inactive}}——记忆页侧栏角标。"""
+async def service_stats(env: str) -> dict[str, dict]:
+    """按域聚合条目数：{service: {active, inactive}}——记忆页侧栏角标。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT domain,"
+            "SELECT service,"
             " COUNT(*) FILTER (WHERE NOT expired AND valid_to IS NULL),"
             " COUNT(*) FILTER (WHERE expired OR valid_to IS NOT NULL)"
-            " FROM knowledge WHERE env=%s GROUP BY domain ORDER BY domain",
+            " FROM knowledge WHERE env=%s GROUP BY service ORDER BY service",
             (env,))
         rows = await cur.fetchall()
     return {d: {"active": a, "inactive": i} for d, a, i in rows}
 
 
-async def evolution_chain(env: str, domain: str, key: str) -> list[dict]:
+async def evolution_chain(env: str, service: str, key: str) -> list[dict]:
     """演化链：同域内沿 superseded_by 双向走，返回时间序的整条链
     （含被取代/过期历史），当前 key 的条目带 current 标记。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, key, expired, valid_to IS NOT NULL, superseded_by,"
             " feedback_score, created_at FROM knowledge"
-            " WHERE env=%s AND domain=%s ORDER BY created_at", (env, domain))
+            " WHERE env=%s AND service=%s ORDER BY created_at", (env, service))
         rows = await cur.fetchall()
     by_key = {r[1]: r for r in rows}
     if key not in by_key:
@@ -237,18 +237,18 @@ async def evolution_chain(env: str, domain: str, key: str) -> list[dict]:
     return chain
 
 
-async def similar_pairs(env: str, domain: str | None = None,
+async def similar_pairs(env: str, service: str | None = None,
                         threshold: float = 0.85, limit: int = 20) -> list[dict]:
     """疑似矛盾/重复对：同域两条生效条目向量余弦相似度超阈值。
     pgvector 缺失或无向量时返回空（不造数据）。"""
-    where = "a.env=%s AND a.domain=b.domain AND a.id<b.id" \
+    where = "a.env=%s AND a.service=b.service AND a.id<b.id" \
             " AND a.expired=false AND a.valid_to IS NULL" \
             " AND b.expired=false AND b.valid_to IS NULL" \
             " AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL"
     params: list = [env]
-    if domain:
-        where += " AND a.domain=%s"
-        params.append(domain)
+    if service:
+        where += " AND a.service=%s"
+        params.append(service)
     params += [threshold, limit]
     try:
         async with pool().connection() as conn:
@@ -282,7 +282,7 @@ async def update_content(entry_id: int, content: str,
 
     async def _snapshot(conn) -> None:
         cur = await conn.execute(
-            "SELECT env, domain, key, content, code_ref FROM knowledge"
+            "SELECT env, service, key, content, code_ref FROM knowledge"
             " WHERE id=%s", (entry_id,))
         old = await cur.fetchone()
         if old and old[3] != content:
@@ -310,32 +310,32 @@ async def update_content(entry_id: int, content: str,
                 (content, entry_id))
 
 
-async def list_by_domain(env: str, domain: str) -> list[dict]:
+async def list_by_service(env: str, service: str) -> list[dict]:
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, key, content, expired FROM knowledge"
-            " WHERE env=%s AND domain=%s ORDER BY key", (env, domain))
+            " WHERE env=%s AND service=%s ORDER BY key", (env, service))
         rows = await cur.fetchall()
     return [{"id": i, "key": k, "content": c, "expired": e} for i, k, c, e in rows]
 
 
-async def list_all(env: str, domain: str | None = None,
+async def list_all(env: str, service: str | None = None,
                    include_inactive: bool = False) -> list[dict]:
     """管理页用：全量列出（可选含已过期/被取代）。"""
     where = "WHERE env=%s"
     params: list = [env]
-    if domain:
-        where += " AND domain=%s"
-        params.append(domain)
+    if service:
+        where += " AND service=%s"
+        params.append(service)
     if not include_inactive:
         where += " AND expired=false AND valid_to IS NULL"
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, key, content, expired, valid_to IS NOT NULL,"
+            "SELECT id, service, key, content, expired, valid_to IS NOT NULL,"
             " feedback_score, code_ref, created_at, task FROM knowledge " + where +
-            " ORDER BY domain, key LIMIT 500", tuple(params))
+            " ORDER BY service, key LIMIT 500", tuple(params))
         rows = await cur.fetchall()
-    return [{"id": r[0], "domain": r[1], "key": r[2], "content": r[3],
+    return [{"id": r[0], "service": r[1], "key": r[2], "content": r[3],
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],
              "code_ref": r[7],  # JSONB 已被 psycopg3 解析成 dict/None
              "created_at": r[8].isoformat(), "task": r[9]} for r in rows]
@@ -345,7 +345,7 @@ async def by_source_run(run_id: str) -> list[dict]:
     """反查：某次 run 沉淀了哪些知识条目（run 详情「本次沉淀」用）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, key FROM knowledge WHERE source_run=%s"
+            "SELECT id, service, key FROM knowledge WHERE source_run=%s"
             " ORDER BY id", (run_id,))
         rows = await cur.fetchall()
-    return [{"id": r[0], "domain": r[1], "key": r[2]} for r in rows]
+    return [{"id": r[0], "service": r[1], "key": r[2]} for r in rows]
