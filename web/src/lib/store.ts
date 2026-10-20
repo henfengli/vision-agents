@@ -1,25 +1,36 @@
 /**
- * 全局 UI 状态（持久化到 localStorage）：主题、全局环境、侧栏折叠。
+ * 个人偏好（只存在这台浏览器的 localStorage，不经过后端）：主题、全局环境视角、侧栏、
+ * 首页、时间显示、列表密度、自动刷新、每页条数、对话默认项。设置 → 个人偏好 里改。
  * 全局环境是"看哪套环境"的视角：列表/统计默认按它过滤，"" = 全部。
  */
 import { useSyncExternalStore } from "react";
 
 export type Theme = "light" | "dark" | "system";
 
-interface UiState {
+export interface UiState {
   theme: Theme;
   env: string;
   sidebarCollapsed: boolean;
+  landing: "/" | "/runs" | "/chat" | "/approvals" | "/services";
+  timeFormat: "relative" | "absolute";
+  density: "comfortable" | "compact";
+  autoRefresh: boolean;          // 关掉后列表不再定时刷新（运行中的详情页与对话仍实时）
+  pageSize: 30 | 50 | 100;
+  chat: { service: string; env: string; task: string; recall: boolean; save: boolean };
 }
 
 const KEY = "ap.ui";
-const defaults: UiState = { theme: "system", env: "", sidebarCollapsed: false };
+export const UI_DEFAULTS: UiState = {
+  theme: "system", env: "", sidebarCollapsed: false, landing: "/", timeFormat: "relative", density: "comfortable",
+  autoRefresh: true, pageSize: 30, chat: { service: "", env: "", task: "", recall: true, save: true },
+};
 
 function read(): UiState {
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(KEY) || "{}") };
+    const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    return { ...UI_DEFAULTS, ...saved, chat: { ...UI_DEFAULTS.chat, ...(saved.chat ?? {}) } };
   } catch {
-    return defaults;
+    return UI_DEFAULTS;
   }
 }
 
@@ -39,7 +50,11 @@ function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", dark);
   try { localStorage.setItem("ap.theme", theme); } catch { /* 隐私模式 */ }
 }
+function applyDensity(density: UiState["density"]) {
+  document.documentElement.dataset.density = density;
+}
 applyTheme(state.theme);
+applyDensity(state.density);
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(state.theme));
 new MutationObserver(() => applyTheme(state.theme)).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
@@ -55,7 +70,12 @@ export function setUi(patch: Partial<UiState>) {
   state = { ...state, ...patch };
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* 隐私模式 */ }
   if (patch.theme) applyTheme(patch.theme);
+  if (patch.density) applyDensity(patch.density);
   listeners.forEach((l) => l());
+}
+
+export function resetUi() {
+  setUi(UI_DEFAULTS);
 }
 
 export function useUi(): UiState {

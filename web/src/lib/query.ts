@@ -4,6 +4,8 @@
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
+import { getUi } from "./store";
+
 type Key = readonly unknown[];
 
 interface Entry<T = unknown> {
@@ -66,10 +68,11 @@ export interface QueryOptions {
   enabled?: boolean;
   refetchInterval?: number;  // 毫秒
   staleTime?: number;        // 毫秒内复用缓存不发请求（默认 5s）
+  live?: boolean;            // 实时视图（运行中的详情）：不受"自动刷新"偏好影响
 }
 
 export function useQuery<T>(key: Key, fetcher: () => Promise<T>, opts: QueryOptions = {}): QueryResult<T> {
-  const { enabled = true, refetchInterval, staleTime = 5000 } = opts;
+  const { enabled = true, refetchInterval, staleTime = 5000, live = false } = opts;
   const hash = hashKey(key);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
@@ -98,10 +101,10 @@ export function useQuery<T>(key: Key, fetcher: () => Promise<T>, opts: QueryOpti
   useEffect(() => {
     if (!enabled || !refetchInterval) return;
     const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") void run();
+      if (document.visibilityState === "visible" && (live || getUi().autoRefresh)) void run();
     }, refetchInterval);
     return () => window.clearInterval(id);
-  }, [enabled, refetchInterval, run]);
+  }, [enabled, refetchInterval, live, run]);
 
   const e = entry(hash) as Entry<T>;
   return {

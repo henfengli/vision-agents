@@ -1,15 +1,16 @@
 /**
- * 任务定义编辑器：基本 / 输入 / 触发 / 输出与去重 / 环境 / 档案 / 高级（任务图、处理器）。
- * 分节表单 + 本地草稿 + 未保存提示条。
+ * 任务定义编辑器：基本 / 输入 / 触发 / 结果与去重 / 记忆 / 环境 / 高级（任务图、处理器）。
+ * 分节表单 + 本地草稿 + 未保存提示条。档案不在这里——它是内容不是结构，在「档案」标签里就地编辑。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  LuCalendarClock, LuCode, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuScrollText, LuSend, LuSettings, LuTrash2,
+  LuBrain, LuCalendarClock, LuCode, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuSend, LuSettings, LuTrash2,
   LuWebhook, LuWorkflow, LuZap,
 } from "react-icons/lu";
 
-import { api, useEnvs, useMeta, useRoles, useServices } from "@/api/hooks";
-import type { InputField, Task, TaskSummary, Trigger, TriggerRule } from "@/api/types";
+import { api, useEnvs, useMeta, useRoles, useServices, useSettings } from "@/api/hooks";
+import type { Deliver, InputField, MemoryOverride, Task, TaskSummary, Trigger, TriggerRule } from "@/api/types";
+import { SaveBar } from "@/components/save-bar";
 import { EnvBadge, TRIGGER } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor } from "@/components/ui/data";
@@ -21,11 +22,11 @@ import { cn } from "@/lib/cn";
 import { dayjs } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 
-type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "output" | "dedup" | "timeout_s" | "context" | "graph" | "handler">;
+type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s" | "graph" | "handler">;
 
 const toDraft = (t: TaskSummary): Draft => structuredClone({
   title: t.title, description: t.description, service: t.service, role: t.role, form: t.form, input: t.input, envs: t.envs,
-  triggers: t.triggers, output: t.output, dedup: t.dedup, timeout_s: t.timeout_s, context: t.context, graph: t.graph ?? null, handler: t.handler ?? null,
+  triggers: t.triggers, deliver: t.deliver, dedup: t.dedup, memory: t.memory ?? {}, timeout_s: t.timeout_s, graph: t.graph ?? null, handler: t.handler ?? null,
 });
 
 function Section({ id, icon, title, description, children, actions }: { id: string; icon: ReactNode; title: string; description: ReactNode; children: ReactNode; actions?: ReactNode }) {
@@ -43,16 +44,17 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
   const { data: roles } = useRoles();
   const { data: services } = useServices();
   const { data: envs } = useEnvs();
+  const { data: meta } = useMeta();
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((s) => ({ ...s, [k]: v }));
   const dirty = useMemo(() => JSON.stringify(d) !== JSON.stringify(toDraft(task)), [d, task]);
   const [graphText, setGraphText] = useState(() => JSON.stringify(task.graph ?? {}, null, 2));
   const graphError = useMemo(() => { if (d.form !== "graph") return null; try { JSON.parse(graphText); return null; } catch (e) { return (e as Error).message; } }, [graphText, d.form]);
-  const cronErrors = d.triggers.some((t) => t.type === "schedule" && validateCron(t.cron));
+  const triggerErrors = d.triggers.some((t) => t.type === "schedule" && (validateCron(t.cron) || !t.envs.length || (d.service === "*" && !t.service)));
 
   const save = useMutation(async () => {
     try {
       const body = { ...d, graph: d.form === "graph" ? JSON.parse(graphText) : null };
-      const r = await api.putTask(task.name, body);
+      const r = await api.update<TaskSummary>("tasks", task.name, body);
       toast(`已保存为 v${r.version}`, { description: "定时触发已重新同步" });
       invalidate("tasks");
       onSaved();
@@ -61,8 +63,9 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
     }
   });
 
-  const enabledEnvs = (envs ?? []).filter((e) => e.enabled);
-  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["output", "输出与去重"], ["envs", "环境"], ["context", "任务档案"], ...(d.form !== "agent" ? [["advanced", d.form === "graph" ? "任务图" : "处理器"]] : [])];
+  const envNames = (envs ?? []).map((e) => e.name);
+  const generic = d.service === "*";
+  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["deliver", "结果与去重"], ["memory", "记忆"], ["envs", "环境"], ...(d.form !== "agent" ? [["advanced", d.form === "graph" ? "任务图" : "处理器"]] : [])];
 
   return (
     <div className="grid gap-5 lg:grid-cols-[160px_1fr]">
@@ -103,24 +106,21 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
           <div className="space-y-3">
             {d.triggers.length === 0 && <div className="rounded-md border border-dashed border-line px-3 py-6 text-center text-xs text-fg-3">没有触发器：只能从网页手动运行</div>}
             {d.triggers.map((tr, i) => (
-              <TriggerEditor key={tr.id} tr={tr} envs={enabledEnvs.map((e) => e.name)} input={d.input}
+              <TriggerEditor key={tr.id} tr={tr} envs={envNames} input={d.input} generic={generic}
                 onChange={(v) => set("triggers", d.triggers.map((x, j) => (j === i ? v : x)))}
                 onRemove={() => set("triggers", d.triggers.filter((_, j) => j !== i))} />
             ))}
           </div>
         </Section>
 
-        <Section id="output" icon={<LuSend />} title="输出与去重" description="结果投递失败只留事件，不改变 run 的状态（结果已在台账里）">
+        <Section id="deliver" icon={<LuSend />} title="结果与去重" description="结果总在运行台账里；这里决定要不要再主动推出去。投递失败只记事件，不改变运行状态。">
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="结果投递">
-              <Segmented value={d.output.channel} onChange={(v) => set("output", { ...d.output, channel: v })} options={[{ value: "caller", label: "调用方自取" }, { value: "dingtalk", label: "钉钉" }, { value: "http", label: "HTTP 回调" }]} />
+            <Field label="结果投递" className="md:col-span-2">
+              <DeliverEditor value={d.deliver} channels={meta?.channels ?? []} onChange={(v) => set("deliver", v)} />
             </Field>
-            {d.output.channel === "http" && (
-              <Field label="回调地址" help="POST {run_id, task, status, output}"><Input mono value={d.output.callback ?? ""} onChange={(e) => set("output", { ...d.output, callback: e.target.value })} placeholder="http://…" /></Field>
-            )}
             <Field label="超时（秒）" help="单次执行上限，最长 7200"><Input inputMode="numeric" value={d.timeout_s} onChange={(e) => set("timeout_s", Math.min(7200, Number(e.target.value.replace(/\D/g, "")) || 0))} /></Field>
             <Field label="去重" help="时间窗内同键的成功运行直接复用结果；a+b 拼接多个字段" className="md:col-span-2">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <Switch checked={!!d.dedup} onChange={(v) => set("dedup", v ? { key: Object.keys(d.input)[0] ?? "", window_s: 600 } : null)} />
                 {d.dedup && <>
                   <Input mono className="w-56" value={d.dedup.key} onChange={(e) => set("dedup", { ...d.dedup!, key: e.target.value })} placeholder="run_id" />
@@ -133,17 +133,17 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
           </div>
         </Section>
 
+        <Section id="memory" icon={<LuBrain />} title="记忆" description="优先级：请求 > 任务 > 平台默认（设置 → 记忆）。跟随 = 不在任务上写死。">
+          <MemoryEditor value={d.memory} onChange={(v) => set("memory", v)} />
+        </Section>
+
         <Section id="envs" icon={<LuLayers />} title="环境" description="限定这个任务能跑在哪些环境；不选 = 全部。提交到其他环境会被拒（env_not_allowed）">
           <div className="flex flex-wrap gap-4">
-            {enabledEnvs.map((e) => (
+            {(envs ?? []).map((e) => (
               <Checkbox key={e.name} checked={d.envs.includes(e.name)} onChange={(v) => set("envs", v ? [...d.envs, e.name] : d.envs.filter((x) => x !== e.name))}
                 label={<span className="flex items-center gap-1.5"><EnvBadge env={e.name} />{e.title}</span>} hint={e.protected ? "受保护" : undefined} />
             ))}
           </div>
-        </Section>
-
-        <Section id="context" icon={<LuScrollText />} title="任务档案" description="置顶逐字注入该任务的 run（子任务按键合并）。只写代码和配置里读不出来的东西。">
-          <KeyValueEditor value={d.context} onChange={(v) => set("context", v)} suggestions={[{ key: "pitfalls", label: "常见坑" }, { key: "code_refs", label: "代码位置" }, { key: "upstream", label: "上游依赖" }, { key: "runbook", label: "运维备注" }]} />
         </Section>
 
         {d.form === "graph" && (
@@ -160,16 +160,60 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
         )}
       </div>
 
-      {dirty && (
-        <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center">
-          <div className="flex animate-pop items-center gap-3 rounded-xl border border-line bg-raised py-2 pl-4 pr-2 shadow-[var(--shadow-pop)]">
-            <span className="size-2 rounded-full bg-warn" />
-            <span className="text-[13px] text-fg">有未保存的修改</span>
-            <Button size="sm" variant="ghost" onClick={() => { setD(toDraft(task)); setGraphText(JSON.stringify(task.graph ?? {}, null, 2)); }}>放弃</Button>
-            <Button size="sm" variant="primary" disabled={!!graphError || cronErrors} loading={save.pending} onClick={() => save.mutate(undefined)}>保存为 v{task.version + 1}</Button>
-          </div>
+      <SaveBar visible={dirty} saving={save.pending} label={`保存为 v${task.version + 1}`}
+        onSave={() => { if (graphError || triggerErrors) toast.error("还有错误没改", graphError ?? "检查触发器：cron、环境、通用任务的服务"); else save.mutate(undefined); }}
+        onDiscard={() => { setD(toDraft(task)); setGraphText(JSON.stringify(task.graph ?? {}, null, 2)); }} />
+    </div>
+  );
+}
+
+// ———————— 结果投递 / 记忆 ————————
+
+type DeliverMode = "none" | "channel" | "url";
+
+function DeliverEditor({ value, channels, onChange }: { value: Deliver | null; channels: string[]; onChange: (v: Deliver | null) => void }) {
+  const mode: DeliverMode = value?.url ? "url" : value?.channel ? "channel" : "none";
+  const setMode = (m: DeliverMode) => onChange(m === "none" ? null : m === "channel" ? { channel: channels[0] ?? "" } : { url: "" });
+  return (
+    <div className="space-y-2">
+      <Segmented value={mode} onChange={setMode} options={[{ value: "none", label: "调用方自取" }, { value: "channel", label: "推送到通知渠道" }, { value: "url", label: "HTTP 回调" }]} />
+      {mode === "channel" && (
+        <div className="flex items-center gap-2">
+          <Select className="w-56" value={value?.channel ?? null} onChange={(channel) => onChange({ channel })} placeholder="选择渠道" options={channels.map((c) => ({ value: c, label: c }))} />
+          <span className="text-xs text-fg-3">渠道在 设置 → 通知 里配置</span>
         </div>
       )}
+      {mode === "url" && (
+        <Input mono value={value?.url ?? ""} onChange={(e) => onChange({ url: e.target.value })} placeholder="https://board.internal/hooks/agent" />
+      )}
+      {mode === "url" && <div className="text-xs text-fg-3">完成后 POST <code className="font-mono">{"{run_id, task, service, env, status, output}"}</code></div>}
+    </div>
+  );
+}
+
+function MemoryEditor({ value, onChange }: { value: MemoryOverride; onChange: (v: MemoryOverride) => void }) {
+  const { data: settings } = useSettings();
+  const platform = settings?.memory;
+  const row = (key: "recall" | "save", title: string, hint: string) => {
+    const v = value[key];
+    const current = v ?? platform?.[key];
+    return (
+      <div className="flex flex-wrap items-center gap-3 py-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] text-fg">{title}</div>
+          <div className="text-xs text-fg-3">{hint}</div>
+        </div>
+        <Segmented size="sm" value={v === true ? "on" : v === false ? "off" : "inherit"}
+          onChange={(m) => onChange({ ...value, [key]: m === "inherit" ? null : m === "on" })}
+          options={[{ value: "inherit", label: `跟随平台${platform ? (platform[key] ? "（开）" : "（关）") : ""}` }, { value: "on", label: "开" }, { value: "off", label: "关" }]} />
+        <span className={cn("w-10 text-right text-xs", current ? "text-ok" : "text-fg-3")}>{current ? "生效" : "不用"}</span>
+      </div>
+    );
+  };
+  return (
+    <div className="divide-y divide-line">
+      {row("recall", "召回", "运行前按问题检索知识、案例、方法，注入提示词")}
+      {row("save", "沉淀", "成功后把可复用的结论存进知识库（agent 判断值不值得存）")}
     </div>
   );
 }
@@ -223,7 +267,9 @@ function AddTriggerMenu({ onAdd, existing }: { onAdd: (t: Trigger) => void; exis
   );
 }
 
-function TriggerEditor({ tr, envs, input, onChange, onRemove }: { tr: Trigger; envs: string[]; input: Record<string, InputField>; onChange: (t: Trigger) => void; onRemove: () => void }) {
+function TriggerEditor({ tr, envs, input, generic, onChange, onRemove }: {
+  tr: Trigger; envs: string[]; input: Record<string, InputField>; generic: boolean; onChange: (t: Trigger) => void; onRemove: () => void;
+}) {
   const meta = TRIGGER[tr.type];
   const { data: m } = useMeta();
   return (
@@ -241,14 +287,26 @@ function TriggerEditor({ tr, envs, input, onChange, onRemove }: { tr: Trigger; e
       <div className="p-3.5">
         {tr.type === "api" && <div className="text-[12.5px] text-fg-3">允许业务项目经 <code className="font-mono">POST /v1/runs</code> / SDK 调用。去掉它，任务就只能被定时、事件或网页触发。</div>}
         {tr.type === "chat" && <div className="text-[12.5px] text-fg-3">出现在对话页的任务选择里；同一会话多轮追问共享上下文。</div>}
-        {tr.type === "schedule" && <ScheduleEditor tr={tr} envs={envs} onChange={onChange} />}
-        {tr.type === "event" && <EventEditor tr={tr} input={input} fields={m?.event_sources.find((s) => s.name === tr.source)?.events.find((e) => e.name === tr.event)?.fields ?? []} onChange={onChange} />}
+        {tr.type === "schedule" && <ScheduleEditor tr={tr} envs={envs} generic={generic} onChange={onChange} />}
+        {tr.type === "event" && <EventEditor tr={tr} input={input} generic={generic} fields={m?.event_sources.find((s) => s.name === tr.source)?.events.find((e) => e.name === tr.event)?.fields ?? []} onChange={onChange} />}
       </div>
     </div>
   );
 }
 
-function ScheduleEditor({ tr, envs, onChange }: { tr: Extract<Trigger, { type: "schedule" }>; envs: string[]; onChange: (t: Trigger) => void }) {
+/** 通用任务（service="*"）的定时 / 事件触发要说清楚跑哪个服务 */
+function TriggerServiceField({ value, required, onChange }: { value: string | null | undefined; required: boolean; onChange: (v: string | null) => void }) {
+  const { data: services } = useServices();
+  return (
+    <Field label="服务" required={required} help={required ? "通用任务的定时触发必须指定服务" : "不选 = 取事件数据里的 service 字段"}
+      error={required && !value ? "请选择服务" : null}>
+      <Select value={value ?? ""} onChange={(v) => onChange(v || null)} placeholder="选择服务"
+        options={[...(required ? [] : [{ value: "", label: "取自事件" }]), ...(services ?? []).map((s) => ({ value: s.name, label: s.name, hint: s.title }))]} />
+    </Field>
+  );
+}
+
+function ScheduleEditor({ tr, envs, generic, onChange }: { tr: Extract<Trigger, { type: "schedule" }>; envs: string[]; generic: boolean; onChange: (t: Trigger) => void }) {
   const err = validateCron(tr.cron);
   const next = err ? [] : nextRuns(tr.cron, 4);
   const presets = [["每天 09:00", "0 9 * * *"], ["工作日 08:30", "30 8 * * 1-5"], ["每小时", "0 * * * *"], ["每 15 分钟", "*/15 * * * *"], ["每周一 10:00", "0 10 * * 1"]];
@@ -269,6 +327,7 @@ function ScheduleEditor({ tr, envs, onChange }: { tr: Extract<Trigger, { type: "
         </div>
         {!tr.envs.length && <div className="mt-1 text-xs text-bad">至少选一个环境</div>}
       </Field>
+      {generic && <TriggerServiceField value={tr.service} required onChange={(service) => onChange({ ...tr, service })} />}
       <Field label="固定输入（JSON）" className="md:col-span-2" help="每次定时触发都带这份输入">
         <Input mono value={inputText} onChange={(e) => { setInputText(e.target.value); try { onChange({ ...tr, input: JSON.parse(e.target.value || "{}") }); } catch { /* 输入中 */ } }} />
       </Field>
@@ -276,7 +335,9 @@ function ScheduleEditor({ tr, envs, onChange }: { tr: Extract<Trigger, { type: "
   );
 }
 
-function EventEditor({ tr, input, fields, onChange }: { tr: Extract<Trigger, { type: "event" }>; input: Record<string, InputField>; fields: string[]; onChange: (t: Trigger) => void }) {
+function EventEditor({ tr, input, generic, fields, onChange }: {
+  tr: Extract<Trigger, { type: "event" }>; input: Record<string, InputField>; generic: boolean; fields: string[]; onChange: (t: Trigger) => void;
+}) {
   const rules = tr.rules ?? [];
   const setRule = (i: number, r: TriggerRule | null) => onChange({ ...tr, rules: r ? rules.map((x, j) => (j === i ? r : x)) : rules.filter((_, j) => j !== i) });
   return (
@@ -290,6 +351,7 @@ function EventEditor({ tr, input, fields, onChange }: { tr: Extract<Trigger, { t
             suggestions={Object.keys(input).filter((k) => !(k in (tr.map ?? {}))).map((k) => ({ key: k, label: k }))} />
         </Field>
       </div>
+      {generic && <TriggerServiceField value={tr.service} required={false} onChange={(service) => onChange({ ...tr, service })} />}
       <Field label="会话命名" help="同一会话共享上下文：如 dagster:{asset_key}:{error_class}:{date} 让同类故障当天连续、跨天开新线；留空 = 每次独立">
         <Input mono value={tr.session ?? ""} onChange={(e) => onChange({ ...tr, session: e.target.value || null })} placeholder="{source}:{asset_key}:{date}" />
       </Field>

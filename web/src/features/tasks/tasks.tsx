@@ -150,7 +150,7 @@ function GroupRows({ group, all, showGroup, hideService }: { group: { key: strin
               </div>
               <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-fg-3">
                 {t.name}
-                {subs.length > 0 && <span className="flex items-center gap-0.5 font-sans"><LuGitBranch className="size-3" />{subs.length} 子任务{subs.some((x) => !Object.keys(x.context).length) && " · 有档案待补"}</span>}
+                {subs.length > 0 && <span className="flex items-center gap-0.5 font-sans"><LuGitBranch className="size-3" />{subs.length} 子任务{subs.some((x) => !x.overrides.includes("profile")) && " · 有档案待补"}</span>}
               </div>
             </Td>
             {!hideService && <Td className="text-fg-2">{t.service === "*" ? "通用" : t.service ?? "平台"}</Td>}
@@ -188,11 +188,11 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
   const valid = /^[a-z][a-z0-9-]{1,48}$/.test(name);
   const create = useMutation(async () => {
     try {
-      await api.createTask({ name, title, description, service: service === "_platform" ? null : service, role: role || null, form, triggers: [{ id: "api", type: "api" }] });
+      await api.create("tasks", { name, title, description, service: service === "_platform" ? null : service, role: role || null, form, triggers: [{ id: "api", type: "api" }] });
       invalidate("tasks");
       toast("任务已创建", { description: "接着配置输入、触发与输出" });
       onClose();
-      navigate(`/tasks/${name}?tab=definition`);
+      navigate(`/tasks/${name}?tab=definition`); // 新任务先去补输入、触发与投递
     } catch (e) {
       toast.error("创建失败", (e as Error).message);
     }

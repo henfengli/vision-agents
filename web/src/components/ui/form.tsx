@@ -143,6 +143,62 @@ export function SearchSelect<T extends string>({ value, onChange, options, place
   );
 }
 
+/**
+ * 可新建的选择：从已有项里选，或直接输入一个新值（下拉里出现"新建：xxx"）。
+ * 空字符串表示"不选"。用于子任务对象名这类"有就选、没有就建"的字段。
+ */
+export function CreatableSelect({ value, onChange, options, placeholder = "选择或输入…", createLabel = "新建", className, validate }: {
+  value: string; onChange: (v: string) => void; options: Option[]; placeholder?: string; createLabel?: string; className?: string;
+  validate?: (v: string) => string | null;
+}) {
+  const [query, setQuery] = useState("");
+  const q = query.trim();
+  const filtered = q ? options.filter((o) => o.value.toLowerCase().includes(q.toLowerCase()) || String(o.label).toLowerCase().includes(q.toLowerCase())) : options;
+  const exists = options.some((o) => o.value === q);
+  const invalid = q && !exists ? validate?.(q) ?? null : null;
+  return (
+    <Combobox value={value} onChange={(v: string | null) => onChange(v ?? "")} onClose={() => setQuery("")}>
+      <div className={cn("relative", className)}>
+        <ComboboxInput className={cn(control, "h-8 pl-2.5 pr-12 font-mono text-[12.5px]")} placeholder={placeholder}
+          displayValue={(v: string) => v} onChange={(e) => setQuery(e.target.value)} />
+        {value && (
+          <button type="button" onClick={() => onChange("")} className="absolute right-7 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-3 hover:text-fg">
+            <LuX className="size-3.5" />
+          </button>
+        )}
+        <LuChevronDown className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-3" />
+      </div>
+      <ComboboxOptions anchor={{ to: "bottom start", gap: 4 }}
+        className="z-50 max-h-72 w-[var(--input-width)] overflow-auto rounded-lg border border-line bg-raised p-1 shadow-[var(--shadow-pop)] empty:invisible">
+        {q && !exists && (invalid
+          ? <div className="px-2 py-1.5 text-xs text-bad">{invalid}</div>
+          : (
+            <ComboboxOption value={q} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] data-[focus]:bg-hover">
+              <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[11px] font-medium text-accent">{createLabel}</span>
+              <span className="truncate font-mono text-[12.5px]">{q}</span>
+            </ComboboxOption>
+          ))}
+        {filtered.map((o) => (
+          <ComboboxOption key={o.value} value={o.value} className="group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] data-[focus]:bg-hover">
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-mono text-[12.5px]">{o.label}</span>
+              {o.hint && <span className="block truncate text-xs text-fg-3">{o.hint}</span>}
+            </span>
+            <LuCheck className="invisible size-3.5 text-accent group-data-[selected]:visible" />
+          </ComboboxOption>
+        ))}
+      </ComboboxOptions>
+    </Combobox>
+  );
+}
+
+/** 子任务对象名的合法性（与后端 OBJECT_NAME_RE 一致） */
+export function objectNameError(v: string): string | null {
+  if (v.length > 120) return "不超过 120 个字符";
+  if (/[:\s/\\]/.test(v)) return "不能含冒号、空白或斜杠";
+  return null;
+}
+
 export function Switch({ checked, onChange, label, disabled, size = "md" }: {
   checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean; size?: "sm" | "md";
 }) {

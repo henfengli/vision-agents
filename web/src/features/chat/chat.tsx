@@ -1,21 +1,25 @@
 /**
- * 对话：会话侧栏 + 消息流 + 输入区（服务 / 环境 / 任务）。
- * 回答流式出现，过程步骤折叠在每条回答下；会话 = 同一个 LangGraph thread，多轮共享上下文。
+ * 对话：会话侧栏（可按服务 / 环境 / 任务筛）+ 消息流 + 输入区。
+ *
+ * 输入区上方的维度条决定"问谁、在哪问"：服务、环境、任务、对象（子任务，可直接输入新对象）、
+ * 任务的其它输入字段、记忆开关。一个会话 = 一个 LangGraph thread，服务 / 环境 / 任务 / 对象在会话内固定；
+ * 记忆开关和其它输入每轮都能改。回答下面可以 👍👎、纠正（同会话开新一轮，并取代上一轮沉淀的记忆）。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LuArrowUp, LuChevronDown, LuChevronRight, LuCircleStop, LuExternalLink, LuMessageSquare, LuPlus, LuSparkles,
-  LuThumbsDown, LuThumbsUp, LuWrench,
+  LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleStop, LuExternalLink, LuMessageSquare, LuPenLine,
+  LuPlus, LuSlidersHorizontal, LuSparkles, LuThumbsDown, LuThumbsUp, LuWrench,
 } from "react-icons/lu";
 
 import { stream } from "@/api/client";
-import { api, useEnvs, useServices, useSession, useSessions, useTasks } from "@/api/hooks";
-import type { ChatTurn, RunEvent } from "@/api/types";
+import { api, useEnvs, useServices, useSession, useSessions, useSubtasks, useTasks } from "@/api/hooks";
+import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } from "@/api/types";
+import { EnvFilter, ServiceFilter } from "@/components/filters";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
-import { SearchInput, Select } from "@/components/ui/form";
-import { toast } from "@/components/ui/overlay";
+import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea, objectNameError } from "@/components/ui/form";
+import { Popover, toast } from "@/components/ui/overlay";
 import { Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
@@ -25,44 +29,56 @@ import { useUi } from "@/lib/store";
 
 interface LiveTurn extends ChatTurn { streaming?: boolean }
 
+const chatTasksFor = (tasks: TaskSummary[] | undefined, service: string) =>
+  (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat") && (t.service === service || t.service === "*"));
+
 export function ChatPage() {
   const { session } = useParams<{ session?: string }>();
-  const [search, setSearch] = useSearch<{ new: string }>();
-  const { data: sessions } = useSessions();
+  const [f, setF] = useSearch<{ service: string; env: string; task: string }>();
   const [q, setQ] = useState("");
-  useEffect(() => { if (search.new) { setSearch({ new: undefined }); navigate("/chat", { replace: true }); } }, [search.new, setSearch]);
-  const list = (sessions ?? []).filter((s) => !q || s.title.includes(q));
+  const { data: sessions } = useSessions({ service: f.service, env: f.env, task: f.task, q: q || undefined });
+  const { data: tasks } = useTasks();
   const groups = useMemo(() => {
-    const today: typeof list = [], week: typeof list = [], older: typeof list = [];
-    for (const s of list) {
+    const today: NonNullable<typeof sessions> = [], week: NonNullable<typeof sessions> = [], older: NonNullable<typeof sessions> = [];
+    for (const s of sessions ?? []) {
       const days = (Date.now() - new Date(s.last_at).getTime()) / 86400_000;
       (days < 1 ? today : days < 7 ? week : older).push(s);
     }
     return [["今天", today], ["近 7 天", week], ["更早", older]] as const;
-  }, [list]);
+  }, [sessions]);
+  const chatTaskOptions = (tasks ?? []).filter((t) => !t.extends && t.triggers.some((tr) => tr.type === "chat")).map((t) => ({ value: t.name, label: t.title || t.name }));
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-[264px] shrink-0 flex-col border-r border-line bg-panel">
+      <aside className="hidden w-[272px] shrink-0 flex-col border-r border-line bg-panel md:flex">
         <div className="space-y-2 p-3">
           <Button className="w-full" icon={<LuPlus />} onClick={() => navigate("/chat")}>新对话</Button>
-          <SearchInput value={q} onChange={setQ} placeholder="搜索会话" />
+          <SearchInput value={q} onChange={setQ} placeholder="搜索会话内容" />
+          <div className="flex flex-wrap gap-1.5">
+            <ServiceFilter value={f.service ?? ""} onChange={(v) => setF({ service: v || undefined })} />
+            <EnvFilter value={f.env ?? ""} onChange={(v) => setF({ env: v || undefined })} />
+            {chatTaskOptions.length > 1 && <FilterSelect label="任务" allLabel="全部" value={f.task ?? ""} onChange={(v) => setF({ task: v || undefined })} options={chatTaskOptions} />}
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {!sessions ? <div className="space-y-2 p-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-10" />)}</div> : groups.map(([label, items]) => items.length > 0 && (
-            <div key={label} className="mb-2">
-              <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-fg-3">{label}</div>
-              {items.map((s) => (
-                <Link key={s.session_id} to={`/chat/${s.session_id}`}
-                  className={cn("block rounded-md px-2.5 py-2 hover:bg-hover", session === s.session_id && "bg-accent-soft hover:bg-accent-soft")}>
-                  <div className={cn("truncate text-[13px]", session === s.session_id ? "font-medium text-accent" : "text-fg")}>{s.title}</div>
-                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-3">
-                    <span>{s.service}</span><span className="font-mono uppercase">{s.env}</span><span>· {s.runs} 轮</span><span className="ml-auto">{ago(s.last_at)}</span>
-                  </div>
-                </Link>
+          {!sessions ? <div className="space-y-2 p-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-10" />)}</div>
+            : !sessions.length ? <div className="px-3 py-6 text-center text-[12.5px] text-fg-3">没有符合条件的会话</div>
+              : groups.map(([label, items]) => items.length > 0 && (
+                <div key={label} className="mb-2">
+                  <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-fg-3">{label}</div>
+                  {items.map((s) => (
+                    <Link key={s.session_id} to={`/chat/${s.session_id}`}
+                      className={cn("block rounded-md px-2.5 py-2 hover:bg-hover", session === s.session_id && "bg-accent-soft hover:bg-accent-soft")}>
+                      <div className={cn("truncate text-[13px]", session === s.session_id ? "font-medium text-accent" : "text-fg")}>{s.title}</div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-3">
+                        <span className="truncate">{s.service}</span><span className="font-mono uppercase">{s.env}</span>
+                        {s.task.includes(":") && <span className="truncate font-mono">{s.task.split(":")[1]}</span>}
+                        <span>· {s.runs} 轮</span><span className="ml-auto shrink-0">{ago(s.last_at)}</span>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
               ))}
-            </div>
-          ))}
         </div>
       </aside>
       <Conversation key={session ?? "new"} sessionId={session} />
@@ -71,101 +87,181 @@ export function ChatPage() {
 }
 
 function Conversation({ sessionId }: { sessionId?: string }) {
+  const ui = useUi();
   const { data: detail, loading } = useSession(sessionId ?? "");
   const { data: services } = useServices();
   const { data: envs } = useEnvs();
   const { data: tasks } = useTasks();
-  const { env: globalEnv } = useUi();
-  const chatTasks = (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat"));
   const [service, setService] = useState("");
   const [env, setEnv] = useState("");
-  const [task, setTask] = useState("data-qa");
+  const [task, setTask] = useState("");
+  const [subtask, setSubtask] = useState("");
+  const [extra, setExtra] = useState<Record<string, string>>({});
+  const [memory, setMemory] = useState<{ recall: boolean; save: boolean }>({ recall: ui.chat.recall, save: ui.chat.save });
   const [turns, setTurns] = useState<LiveTurn[]>([]);
   const [text, setText] = useState("");
   const [sid, setSid] = useState<string | undefined>(sessionId);
   const cancelRef = useRef<(() => void) | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const streaming = turns.some((t) => t.streaming);
+  const locked = turns.length > 0;
 
+  // 已有会话：维度取自会话；新会话：取个人偏好里的对话默认项
   useEffect(() => {
-    if (detail) {
-      setTurns(detail.turns);
-      setService(detail.service ?? "");
-      setEnv(detail.env);
-      setTask(detail.task);
-    }
+    if (!detail) return;
+    setTurns(detail.turns);
+    setService(detail.service ?? "");
+    setEnv(detail.env);
+    const [base, obj] = detail.task.split(":");
+    setTask(base);
+    setSubtask(obj ?? "");
   }, [detail]);
   useEffect(() => {
-    if (!service && services?.length) setService(services.find((s) => s.enabled)?.name ?? "");
-    if (!env && envs?.length) setEnv((envs.find((e) => e.name === globalEnv) ?? envs.find((e) => !e.protected) ?? envs[0]).name);
-  }, [services, envs, service, env, globalEnv]);
+    if (sessionId) return;
+    if (!service && services?.length) setService((services.find((s) => s.name === ui.chat.service && s.enabled) ?? services.find((s) => s.enabled))?.name ?? "");
+    if (!env && envs?.length) setEnv((envs.find((e) => e.name === (ui.chat.env || ui.env)) ?? envs.find((e) => !e.protected) ?? envs[0]).name);
+  }, [sessionId, services, envs, service, env, ui.chat.service, ui.chat.env, ui.env]);
+
+  const chatTasks = chatTasksFor(tasks, service);
+  useEffect(() => {
+    if (locked || !chatTasks.length) return;
+    if (!chatTasks.some((t) => t.name === task)) setTask((chatTasks.find((t) => t.name === ui.chat.task) ?? chatTasks.find((t) => t.service === service) ?? chatTasks[0]).name);
+  }, [chatTasks, task, locked, service, ui.chat.task]);
+
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [turns]);
   useEffect(() => () => cancelRef.current?.(), []);
+
+  const taskDef = tasks?.find((t) => t.name === task);
+  const extraFields = Object.entries(taskDef?.input ?? {}).filter(([k]) => k !== "question");
+  const svc = services?.find((s) => s.name === service);
+  const envOff = !!svc && svc.health[env]?.enabled === false;
+
+  const patchLast = (fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t, i) => (i === all.length - 1 ? fn(t) : t)));
 
   const send = () => {
     const message = text.trim();
     if (!message || streaming) return;
     setText("");
-    const turn: LiveTurn = { run_id: "", question: message, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true };
-    setTurns((t) => [...t, turn]);
+    setTurns((t) => [...t, { run_id: "", question: message, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
+    const input = Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== ""));
+    const body: ChatRequest = { message, session_id: sid ?? null, service, env, task, subtask: subtask || null, input, memory: memory as MemoryOverride };
     let seq = 0;
-    const patch = (fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t, i) => (i === all.length - 1 ? fn(t) : t)));
-    cancelRef.current = stream("/v1/chat", { service, env, task, message, session_id: sid ?? null }, (ev) => {
+    cancelRef.current = stream("/v1/chat", body, (ev) => {
       const type = String(ev.type);
       if (type === "run") {
-        patch((t) => ({ ...t, run_id: String(ev.run_id) }));
+        patchLast((t) => ({ ...t, run_id: String(ev.run_id) }));
         if (!sid) setSid(String(ev.session_id));
-      } else if (type === "delta") {
-        patch((t) => ({ ...t, answer: (t.answer ?? "") + String(ev.content) }));
+        if (ev.subtask_created) toast(`已按 ${task} 新建子任务`, { description: String(ev.subtask_created) });
+      } else if (type === "error") {
+        patchLast((t) => ({ ...t, status: "failed", answer: `**${String(ev.code)}**：${String(ev.message)}`, streaming: false }));
       } else if (type === "final") {
-        patch((t) => ({ ...t, answer: String((ev.output as { answer?: string })?.answer ?? t.answer), status: (ev.status as "success") ?? "success", streaming: false }));
-      } else if (["stage", "thought", "tool_call", "tool_result"].includes(type)) {
+        const out = (ev.output ?? {}) as { answer?: string; error?: string };
+        patchLast((t) => ({ ...t, answer: out.answer ?? out.error ?? t.answer, status: (ev.status as LiveTurn["status"]) ?? "success", streaming: false }));
+      } else if (["stage", "thought", "tool_call", "tool_result", "approval"].includes(type)) {
         const { type: _t, ...payload } = ev;
         void _t;
-        patch((t) => ({ ...t, events: [...t.events, { seq: ++seq, kind: type as RunEvent["kind"], at: new Date().toISOString(), payload } as RunEvent] }));
+        patchLast((t) => ({ ...t, events: [...t.events, { seq: ++seq, kind: type as RunEvent["kind"], at: new Date().toISOString(), payload } as RunEvent] }));
       }
     }, (err) => {
-      if (err) { patch((t) => ({ ...t, status: "failed", answer: err.message, streaming: false })); toast.error("发送失败", err.message); }
-      else patch((t) => ({ ...t, streaming: false }));
+      if (err) { patchLast((t) => ({ ...t, status: "failed", answer: err.message, streaming: false })); toast.error("发送失败", err.message); }
+      else patchLast((t) => ({ ...t, streaming: false }));
       invalidate("sessions");
       cancelRef.current = null;
     });
   };
   const stop = () => {
     cancelRef.current?.();
-    setTurns((all) => all.map((t, i) => (i === all.length - 1 ? { ...t, streaming: false, status: "cancelled" } : t)));
+    patchLast((t) => ({ ...t, streaming: false, status: "cancelled" }));
   };
 
-  const svc = services?.find((s) => s.name === service);
+  /** 纠正：同会话开新一轮；结果轮询拿回来 */
+  const correct = async (runId: string, correction: string) => {
+    try {
+      const acc = await api.correct(runId, correction);
+      setTurns((t) => [...t, { run_id: acc.run_id, question: `[纠正] ${correction}`, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const run = await api.run(acc.run_id);
+        if (["success", "failed", "cancelled"].includes(run.status)) {
+          setTurns((all) => all.map((t) => (t.run_id === acc.run_id ? { ...t, status: run.status, answer: run.output?.answer ?? run.output?.error ?? "", streaming: false } : t)));
+          break;
+        }
+      }
+      invalidate("sessions");
+    } catch (e) { toast.error("纠正失败", (e as Error).message); }
+  };
+
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-bg">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel/60 px-5 text-[12.5px] text-fg-3">
         <LuMessageSquare className="size-4" />
         <span className="truncate text-fg">{detail?.title ?? (turns[0]?.question.slice(0, 40) || "新对话")}</span>
-        {sid && <span className="font-mono text-[11px]">{sid.slice(0, 12)}</span>}
-        <div className="ml-auto flex items-center gap-2">{service && <span>{svc?.title ?? service}</span>}{env && <EnvBadge env={env} />}</div>
+        {sid && <span className="hidden font-mono text-[11px] sm:inline">{sid.slice(0, 12)}</span>}
+        <div className="ml-auto flex items-center gap-2">{service && <span className="truncate">{svc?.title ?? service}</span>}{env && <EnvBadge env={env} />}</div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[820px] px-6 py-6">
+        <div className="mx-auto max-w-[820px] px-4 py-6 md:px-6">
           {sessionId && loading ? <div className="space-y-4"><Skeleton className="h-16" /><Skeleton className="h-40" /></div> : turns.length === 0 ? (
             <Welcome service={svc?.title ?? service} onPick={(q) => setText(q)} />
-          ) : turns.map((t, i) => <Turn key={t.run_id || i} turn={t} />)}
+          ) : turns.map((t, i) => <Turn key={t.run_id || i} turn={t} onCorrect={(c) => correct(t.run_id, c)} />)}
           <div ref={bottom} />
         </div>
       </div>
-      <div className="shrink-0 px-6 pb-5">
+      <div className="shrink-0 px-4 pb-5 md:px-6">
         <div className="mx-auto max-w-[820px] rounded-xl border border-line bg-panel shadow-[var(--shadow-pop)] focus-within:border-accent">
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={`问 ${svc?.title ?? "agent"} 点什么… （Enter 发送，Shift+Enter 换行）`}
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-2">
+            <Dim label="服务" locked={locked}>
+              <Select size="sm" className="w-36" value={service || null} disabled={locked} onChange={(v) => { setService(v); setSubtask(""); }}
+                options={(services ?? []).filter((s) => s.enabled).map((s) => ({ value: s.name, label: s.name, hint: s.title }))} />
+            </Dim>
+            <Dim label="环境" locked={locked}>
+              <Select size="sm" className="w-24" value={env || null} disabled={locked} onChange={setEnv}
+                options={(envs ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: svc?.health[e.name]?.enabled === false ? "该服务在此环境已停用" : e.title }))} />
+            </Dim>
+            <Dim label="任务" locked={locked}>
+              <Select size="sm" className="w-36" value={task || null} disabled={locked || chatTasks.length <= 1} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
+                placeholder="没有对话任务" options={chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: t.service === "*" ? "通用" : t.service ?? "" }))} />
+            </Dim>
+            <Dim label="对象" locked={locked}>
+              {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
+            </Dim>
+            {extraFields.length > 0 && (
+              <Popover align="start" trigger={
+                <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", Object.values(extra).some(Boolean) ? "border-accent/40 bg-accent-soft text-accent" : "border-line text-fg-2 hover:bg-hover")}>
+                  <LuSlidersHorizontal />输入 {Object.values(extra).filter(Boolean).length || ""}
+                </span>
+              }>
+                <div className="w-72 space-y-3 p-3">
+                  <div className="text-[12px] text-fg-3">任务 {task} 的其它输入，每轮随消息一起发送</div>
+                  {extraFields.map(([k, f]) => (
+                    <Field key={k} label={<span className="font-mono">{k}{f.required && <span className="text-bad">*</span>}</span>} help={f.description}>
+                      {f.type === "enum" ? <Select size="sm" value={extra[k] ?? String(f.default ?? "")} onChange={(v) => setExtra({ ...extra, [k]: v })} options={(f.options ?? []).map((o) => ({ value: o, label: o }))} />
+                        : <Input value={extra[k] ?? ""} placeholder={f.default !== undefined ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
+                    </Field>
+                  ))}
+                </div>
+              </Popover>
+            )}
+            <Popover align="start" trigger={
+              <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", !memory.recall || !memory.save ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-fg-2 hover:bg-hover")}>
+                <LuBrain />{memory.recall && memory.save ? "记忆" : !memory.recall && !memory.save ? "不用记忆" : !memory.recall ? "不召回" : "不沉淀"}
+              </span>
+            }>
+              <div className="w-64 space-y-3 p-3">
+                <Switch checked={memory.recall} onChange={(recall) => setMemory({ ...memory, recall })} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查知识、案例、方法</span></span>} />
+                <Switch checked={memory.save} onChange={(save) => setMemory({ ...memory, save })} label={<span>沉淀<span className="ml-1 text-[11.5px] text-fg-3">回答后存可复用结论</span></span>} />
+                <div className="text-[11.5px] text-fg-3">只影响接下来的消息；平台默认在 设置 → 记忆。</div>
+              </div>
+            </Popover>
+          </div>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={envOff ? `${service} 在 ${env} 环境已停用` : `问 ${svc?.title ?? "agent"} 点什么…（Enter 发送，Shift+Enter 换行）`}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
             className="block max-h-48 w-full resize-none bg-transparent px-4 pt-3 text-[13.5px] leading-relaxed text-fg outline-none placeholder:text-fg-3" />
           <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-            <div className="w-36"><Select size="sm" value={service || null} onChange={setService} disabled={turns.length > 0} options={(services ?? []).filter((s) => s.enabled).map((s) => ({ value: s.name, label: s.title }))} /></div>
-            <div className="w-24"><Select size="sm" value={env || null} onChange={setEnv} disabled={turns.length > 0} options={(envs ?? []).filter((e) => e.enabled).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span> }))} /></div>
-            {chatTasks.length > 1 && <div className="w-40"><Select size="sm" value={task} onChange={setTask} disabled={turns.length > 0} options={chatTasks.map((t) => ({ value: t.name, label: t.title || t.name }))} /></div>}
-            {turns.length > 0 && <span className="text-[11px] text-fg-3">同一会话内服务与环境固定</span>}
+            <span className="text-[11px] text-fg-3">{locked ? "同一会话内服务、环境、任务、对象固定；要换就开新对话" : subtask && !(tasks ?? []).some((t) => t.name === `${task}:${subtask}`) ? `发送时会按 ${task} 新建子任务 ${task}:${subtask}` : ""}</span>
             <div className="ml-auto">
               {streaming ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止"><LuCircleStop /></Button>
-                : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
+                : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service || !task || envOff} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
             </div>
           </div>
         </div>
@@ -174,14 +270,32 @@ function Conversation({ sessionId }: { sessionId?: string }) {
   );
 }
 
+function Dim({ label, locked, children }: { label: string; locked: boolean; children: React.ReactNode }) {
+  return (
+    <div className={cn("flex items-center gap-1.5 rounded-md pl-1.5", locked && "opacity-80")}>
+      <span className="text-[11px] text-fg-3">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+/** 子任务：选已有对象，或直接输入新对象名（发送时自动按父任务建） */
+function SubtaskPicker({ task, value, onChange }: { task: string; value: string; onChange: (v: string) => void }) {
+  const { data } = useSubtasks(task);
+  return (
+    <CreatableSelect className="w-40" value={value} onChange={onChange} placeholder="不指定" validate={objectNameError}
+      options={(data ?? []).map((t) => ({ value: t.name.split(":")[1], label: t.name.split(":")[1], hint: t.title || (t.auto_created ? "自动创建" : undefined) }))} />
+  );
+}
+
 function Welcome({ service, onPick }: { service: string; onPick: (q: string) => void }) {
   const examples = ["上周 GMV 环比为什么下跌？", "退款率指标的口径是什么？", "近 7 天每天的订单量", "dwd_trade_order 昨天行数正常吗？"];
   return (
-    <div className="pt-16 text-center">
+    <div className="pt-12 text-center">
       <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-accent-soft text-accent"><LuSparkles className="size-5" /></div>
       <div className="mt-4 text-[17px] font-semibold text-fg">问 {service || "agent"}</div>
-      <div className="mt-1 text-[13px] text-fg-3">口径以服务档案为准，取数只走该环境的只读库；每一步都可以在运行详情里回放</div>
-      <div className="mx-auto mt-6 grid max-w-lg grid-cols-2 gap-2">
+      <div className="mt-1 text-[13px] text-fg-3">口径以档案为准，取数只走该环境的只读库；每一步都能在运行详情里回放</div>
+      <div className="mx-auto mt-6 grid max-w-lg gap-2 sm:grid-cols-2">
         {examples.map((e) => (
           <button key={e} type="button" onClick={() => onPick(e)} className="rounded-lg border border-line bg-panel px-3 py-2.5 text-left text-[12.5px] text-fg-2 transition-colors hover:border-accent hover:text-fg">{e}</button>
         ))}
@@ -190,14 +304,17 @@ function Welcome({ service, onPick }: { service: string; onPick: (q: string) => 
   );
 }
 
-function Turn({ turn }: { turn: LiveTurn }) {
+function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) => void }) {
   const [open, setOpen] = useState(false);
   const [fb, setFb] = useState(turn.feedback ?? 0);
+  const [correcting, setCorrecting] = useState(false);
+  const [correction, setCorrection] = useState("");
   const steps = turn.events.filter((e) => e.kind === "thought" || e.kind === "tool_call");
-  const sendFb = async (s: number) => {
+  const waiting = turn.events.some((e) => e.kind === "approval" && !e.payload.decision) && turn.streaming;
+  const sendFb = async (s: 1 | -1) => {
     const next = fb === s ? 0 : s;
     setFb(next);
-    if (next && turn.run_id) await api.runFeedback(turn.run_id, next);
+    if (next && turn.run_id) await api.runFeedback(turn.run_id, next as 1 | -1);
   };
   return (
     <div className="mb-7">
@@ -220,22 +337,36 @@ function Turn({ turn }: { turn: LiveTurn }) {
                   {e.kind === "thought" && <div className="flex gap-1.5 text-fg-2"><LuSparkles className="mt-0.5 size-3 shrink-0 text-accent" />{String(e.payload.content)}</div>}
                   {e.kind === "tool_call" && <div className="flex gap-1.5 font-mono text-fg-2"><LuWrench className="mt-0.5 size-3 shrink-0 text-info" />{String(e.payload.tool)} <span className="truncate text-fg-3">{JSON.stringify(e.payload.args).slice(0, 100)}</span></div>}
                   {e.kind === "tool_result" && <pre className="ml-4 max-h-32 overflow-auto rounded bg-sunken px-2 py-1 font-mono text-[11px] text-fg-3">{String(e.payload.output)}</pre>}
-                  {e.kind === "stage" && <div className="text-fg-3">· {String(e.payload.title ?? e.payload.stage)} {String(e.payload.content ?? "")}</div>}
+                  {e.kind === "stage" && <div className="text-fg-3">· {String(e.payload.title ?? e.payload.stage)}</div>}
+                  {e.kind === "approval" && <div className="text-warn">· {String(e.payload.title)}</div>}
                 </div>
               ))}
             </div>
           )}
           {turn.answer ? <Markdown text={turn.answer} className={cn("text-[13.5px]", turn.status === "failed" && "text-bad")} />
-            : turn.streaming ? <div className="flex gap-1 py-2">{[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-fg-3" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
-              : turn.status === "cancelled" ? <div className="text-[12.5px] text-fg-3">已停止</div>
-                : turn.status === "awaiting_approval" ? <div className="text-[12.5px] text-warn">等待审批，通过后继续</div>
+            : waiting || turn.status === "awaiting_approval" ? <div className="text-[12.5px] text-warn">等待审批，通过后继续（<Link to="/approvals" className="underline">去审批</Link>）</div>
+              : turn.streaming ? <div className="flex gap-1 py-2">{[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-fg-3" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
+                : turn.status === "cancelled" ? <div className="text-[12.5px] text-fg-3">已停止</div>
                   : turn.status === "running" ? <div className="text-[12.5px] text-fg-3">执行中…</div> : null}
           {!turn.streaming && turn.answer && (
             <div className="mt-2 flex items-center gap-0.5 text-fg-3">
               <CopyButton text={turn.answer} />
-              <button type="button" onClick={() => sendFb(1)} className={cn("rounded p-1 hover:bg-hover", fb > 0 && "text-ok")}><LuThumbsUp className="size-3.5" /></button>
-              <button type="button" onClick={() => sendFb(-1)} className={cn("rounded p-1 hover:bg-hover", fb < 0 && "text-bad")}><LuThumbsDown className="size-3.5" /></button>
+              <button type="button" title="有用" onClick={() => sendFb(1)} className={cn("rounded p-1 hover:bg-hover", fb > 0 && "text-ok")}><LuThumbsUp className="size-3.5" /></button>
+              <button type="button" title="没用" onClick={() => sendFb(-1)} className={cn("rounded p-1 hover:bg-hover", fb < 0 && "text-bad")}><LuThumbsDown className="size-3.5" /></button>
+              {turn.run_id && turn.status === "success" && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPenLine className="size-3" />纠正</button>}
               {turn.run_id && <Link to={`/runs/${turn.run_id}`} className="ml-1 inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuExternalLink className="size-3" />运行详情</Link>}
+            </div>
+          )}
+          {correcting && (
+            <div className="mt-2 space-y-2 rounded-lg border border-line bg-panel p-3">
+              <Textarea rows={2} autoFocus value={correction} onChange={(e) => setCorrection(e.target.value)} placeholder="哪里不对？例如：GMV 应该不含运费，按支付日而不是下单日" />
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11.5px] text-fg-3">会在本会话开新一轮；成功后上一轮沉淀的记忆被取代</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="ghost" onClick={() => setCorrecting(false)}>取消</Button>
+                  <Button size="sm" variant="primary" disabled={!correction.trim()} onClick={() => { onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }}>提交纠正</Button>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -243,4 +374,3 @@ function Turn({ turn }: { turn: LiveTurn }) {
     </div>
   );
 }
-

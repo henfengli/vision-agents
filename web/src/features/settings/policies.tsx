@@ -7,7 +7,6 @@ import { LuPlus, LuShieldCheck, LuSlidersHorizontal } from "react-icons/lu";
 
 import { api, useEnvs, usePolicies, useServices, useTasks } from "@/api/hooks";
 import type { Policy } from "@/api/types";
-import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
@@ -18,9 +17,10 @@ import { Badge, Card, CardHeader, Empty, SkeletonRows } from "@/components/ui/pr
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
+import { SettingsLayout } from "./layout";
 
 const GATES = [
-  ["env_disabled", "目标环境停用"], ["service_disabled", "服务停用"], ["task_disabled", "任务停用"],
+  ["service_disabled", "服务停用"], ["service_env_disabled", "服务在该环境停用"], ["task_disabled", "任务停用"],
   ["env_not_allowed", "任务不允许该环境"], ["trigger_not_allowed", "任务没声明这种触发"],
 ];
 
@@ -28,11 +28,10 @@ export function PoliciesPage() {
   const { data, loading } = usePolicies();
   const [editing, setEditing] = useState<Policy | "new" | null>(null);
   return (
-    <Page>
-      <PageHeader title="策略" description="新提交依次通过闸门链；拒绝时返回原因码（error_code），「为什么没跑」只在一处判断。"
-        actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setEditing("new")}>新建策略</Button>} />
+    <SettingsLayout title="提交策略" description="新提交依次通过闸门链；拒绝时返回原因码（error.code），「为什么没跑」只在一处判断。"
+      actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setEditing("new")}>新建策略</Button>}>
       <Card className="mb-4">
-        <CardHeader title="闸门链" icon={<LuShieldCheck />} description="前五环是内置开关（续跑/重跑/调度也过），最后是下面这些输入策略（只对新提交）" />
+        <CardHeader title="闸门链" icon={<LuShieldCheck />} description="前四环是开关（重跑、续跑、定时也过），第五环查任务声明的触发方式，最后是下面这些输入策略（只对新提交）" />
         <div className="flex flex-wrap items-center gap-1.5 px-4 py-3">
           {GATES.map(([code, label], i) => (
             <span key={code} className="flex items-center gap-1.5">
@@ -61,7 +60,7 @@ export function PoliciesPage() {
         )}
       </Card>
       <PolicyDrawer policy={editing} onClose={() => setEditing(null)} />
-    </Page>
+    </SettingsLayout>
   );
 }
 
@@ -94,7 +93,9 @@ function PolicyDrawer({ policy, onClose }: { policy: Policy | "new" | null; onCl
   const hit = !regexError && d.match_regex && new RegExp(d.match_regex, "i").test(sample);
   const save = useMutation(async () => {
     try {
-      if (isNew) await api.createPolicy(d); else await api.putPolicy(d.name, d);
+      const { version: _v, updated_by: _u, updated_at: _a, ...body } = d;
+      void _v; void _u; void _a;
+      if (isNew) await api.create("policies", body); else await api.update("policies", d.name, body);
       toast(isNew ? "策略已创建" : "已保存", { description: "立即对新提交生效" });
       invalidate("policies");
       onClose();
@@ -111,7 +112,7 @@ function PolicyDrawer({ policy, onClose }: { policy: Policy | "new" | null; onCl
           </div>
           <Field label="说明"><Input value={d.description} onChange={(e) => setD({ ...d, description: e.target.value })} /></Field>
           <Field label="动作"><Segmented value={d.action} onChange={(v) => setD({ ...d, action: v })} options={[{ value: "require_approval", label: "需审批" }, { value: "deny", label: "直接拒绝" }]} /></Field>
-          <Field label="匹配正则" required error={regexError} help="作用于 任务名 + 输入 JSON + 问题文本，不区分大小写">
+          <Field label="匹配正则" required error={regexError} help="作用于输入的 JSON 文本，不区分大小写">
             <Input mono value={d.match_regex} onChange={(e) => setD({ ...d, match_regex: e.target.value })} aria-invalid={!!regexError} />
           </Field>
           <Field label="试一下" help={d.match_regex && !regexError ? (hit ? <span className="text-warn">命中 → {d.action === "deny" ? "拒绝" : "挂起等审批"}</span> : <span className="text-ok">未命中 → 放行</span>) : undefined}>

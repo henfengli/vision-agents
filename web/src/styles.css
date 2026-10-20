@@ -55,6 +55,9 @@
 @keyframes slide-in { from { opacity: 0; transform: translateX(16px) } to { opacity: 1; transform: none } }
 @keyframes pulse-dot { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
 
+:root { --row-h: 44px; }
+:root[data-density="compact"] { --row-h: 34px; }
+
 :root {
   --c-bg: #f7f7f8;
   --c-panel: #ffffff;

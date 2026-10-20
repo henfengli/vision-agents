@@ -12,14 +12,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@floating-ui/react": "0.27.20",
     "@headlessui/react": "2.2.10",
     "clsx": "2.1.1",
     "d3-scale": "^4.0.2",
-    "d3-shape": "^3.2.0",
     "dayjs": "1.11.23",
     "diff": "4.0.4",
     "dompurify": "3.4.14",
-    "elkjs": "0.9.3",
     "marked": "18.0.10",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -28,7 +27,6 @@
   },
   "devDependencies": {
     "@types/d3-scale": "^4.0.8",
-    "@types/d3-shape": "^3.1.6",
     "@types/diff": "^4.0.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

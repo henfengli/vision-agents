@@ -3,8 +3,8 @@
  * 让预览里的列表、统计、时间线看起来像一个跑了几天的真实平台。
  */
 import type {
-  Approval, Asset, Case, ChatTurn, Env, Instance, Knowledge, Policy, Role, Run, RunEvent,
-  RunStatus, Service, SessionDetail, Task, Trigger,
+  ApiKey, Approval, Asset, Case, ChatTurn, Env, Instance, Knowledge, Policy, Role, Run, RunEvent,
+  RunStatus, Service, SessionDetail, Settings, Task, Trigger,
 } from "../types";
 
 // ———————— 随机工具 ————————
@@ -28,9 +28,9 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 // ———————— 环境 ————————
 
 export const envs: Env[] = [
-  { name: "prod", title: "生产", description: "线上环境：写操作与进程启停需审批", enabled: true, protected: true, color: "red", order: 1, version: 3 },
-  { name: "test", title: "测试", description: "集成测试环境，数据每周从生产脱敏同步", enabled: true, protected: false, color: "amber", order: 2, version: 2 },
-  { name: "dev", title: "开发", description: "开发自测，库每周一重置", enabled: true, protected: false, color: "blue", order: 3, version: 1 },
+  { name: "prod", title: "生产", description: "线上环境：危险命令与进程启停需审批", protected: true, color: "red" },
+  { name: "test", title: "测试", description: "集成测试环境，数据每周从生产脱敏同步", protected: false, color: "amber" },
+  { name: "dev", title: "开发", description: "开发自测，库每周一重置", protected: false, color: "blue" },
 ];
 
 // ———————— 服务 ————————
@@ -80,7 +80,7 @@ export const services: Service[] = [
     root: "/srv/config-center", code_paths: ["/srv/config-center"], hosts: ["10.0.0.31"], readonly_dsn: "postgresql://ro@prod-db:5432/config",
     configs: [{ canonical: "/srv/config-center/application.yaml", template: "/srv/config-center/conf/application.{env}.yaml" }],
     processes: { app: { cmd: ["./bin/config-center", "--port", "{port}"], workdir: "/srv/config-center", ports: { prod: 9080, test: 9081, dev: 9082 }, lease_hours: 2 } },
-    envs: {},
+    envs: { dev: { enabled: false } },
     profile: { no_go: "发布接口在 prod 只读调用，审计只看不改" },
     enabled: true, version: 2, ...by("lihf", 9 * DAY),
   },
@@ -127,7 +127,7 @@ const trig = {
   chat: (id = "chat"): Trigger => ({ id, type: "chat" }),
 };
 
-const taskBase = { enabled: true, context: {}, extends: null, auto_created: false, dedup: null, graph: null, handler: null };
+const taskBase = { enabled: true, profile: {}, memory: {}, deliver: null, extends: null, auto_created: false, dedup: null, graph: null, handler: null };
 
 export const tasks: Task[] = [
   {
@@ -149,14 +149,14 @@ export const tasks: Task[] = [
         session: "dagster:{asset_key}:{error_class}:{date}" },
       trig.api(),
     ],
-    output: { channel: "dingtalk" }, dedup: { key: "run_id", window_s: 600 }, timeout_s: 300,
-    context: { pitfalls: "资产失败先看上游是否完成，80% 的失败是上游延迟级联" },
+    deliver: { channel: "default" }, dedup: { key: "run_id", window_s: 600 }, timeout_s: 300,
+    profile: { pitfalls: "资产失败先看上游是否完成，80% 的失败是上游延迟级联" },
     version: 9, ...by("lihf", 1 * DAY),
   },
   {
     ...taskBase, name: "failure-analysis:dwd_trade_order", title: "", description: "", service: "dagster", role: "ops_analyst", form: "agent",
-    input: {}, envs: [], triggers: [], output: { channel: "dingtalk" }, timeout_s: 300, extends: "failure-analysis",
-    context: {
+    input: {}, envs: [], triggers: [], deliver: { channel: "default" }, timeout_s: 300, extends: "failure-analysis",
+    profile: {
       code_refs: "/srv/dagster/assets/dwd/trade_order.py",
       upstream: "ods_order、ods_payment（03:00 前到齐）",
       pitfalls: "支付回调乱序时会出现 amount 为负的脏数据，过滤规则在 transform_payment()",
@@ -165,14 +165,14 @@ export const tasks: Task[] = [
   },
   {
     ...taskBase, name: "failure-analysis:ads_gmv_daily", title: "", description: "", service: "dagster", role: "ops_analyst", form: "agent",
-    input: {}, envs: [], triggers: [], output: { channel: "dingtalk" }, timeout_s: 300, extends: "failure-analysis", auto_created: true,
+    input: {}, envs: [], triggers: [], deliver: { channel: "default" }, timeout_s: 300, extends: "failure-analysis", auto_created: true,
     version: 1, ...by("auto:event", 6 * HOUR),
   },
   {
     ...taskBase, name: "data-qa", title: "数据口径问答", description: "业务方提问指标口径、取数；对话页默认任务",
     service: "*", role: "data_searcher", form: "agent",
     input: { question: { type: "text", required: true, description: "问题" } },
-    envs: [], triggers: [trig.chat(), trig.api()], output: { channel: "caller" }, timeout_s: 180,
+    envs: [], triggers: [trig.chat(), trig.api()], deliver: null, timeout_s: 180,
     version: 5, ...by("wangzh", 4 * DAY),
   },
   {
@@ -181,7 +181,7 @@ export const tasks: Task[] = [
     input: { version: { type: "str", required: true, description: "部署版本（ref）" }, project: { type: "str", description: "GitLab 项目" } },
     envs: ["test", "prod"],
     triggers: [{ id: "on-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^board$" }, map: { version: "ref", project: "project" } }, trig.api()],
-    output: { channel: "dingtalk" }, dedup: { key: "version", window_s: 1800 }, timeout_s: 600,
+    deliver: { channel: "default" }, dedup: { key: "version", window_s: 1800 }, timeout_s: 600,
     version: 4, ...by("chenyu", 7 * DAY),
   },
   {
@@ -189,33 +189,33 @@ export const tasks: Task[] = [
     service: "board", role: "inspector", form: "agent", input: { scope: { type: "enum", options: ["full", "quick"], default: "full" } },
     envs: ["prod", "test"],
     triggers: [{ id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" }, timezone: "Asia/Shanghai" }, trig.api()],
-    output: { channel: "dingtalk" }, timeout_s: 600, version: 6, ...by("lihf", 3 * DAY),
+    deliver: { channel: "default" }, timeout_s: 600, version: 6, ...by("lihf", 3 * DAY),
   },
   {
     ...taskBase, name: "config-audit", title: "配置变更审计", description: "工作日早上汇总前一天的配置发布，标出高风险变更",
     service: "config-center", role: "ops_analyst", form: "graph", input: {},
     envs: ["prod"],
     triggers: [{ id: "weekday", type: "schedule", cron: "30 8 * * 1-5", envs: ["prod"], input: {} }],
-    output: { channel: "dingtalk" }, timeout_s: 900,
+    deliver: { channel: "default" }, timeout_s: 900,
     graph: {
       changes: { code: "config.collect_changes" },
       risk: { deps: ["changes"], map: "changes", agent: { role: "ops_analyst", contract: "每条变更给出 risk: low|mid|high 与理由" } },
       triage: { deps: ["risk"], route: { by: "risk_level", choices: ["quiet", "notify", "escalate"] } },
-      report: { deps: ["risk", "triage"], agent: { role: "ops_analyst", contract: "汇总报告 markdown" }, gate: { when: "triage == 'escalate'" } },
+      report: { deps: ["risk", "triage"], agent: { role: "ops_analyst", contract: "汇总报告 markdown" }, gate: { when: 'triage == "escalate"' } },
     },
     version: 2, ...by("lihf", 12 * DAY),
   },
   {
     ...taskBase, name: "report-regression", title: "报表回归对比", description: "渲染报表与基线逐格对比", service: "report-engine", role: "inspector", form: "agent",
     input: { report: { type: "str", required: true }, baseline: { type: "str" } }, envs: ["test"],
-    triggers: [trig.api()], output: { channel: "http", callback: "http://10.0.0.41:7000/hooks/regression" }, timeout_s: 900,
+    triggers: [trig.api()], deliver: { url: "http://10.0.0.41:7000/hooks/regression" }, timeout_s: 900,
     enabled: false, version: 1, ...by("chenyu", 14 * DAY),
   },
   {
     ...taskBase, name: "memory-gardener", title: "记忆园丁", description: "夜间维护：code_ref 漂移巡检、负反馈条目处置提示",
     service: null, role: null, form: "builtin", handler: "memory-gardener", input: {}, envs: [],
     triggers: [{ id: "nightly", type: "schedule", cron: "0 3 * * *", envs: ["prod", "test", "dev"], input: {} }],
-    output: { channel: "caller" }, timeout_s: 1800, version: 2, ...by("seed", 20 * DAY),
+    deliver: null, timeout_s: 1800, version: 2, ...by("seed", 20 * DAY),
   },
 ];
 
@@ -273,7 +273,7 @@ function makeRun(): MockRun {
   const asset = taskName === "failure-analysis:dwd_trade_order" ? "dwd_trade_order" : pick(assets);
   const err = pick(errors);
   const input: Record<string, unknown> =
-    base.name === "data-qa" ? { question: pick(questions), server: service }
+    base.name === "data-qa" ? { question: pick(questions) }
       : base.name === "failure-analysis" ? { run_id: hex(8) + "-" + hex(4), asset_key: asset, error: err }
         : base.name === "frontend-smoke" ? { version: `v2.${between(10, 40)}.${between(0, 9)}`, project: "board" }
           : base.name === "daily-inspection" ? { scope: "full" } : {};
@@ -290,7 +290,7 @@ function makeRun(): MockRun {
     input, output: null, error_code: null, pending_approval: null,
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [], graph: null },
     feedback: rand() < 0.12 ? { score: rand() < 0.75 ? 1 : -1, comment: "", at: created } : null,
-    langfuse_url: base.form === "agent" && !ruleHit ? "https://langfuse.internal/project/agent/traces/" + hex(16) : null,
+    memory: {},
     _events: undefined,
   };
 }
@@ -312,7 +312,7 @@ awaiting.status = "awaiting_approval"; awaiting.finished_at = null; awaiting.dur
 awaiting.created_at = iso(14 * MIN);
 const awaiting2 = runs.find((r) => r.task === "data-qa" && r.env === "prod" && r.service === "board")!;
 awaiting2.status = "awaiting_approval"; awaiting2.finished_at = null; awaiting2.duration_ms = null; awaiting2.resolution = null;
-awaiting2.created_at = iso(38 * MIN); awaiting2.input = { question: "把 10 月测试订单从 ads_gmv_daily 删除后重算 GMV", server: "board" };
+awaiting2.created_at = iso(38 * MIN); awaiting2.input = { question: "把 10 月测试订单从 ads_gmv_daily 删除后重算 GMV" };
 awaiting2.summary = String(awaiting2.input.question);
 runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 
@@ -400,7 +400,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
       : "巡检完成：**12 项正常，1 项关注**。\n\n- ⚠️ 根盘使用率 72%（阈值 80%），较上周 +6%，建议清理 /srv/board/logs\n- 数据新鲜度：ads_gmv_daily 最新分区 2026-10-19 ✓\n- 接口 5xx 比例 0.02% ✓";
   push("final", { content: answer, tokens: between(600, 1800) }, 2000);
   push("stage", { stage: "finalize", title: "沉淀记忆", content: run.task === "data-qa" ? "知识 1 条（metric:total_fee）" : "案例 1 条 · 交接摘要" }, 1500);
-  if (tasks.find((x) => x.name === run.task.split(":")[0])?.output.channel !== "caller") push("stage", { stage: "deliver", title: "投递", content: "dingtalk ✓" }, 400);
+  if (tasks.find((x) => x.name === run.task.split(":")[0])?.deliver) push("stage", { stage: "deliver", title: "投递", content: "渠道 default ✓" }, 400);
   return (run._events = out);
 }
 
@@ -411,7 +411,7 @@ export function detailOf(run: MockRun): Run {
   const service = services.find((s) => s.name === run.service);
   const task = tasks.find((t) => t.name === run.task);
   const parent = task?.extends ? tasks.find((t) => t.name === task.extends) : null;
-  const ctxLines = [...Object.entries(parent?.context ?? {}), ...Object.entries(task?.context ?? {})];
+  const ctxLines = Object.entries({ ...(parent?.profile ?? {}), ...(task?.profile ?? {}) });
   const profile = [
     service && Object.keys(service.profile).length ? `[档案——服务 ${service.name}：一手事实，逐字保留，优先级最高]\n` + Object.entries(service.profile).map(([k, v]) => `${label(k)}：${v}`).join("\n") : "",
     ctxLines.length ? `[档案——任务 ${run.task}：一手事实，逐字保留，优先级最高]\n` + ctxLines.map(([k, v]) => `${label(k)}：${v}`).join("\n") : "",
@@ -449,9 +449,9 @@ function label(k: string): string {
 // ———————— 审批 ————————
 
 export const approvals: Approval[] = [
-  { id: 101, kind: "command", run_id: awaiting.run_id, title: "危险命令", detail: "systemctl restart board-prod\n# 原因：巡检发现 node 进程内存持续增长到 3.1G", service: "board", env: "prod", task: "daily-inspection", requested_by: `run:${awaiting.run_id.slice(0, 8)}`, status: "pending", decided_by: null, comment: null, created_at: iso(12 * MIN), decided_at: null, expires_at: new Date(NOW + 18 * MIN).toISOString() },
-  { id: 102, kind: "submit", run_id: awaiting2.run_id, title: "提交审批 · 策略 prod-destructive", detail: "生产环境的破坏性操作需要人工确认\n\n问题：把 10 月测试订单从 ads_gmv_daily 删除后重算 GMV", service: "board", env: "prod", task: "data-qa", requested_by: "wangzh", status: "pending", decided_by: null, comment: null, created_at: iso(38 * MIN), decided_at: null, expires_at: null },
-  { id: 103, kind: "process", run_id: null, title: "进程启动 · dagster/webserver@prod", detail: "启动 dagster-webserver（prod，端口 3000），租约 2 小时\n# 用于排查 dwd_trade_order 的 UI 运行记录", service: "dagster", env: "prod", task: null, requested_by: "lihf", status: "pending", decided_by: null, comment: null, created_at: iso(4 * MIN), decided_at: null, expires_at: new Date(NOW + 26 * MIN).toISOString() },
+  { id: 101, kind: "command", run_id: awaiting.run_id, title: "危险命令", detail: "systemctl restart board-prod\n# 原因：巡检发现 node 进程内存持续增长到 3.1G", service: "board", env: "prod", task: "daily-inspection", payload: { tool: "bash" }, requested_by: `run:${awaiting.run_id.slice(0, 8)}`, status: "pending", decided_by: null, comment: null, created_at: iso(12 * MIN), decided_at: null, expires_at: new Date(NOW + 18 * MIN).toISOString() },
+  { id: 102, kind: "submit", run_id: awaiting2.run_id, title: "提交审批 · 策略 prod-destructive", detail: "生产环境的破坏性操作需要人工确认\n\n问题：把 10 月测试订单从 ads_gmv_daily 删除后重算 GMV", service: "board", env: "prod", task: "data-qa", payload: { policy: "prod-destructive" }, requested_by: "wangzh", status: "pending", decided_by: null, comment: null, created_at: iso(38 * MIN), decided_at: null, expires_at: null },
+  { id: 103, kind: "process", run_id: null, title: "进程启动 · dagster/webserver@prod", detail: "启动 dagster-webserver（prod，端口 3000），租约 2 小时\n# 用于排查 dwd_trade_order 的 UI 运行记录", service: "dagster", env: "prod", task: null, payload: { service: "dagster", env: "prod", process: "webserver", action: "start", executor: "api" }, requested_by: "lihf", status: "pending", decided_by: null, comment: null, created_at: iso(4 * MIN), decided_at: null, expires_at: new Date(NOW + 26 * MIN).toISOString() },
   ...Array.from({ length: 14 }, (_, i): Approval => {
     const ok = rand() < 0.78;
     const at = between(2, 70) * HOUR;
@@ -460,7 +460,7 @@ export const approvals: Approval[] = [
       id: 90 - i, kind, run_id: kind === "process" ? null : pick(runs).run_id,
       title: { command: "危险命令", submit: "提交审批 · 策略 prod-destructive", process: "进程启动 · board/server@prod", artifact: "产物门禁 · config-audit/report" }[kind],
       detail: { command: pick(["rm -rf /srv/board/logs/2026-09-*", "kill -9 28812", "systemctl restart dagster-daemon-prod"]), submit: "删除 ads_refund_rate 10-18 分区后重算", process: "启动 board server（prod，端口 8080），租约 4 小时", artifact: "triage = escalate：发现 1 条高风险变更（payment.timeout 3s → 30s）" }[kind],
-      service: pick(["board", "dagster", "config-center"]), env: "prod", task: kind === "process" ? null : pick(["daily-inspection", "failure-analysis", "config-audit"]),
+      service: pick(["board", "dagster", "config-center"]), env: "prod", task: kind === "process" ? null : pick(["daily-inspection", "failure-analysis", "config-audit"]), payload: {},
       requested_by: pick(["lihf", "run:a41c2e90", "wangzh"]), status: ok ? "approved" : "rejected", decided_by: pick(["lihf", "wangzh", "chenyu"]),
       comment: ok ? (rand() < 0.4 ? "确认过影响范围" : null) : "先在 test 复现", created_at: iso(at + 9 * MIN), decided_at: iso(at), expires_at: null,
     };
@@ -537,5 +537,42 @@ export function sessionsList(): SessionDetail[] {
     return { session_id: sid, title: String(asc[0].input.question).slice(0, 28), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: "data-qa", runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
   }).sort((a, b) => b.last_at.localeCompare(a.last_at));
 }
+
+// ———————— 设置 ————————
+
+const entry = <T extends object>(section: string, v: T, version: number, by_: string, at: number) =>
+  ({ section, ...v, version, updated_by: by_, updated_at: iso(at) });
+
+export const settings = {
+  envs: entry("envs", { items: envs, default: "test" }, 3, "lihf", 9 * DAY),
+  approvals: entry("approvals", {
+    danger_patterns: ["\\brm\\s+-[a-z]*[rf]", "\\bdrop\\s+(table|database|schema)\\b", "\\btruncate\\b", "\\bdelete\\s+from\\b", "\\bkill(all)?\\b", "\\bsystemctl\\s+(stop|restart|disable)\\b", "\\bgit\\s+push\\b"],
+    required_in: "protected", timeout_minutes: 30,
+  }, 2, "lihf", 12 * DAY),
+  notifications: entry("notifications", {
+    channels: {
+      default: { type: "dingtalk", url: "https://alert-notification.ipa.zs/robot/send", token: "***" },
+      "data-team": { type: "dingtalk", url: "https://alert-notification.ipa.zs/robot/send", token: "***" },
+      "ops-webhook": { type: "webhook", url: "https://ops.internal/hooks/agent", token: "" },
+    },
+    rules: [
+      { name: "审批提醒", enabled: true, events: ["approval_requested"], services: [], envs: [], tasks: [], triggers: [], channel: "default" },
+      { name: "自动运行失败", enabled: true, events: ["run_failed"], services: [], envs: [], tasks: [], triggers: ["schedule", "event"], channel: "default" },
+      { name: "看板问答失败", enabled: true, events: ["run_failed"], services: ["board"], envs: ["prod"], tasks: ["data-qa"], triggers: [], channel: "data-team" },
+      { name: "进程停止", enabled: false, events: ["process_stopped"], services: [], envs: ["prod"], tasks: [], triggers: [], channel: "ops-webhook" },
+    ],
+  }, 5, "wangzh", 2 * DAY),
+  memory: entry("memory", { recall: true, save: true, handoff_summary: true, knowledge_limit: 5, asset_limit: 8 }, 1, "seed", 20 * DAY),
+  processes: entry("processes", { default_lease_hours: 2, max_lease_hours: 24 }, 2, "lihf", 7 * DAY),
+} as unknown as Settings;
+
+export const apiKeys: ApiKey[] = [
+  { id: 1, name: "board-backend", prefix: "ap_x8Kq2m", scope: "run", services: ["board"], envs: [], note: "看板后端调用问答", created_by: "lihf", created_at: iso(30 * DAY), expires_at: null, last_used_at: iso(4 * MIN), revoked_at: null },
+  { id: 2, name: "dagster-sensor", prefix: "ap_N3pZ0c", scope: "run", services: ["dagster"], envs: ["prod", "test"], note: "run_failure_sensor 回调", created_by: "lihf", created_at: iso(28 * DAY), expires_at: null, last_used_at: iso(26 * MIN), revoked_at: null },
+  { id: 3, name: "gitlab", prefix: "ap_7Hh1Wd", scope: "run", services: [], envs: [], note: "GitLab 部署 Webhook（X-Gitlab-Token）", created_by: "chenyu", created_at: iso(21 * DAY), expires_at: null, last_used_at: iso(5 * HOUR), revoked_at: null },
+  { id: 4, name: "report-engine", prefix: "ap_q0LmE4", scope: "run", services: ["report-engine"], envs: ["test"], note: "报表回归", created_by: "chenyu", created_at: iso(15 * DAY), expires_at: new Date(NOW + 45 * DAY).toISOString(), last_used_at: null, revoked_at: null },
+  { id: 5, name: "lihf-console", prefix: "ap_Bx9tYv", scope: "admin", services: [], envs: [], note: "控制台登录", created_by: "root", created_at: iso(40 * DAY), expires_at: null, last_used_at: iso(1 * MIN), revoked_at: null },
+  { id: 6, name: "old-cli", prefix: "ap_Ze2Rr8", scope: "run", services: [], envs: [], note: "旧 CLI，已停用", created_by: "lihf", created_at: iso(60 * DAY), expires_at: null, last_used_at: iso(33 * DAY), revoked_at: iso(20 * DAY) },
+];
 
 export { NOW, MIN, HOUR, DAY, iso, hex, pick, between };

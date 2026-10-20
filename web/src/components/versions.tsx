@@ -1,11 +1,11 @@
 /**
- * 版本历史：时间线 + 任选两版 diff + 恢复。所有定义（环境/服务/角色/任务/策略）共用。
+ * 版本历史：时间线 + 任选两版 diff + 恢复。服务 / 角色 / 任务 / 策略与平台配置各节共用。
  */
 import { useEffect, useMemo, useState } from "react";
 import { LuGitCompare, LuHistory, LuRotateCcw } from "react-icons/lu";
 
-import { api, useVersions } from "@/api/hooks";
-import type { Version } from "@/api/types";
+import { api, useVersions, type DefinitionPath } from "@/api/hooks";
+import type { ConfigSection, Version } from "@/api/types";
 import { cn } from "@/lib/cn";
 import { ago, datetime } from "@/lib/format";
 import { invalidate } from "@/lib/query";
@@ -14,13 +14,13 @@ import { DiffView, stableYaml } from "./ui/data";
 import { confirm, toast } from "./ui/overlay";
 import { Badge, Card, CardHeader, Empty, SkeletonRows } from "./ui/primitives";
 
-const STRIP = new Set(["version", "updated_by", "updated_at", "name", "stats_24h", "last_run", "next_fire", "subtask_count", "task_count", "health"]);
+const STRIP = new Set(["version", "updated_by", "updated_at", "name", "section", "overrides", "stats_24h", "last_run", "next_fire", "subtask_count", "task_count", "health"]);
 
 function clean(def: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(def).filter(([k]) => !STRIP.has(k)));
 }
 
-export function VersionHistory({ kind, name, onRestored }: { kind: string; name: string; onRestored?: () => void }) {
+export function VersionHistory({ kind, name, onRestored }: { kind: DefinitionPath | `settings/${ConfigSection}`; name?: string; onRestored?: () => void }) {
   const { data, loading, refetch } = useVersions(kind, name);
   const [a, setA] = useState<number | null>(null);
   const [b, setB] = useState<number | null>(null);
@@ -40,10 +40,11 @@ export function VersionHistory({ kind, name, onRestored }: { kind: string; name:
     const ok = await confirm({ title: `恢复到 v${v.version}？`, description: "会把 v" + v.version + " 的内容写成一个新版本（历史只增不改，可再恢复回来），立即生效。", confirmText: "恢复" });
     if (!ok) return;
     try {
-      await api.restoreVersion(kind, name, v.version);
+      await api.restore(kind, name, v.version);
       toast(`已恢复为 v${v.version} 的内容`);
       await refetch();
-      invalidate(kind);
+      invalidate(kind.startsWith("settings/") ? "settings" : kind);
+      if (kind === "settings/envs") invalidate("meta");
       onRestored?.();
       setA(null);
     } catch (e) {
@@ -76,6 +77,7 @@ export function VersionHistory({ kind, name, onRestored }: { kind: string; name:
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-[12.5px] font-semibold text-fg">v{v.version}</span>
                   {i === 0 && <Badge tone="ok">当前</Badge>}
+                  {v.deleted && <Badge tone="bad">已删除</Badge>}
                   {v.version === a && <Badge tone="warn">对比基准</Badge>}
                 </div>
                 <div className="mt-0.5 text-[11.5px] text-fg-3" title={datetime(v.created_at, true)}>{v.updated_by} · {ago(v.created_at)}</div>

@@ -5,31 +5,32 @@
 import { useMemo, useState } from "react";
 import {
   LuBrain, LuCircleStop, LuClock, LuEllipsis, LuFileText, LuFolder, LuGitBranch, LuHistory, LuListTodo,
-  LuPlay, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayoutDashboard,
+  LuPlay, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
 } from "react-icons/lu";
 
-import { api, useEnvs, useInstances, useRuns, useService, useServiceView, useTasks } from "@/api/hooks";
+import { api, useEnvs, useProcesses, useRuns, useService, useServiceEnv, useSettings, useTasks } from "@/api/hooks";
 import type { Instance, ServiceSummary } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, InstanceBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown, Mono, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
+import { Switch } from "@/components/ui/form";
 import { Drawer, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, datetime, until } from "@/lib/format";
 import { invalidate, useQuery } from "@/lib/query";
-import { useParams, useSearch } from "@/lib/router";
+import { Link, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
-import { KnowledgeList } from "../memory/memory";
+import { AssetList, KnowledgeList } from "../memory/memory";
 import { ServiceAvatar } from "../overview/overview";
 import { RunMiniList, RunsTable } from "../runs/runs-table";
 import { RunTaskDialog } from "../tasks/run-dialog";
 import { TasksTable } from "../tasks/tasks";
 import { ServiceConfigEditor } from "./service-config";
 
-type TabKey = "overview" | "tasks" | "runs" | "memory" | "config" | "versions";
+type TabKey = "overview" | "envs" | "tasks" | "runs" | "memory" | "config" | "versions";
 
 export function ServiceDetailPage() {
   const { name } = useParams<{ name: string }>();
@@ -38,8 +39,8 @@ export function ServiceDetailPage() {
   const { data: envs } = useEnvs();
   const { env: globalEnv } = useUi();
   const [runOpen, setRunOpen] = useState(false);
-  const enabledEnvs = (envs ?? []).filter((e) => e.enabled);
-  const env = search.env || (enabledEnvs.find((e) => e.name === globalEnv) ?? enabledEnvs.find((e) => !e.protected) ?? enabledEnvs[0])?.name || "test";
+  const allEnvs = envs ?? [];
+  const env = search.env || (allEnvs.find((e) => e.name === globalEnv) ?? allEnvs.find((e) => !e.protected) ?? allEnvs[0])?.name || "test";
   const tab = (search.tab as TabKey) || "overview";
   const { data: tasks } = useTasks(name);
 
@@ -53,7 +54,7 @@ export function ServiceDetailPage() {
       confirmText: svc.enabled ? "停用" : "启用", danger: svc.enabled, requireText: svc.enabled ? svc.name : undefined,
     });
     if (!ok) return;
-    await api.putService(svc.name, { enabled: !svc.enabled });
+    await api.update("services", svc.name, { enabled: !svc.enabled });
     toast(svc.enabled ? "服务已停用" : "服务已启用");
     invalidate("services");
   };
@@ -82,19 +83,23 @@ export function ServiceDetailPage() {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <span className="text-xs text-fg-3">环境</span>
         <div className="inline-flex rounded-lg border border-line bg-sunken p-0.5">
-          {enabledEnvs.map((e) => (
-            <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })}
-              className={cn("flex h-7 items-center gap-2 rounded-md px-3 text-[12.5px] transition-colors", env === e.name ? "bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "hover:bg-hover")}>
-              <EnvBadge env={e.name} /><span className={cn(env === e.name ? "text-fg" : "text-fg-3")}>{e.title}</span>
-              {svc && !!svc.health[e.name]?.failed_24h && <span className="size-1.5 rounded-full bg-bad" />}
-            </button>
-          ))}
+          {allEnvs.map((e) => {
+            const off = svc?.health[e.name]?.enabled === false;
+            return (
+              <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })} title={off ? "该服务在此环境已停用" : undefined}
+                className={cn("flex h-7 items-center gap-2 rounded-md px-3 text-[12.5px] transition-colors", env === e.name ? "bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "hover:bg-hover", off && "opacity-55")}>
+                <EnvBadge env={e.name} /><span className={cn(env === e.name ? "text-fg" : "text-fg-3", off && "line-through")}>{e.title}</span>
+                {svc && !off && !!svc.health[e.name]?.failed_24h && <span className="size-1.5 rounded-full bg-bad" />}
+              </button>
+            );
+          })}
         </div>
         <span className="text-xs text-fg-3">配置文件、只读库、进程、记忆都按所选环境解析</span>
       </div>
 
       <Tabs className="mb-5" value={tab} onChange={(v) => setSearch({ tab: v === "overview" ? undefined : v })} tabs={[
         { value: "overview", label: "概览", icon: <LuLayoutDashboard /> },
+        { value: "envs", label: "环境", icon: <LuLayers /> },
         { value: "tasks", label: "任务", icon: <LuListTodo />, count: tasks?.filter((t) => !t.extends).length },
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "memory", label: "记忆", icon: <LuBrain /> },
@@ -104,10 +109,14 @@ export function ServiceDetailPage() {
 
       {!svc ? <Skeleton className="h-96" /> : (
         <>
-          {tab === "overview" && <OverviewTab svc={svc} env={env} />}
+          {tab === "overview" && <OverviewTab svc={svc} env={env} onOpenEnvs={() => setSearch({ tab: "envs" })} />}
+          {tab === "envs" && <EnvsTab svc={svc} onSaved={refetch} />}
           {tab === "tasks" && <Card><TasksTable tasks={tasks?.filter((t) => !t.extends)} all={tasks} hideService /></Card>}
           {tab === "runs" && <RunsTab service={svc.name} env={env} />}
-          {tab === "memory" && <Card><KnowledgeList service={svc.name} env={env} /></Card>}
+          {tab === "memory" && <div className="space-y-4">
+            <KnowledgeList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
+            <AssetList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
+          </div>}
           {tab === "config" && <ServiceConfigEditor svc={svc} onSaved={refetch} />}
           {tab === "versions" && <VersionHistory kind="services" name={svc.name} onRestored={refetch} />}
         </>
@@ -122,13 +131,19 @@ function RunsTab({ service, env }: { service: string; env: string }) {
   return <Card><RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]} /></Card>;
 }
 
-function OverviewTab({ svc, env }: { svc: ServiceSummary; env: string }) {
-  const { data: view } = useServiceView(svc.name, env);
+function OverviewTab({ svc, env, onOpenEnvs }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void }) {
+  const { data: view } = useServiceEnv(svc.name, env);
   const { data: recent } = useRuns({ service: svc.name, env, limit: 8 });
   const h = svc.health[env];
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
       <div className="min-w-0 space-y-4">
+        {h && !h.enabled && svc.enabled && (
+          <div className="flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-[13px] text-warn">
+            <LuPower className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 环境已停用：不接收运行、不启动进程、定时暂停。</span>
+            <Button size="sm" onClick={onOpenEnvs}>去启用</Button>
+          </div>
+        )}
         <Processes svc={svc} env={env} />
         <ConfigFiles svc={svc} env={env} files={view?.config_files} />
         <Card>
@@ -184,11 +199,63 @@ export const PROFILE_LABEL: Record<string, string> = {
   upstream: "上游依赖", downstream: "下游影响", runbook: "运维备注",
 };
 
+// ———————— 环境：服务在每个环境是否启用、覆盖了什么 ————————
+
+function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void }) {
+  const { data: envs } = useEnvs();
+  const toggle = async (env: string, enabled: boolean) => {
+    const ok = await confirm({
+      title: enabled ? `在 ${env} 启用 ${svc.name}？` : `在 ${env} 停用 ${svc.name}？`,
+      description: enabled ? "启用后该环境立即接收运行，定时恢复。" : "停用后：该环境的新运行全部拒收（原因码 service_env_disabled），定时暂停，进程不能启动；其它环境不受影响。",
+      confirmText: enabled ? "启用" : "停用", danger: !enabled,
+    });
+    if (!ok) return;
+    const next = { ...svc.envs, [env]: { ...(svc.envs[env] ?? {}), enabled } };
+    if (enabled) delete next[env].enabled;
+    if (!Object.keys(next[env]).length) delete next[env];
+    try {
+      await api.update("services", svc.name, { envs: next });
+      toast(enabled ? `${env} 已启用` : `${env} 已停用`);
+      invalidate("services");
+      onSaved();
+    } catch (e) { toast.error("保存失败", (e as Error).message); }
+  };
+  return (
+    <Card>
+      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。这里控制服务在哪些环境可用；主机、只读库、代码目录、档案的环境差异在「配置」里改。" icon={<LuLayers />} />
+      <ul className="divide-y divide-line">
+        {(envs ?? []).map((e) => {
+          const o = svc.envs[e.name] ?? {};
+          const on = svc.health[e.name]?.enabled !== false;
+          const overrides = [o.hosts && "主机", o.readonly_dsn && "只读库", o.code_paths && "代码目录", o.profile && Object.keys(o.profile).length && "档案"].filter(Boolean);
+          return (
+            <li key={e.name} className={cn("flex flex-wrap items-center gap-4 px-4 py-3.5", !on && "bg-sunken/50")}>
+              <EnvBadge env={e.name} className="h-6 px-2 text-[12px]" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-[13px] font-medium text-fg">{e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">已停用</Badge>}</div>
+                <div className="mt-0.5 text-[12px] text-fg-3">
+                  {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"} · 近 24h {svc.health[e.name]?.runs_24h ?? 0} 次运行 · 进程 {svc.health[e.name]?.running_processes ?? 0}/{svc.health[e.name]?.total_processes ?? 0} 运行中
+                </div>
+              </div>
+              <Switch checked={on} disabled={!svc.enabled} onChange={(v) => toggle(e.name, v)} label={<span className="text-[12.5px]">{on ? "启用" : "停用"}</span>} />
+            </li>
+          );
+        })}
+      </ul>
+      {!svc.enabled && <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">服务整体已停用（右上角菜单），各环境开关暂不生效。</div>}
+      <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">环境本身（有哪些、谁受保护）在 <Link to="/settings/envs" className="text-accent hover:underline">设置 → 环境</Link>。</div>
+    </Card>
+  );
+}
+
 // ———————— 进程 ————————
 
 function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
-  const { data, loading, refetch } = useInstances(svc.name);
+  const { data, loading, refetch } = useProcesses(svc.name);
   const { data: envs } = useEnvs();
+  const { data: settings } = useSettings();
+  const defaultLease = settings?.processes.default_lease_hours ?? 2;
+  const envOff = svc.health[env]?.enabled === false;
   const [logs, setLogs] = useState<Instance | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const rows = (data ?? []).filter((i) => i.env === env);
@@ -198,16 +265,16 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
     if (action !== "renew") {
       const ok = await confirm({
         title: `${action === "start" ? "启动" : "停止"} ${i.process}@${env}？`,
-        description: protectedEnv ? "受保护环境：会先创建审批单，审批通过后才执行。" : action === "start" ? `按 ${svc.processes[i.process]?.lease_hours ?? 2} 小时租约启动，到期自动停止（可续期）。` : "进程会收到 SIGTERM，10 秒后仍未退出则强制结束。",
+        description: protectedEnv ? "受保护环境：会先创建审批单，审批通过后才执行。" : action === "start" ? `按 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时租约启动，到期自动停止（可续期）。` : "进程会收到 SIGTERM，15 秒后仍未退出则强制结束。",
         confirmText: protectedEnv ? "提交审批" : action === "start" ? "启动" : "停止", danger: action === "stop",
       });
       if (!ok) return;
     }
     setBusy(i.process + action);
     try {
-      const res = await api.instanceAction(svc.name, env, i.process, action);
+      const res = await api.processAction(svc.name, env, i.process, action);
       if (res.approval) toast("已提交审批", { description: res.approval.title });
-      else toast({ start: "已启动", stop: "已停止", renew: "租约已续期 2 小时" }[action]);
+      else toast({ start: "已启动", stop: "已停止", renew: `租约已续期 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时` }[action]);
       await refetch();
       invalidate("services");
       invalidate("approvals");
@@ -246,12 +313,12 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
                       {i.state === "running" ? <>
-                        <Tooltip content="续期 2 小时"><Button size="icon-xs" variant="ghost" onClick={() => act(i, "renew")} loading={busy === i.process + "renew"}><LuClock /></Button></Tooltip>
+                        <Tooltip content={`续期 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时`}><Button size="icon-xs" variant="ghost" onClick={() => act(i, "renew")} loading={busy === i.process + "renew"}><LuClock /></Button></Tooltip>
                         <Tooltip content="日志"><Button size="icon-xs" variant="ghost" onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>
                         <Button size="xs" variant="danger-ghost" icon={<LuCircleStop />} onClick={() => act(i, "stop")} loading={busy === i.process + "stop"}>停止</Button>
                       </> : <>
                         {i.last_exit && <Tooltip content="上次运行的日志"><Button size="icon-xs" variant="ghost" onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>}
-                        <Button size="xs" icon={<LuPlay />} onClick={() => act(i, "start")} loading={busy === i.process + "start"} disabled={!svc.enabled}>启动</Button>
+                        <Button size="xs" icon={<LuPlay />} onClick={() => act(i, "start")} loading={busy === i.process + "start"} disabled={!svc.enabled || envOff}>启动</Button>
                       </>}
                     </div>
                   </Td>
@@ -267,7 +334,7 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
 }
 
 function LogsDrawer({ instance, onClose }: { instance: Instance | null; onClose: () => void }) {
-  const { data } = useQuery(["logs", instance?.service, instance?.env, instance?.process], () => api.instanceLogs(instance!.service, instance!.env, instance!.process), { enabled: !!instance, refetchInterval: 5000 });
+  const { data } = useQuery(["logs", instance?.service, instance?.env, instance?.process], () => api.processLogs(instance!.service, instance!.env, instance!.process), { enabled: !!instance, refetchInterval: 5000, live: true });
   return (
     <Drawer open={!!instance} onClose={onClose} width="w-[760px]" title={instance ? `${instance.service}/${instance.process}@${instance.env} 日志` : ""} subtitle="最近 200 行 · 每 5 秒刷新">
       <div className="p-4">

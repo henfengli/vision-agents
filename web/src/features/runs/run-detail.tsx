@@ -5,25 +5,29 @@
  */
 import { useMemo, useState } from "react";
 import {
-  LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuExternalLink, LuMessageSquare,
-  LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuThumbsDown, LuThumbsUp, LuWrench, LuZap, LuFlag,
+  LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuMessageSquare, LuPencilLine,
+  LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuThumbsDown, LuThumbsUp, LuWrench, LuZap, LuFlag,
 } from "react-icons/lu";
 
 import { api, useRun, useRunEvents } from "@/api/hooks";
 import type { Run, RunEvent } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TriggerBadge } from "@/components/status";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
-import { Tooltip, confirm, toast } from "@/components/ui/overlay";
+import { Field, Textarea } from "@/components/ui/form";
+import { Dialog, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, ErrorState, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
-import { invalidate } from "@/lib/query";
+import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate, useParams } from "@/lib/router";
 import { GraphView } from "./graph-view";
 
 const LIVE = new Set(["queued", "running", "awaiting_approval"]);
+
+/** 👍 = 1，👎 = -1，没评 = 0 */
+type Score = -1 | 0 | 1;
 
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -57,8 +61,8 @@ export function RunDetailPage() {
 
 function Header({ run }: { run: Run }) {
   const live = LIVE.has(run.status);
-  const [fb, setFb] = useState(run.feedback?.score ?? 0);
-  const feedback = async (score: number) => {
+  const [fb, setFb] = useState<Score>((run.feedback?.score ?? 0) as Score);
+  const feedback = async (score: 1 | -1) => {
     const next = fb === score ? 0 : score;
     setFb(next);
     if (next) {
@@ -70,11 +74,16 @@ function Header({ run }: { run: Run }) {
     if (!(await confirm({ title: "取消这次运行？", description: "终止执行并落 cancelled 终态；挂起的审批一并拒绝。", danger: true, confirmText: "取消运行" }))) return;
     try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); }
   };
-  const rerun = async () => {
-    const failed = run.status === "failed";
-    if (!(await confirm({ title: failed ? "断点续跑？" : "用同样的输入再跑一次？", description: failed ? "沿用同一个 run id，从失败处继续（已完成的步骤与复用的产物不重做）。" : "新开一个 run，跳过去重，沿用任务/服务/环境/会话。", confirmText: failed ? "续跑" : "重跑" }))) return;
+  const [correcting, setCorrecting] = useState(false);
+  const failed = run.status === "failed";
+  /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run，跳过去重） */
+  const again = async () => {
+    const ok = await confirm(failed
+      ? { title: "断点续跑？", description: "沿用同一个 run id，从失败处继续：已完成的步骤与复用的产物不重做。", confirmText: "续跑" }
+      : { title: "用同样的输入再跑一次？", description: "新开一个 run，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
+    if (!ok) return;
     try {
-      const r = await api.rerun(run.run_id);
+      const r = failed ? await api.resume(run.run_id) : await api.rerun(run.run_id);
       invalidate("runs");
       navigate(`/runs/${r.run_id}`);
     } catch (e) { toast.error("提交失败", (e as Error).message); }
@@ -100,12 +109,36 @@ function Header({ run }: { run: Run }) {
           <span className="h-4 w-px bg-line" />
           <Tooltip content="没帮助"><button type="button" onClick={() => feedback(-1)} className={cn("flex size-8 items-center justify-center rounded-r-md hover:bg-hover", fb < 0 ? "text-bad" : "text-fg-3")}><LuThumbsDown className="size-4" /></button></Tooltip>
         </div>}
-        {run.langfuse_url && <a href={run.langfuse_url} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "ghost" })}><LuExternalLink />Langfuse</a>}
-        {run.task.startsWith("data-qa") && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
+        {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
+        {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} onClick={cancel}>取消</Button>
-          : <Button icon={<LuRotateCcw />} onClick={rerun}>{run.status === "failed" ? "续跑" : "重跑"}</Button>}
+          : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
+        <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
       </>}
     />
+  );
+}
+
+/** 纠正：告诉 agent 哪里错了，在同一会话里带着原结论与纠正重答；纠正内容会沉淀为高优先级知识 */
+function CorrectDialog({ run, open, onClose }: { run: Run; open: boolean; onClose: () => void }) {
+  const [text, setText] = useState("");
+  const submit = useMutation(async () => {
+    try {
+      const r = await api.correct(run.run_id, text);
+      invalidate("runs");
+      onClose();
+      setText("");
+      navigate(`/runs/${r.run_id}`);
+    } catch (e) { toast.error("提交失败", (e as Error).message); }
+  });
+  return (
+    <Dialog open={open} onClose={onClose} size="lg" title="纠正这次结论" description="在同一会话里新开一次运行：agent 看到原结论和你的纠正后重答。纠正本身会作为人工知识沉淀。"
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!text.trim()} loading={submit.pending} onClick={() => submit.mutate(undefined)}>提交纠正</Button></>}>
+      {run.output?.answer && <div className="mb-3 max-h-40 overflow-auto rounded-md border border-line bg-sunken/50 p-3 text-[12.5px] text-fg-2"><Markdown text={run.output.answer} /></div>}
+      <Field label="哪里不对" required help="说清楚正确的口径或事实，例如：GMV 不扣退款，退款看 refund_amount">
+        <Textarea autoFocus rows={4} value={text} onChange={(e) => setText(e.target.value)} />
+      </Field>
+    </Dialog>
   );
 }
 
@@ -115,7 +148,7 @@ function ApprovalBanner({ run }: { run: Run }) {
   const decide = async (approve: boolean) => {
     setBusy(approve ? "a" : "r");
     try {
-      await api.decide(a.id, approve);
+      await (approve ? api.approve(a.id) : api.reject(a.id));
       toast(approve ? "已放行" : "已拒绝");
       invalidate("runs"); invalidate("approvals");
     } catch (e) { toast.error("处理失败", (e as Error).message); } finally { setBusy(null); }
@@ -189,7 +222,7 @@ function buildSteps(events: RunEvent[]): Step[] {
       const i = open.findIndex((s) => s.call?.payload.tool === ev.payload.tool);
       if (i >= 0) { open[i].result = ev; open.splice(i, 1); } else steps.push({ key: "r" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, result: ev, ev });
     } else {
-      steps.push({ key: ev.kind + ev.seq, kind: ev.kind === "tool_result" ? "tool" : (ev.kind as Step["kind"]), at: ev.at, seq: ev.seq, ev });
+      steps.push({ key: ev.kind + ev.seq, kind: ev.kind, at: ev.at, seq: ev.seq, ev });
     }
   }
   return steps;
@@ -232,13 +265,13 @@ const STEP_ICON: Record<Step["kind"], { icon: React.ReactNode; cls: string }> = 
 function StepRow({ step, runId, offset, last, expandAll }: { step: Step; runId: string; offset: number; last: boolean; expandAll: boolean }) {
   const [open, setOpen] = useState<boolean | null>(null);
   const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval");
-  const [fb, setFb] = useState<number>(step.ev.feedback ?? 0);
+  const [fb, setFb] = useState<Score>((step.ev.feedback ?? 0) as Score);
   const p = step.ev.payload;
   const meta = STEP_ICON[step.kind];
-  const sendFb = async (score: number) => {
+  const sendFb = async (score: 1 | -1) => {
     const next = fb === score ? 0 : score;
     setFb(next);
-    if (next) await api.stepFeedback(runId, step.seq, next);
+    await api.stepFeedback(runId, step.seq, next);
   };
   const title = step.kind === "tool"
     ? <span className="flex items-center gap-2"><code className="font-mono text-[12.5px] font-medium text-fg">{step.call?.payload.tool ?? step.result?.payload.tool}</code><span className="truncate text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
@@ -312,8 +345,10 @@ function Sidebar({ run }: { run: Run }) {
           <DescList items={[
             ["任务", <Link to={`/tasks/${encodeURIComponent(run.task)}?tab=versions`} className="hover:text-accent">{run.task} <span className="text-fg-3">v{run.task_version ?? "—"}</span></Link>],
             ["角色", run.role ? <Link to={`/settings/roles/${run.role}`} className="flex items-center gap-1 hover:text-accent"><LuBot className="size-3.5 text-fg-3" />{run.role} <span className="text-fg-3">v{run.role_version ?? "—"}</span></Link> : "—"],
-            ["触发", <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""} · {run.trigger.caller}</span>],
-            ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
+            ["触发", <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""}</span>],
+            ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
+            ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
+            ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
             ["开始", datetime(run.created_at, true)],
             ["结束", run.finished_at ? datetime(run.finished_at, true) : "—"],
           ]} />
@@ -356,6 +391,8 @@ function Sidebar({ run }: { run: Run }) {
     </div>
   );
 }
+
+const onOff = (v: boolean | null | undefined) => (v === false ? "关" : v === true ? "开" : "默认");
 
 function MemList({ title, items, empty }: { title: string; items: { key: string; label: string; hint?: string; href: string }[]; empty: string }) {
   return (

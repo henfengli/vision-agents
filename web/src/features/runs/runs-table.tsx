@@ -49,7 +49,7 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
             </Td>
             {has("task") && (
               <Td className="max-w-[220px]">
-                <Link to={`/tasks/${encodeURIComponent(r.task.split(":")[0])}`} onClick={(e) => e.stopPropagation()} className="block truncate text-fg-2 hover:text-accent">{r.task_title || r.task}</Link>
+                <Link to={`/tasks/${encodeURIComponent(r.task)}`} onClick={(e) => e.stopPropagation()} className="block truncate text-fg-2 hover:text-accent">{r.task_title || r.task}</Link>
                 {r.task.includes(":") && <div className="truncate font-mono text-[11px] text-fg-3">:{r.task.split(":")[1]}</div>}
               </Td>
             )}

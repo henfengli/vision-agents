@@ -7,10 +7,11 @@ import { LuFileText, LuPlus, LuScrollText, LuServer, LuSettings, LuTrash2, LuLay
 
 import { api, useEnvs } from "@/api/hooks";
 import type { ProcessDef, Service, ServiceEnvOverride, ServiceSummary } from "@/api/types";
+import { SaveBar } from "@/components/save-bar";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor, type KvSuggestion } from "@/components/ui/data";
-import { Field, Input, TagInput, Textarea } from "@/components/ui/form";
+import { Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
 import { toast } from "@/components/ui/overlay";
 import { Card, CardHeader } from "@/components/ui/primitives";
 import { invalidate, useMutation } from "@/lib/query";
@@ -46,7 +47,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
 
   const save = useMutation(async () => {
     try {
-      const res = await api.putService(svc.name, draft);
+      const res = await api.update<ServiceSummary>("services", svc.name, draft);
       toast(`已保存为 v${res.version}`, { description: "5 秒内对新运行生效" });
       invalidate("services");
       onSaved();
@@ -64,7 +65,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
     }
     set("processes", next);
   };
-  const enabledEnvs = (envs ?? []).filter((e) => e.enabled);
+  const allEnvs = envs ?? [];
 
   return (
     <div className="grid gap-5 lg:grid-cols-[180px_1fr]">
@@ -120,7 +121,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                   <Field label="工作目录"><Input mono value={p.workdir ?? ""} onChange={(e) => setProc(name, { ...p, workdir: e.target.value || null })} placeholder={draft.root} /></Field>
                   <Field label="端口（按环境）">
                     <div className="flex flex-wrap gap-2">
-                      {enabledEnvs.map((e) => (
+                      {allEnvs.map((e) => (
                         <label key={e.name} className="flex items-center gap-1.5">
                           <EnvBadge env={e.name} />
                           <input value={p.ports?.[e.name] ?? ""} inputMode="numeric"
@@ -134,21 +135,21 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                       ))}
                     </div>
                   </Field>
-                  <Field label="默认租约（小时）"><Input inputMode="numeric" value={p.lease_hours ?? 2} onChange={(e) => setProc(name, { ...p, lease_hours: Number(e.target.value) || 2 })} /></Field>
+                  <Field label="租约（小时）" help="空 = 平台默认"><Input inputMode="decimal" value={p.lease_hours ?? ""} placeholder="默认" onChange={(e) => setProc(name, { ...p, lease_hours: e.target.value ? Number(e.target.value) || null : null })} /></Field>
                 </div>
               </div>
             ))}
             <Button size="xs" icon={<LuPlus />} onClick={() => {
               let n = "app"; let i = 1;
               while (n in draft.processes) n = `app${++i}`;
-              set("processes", { ...draft.processes, [n]: { cmd: [], workdir: null, ports: {}, lease_hours: 2 } });
+              set("processes", { ...draft.processes, [n]: { cmd: [], workdir: null, ports: {}, lease_hours: null } });
             }}>添加进程</Button>
           </div>
         </Section>
 
-        <Section id="envs" icon={<LuLayers />} title="环境覆盖" description="只写和基座不同的部分（深合并）。一套 agent 操作多套业务环境，差异只在这里。">
+        <Section id="envs" icon={<LuLayers />} title="环境" description="服务在每个环境是否启用，以及和基座不同的部分（只写差异）。一套 agent 操作多套业务环境，差异只在这里。">
           <div className="space-y-3">
-            {enabledEnvs.map((e) => {
+            {allEnvs.map((e) => {
               const o: ServiceEnvOverride = draft.envs[e.name] ?? {};
               const setO = (patch: Partial<ServiceEnvOverride>) => {
                 const next = { ...o, ...patch };
@@ -163,14 +164,16 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
               return (
                 <div key={e.name} className="rounded-lg border border-line p-3.5">
                   <div className="mb-3 flex items-center gap-2"><EnvBadge env={e.name} /><span className="text-[12.5px] font-medium text-fg">{e.title}</span>
-                    {!Object.keys(o).length && <span className="text-xs text-fg-3">与基座相同</span>}</div>
-                  <div className="grid gap-3 md:grid-cols-2">
+                    {!Object.keys(o).length && <span className="text-xs text-fg-3">与基座相同</span>}
+                    <div className="ml-auto"><Switch size="sm" checked={o.enabled !== false} onChange={(v) => setO({ enabled: v ? undefined : false })} label={<span className="text-[12px]">{o.enabled === false ? "该环境停用" : "启用"}</span>} /></div>
+                  </div>
+                  {o.enabled !== false && <div className="grid gap-3 md:grid-cols-2">
                     <Field label="主机"><TagInput mono value={o.hosts ?? []} onChange={(v) => setO({ hosts: v })} placeholder={draft.hosts.join(", ") || "继承基座"} /></Field>
                     <Field label="只读库 DSN"><Input mono value={o.readonly_dsn ?? ""} onChange={(ev) => setO({ readonly_dsn: ev.target.value || undefined })} placeholder={draft.readonly_dsn ?? "继承基座"} /></Field>
                     <Field label="档案补充（只对该环境）" className="md:col-span-2">
                       <KeyValueEditor value={o.profile ?? {}} onChange={(v) => setO({ profile: v })} suggestions={PROFILE_SUGGESTIONS.slice(1, 3)} />
                     </Field>
-                  </div>
+                  </div>}
                 </div>
               );
             })}
@@ -182,16 +185,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
         </Section>
       </div>
 
-      {dirty && (
-        <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center">
-          <div className="flex animate-pop items-center gap-3 rounded-xl border border-line bg-raised py-2 pl-4 pr-2 shadow-[var(--shadow-pop)]">
-            <span className="size-2 rounded-full bg-warn" />
-            <span className="text-[13px] text-fg">有未保存的修改</span>
-            <Button size="sm" variant="ghost" onClick={() => setDraft(toDraft(svc))}>放弃</Button>
-            <Button size="sm" variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存为 v{svc.version + 1}</Button>
-          </div>
-        </div>
-      )}
+      <SaveBar visible={dirty} saving={save.pending} onDiscard={() => setDraft(toDraft(svc))} onSave={() => save.mutate(undefined)} label={`保存为 v${svc.version + 1}`} />
     </div>
   );
 }

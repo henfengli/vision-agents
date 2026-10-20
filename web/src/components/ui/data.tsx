@@ -66,7 +66,7 @@ export function Th({ className, sort, onSort, children, ...p }: ThHTMLAttributes
 }
 
 export function Td({ className, ...p }: TdHTMLAttributes<HTMLTableCellElement>) {
-  return <td className={cn("h-11 border-b border-line px-3 py-1.5 align-middle first:pl-4 last:pr-4", className)} {...p} />;
+  return <td className={cn("h-[var(--row-h)] border-b border-line px-3 py-1.5 align-middle first:pl-4 last:pr-4", className)} {...p} />;
 }
 
 export function Tr({ className, onClick, href, children }: { className?: string; onClick?: () => void; href?: string; children: ReactNode }) {

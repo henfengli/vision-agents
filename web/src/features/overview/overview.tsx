@@ -8,6 +8,7 @@ import {
 } from "react-icons/lu";
 
 import { useApprovals, useEnvs, useRuns, useServices, useStats } from "@/api/hooks";
+import type { UpcomingFire } from "@/api/types";
 import { RunsChart } from "@/components/charts";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { APPROVAL_KIND, EnvBadge, RUN_STATUS } from "@/components/status";
@@ -104,7 +105,7 @@ function Legend() {
   );
 }
 
-function Upcoming({ items }: { items: { task: string; service: string | null; env: string; at: string }[] | undefined }) {
+function Upcoming({ items }: { items: UpcomingFire[] | undefined }) {
   return (
     <Card>
       <CardHeader title="即将触发" icon={<LuCalendarClock />} description="定时任务的下一次运行（按环境展开）" />
@@ -112,8 +113,8 @@ function Upcoming({ items }: { items: { task: string; service: string | null; en
         <Empty title="没有定时任务" />
       ) : (
         <ul className="divide-y divide-line">
-          {items.map((u, i) => (
-            <li key={i}>
+          {items.map((u) => (
+            <li key={`${u.task}/${u.trigger_id}/${u.env}`}>
               <Link to={`/tasks/${encodeURIComponent(u.task)}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-hover/70">
                 <div className="w-[52px] text-center">
                   <div className="text-[13px] font-semibold tabular-nums text-fg">{dayjs(u.at).format("HH:mm")}</div>
@@ -138,7 +139,7 @@ function HealthMatrix() {
   const { data: services } = useServices({ refetchInterval: 30_000 });
   const { data: envs } = useEnvs();
   const { env: focus } = useUi();
-  const cols = (envs ?? []).filter((e) => e.enabled);
+  const cols = envs ?? [];
   return (
     <Card>
       <CardHeader title="服务健康" icon={<LuServer />} description="每格是一个 服务×环境：最近一次运行、近 24 小时运行与失败、在跑的进程"
@@ -166,6 +167,11 @@ function HealthMatrix() {
                   </td>
                   {cols.map((e) => {
                     const h = s.health[e.name];
+                    if (h && !h.enabled) return (
+                      <td key={e.name} className="border-b border-l border-line px-3 py-2 text-[11.5px] text-fg-3">
+                        <Link to={`/services/${s.name}?tab=envs`} className="block rounded-md px-1.5 py-1 hover:bg-hover">未启用</Link>
+                      </td>
+                    );
                     const last = h?.last_run;
                     const st = last ? RUN_STATUS[last.status] : null;
                     return (
@@ -200,7 +206,7 @@ function HealthMatrix() {
 }
 
 function PendingApprovals() {
-  const { data } = useApprovals("pending");
+  const { data } = useApprovals({ status: "pending" });
   return (
     <Card>
       <CardHeader title="待审批" icon={<LuShieldCheck />} actions={<LinkButton to="/approvals" size="xs" variant="ghost">收件箱 <LuArrowRight /></LinkButton>} />

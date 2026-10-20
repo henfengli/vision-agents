@@ -4,12 +4,12 @@
 import { type ReactNode } from "react";
 import {
   LuActivity, LuBrain, LuChevronsLeft, LuChevronsRight, LuLayoutDashboard, LuListTodo, LuLogOut, LuMessageSquare,
-  LuMonitor, LuMoon, LuSearch, LuServer, LuShieldCheck, LuSlidersHorizontal, LuSun, LuBot, LuLayers,
+  LuMonitor, LuMoon, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSun,
 } from "react-icons/lu";
 
-import { useApprovals, useEnvs, useMeta } from "@/api/hooks";
+import { api, useApprovals, useEnvs, useMeta } from "@/api/hooks";
 import { cn } from "@/lib/cn";
-import { Link, useActive } from "@/lib/router";
+import { Link, navigate, useActive } from "@/lib/router";
 import { setUi, useNarrow, useUi, type Theme } from "@/lib/store";
 import { Kbd } from "../ui/primitives";
 import { Menu, Tooltip } from "../ui/overlay";
@@ -37,7 +37,7 @@ function Sidebar() {
   const { sidebarCollapsed } = useUi();
   const narrow = useNarrow();
   const collapsed = sidebarCollapsed || narrow;
-  const { data: pending } = useApprovals("pending");
+  const { data: pending } = useApprovals({ status: "pending" });
   const { data: meta } = useMeta();
   return (
     <aside className={cn("flex h-full shrink-0 flex-col border-r border-line bg-sunken/60 transition-[width] duration-150", collapsed ? "w-[56px]" : "w-[220px]")}>
@@ -56,11 +56,10 @@ function Sidebar() {
         <NavItem to="/chat" icon={<LuMessageSquare />} label="对话" collapsed={collapsed} />
         <NavItem to="/approvals" icon={<LuShieldCheck />} label="审批" badge={pending?.length} collapsed={collapsed} />
         <NavItem to="/memory" icon={<LuBrain />} label="记忆" collapsed={collapsed} />
-        <div className={cn("px-2.5 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wider text-fg-3", collapsed && "invisible h-3 p-0")}>平台</div>
-        <NavItem to="/settings/roles" icon={<LuBot />} label="角色" collapsed={collapsed} />
-        <NavItem to="/settings/policies" icon={<LuSlidersHorizontal />} label="策略" collapsed={collapsed} />
-        <NavItem to="/settings/envs" icon={<LuLayers />} label="环境" collapsed={collapsed} />
       </nav>
+      <div className="px-2 pb-2">
+        <NavItem to="/settings" icon={<LuSettings />} label="设置" collapsed={collapsed} />
+      </div>
       <div className={cn("flex items-center border-t border-line p-2", collapsed ? "justify-center" : "justify-between")}>
         {!collapsed && <ThemeMenu />}
         {!narrow && <Tooltip content={collapsed ? "展开侧栏" : "收起侧栏"} side="right">
@@ -76,19 +75,22 @@ function Sidebar() {
 
 function ThemeMenu() {
   const { theme } = useUi();
+  const { data: meta } = useMeta();
   const icon = theme === "dark" ? <LuMoon /> : theme === "light" ? <LuSun /> : <LuMonitor />;
   const set = (t: Theme) => () => setUi({ theme: t });
+  const logout = async () => { await api.logout().catch(() => undefined); navigate("/login", { replace: true }); };
   return (
     <Menu align="start" trigger={
-      <button type="button" className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5">
-        {icon}{{ dark: "深色", light: "浅色", system: "跟随系统" }[theme]}
+      <button type="button" className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5">
+        {icon}<span className="truncate">{meta?.me.name ?? "—"}</span>
       </button>
     } items={[
       { label: "浅色", icon: <LuSun />, onClick: set("light") },
       { label: "深色", icon: <LuMoon />, onClick: set("dark") },
       { label: "跟随系统", icon: <LuMonitor />, onClick: set("system") },
       { separator: true, label: "" },
-      { label: "退出登录", icon: <LuLogOut />, onClick: () => { window.location.href = "/logout"; } },
+      { label: "个人偏好", icon: <LuSettings />, onClick: () => navigate("/settings/preferences") },
+      { label: "退出登录", icon: <LuLogOut />, onClick: logout },
     ]} />
   );
 }
@@ -107,7 +109,7 @@ export function Logo({ className }: { className?: string }) {
 export function EnvSwitcher() {
   const { env } = useUi();
   const { data: envs } = useEnvs();
-  const items = [{ name: "", title: "全部" }, ...(envs ?? []).filter((e) => e.enabled)];
+  const items = [{ name: "", title: "全部" }, ...(envs ?? [])];
   return (
     <div className="inline-flex h-7 items-center rounded-md border border-line bg-sunken p-0.5">
       {items.map((e) => (
@@ -123,7 +125,7 @@ export function EnvSwitcher() {
 }
 
 function Topbar() {
-  const { data: pending } = useApprovals("pending");
+  const { data: pending } = useApprovals({ status: "pending" });
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-panel/80 px-3 backdrop-blur md:gap-3 md:px-5">
       <button type="button" onClick={openPalette} aria-label="搜索"
@@ -145,7 +147,7 @@ function Topbar() {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  useEnvs();
+  useMeta();
   return (
     <div className="flex h-full">
       <Sidebar />

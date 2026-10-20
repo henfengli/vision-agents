@@ -5,8 +5,7 @@
 import { Dialog, DialogPanel } from "@headlessui/react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
-  LuActivity, LuBot, LuBrain, LuCornerDownLeft, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare, LuMoon,
-  LuPlay, LuSearch, LuServer, LuShieldCheck, LuSlidersHorizontal, LuSun,
+  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSlidersHorizontal, LuSun,
 } from "react-icons/lu";
 
 import { api, useEnvs } from "@/api/hooks";
@@ -64,7 +63,11 @@ export function CommandPalette() {
       { id: "nav-memory", label: "记忆", icon: <LuBrain />, group: "跳转", run: go("/memory"), keywords: "memory knowledge" },
       { id: "nav-roles", label: "角色", icon: <LuBot />, group: "跳转", run: go("/settings/roles"), keywords: "roles" },
       { id: "nav-policies", label: "策略", icon: <LuSlidersHorizontal />, group: "跳转", run: go("/settings/policies"), keywords: "policies" },
-      { id: "nav-envs", label: "环境", icon: <LuLayers />, group: "跳转", run: go("/settings/envs"), keywords: "envs" },
+      { id: "nav-settings", label: "设置", icon: <LuSettings />, group: "跳转", run: go("/settings"), keywords: "settings admin" },
+      { id: "nav-prefs", label: "个人偏好", icon: <LuSettings />, group: "跳转", run: go("/settings/preferences"), keywords: "preferences theme" },
+      { id: "nav-envs", label: "环境设置", icon: <LuLayers />, group: "跳转", run: go("/settings/envs"), keywords: "envs" },
+      { id: "nav-notify", label: "通知设置", icon: <LuBell />, group: "跳转", run: go("/settings/notifications"), keywords: "notifications dingtalk" },
+      { id: "nav-keys", label: "API 密钥", icon: <LuKeyRound />, group: "跳转", run: go("/settings/api-keys"), keywords: "api key token" },
       { id: "act-run", label: "运行一个任务…", icon: <LuPlay />, group: "操作", run: go("/tasks?run=1"), keywords: "run start" },
       { id: "act-new-chat", label: "新对话", icon: <LuMessageSquare />, group: "操作", run: go("/chat?new=1"), keywords: "new chat ask" },
       ...[{ name: "", title: "全部" }, ...(envs ?? [])].map((e) => ({

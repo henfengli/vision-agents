@@ -7,7 +7,8 @@ import { LuBot, LuHistory, LuLayoutDashboard, LuPlus, LuSettings, LuTriangleAler
 
 import { api, useMeta, useRole, useRoles, useTasks } from "@/api/hooks";
 import type { Role } from "@/api/types";
-import { Page, PageHeader } from "@/components/layout/shell";
+import { Page } from "@/components/layout/shell";
+import { SaveBar } from "@/components/save-bar";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
@@ -17,15 +18,15 @@ import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton, SkeletonRows } fr
 import { ago } from "@/lib/format";
 import { invalidate, useMutation, useQuery } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
+import { SettingsLayout } from "./layout";
 
 export function RolesPage() {
   const { data, loading } = useRoles();
   const { data: tasks } = useTasks();
   const [creating, setCreating] = useState(false);
   return (
-    <Page>
-      <PageHeader title="角色" description="谁来做：系统提示 + 工具白名单。任务指定角色，执行时只拿得到白名单里的工具；工具在运行时绑定到该次的服务×环境。"
-        actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建角色</Button>} />
+    <SettingsLayout title="角色" description="谁来做：系统提示 + 工具白名单。任务指定角色，执行时只拿得到白名单里的工具；工具在运行时绑定到该次的服务×环境。"
+      actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建角色</Button>}>
       <Card>
         {loading ? <SkeletonRows /> : !data?.length ? <Empty icon={<LuBot />} title="还没有角色" /> : (
           <Table>
@@ -51,7 +52,7 @@ export function RolesPage() {
         )}
       </Card>
       <CreateRoleDialog open={creating} onClose={() => setCreating(false)} roles={data ?? []} />
-    </Page>
+    </SettingsLayout>
   );
 }
 
@@ -62,7 +63,7 @@ function CreateRoleDialog({ open, onClose, roles }: { open: boolean; onClose: ()
   const valid = /^[a-z][a-z0-9_]{1,40}$/.test(name);
   const create = useMutation(async () => {
     try {
-      await api.createRole({ name, title, extends: ext || null });
+      await api.create("roles", { name, title, extends: ext || null });
       invalidate("roles");
       onClose();
       navigate(`/settings/roles/${name}`);
@@ -92,10 +93,8 @@ export function RoleDetailPage() {
   if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
   const used = (tasks ?? []).filter((t) => t.role === name && !t.extends);
   return (
-    <Page wide>
-      <PageHeader crumbs={[{ label: "角色", to: "/settings/roles" }, { label: name }]} icon={<LuBot />}
-        title={role?.title || name} description={role?.description}
-        meta={role && <><span className="font-mono">{role.name}</span>{role.extends && <span>继承 <Link to={`/settings/roles/${role.extends}`} className="text-accent hover:underline">{role.extends}</Link></span>}<span>v{role.version} · {role.updated_by} · {ago(role.updated_at)}</span></>} />
+    <SettingsLayout wide title={<span className="flex items-center gap-2"><LuBot className="size-5 text-fg-3" />{role?.title || name}</span>}
+      description={role && <span className="flex flex-wrap items-center gap-x-3"><Link to="/settings/roles" className="text-accent hover:underline">← 全部角色</Link><span className="font-mono">{role.name}</span>{role.extends && <span>继承 <Link to={`/settings/roles/${role.extends}`} className="text-accent hover:underline">{role.extends}</Link></span>}<span>v{role.version} · {role.updated_by} · {ago(role.updated_at)}</span>{role.description && <span>{role.description}</span>}</span>}>
       <Tabs className="mb-5" value={tab} onChange={(v) => setS({ tab: v === "overview" ? undefined : v })} tabs={[
         { value: "overview", label: "概览", icon: <LuLayoutDashboard /> }, { value: "edit", label: "编辑", icon: <LuSettings /> }, { value: "versions", label: "版本", icon: <LuHistory /> },
       ]} />
@@ -124,7 +123,7 @@ export function RoleDetailPage() {
           {tab === "versions" && <VersionHistory kind="roles" name={name} onRestored={refetch} />}
         </>
       )}
-    </Page>
+    </SettingsLayout>
   );
 }
 
@@ -162,7 +161,7 @@ function RoleEditor({ role, onSaved }: { role: Role; onSaved: () => void }) {
   }, [meta]);
   const save = useMutation(async () => {
     try {
-      const r = await api.putRole(role.name, { title: d.title, description: d.description, prompt: d.prompt, tools: d.tools, extends: d.extends, prompt_append: d.prompt_append });
+      const r = await api.update<Role>("roles", role.name, { title: d.title, description: d.description, prompt: d.prompt, tools: d.tools, extends: d.extends, prompt_append: d.prompt_append });
       toast(`已保存为 v${r.version}`, { description: "5 秒内对新运行生效" });
       invalidate("roles");
       onSaved();
@@ -205,15 +204,7 @@ function RoleEditor({ role, onSaved }: { role: Role; onSaved: () => void }) {
           ))}
         </div>
       </Card>
-      {dirty && (
-        <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center">
-          <div className="flex animate-pop items-center gap-3 rounded-xl border border-line bg-raised py-2 pl-4 pr-2 shadow-[var(--shadow-pop)]">
-            <span className="size-2 rounded-full bg-warn" /><span className="text-[13px] text-fg">有未保存的修改</span>
-            <Button size="sm" variant="ghost" onClick={() => setD(role)}>放弃</Button>
-            <Button size="sm" variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存为 v{role.version + 1}</Button>
-          </div>
-        </div>
-      )}
+      <SaveBar visible={dirty} saving={save.pending} onDiscard={() => setD(role)} onSave={() => save.mutate(undefined)} label={`保存为 v${role.version + 1}`} />
     </div>
   );
 }

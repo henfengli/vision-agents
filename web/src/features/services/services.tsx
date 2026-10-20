@@ -63,10 +63,18 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
         <span className="flex items-center gap-1"><LuListTodo className="size-3.5" />{s.task_count} 任务</span>
         <span>{procs.length ? `进程：${procs.join("、")}` : "无托管进程"}</span>
       </div>
-      <div className="mt-3 grid grid-cols-3 border-t border-line">
-        {(envs ?? []).filter((e) => e.enabled).map((e, i) => {
+      <div className="mt-3 grid border-t border-line" style={{ gridTemplateColumns: `repeat(${envs?.length || 3}, minmax(0, 1fr))` }}>
+        {(envs ?? []).map((e, i) => {
           const h = s.health[e.name];
           const st = h?.last_run ? RUN_STATUS[h.last_run.status] : null;
+          if (h && !h.enabled) {
+            return (
+              <Link key={e.name} to={`/services/${s.name}?tab=envs`} className={cn("bg-sunken/50 px-4 py-3 hover:bg-hover/60", i > 0 && "border-l border-line")}>
+                <EnvBadge env={e.name} />
+                <div className="mt-2 text-[12px] text-fg-3">该环境未启用</div>
+              </Link>
+            );
+          }
           return (
             <Link key={e.name} to={`/services/${s.name}?env=${e.name}`} className={cn("px-4 py-3 hover:bg-hover/60", i > 0 && "border-l border-line")}>
               <div className="flex items-center justify-between"><EnvBadge env={e.name} />
@@ -101,7 +109,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
   const valid = /^[a-z][a-z0-9._-]{1,40}$/.test(name);
   const create = useMutation(async () => {
     try {
-      await api.createService({ name, title: title || name, root, code_paths: root ? [root] : [], description });
+      await api.create("services", { name, title: title || name, root, code_paths: root ? [root] : [], description });
       invalidate("services");
       toast("服务已创建", { description: "接着配置进程、各环境配置文件与档案" });
       onClose();

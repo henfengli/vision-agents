@@ -24,8 +24,9 @@ export function Dialog({ open, onClose, title, description, children, footer, si
   return (
     <HDialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop transition className="fixed inset-0 bg-black/30 backdrop-blur-[1px] transition duration-150 data-[closed]:opacity-0 dark:bg-black/60" />
-      <div className="fixed inset-0 flex items-start justify-center overflow-y-auto p-4 pt-[10vh]">
-        <DialogPanel transition className={cn("w-full rounded-xl border border-line bg-raised shadow-[var(--shadow-pop)] transition duration-150 data-[closed]:scale-[0.98] data-[closed]:opacity-0", w, className)}>
+      {/* 面板限高：内容长时只滚动中间，标题与底部按钮始终可见 */}
+      <div className="fixed inset-0 flex items-start justify-center p-4 pt-[8vh]">
+        <DialogPanel transition className={cn("flex max-h-[calc(92dvh-2rem)] w-full flex-col rounded-xl border border-line bg-raised shadow-[var(--shadow-pop)] transition duration-150 data-[closed]:scale-[0.98] data-[closed]:opacity-0", w, className)}>
           <div className="flex items-start gap-3 px-5 pt-4">
             <div className="min-w-0 flex-1">
               <DialogTitle className="text-[15px] font-semibold text-fg">{title}</DialogTitle>
@@ -33,7 +34,7 @@ export function Dialog({ open, onClose, title, description, children, footer, si
             </div>
             <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="关闭"><LuX /></Button>
           </div>
-          {children && <div className="px-5 py-4">{children}</div>}
+          {children && <div className="min-h-0 overflow-y-auto px-5 py-4">{children}</div>}
           {footer && <div className="flex items-center justify-end gap-2 rounded-b-xl border-t border-line bg-sunken/60 px-5 py-3">{footer}</div>}
         </DialogPanel>
       </div>

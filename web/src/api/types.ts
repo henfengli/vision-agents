@@ -1,5 +1,5 @@
 /**
- * /v1 接口契约（前端侧）。与后端 src/agent_platform/api/schemas.py 一一对应：
+ * /v1 接口契约（前端侧）。与后端 api/schemas.py（请求体）、api/views.py（响应）一一对应：
  * 改一边必须改另一边。字段命名与后端 JSON 完全一致（snake_case）。
  */
 
@@ -18,16 +18,31 @@ export interface ApiErrorBody {
   error: { code: string; message: string; detail?: unknown };
 }
 
+/** 定义的一个历史版本 */
 export interface Version {
   version: number;
   updated_by: string;
   created_at: ISODate;
+  deleted?: boolean;
   definition: Record<string, unknown>;
 }
 
-export type DefinitionKind = "env" | "service" | "role" | "task" | "policy";
+/** 有版本台账的对象都带这三个字段 */
+export interface Ledger {
+  version: number;
+  updated_by: string;
+  updated_at: ISODate;
+}
 
-// ———————————————————— 元信息 ————————————————————
+// ———————————————————— 身份 / 元信息 ————————————————————
+
+export interface Me {
+  name: string;
+  kind: "key" | "user" | "root" | "system";
+  admin: boolean;
+  services: string[];
+  envs: string[];
+}
 
 export interface ToolInfo {
   name: string;
@@ -40,29 +55,106 @@ export interface ToolInfo {
 export interface EventSourceInfo {
   name: string;          // dagster / gitlab / webhook
   title: string;
+  notes: string;
   events: { name: string; title: string; fields: string[] }[];
 }
 
 export interface Meta {
   version: string;
+  envs: Env[];
   default_env: string;
   tools: ToolInfo[];
   event_sources: EventSourceInfo[];
-  langfuse_url: string | null;
+  channels: string[];    // 通知渠道名（任务投递、notify 工具可选）
   features: { process_control: "systemd" | "local" | "off"; vector_search: boolean };
+  me: Me;
 }
 
-// ———————————————————— 环境 ————————————————————
+// ———————————————————— 平台配置（设置 → 平台） ————————————————————
+
+export type EnvColor = "red" | "amber" | "blue" | "green" | "violet" | "gray";
 
 export interface Env {
   name: string;          // prod / test / dev
   title: string;
   description: string;
+  protected: boolean;    // 受保护：危险命令、进程启停、命中审批策略的提交都要人放行
+  color: EnvColor;
+}
+
+export interface EnvsConfig {
+  items: Env[];
+  default: string;
+}
+
+export interface ApprovalsConfig {
+  danger_patterns: string[];
+  required_in: "protected" | "all";
+  timeout_minutes: number;
+}
+
+export type NotifyEvent = "run_failed" | "run_succeeded" | "approval_requested" | "process_stopped";
+
+export interface Channel {
+  type: "dingtalk" | "webhook";
+  url: string;
+  token: string;         // 回显为 "***"；保存时原样传回表示不改
+}
+
+export interface NotifyRule {
+  name: string;
   enabled: boolean;
-  protected: boolean;    // 受保护：写操作/进程启停需审批
-  color: "red" | "amber" | "blue" | "green" | "violet" | "gray";
-  order: number;
-  version: number;
+  events: NotifyEvent[];
+  services: string[];
+  envs: string[];
+  tasks: string[];
+  triggers: string[];
+  channel: string;
+}
+
+export interface NotificationsConfig {
+  channels: Record<string, Channel>;
+  rules: NotifyRule[];
+}
+
+export interface MemoryConfig {
+  recall: boolean;
+  save: boolean;
+  handoff_summary: boolean;
+  knowledge_limit: number;
+  asset_limit: number;
+}
+
+export interface ProcessesConfig {
+  default_lease_hours: number;
+  max_lease_hours: number;
+}
+
+export interface ConfigSections {
+  envs: EnvsConfig;
+  approvals: ApprovalsConfig;
+  notifications: NotificationsConfig;
+  memory: MemoryConfig;
+  processes: ProcessesConfig;
+}
+
+export type ConfigSection = keyof ConfigSections;
+export type ConfigEntry<S extends ConfigSection> = ConfigSections[S] & { section: S; version: number; updated_by: string; updated_at: ISODate | null };
+export type Settings = { [S in ConfigSection]: ConfigEntry<S> };
+
+export interface ApiKey {
+  id: number;
+  name: string;          // 调用方身份：运行记录里的 caller
+  prefix: string;
+  scope: "run" | "admin";
+  services: string[];    // 空 = 不限
+  envs: string[];
+  note: string;
+  created_by: string;
+  created_at: ISODate;
+  expires_at: ISODate | null;
+  last_used_at: ISODate | null;
+  revoked_at: ISODate | null;
 }
 
 // ———————————————————— 服务 ————————————————————
@@ -75,19 +167,20 @@ export interface ConfigFile {
 export interface ProcessDef {
   cmd: string[];
   workdir?: string | null;
-  ports?: Record<string, number>;
+  ports?: Record<string, number>;   // 环境 → 端口
   env_vars?: Record<string, string>;
-  lease_hours?: number;  // 默认租约
+  lease_hours?: number | null;      // 空 = 平台默认
 }
 
 export interface ServiceEnvOverride {
-  hosts?: string[];
+  enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程
+  hosts?: string[] | null;
   readonly_dsn?: string | null;
-  code_paths?: string[];
+  code_paths?: string[] | null;
   profile?: Record<string, string>;
 }
 
-export interface Service {
+export interface Service extends Ledger {
   name: string;
   title: string;
   description: string;
@@ -100,9 +193,6 @@ export interface Service {
   envs: Record<string, ServiceEnvOverride>;
   profile: Record<string, string>;
   enabled: boolean;
-  version: number;
-  updated_by: string;
-  updated_at: ISODate;
 }
 
 /** 服务×环境视图：基座 + 环境覆盖 + 渲染后的配置文件路径 */
@@ -129,25 +219,28 @@ export interface Instance {
   pid: number | null;
   started_at: ISODate | null;
   lease_until: ISODate | null;
-  started_by: string | null;    // 人 / run:<id>
-  last_exit: { code: number; at: ISODate } | null;
+  started_by: string | null;    // 人 / run:<id> / lease
+  last_exit: { code: number | null; at: ISODate } | null;
+}
+
+export interface ServiceEnvHealth {
+  enabled: boolean;
+  runs_24h: number;
+  failed_24h: number;
+  last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
+  running_processes: number;
+  total_processes: number;
 }
 
 /** 服务列表项：带每个环境的健康汇总 */
 export interface ServiceSummary extends Service {
   task_count: number;
-  health: Record<string, {
-    runs_24h: number;
-    failed_24h: number;
-    last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
-    running_processes: number;
-    total_processes: number;
-  }>;
+  health: Record<string, ServiceEnvHealth>;
 }
 
 // ———————————————————— 角色 ————————————————————
 
-export interface Role {
+export interface Role extends Ledger {
   name: string;
   title: string;
   description: string;
@@ -155,13 +248,12 @@ export interface Role {
   tools: string[];
   extends: string | null;
   prompt_append: string;
-  version: number;
-  updated_by: string;
-  updated_at: ISODate;
 }
 
 export interface ResolvedRole {
   name: string;
+  title: string;
+  description: string;
   prompt: string;
   tools: string[];
   lineage: string[];
@@ -192,6 +284,7 @@ export type Trigger =
   | {
       id: string; type: "schedule"; enabled?: boolean;
       cron: string; envs: string[]; input: Record<string, unknown>; timezone?: string;
+      service?: string | null;              // 通用任务的定时必须指定服务
     }
   | {
       id: string; type: "event"; enabled?: boolean;
@@ -200,16 +293,23 @@ export type Trigger =
       map?: Record<string, string>;         // 任务输入字段 → 事件字段
       rules?: TriggerRule[];
       session?: string | null;              // 会话命名模板
+      service?: string | null;
     };
 
 export type TriggerType = Trigger["type"];
 
-export interface TaskOutput {
-  channel: "caller" | "dingtalk" | "http";
-  callback?: string | null;
+/** 结果投递：二选一；不填 = 只等调用方来取 */
+export interface Deliver {
+  channel?: string | null;
+  url?: string | null;
 }
 
-export interface Task {
+export interface MemoryOverride {
+  recall?: boolean | null;   // 空 = 跟随上一级（请求 > 任务 > 平台默认）
+  save?: boolean | null;
+}
+
+export interface Task extends Ledger {
   name: string;                 // 子任务：父任务:对象名
   title: string;
   description: string;
@@ -219,18 +319,16 @@ export interface Task {
   input: Record<string, InputField>;
   envs: string[];               // 空 = 全部
   triggers: Trigger[];
-  output: TaskOutput;
+  deliver: Deliver | null;
   dedup: { key: string; window_s: number } | null;
+  memory: MemoryOverride;
   timeout_s: number;
   enabled: boolean;
-  context: Record<string, string>;
+  profile: Record<string, string>;
   extends: string | null;
   auto_created: boolean;
   graph?: Record<string, GraphNodeDef> | null;
   handler?: string | null;
-  version: number;
-  updated_by: string;
-  updated_at: ISODate;
 }
 
 export interface GraphNodeDef {
@@ -243,15 +341,34 @@ export interface GraphNodeDef {
 }
 
 export interface TaskSummary extends Task {
+  overrides: string[];          // 子任务自己写了哪些字段（其余跟随父任务）
   stats_24h: { runs: number; success: number; failed: number; p50_ms: number | null };
   last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
   next_fire: { env: string; at: ISODate } | null;
   subtask_count: number;
 }
 
+export interface SubtaskCreate {
+  object: string;
+  title?: string;
+  description?: string;
+  profile?: Record<string, string>;
+  input?: Record<string, InputField>;
+  envs?: string[];
+  enabled?: boolean;
+}
+
+export interface UpcomingFire {
+  task: string;
+  trigger_id: string;
+  service: string | null;
+  env: string;
+  at: ISODate;
+}
+
 // ———————————————————— 策略 ————————————————————
 
-export interface Policy {
+export interface Policy extends Ledger {
   name: string;
   description: string;
   order: number;
@@ -260,9 +377,6 @@ export interface Policy {
   action: "deny" | "require_approval";
   message: string;
   enabled: boolean;
-  version: number;
-  updated_by: string;
-  updated_at: ISODate;
 }
 
 // ———————————————————— 运行 ————————————————————
@@ -273,10 +387,10 @@ export type RunStatus =
 export type Resolution = "agent" | "graph" | "builtin" | "rule" | null;
 
 export interface RunTrigger {
-  type: TriggerType | "rerun" | "resume" | "correction" | "web";
+  type: TriggerType | "web" | "rerun" | "resume" | "correction";
   id: string | null;           // 触发器 id（schedule/event）
   source: string | null;       // 事件来源
-  caller: string;              // 调用身份
+  caller: string;              // 调用身份：API 密钥名 / 控制台用户 / schedule
 }
 
 export interface RunListItem {
@@ -303,10 +417,10 @@ export interface Run extends RunListItem {
   input: Record<string, unknown>;
   output: { answer?: string; error?: string; [k: string]: unknown } | null;
   error_code: string | null;
+  memory: MemoryOverride;
   pending_approval: Approval | null;
   context: RunContext;
   feedback: { score: number; comment: string; at: ISODate } | null;
-  langfuse_url: string | null;
 }
 
 export interface RunContext {
@@ -334,7 +448,7 @@ export interface RunEvent {
   kind: RunEventKind;
   at: ISODate;
   payload: {
-    stage?: string;            // prepare/recall/profile/assets/execute/finalize/deliver…
+    stage?: string;            // profile/recall/assets/graph/rule/resume/deliver…
     title?: string;
     content?: string;
     tool?: string;
@@ -342,7 +456,6 @@ export interface RunEvent {
     output?: string;
     duration_ms?: number;
     tokens?: number;
-    model?: string;
     approval_id?: number;
     decision?: "approved" | "rejected";
     node?: string;
@@ -352,21 +465,24 @@ export interface RunEvent {
   feedback?: number | null;    // 步骤 👍👎
 }
 
+/** POST /v1/runs */
 export interface RunRequest {
   task: string;
+  subtask?: string | null;     // 不存在则按父任务自动创建
   service?: string | null;
   env?: string | null;
-  subtask?: string | null;
   input: Record<string, unknown>;
   session_id?: string | null;
-  caller?: string | null;
+  memory?: MemoryOverride;
+  wait?: number;               // 同步等待秒数（0–300）
 }
 
 export interface RunAccepted {
   run_id: string;
   session_id: string;
   status: RunStatus;
-  dedup_hit: boolean;
+  output: Run["output"];
+  dedup: boolean;              // 命中幂等键或任务去重，返回的是已有运行
   subtask_created: string | null;
   approval_id: number | null;
 }
@@ -377,14 +493,27 @@ export interface RunFilters {
   service?: string;
   task?: string;
   trigger?: string;
+  caller?: string;
   q?: string;
   hours?: number;
-  session?: string;
+  session_id?: string;
   cursor?: string;
   limit?: number;
 }
 
 // ———————————————————— 对话 ————————————————————
+
+/** POST /v1/chat */
+export interface ChatRequest {
+  message: string;
+  session_id?: string | null;
+  service?: string | null;
+  env?: string | null;
+  task?: string | null;
+  subtask?: string | null;
+  input?: Record<string, unknown>;
+  memory?: MemoryOverride;
+}
 
 export interface SessionSummary {
   session_id: string;
@@ -423,6 +552,7 @@ export interface Approval {
   service: string | null;
   env: string | null;
   task: string | null;
+  payload: Record<string, unknown>;
   requested_by: string;
   status: "pending" | "approved" | "rejected" | "expired";
   decided_by: string | null;
@@ -430,6 +560,13 @@ export interface Approval {
   created_at: ISODate;
   decided_at: ISODate | null;
   expires_at: ISODate | null;
+}
+
+export interface ApprovalFilters {
+  status?: "pending" | "decided" | "";
+  kind?: ApprovalKind | "";
+  service?: string;
+  env?: string;
 }
 
 // ———————————————————— 记忆 ————————————————————
@@ -441,7 +578,7 @@ export interface Knowledge {
   task: string;
   key: string;
   content: string;
-  source_run: string | null;
+  source_run: string | null;    // 空 = 人工录入
   code_ref: { path: string; commit: string } | null;
   status: "active" | "expired" | "superseded";
   feedback_score: number;
@@ -471,12 +608,14 @@ export interface Case {
   updated_at: ISODate;
 }
 
+export type AssetKind = "procedure" | "script" | "query" | "baseline";
+
 export interface Asset {
   id: number;
   service: string;
   env: string;
-  task: string;
-  kind: "procedure" | "script" | "query" | "baseline";
+  task: string;                 // 空 = 服务通用
+  kind: AssetKind;
   name: string;
   summary: string;
   content: string;
@@ -485,8 +624,16 @@ export interface Asset {
   use_count: number;
   last_used_at: ISODate | null;
   feedback_score: number;
-  status: "active" | "expired" | "superseded";
+  status: "active" | "superseded";
   updated_at: ISODate;
+}
+
+export interface MemoryFilters {
+  service?: string;
+  env?: string;
+  task?: string;
+  status?: string;
+  q?: string;
 }
 
 export interface MemoryHealth {
@@ -505,7 +652,7 @@ export interface Stats {
   by_env: Record<string, { runs: number; success: number; failed: number }>;
   series: { t: ISODate; success: number; failed: number; other: number }[];
   top_failures: { task: string; service: string | null; failed: number; last_error: string }[];
-  upcoming: { task: string; service: string | null; env: string; at: ISODate }[];
+  upcoming: UpcomingFire[];
   tokens: number;
 }
 

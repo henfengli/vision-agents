@@ -14,12 +14,17 @@ import { RunDetailPage } from "./features/runs/run-detail";
 import { RunsPage } from "./features/runs/runs";
 import { ServiceDetailPage } from "./features/services/service-detail";
 import { ServicesPage } from "./features/services/services";
-import { EnvsPage } from "./features/settings/envs";
+import { ApiKeysPage } from "./features/settings/api-keys";
+import {
+  ApprovalsSettingsPage, EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, ProcessesSettingsPage,
+} from "./features/settings/platform";
 import { PoliciesPage } from "./features/settings/policies";
+import { PreferencesPage } from "./features/settings/preferences";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
 import { TaskDetailPage } from "./features/tasks/task-detail";
 import { TasksPage } from "./features/tasks/tasks";
 import { navigate, Routes, useLocation, type RouteDef } from "./lib/router";
+import { getUi } from "./lib/store";
 
 const routes: RouteDef[] = [
   { path: "/", component: OverviewPage },
@@ -33,10 +38,17 @@ const routes: RouteDef[] = [
   { path: "/chat/:session", component: ChatPage },
   { path: "/approvals", component: ApprovalsPage },
   { path: "/memory", component: MemoryPage },
+  { path: "/settings", component: PreferencesPage },
+  { path: "/settings/preferences", component: PreferencesPage },
+  { path: "/settings/envs", component: EnvsSettingsPage },
+  { path: "/settings/approvals", component: ApprovalsSettingsPage },
+  { path: "/settings/notifications", component: NotificationsSettingsPage },
+  { path: "/settings/memory", component: MemorySettingsPage },
+  { path: "/settings/processes", component: ProcessesSettingsPage },
   { path: "/settings/roles", component: RolesPage },
   { path: "/settings/roles/:name", component: RoleDetailPage },
   { path: "/settings/policies", component: PoliciesPage },
-  { path: "/settings/envs", component: EnvsPage },
+  { path: "/settings/api-keys", component: ApiKeysPage },
 ];
 
 function NotFound() {
@@ -45,6 +57,10 @@ function NotFound() {
 
 export function App() {
   const { path } = useLocation();
+  useEffect(() => {
+    // 个人偏好"打开控制台时进入"：只在刚打开、落在根路径时跳一次
+    if (path === "/" && getUi().landing !== "/") navigate(getUi().landing, { replace: true });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onUnauthorized = () => navigate("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search), { replace: true });
     window.addEventListener("ap:unauthorized", onUnauthorized);
