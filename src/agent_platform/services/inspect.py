@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 
+from .. import credentials
 from ..domain import Rejected, ServiceView
 
 MAX_CONFIG_BYTES = 256 * 1024
@@ -84,18 +85,7 @@ def git_log(path: str, n: int = 10) -> str:
 def view_dict(view: ServiceView) -> dict:
     """API 的 ServiceView 形状。"""
     base = view.code_paths[0] if view.code_paths else view.root
-    return {"service": view.service, "env": view.env, "root": view.root, "code_paths": view.code_paths,
-            "hosts": view.hosts, "readonly_dsn": _dsn_hint(view.readonly_dsn), "config_files": config_files(view),
-            "profile": view.profile, "git": git_state(base) if base else None}
-
-
-def _dsn_hint(dsn: str | None) -> str | None:
-    """页面只显示连到哪，不显示口令。"""
-    if not dsn:
-        return None
-    if "@" in dsn and "://" in dsn:
-        scheme, _, rest = dsn.partition("://")
-        creds, _, host = rest.rpartition("@")
-        user = creds.split(":")[0]
-        return f"{scheme}://{user}:***@{host}"
-    return dsn
+    return {"service": view.service, "env": view.env, "enabled": view.enabled, "startable": view.startable,
+            "root": view.root, "code_paths": view.code_paths, "repo": view.repo, "ref": view.ref,
+            "hosts": view.hosts, "readonly_dsn": credentials.redact_dsn(view.readonly_dsn),
+            "config_files": config_files(view), "profile": view.profile, "git": git_state(base) if base else None}

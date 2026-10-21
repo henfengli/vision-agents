@@ -1,0 +1,21 @@
+# ~/.config/systemd/user/agent-platform.service —— 用户级部署（deploy/install-user.sh）：接口 + 控制台 + worker
+# 平台和它启动的业务进程是同一个用户：密钥文件在 agent 沙箱与业务进程里都被遮蔽（hidden_paths），
+# 业务进程有独立 pid 命名空间，读不到平台进程的环境变量。
+[Unit]
+Description=agent-platform（用户级）
+After=network-online.target temporal-server.service
+Wants=temporal-server.service
+
+[Service]
+Environment=AGENT_ENV=prod-user
+Environment=AGENT_CONF=%h/agent-platform/conf
+Environment=AGENT_DATA_DIR=%h/.local/share/agent-platform
+EnvironmentFile=%h/.config/agent-platform/secrets.env
+WorkingDirectory=%h/agent-platform
+ExecStart=%h/agent-platform/venv/bin/agent-platform serve --host 127.0.0.1 --port 8100
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

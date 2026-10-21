@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# agent-platform 安装（主机 + systemd，无容器）。在仓库根目录的 deploy/ 下执行：
+# agent-platform 系统级安装（主机 + systemd，无容器，需要 root）。在仓库根目录执行：
 #   sudo deploy/install.sh            # 生产主机（AGENT_ENV=prod）
 #   sudo deploy/install.sh dev        # 开发机
+# 没有 root：用 deploy/install-user.sh（用户级，systemd --user），见 docs/部署指南.md §3.0
 set -euo pipefail
 
 PROFILE="${1:-prod}"
@@ -19,6 +20,11 @@ cp -r "$REPO"/src "$REPO"/conf "$REPO"/mcp_servers "$REPO"/pyproject.toml "$APP"
 chown -R root:root "$APP"
 chown -R agent-svc:agent-svc "$DATA" /var/lib/temporal
 chmod 755 "$DATA" "$DATA/instances"          # svc-runner 要读启动规格
+# 业务服务目录：/srv/svc/<服务>/code/<环境>（代码）+ /srv/svc/<服务>/conf/<环境>（配置）。
+# 平台写（代码同步、固定路径占位），业务进程（svc-runner 组）读，其他用户进不来
+mkdir -p /srv/svc
+chown agent-svc:svc-runner /srv/svc
+chmod 2750 /srv/svc
 
 # 3. 控制台前端：仓库里有构建好的 dist 就直接用；没有且装了 node 就现场构建
 if [ ! -f "$APP/src/agent_platform/webui/dist/index.html" ] && command -v npm >/dev/null; then

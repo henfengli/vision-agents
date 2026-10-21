@@ -36,12 +36,15 @@ def _section(section: str) -> str:
 
 async def _shown(rt: Runtime, section: str) -> dict:
     """渠道 token 不回显。"""
-    entry = await rt.registry.config_entry(section)
+    return _masked(section, await rt.registry.config_entry(section))
+
+
+def _masked(section: str, body: dict) -> dict:
     if section == "notifications":
-        for ch in entry["channels"].values():
+        for ch in (body.get("channels") or {}).values():
             if ch.get("token"):
                 ch["token"] = MASK
-    return entry
+    return body
 
 
 @router.get("/settings")
@@ -71,7 +74,8 @@ async def put_section(section: str, body: dict, rt: Runtime = RT, who: Caller = 
 
 @router.get("/settings/{section}/versions")
 async def section_versions(section: str, rt: Runtime = RT, _: Caller = WHO):
-    return await rt.registry.store.history("config", _section(section))
+    history = await rt.registry.store.history("config", _section(section))
+    return [{**h, "definition": _masked(section, h["definition"])} for h in history]
 
 
 @router.post("/settings/{section}/versions/{version}/restore")

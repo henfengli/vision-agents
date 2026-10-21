@@ -45,14 +45,18 @@ class AgentClient:
 
     # —— 对话 ——
 
-    def ask(self, message: str, *, task: str | None = None, new_session: bool = False,
+    def ask(self, message: str, *, task: str | None = None, subtask: str | None = None,
+            service: str | None = None, env: str | None = None, new_session: bool = False,
+            recall: bool | None = None, save: bool | None = None,
             on_event: Callable[[dict], None] | None = None, **input_fields: Any) -> str:
         """发一条消息，返回回答。默认续上一轮的会话；new_session=True 另起一个。
+        service / env 不传用客户端的默认；recall / save 按次覆盖记忆开关（None = 跟随任务与平台）。
         on_event 可订阅过程（stage / thought / tool_call / tool_result / approval）。"""
         if new_session:
             self.session_id = None
-        body = {"message": message, "session_id": self.session_id, "service": self.service, "env": self.env,
-                "task": task, "input": input_fields}
+        body = {"message": message, "session_id": self.session_id, "service": service or self.service,
+                "env": env or self.env, "task": task, "subtask": subtask, "input": input_fields,
+                "memory": {"recall": recall, "save": save}}
         answer, status = "", None
         for ev in self._sse("/v1/chat", body):
             if ev["type"] == "run":
@@ -76,6 +80,7 @@ class AgentClient:
         """发起一次任务运行。
         wait=True 等到结束；wait=秒数 最多等这么久；wait=False 立即返回回执 {run_id, status, …}。
         等到了返回运行详情（status / output / 过程上下文）。"""
+        started = time.monotonic()
         server_wait = 0 if not wait else 300 if wait is True else min(float(wait), 300)
         body = {"task": task, "subtask": subtask, "service": service or self.service, "env": env or self.env,
                 "input": input or {}, "memory": {"recall": recall, "save": save}, "wait": server_wait}
@@ -83,7 +88,9 @@ class AgentClient:
         accepted = self._call("POST", "/v1/runs", json=body, headers=headers)
         if not wait or accepted["status"] == "awaiting_approval":
             return accepted
-        return self.wait(accepted["run_id"], timeout=None if wait is True else float(wait))
+        # 服务端已经等过一段：总时长从提交那一刻算，不重新起算
+        left = None if wait is True else max(0.0, float(wait) - (time.monotonic() - started))
+        return self.wait(accepted["run_id"], timeout=left)
 
     def get(self, run_id: str) -> dict:
         return self._call("GET", f"/v1/runs/{run_id}")
@@ -95,7 +102,7 @@ class AgentClient:
             run = self.get(run_id)
             if run["status"] in TERMINAL or (deadline is not None and time.monotonic() >= deadline):
                 return run
-            time.sleep(2)
+            time.sleep(2 if deadline is None else max(0.0, min(2.0, deadline - time.monotonic())))
 
     def events(self, run_id: str, after: int = 0) -> list[dict]:
         return self._call("GET", f"/v1/runs/{run_id}/events", params={"after": after})

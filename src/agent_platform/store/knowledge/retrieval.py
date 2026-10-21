@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 
@@ -43,7 +44,10 @@ def code_base(path: str, code_paths: list[str]) -> str | None:
 
 
 def is_entry_fresh(code_ref: dict | None, code_paths: list[str]) -> bool:
-    """校验知识条目的 code_ref 是否与当前代码一致。无 code_ref 视为始终新鲜。"""
+    """校验知识条目的 code_ref 是否与当前代码一致。无 code_ref 视为始终新鲜。
+
+    看的是"引用的那个文件从记录的提交到现在有没有改过"，不是仓库 HEAD 变没变——
+    代码目录定期同步时，别的文件的提交不该让这条知识过期。"""
     if not code_ref or not code_ref.get("path"):
         return True
     recorded = code_ref.get("commit")
@@ -54,7 +58,29 @@ def is_entry_fresh(code_ref: dict | None, code_paths: list[str]) -> bool:
         return True
     head = current_commit(base)
     # 非 git 仓库（head 为 None）无法校验，按新鲜处理——不退化
-    return head is None or head == recorded
+    if head is None or head == recorded:
+        return True
+    return _unchanged_since(base, recorded, head, code_ref["path"])
+
+
+_diff_cache: dict[tuple[str, str, str, str], bool] = {}
+
+
+def _unchanged_since(base: str, recorded: str, head: str, path: str) -> bool:
+    key = (base, recorded, head, path)
+    if key in _diff_cache:
+        return _diff_cache[key]
+    try:
+        r = subprocess.run(["git", "-C", base, "diff", "--quiet", recorded, head, "--", os.path.relpath(path, base)],
+                           capture_output=True, timeout=5, check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return True
+    # 0 = 没改；1 = 改过；其它（记录的提交已不在仓库里：强推 / gc）= 无法证明没变，按过期
+    unchanged = r.returncode == 0
+    if len(_diff_cache) > 4096:
+        _diff_cache.clear()
+    _diff_cache[key] = unchanged
+    return unchanged
 
 
 async def search(env: str, service: str, query: str, limit: int = 5,

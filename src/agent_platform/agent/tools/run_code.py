@@ -34,6 +34,7 @@ async def execute_code(
     host_tools: dict[str, Callable[..., Awaitable[Any]]],
     scratch_dir: str,
     timeout: float = 120.0,
+    hidden: tuple[str, ...] = (),
 ) -> str:
     """执行 code，返回给 agent 的文本（输出 + 调用统计 / 错误）。"""
     with tempfile.NamedTemporaryFile(
@@ -44,7 +45,7 @@ async def execute_code(
 
     argv = sandbox.wrap_argv(
         ["python3", "-c", DRIVER, code_path, json.dumps(list(host_tools))],
-        scratch_dir)
+        scratch_dir, hidden=hidden)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,

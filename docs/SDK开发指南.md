@@ -65,17 +65,19 @@ AgentClient(service=None, env=None, *, url=None, key=None, timeout=330.0)
 | `url` / `key` | 不传就读 `AGENT_URL` / `AGENT_KEY` |
 | `timeout` | 单次 HTTP 超时（秒） |
 
-每个方法也都能单独指定 `service` / `env`，覆盖构造时的默认值。
+`ask` 和 `run` 都能按次传 `service` / `env`，覆盖构造时的默认值。
 
 ### 对话
 
 ```python
-agent.ask(message, *, task=None, new_session=False, on_event=None, **input_fields) -> str
+agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_session=False,
+          recall=None, save=None, on_event=None, **input_fields) -> str
 ```
 
 - 返回回答文本。运行没有成功结束时抛 `AgentError`，`code` 为 `run_failed` / `run_cancelled`。
 - 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。
-- `task` 不传时，用该服务声明了 `chat` 触发的任务。
+- `task` 不传时，用该服务声明了 `chat` 触发的任务；`subtask` 选用子任务（不存在会按父任务自动建）。
+- `recall` / `save` 按次覆盖记忆开关，`None` 表示跟随任务与平台默认。
 - `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`thought`、`tool_call`、`tool_result`、`approval`。
 - `**input_fields` 是对话任务的其他输入字段。
 

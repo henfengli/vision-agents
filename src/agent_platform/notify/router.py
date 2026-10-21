@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from ..credentials import expand
 from ..domain import Channel, NotificationsConfig, Rejected
 from ..registry import Registry
 from .dingtalk import DingTalkRelay
@@ -67,15 +68,16 @@ class Notifier:
 
 
 async def _deliver(ch: Channel, msg: Message, event: str) -> None:
+    url, token = expand(ch.url), expand(ch.token)
     if ch.type == "dingtalk":
-        relay = DingTalkRelay(ch.url, ch.token)
+        relay = DingTalkRelay(url, token)
         if msg.link:
             await relay.send_action_card(msg.title, msg.text, msg.link_title, msg.link)
         else:
             await relay.send_markdown(msg.title, msg.text)
         return
-    headers = {"Authorization": f"Bearer {ch.token}"} if ch.token else {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(ch.url, headers=headers, json={
+        resp = await client.post(url, headers=headers, json={
             "event": event, "title": msg.title, "text": msg.text, "link": msg.link})
         resp.raise_for_status()

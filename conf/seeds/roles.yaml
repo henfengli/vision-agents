@@ -30,7 +30,9 @@ qa_engineer:
   tools: [bash, service_info, service_ctl, save_asset]
   prompt: |
     你是测试工程师。部署完成后执行冒烟测试：优先复用方法里的脚本，不要重写；
-    先用 service_info 确认本环境的进程与端口，必要时用 service_ctl 起进程；失败时给出复现步骤与证据。
+    先用 service_info(what=git) 确认代码目录的提交就是待测版本（部署事件同时触发代码同步，可能还没切完；
+    对不上就如实报告，不要测旧代码），再用 service_info 确认本环境的进程与端口，必要时用 service_ctl 起进程；
+    失败时给出复现步骤与证据。
 
 inspector:
   title: 巡检

@@ -80,6 +80,7 @@ export interface Env {
   title: string;
   description: string;
   protected: boolean;    // 受保护：危险命令、进程启停、命中审批策略的提交都要人放行
+  startable: boolean;    // 平台能否在此环境起服务进程（只看不起 = false；各服务可覆盖）
   color: EnvColor;
 }
 
@@ -161,7 +162,7 @@ export interface ApiKey {
 // ———————————————————— 服务 ————————————————————
 
 export interface ConfigFile {
-  canonical: string;     // 服务读的固定路径
+  canonical: string;     // 服务读的固定路径（每环境一份代码时也写 {env}）
   template: string;      // 每环境一份的真实文件（含 {env}）
 }
 
@@ -175,6 +176,8 @@ export interface ProcessDef {
 
 export interface ServiceEnvOverride {
   enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程
+  startable?: boolean | null;   // 空 = 跟随环境默认（设置 → 环境）
+  ref?: string | null;          // 该环境跟踪的分支 / tag（代码同步的默认目标）
   hosts?: string[] | null;
   readonly_dsn?: string | null;
   code_paths?: string[] | null;
@@ -185,10 +188,12 @@ export interface Service extends Ledger {
   name: string;
   title: string;
   description: string;
-  root: string;
+  root: string;          // 可含 {env}：每个环境一份代码
   code_paths: string[];
+  repo: string;          // git 远端：代码同步从这里拉
+  ref: string;           // 默认跟踪的分支
   hosts: string[];
-  readonly_dsn: string | null;
+  readonly_dsn: string | null;   // 明文口令回显为 ***，原样传回表示不改
   configs: ConfigFile[];
   processes: Record<string, ProcessDef>;
   envs: Record<string, ServiceEnvOverride>;
@@ -200,8 +205,12 @@ export interface Service extends Ledger {
 export interface ServiceView {
   service: string;
   env: string;
+  enabled: boolean;
+  startable: boolean;    // false = 只看不起
   root: string;
   code_paths: string[];
+  repo: string;
+  ref: string;           // 该环境跟踪的分支（已合并基座）
   hosts: string[];
   readonly_dsn: string | null;
   config_files: { canonical: string; path: string; exists: boolean; size: number | null }[];
@@ -222,10 +231,12 @@ export interface Instance {
   lease_until: ISODate | null;
   started_by: string | null;    // 人 / run:<id> / lease
   last_exit: { code: number | null; at: ISODate } | null;
+  startable: boolean;           // 该环境能否由平台启动
 }
 
 export interface ServiceEnvHealth {
   enabled: boolean;
+  startable: boolean;
   runs_24h: number;
   failed_24h: number;
   last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;

@@ -30,6 +30,7 @@ class EnvDef(BaseModel):
     title: str = ""
     description: str = ""
     protected: bool = False        # 受保护：危险命令、进程启停、命中审批策略的提交都要人放行
+    startable: bool = True         # 平台能否在此环境起服务进程（各服务可在 envs[env].startable 覆盖）
     color: EnvColor = "gray"
 
     @field_validator("name")
@@ -42,7 +43,7 @@ class EnvDef(BaseModel):
 
 class EnvsConfig(BaseModel):
     items: list[EnvDef] = Field(default_factory=lambda: [
-        EnvDef(name="prod", title="生产", protected=True, color="red"),
+        EnvDef(name="prod", title="生产", protected=True, startable=False, color="red"),
         EnvDef(name="test", title="测试", color="amber"),
         EnvDef(name="dev", title="开发", color="blue"),
     ])

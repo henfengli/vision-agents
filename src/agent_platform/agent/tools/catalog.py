@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from ... import credentials
 from ...config import Settings
 from ...domain import Rejected
 from ...notify import Message, Notifier
@@ -98,7 +99,7 @@ class Toolbox:
 
     def host_tools(self, names: list[str] | tuple[str, ...]) -> dict[str, Fn]:
         out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n != "run_code"}
-        out.update({n: self._mcp[n].ainvoke for n in names if n in self._mcp})
+        out.update({n: self._mcp[n].coroutine for n in names if n in self._mcp})   # MCP 工具按关键字参数调用
         return out
 
     # —— 实现 ——
@@ -107,15 +108,16 @@ class Toolbox:
         s, gate, ctl, toolbox = self._s, self._gate, self._ctl, self
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
-            """在沙箱里执行 shell 命令：全盘只读（可读服务代码与配置）、只有工作目录可写、
-            调用结束后台进程全灭。默认断网；需要访问本机服务端口或内网接口时传 network=true。
+            """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件与密钥被遮蔽，配置用 service_info 读）、
+            只有工作目录可写、调用结束后台进程全灭。默认断网；需要访问本机服务端口或内网接口时传 network=true。
             受保护环境里命中危险模式（rm -rf、drop、kill、systemctl…）会挂起等人工审批。"""
             try:
                 await gate.review("bash", command)
             except ApprovalRejected as e:
                 return f"[未执行] {e}"
+            sc = run_scope.current()
             r = await asyncio.to_thread(bash_mod.run_command, command, max(1, min(timeout, 600)),
-                                        s.scratch_dir, None, network)
+                                        s.scratch_dir, None, network, sc.hidden)
             return bash_mod.format_result(r)
 
         async def run_code(code: str, timeout: int = 120) -> str:
@@ -127,7 +129,7 @@ class Toolbox:
                 return f"[未执行] {e}"
             sc = run_scope.current()
             return await run_code_mod.execute_code(code, toolbox.host_tools(sc.tools), s.scratch_dir,
-                                                   timeout=max(1, min(timeout, 600)))
+                                                   timeout=max(1, min(timeout, 600)), hidden=sc.hidden)
 
         async def service_info(what: str = "overview", path: str = "") -> str:
             """查看本次运行所在服务×环境。what：overview（目录/配置文件/进程总览）、
@@ -157,8 +159,8 @@ class Toolbox:
 
         async def service_ctl(action: str, process: str = "", lines: int = 100) -> str:
             """启停本服务在本环境的进程。action：status / start / stop / restart / logs。
-            process 为进程名（只有一个进程时可省略）。受保护环境的 start/stop/restart 需人工审批。
-            启动带租约，到期自动停止。"""
+            process 为进程名（只有一个进程时可省略）。受保护环境的 start/stop/restart 需人工审批；
+            只看不起的环境（如生产）不能 start/restart，只能看状态与日志。启动带租约，到期自动停止。"""
             sc = run_scope.current()
             if ctl is None or sc.view is None:
                 return "[不可用] 本运行没有可操作的服务进程"
@@ -176,6 +178,8 @@ class Toolbox:
                     return "\n".join(await ctl.logs(sc.service, sc.env, process, lines)) or "（无日志）"
                 if action not in ("start", "stop", "restart"):
                     return "[参数] action 须为 status/start/stop/restart/logs"
+                if action in ("start", "restart"):
+                    await ctl.ensure_startable(sc.service, sc.env)
                 if sc.protected:
                     await gate.hold(kind="process", title=f"进程{action} · {sc.service}/{process}@{sc.env}",
                                     detail=f"运行 {sc.run_id} 请求 {action} {sc.service}/{process}（环境 {sc.env}）",
@@ -200,6 +204,10 @@ class Toolbox:
             dsn = sc.view.readonly_dsn if sc.view else None
             if not dsn:
                 return f"[未配置] 服务 {sc.service or '—'} 在 {sc.env} 没有只读库"
+            try:
+                dsn = credentials.expand(dsn)
+            except credentials.MissingSecret as e:
+                return f"[未配置] 只读库口令取不到：{e}"
             return await sql_mod.run_query(dsn, sql)
 
         async def host_metrics() -> str:

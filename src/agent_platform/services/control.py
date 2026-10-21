@@ -2,10 +2,14 @@
 
 后端：
 - systemd（生产）：模板单元 agent-svc@<服务:环境:进程>.service，ExecStart 是 svcrun，
-  平台写好启动规格再 systemctl start；日志走 journald。需要 polkit 允许平台用户
-  管理 agent-svc@*.service（deploy/polkit-agent-svc.rules）。
+  平台写好启动规格再 systemctl start；日志走 journald。
+  scope=system：系统级单元，polkit 允许平台用户管理 agent-svc@*.service（deploy/50-agent-svc.rules）；
+  scope=user：平台用户自己的 systemd --user 单元（deploy/install-user.sh），不需要 root 与 polkit。
 - local（开发）：本机子进程跑 svcrun，日志写 <数据目录>/instances/<实例>.log。
 - off：只读，不允许启停。
+
+只看不起：服务在该环境 startable=false 时拒绝启动（start_not_allowed），停止照常——
+平台起的是本机副本，用生产配置起一份副本会真的连生产库、跑生产调度。
 
 租约：每次启动带租约（默认取进程定义，封顶 max_lease_hours），到期自动停——
 调试用的环境不会被遗忘地一直跑着。续期从当前到期时间往后加。
@@ -70,18 +74,20 @@ class ProcessController:
         return s.spec, proc.ports.get(env)
 
     async def build_spec(self, service: str, svc: ServiceDef, env: str, process: str) -> dict:
-        """启动规格：命令/工作目录渲染好，配置文件 bind 到固定路径，其他环境的文件遮蔽。"""
+        """启动规格：命令/工作目录渲染好，配置文件 bind 到固定路径，其他环境的文件与平台密钥遮蔽。"""
         proc = svc.processes[process]
         port = proc.ports.get(env)
-        binds, masks = [], []
+        binds, masks = [], list(self._settings.hidden_paths)
         all_envs = (await self._reg.envs()).names
         for c in svc.configs:
             selected = c.path_for(env)
-            binds.append([selected, c.canonical])
+            binds.append([selected, c.canonical_for(env)])
             for other in all_envs:
-                p = c.path_for(other)
-                if other != env and p != selected and os.path.exists(p):
-                    masks.append(p)
+                if other == env:
+                    continue
+                for p in (c.path_for(other), c.canonical_for(other)):
+                    if p not in (selected, c.canonical_for(env)) and os.path.exists(p):
+                        masks.append(p)
         return {
             "instance": instance_name(service, env, process), "service": service, "env": env, "process": process,
             "argv": [render(a, env, port) for a in proc.cmd],
@@ -93,20 +99,22 @@ class ProcessController:
     # —— 观察 ——
 
     async def list(self, service: str) -> list[dict]:
-        """该服务全部 (环境 × 进程) 的实例状态，未启动过的也列出（stopped）。"""
+        """该服务全部 (环境 × 进程) 的实例状态，未启动过的也列出（stopped）。startable：该环境能不能起。"""
         s = await self._reg.service(service)
         if s is None:
             raise Rejected.not_found(f"服务 {service}")
         rows = {(r["env"], r["process"]): r for r in await instances_store.of_service(service)}
         out = []
-        for env in (await self._reg.envs()).names:
+        for e in (await self._reg.envs()).items:
+            env = e.name
+            startable = s.spec.view(service, env, e.startable).startable
             for process, pdef in s.spec.processes.items():
                 row = rows.get((env, process)) or {
                     "service": service, "env": env, "process": process, "state": "stopped", "port": None, "pid": None,
                     "started_at": None, "lease_until": None, "started_by": None, "last_exit": None}
                 if row["port"] is None:
                     row["port"] = pdef.ports.get(env)
-                out.append(await self._reconcile(row))
+                out.append({**await self._reconcile(row), "startable": startable})
         return out
 
     async def get(self, service: str, env: str, process: str) -> dict:
@@ -130,8 +138,8 @@ class ProcessController:
     async def _live_state(self, service: str, env: str, process: str, pid: int | None) -> tuple[str, int | None, int | None]:
         inst = instance_name(service, env, process)
         if self.backend == "systemd":
-            code, out = await _exec("systemctl", "show", self._unit(inst), "-p", "ActiveState", "-p", "MainPID",
-                                    "-p", "ExecMainStatus", "--value")
+            code, out = await self._systemctl("show", self._unit(inst), "-p", "ActiveState", "-p", "MainPID",
+                                              "-p", "ExecMainStatus", "--value")
             if code != 0:
                 return "stopped", None, None
             parts = out.splitlines() + ["", "", ""]
@@ -153,7 +161,8 @@ class ProcessController:
         inst = instance_name(service, env, process)
         lines = max(10, min(lines, 2000))
         if self.backend == "systemd":
-            _, out = await _exec("journalctl", "-u", self._unit(inst), "-n", str(lines), "--no-pager", "-o", "short-iso")
+            _, out = await _exec("journalctl", *self._journal_scope(), "-u", self._unit(inst), "-n", str(lines),
+                                 "--no-pager", "-o", "short-iso")
             return out.splitlines()
         path = self._log_path(inst)
         if not path.exists():
@@ -167,11 +176,21 @@ class ProcessController:
         if self.backend == "off":
             raise Rejected("process_control_off", "平台未开启进程启停（process_control.backend=off）")
 
-    async def start(self, service: str, env: str, process: str, *, by: str, lease_hours: float | None = None) -> dict:
+    async def ensure_startable(self, service: str, env: str) -> None:
+        """能不能在这个环境起进程。受保护环境的调用方要在发审批前先问这里，免得审批一张注定被拒的单。"""
         self._require_enabled()
-        svc, port = await self._resolve(service, env, process)
-        if not svc.view(service, env).enabled:
+        view = await self._reg.service_view(service, env)
+        if view is None:
+            raise Rejected.not_found(f"服务 {service}")
+        if not view.enabled:
             raise Rejected("service_env_disabled", f"服务 {service} 在 {env} 环境已停用")
+        if not view.startable:
+            raise Rejected("start_not_allowed",
+                           f"服务 {service} 在 {env} 只看不起：平台不在这个环境启动进程（服务 → 环境 → 允许启动进程）")
+
+    async def start(self, service: str, env: str, process: str, *, by: str, lease_hours: float | None = None) -> dict:
+        svc, port = await self._resolve(service, env, process)
+        await self.ensure_startable(service, env)
         current = await self.get(service, env, process)
         if current["state"] in ("running", "starting"):
             return current
@@ -179,6 +198,7 @@ class ProcessController:
         missing = [src for src, _ in spec["binds"] if not os.path.exists(src)]
         if missing:
             raise Rejected("config_missing", f"{service} 在 {env} 的配置文件不存在：{'、'.join(missing)}")
+        _ensure_mount_points([dst for _, dst in spec["binds"]])
         spec_path(self._settings.instances_dir, spec["instance"]).write_text(json.dumps(spec, ensure_ascii=False, indent=2))
         limits = await self._reg.config("processes")
         lease = min(lease_hours or svc.processes[process].lease_hours or limits.default_lease_hours, limits.max_lease_hours)
@@ -219,15 +239,22 @@ class ProcessController:
     def _unit(self, inst: str) -> str:
         return f"{self._cfg.unit}@{inst}.service"
 
+    async def _systemctl(self, *args: str, timeout: float = 20.0) -> tuple[int, str]:
+        user = ("--user",) if self._cfg.scope == "user" else ()
+        return await _exec("systemctl", *user, *args, timeout=timeout)
+
+    def _journal_scope(self) -> tuple[str, ...]:
+        return ("--user",) if self._cfg.scope == "user" else ()
+
     def _log_path(self, inst: str) -> Path:
         return Path(self._settings.instances_dir) / f"{inst}.log"
 
     async def _backend_start(self, inst: str) -> int | None:
         if self.backend == "systemd":
-            code, out = await _exec("systemctl", "start", "--no-block", self._unit(inst))
+            code, out = await self._systemctl("start", "--no-block", self._unit(inst))
             if code != 0:
                 raise Rejected("start_failed", f"systemctl start 失败：{out[-500:]}", 500)
-            _, pid = await _exec("systemctl", "show", self._unit(inst), "-p", "MainPID", "--value")
+            _, pid = await self._systemctl("show", self._unit(inst), "-p", "MainPID", "--value")
             return int(pid) if pid.isdigit() and int(pid) > 0 else None
         logf = self._log_path(inst).open("ab")
         proc = await asyncio.create_subprocess_exec(
@@ -247,7 +274,7 @@ class ProcessController:
 
     async def _backend_stop(self, inst: str) -> int | None:
         if self.backend == "systemd":
-            code, out = await _exec("systemctl", "stop", self._unit(inst), timeout=60)
+            code, out = await self._systemctl("stop", self._unit(inst), timeout=60)
             if code != 0:
                 raise Rejected("stop_failed", f"systemctl stop 失败：{out[-500:]}", 500)
             return 0
@@ -273,6 +300,20 @@ class ProcessController:
             except ProcessLookupError:
                 pass
         return None
+
+
+def _ensure_mount_points(paths: list[str]) -> None:
+    """bwrap 往固定路径 bind 时目标必须已存在，否则它会以业务进程用户的身份去建（多半没有写权限）。
+    每环境一个 worktree 时固定路径（如 /srv/code/board/test/.env）通常不存在：平台先建个空文件占位。"""
+    for p in paths:
+        if os.path.exists(p):
+            continue
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            Path(p).touch()
+        except OSError as e:
+            raise Rejected("config_missing", f"配置文件的固定路径 {p} 不存在，平台也建不了（{e.strerror}）："
+                                             "让平台用户对代码目录有写权限，或手工建好这个文件") from e
 
 
 def _pid_alive(pid: int) -> bool:

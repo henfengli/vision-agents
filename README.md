@@ -7,6 +7,12 @@
 - **agent 能碰到项目本身**：读部署目录和代码、读对应环境的配置、查只读库、按环境启停进程来复现问题。
 
 部署形态：单部署、主机 + systemd、不用容器。一套服务操作所有项目的 prod / test / dev。
+系统级（root，`deploy/install.sh`）和用户级（普通用户 + systemd --user，`deploy/install-user.sh`）两种装法。
+
+业务项目在这台机器上是**本机副本**：每个服务、每个环境一份代码（`/srv/svc/<服务>/code/<环境>`，
+内建任务 `code-sync` 按环境切到部署的版本）加该环境的配置文件（`/srv/svc/<服务>/conf/<环境>`）。
+agent 能读代码、经 `service_info` 读本环境打码后的配置、查只读库；能不能起进程按环境单独管，
+生产出厂「只看不起」——用生产配置起一份副本会真的连生产库、跑生产调度。
 
 ## 文档
 
@@ -34,12 +40,12 @@ agent     按任务的角色装配：角色的提示词 + 工具白名单；工�
 
 | 对象 | 是什么 |
 |---|---|
-| 服务 | 一个业务项目：目录、代码、各环境配置文件、只读库、进程、档案，以及在哪些环境启用 |
+| 服务 | 一个业务项目：各环境代码（git 仓库 + 跟踪分支）、各环境配置文件、只读库、进程、档案，以及在哪些环境启用、能不能起进程 |
 | 角色 | 能力：系统提示 + 工具白名单，和服务无关 |
 | 任务 | 要做的事：输入、触发（api / chat / schedule / event）、投递、记忆开关、档案。归属一个服务、通用（`*`）或平台 |
 | 子任务 | `任务:对象名`，针对某张表、某条链路；只存差异，调用时点名不存在就自动建 |
 | 策略 | 提交前的输入闸门：拒绝或需审批 |
-| 平台配置 | 环境、审批、通知、记忆、进程默认值（设置页） |
+| 平台配置 | 环境（含受保护、只看不起）、审批、通知、记忆、进程默认值（设置页） |
 | API 密钥 | 调用方身份；`run` / `admin` 两种范围，可限定服务与环境 |
 | 运行 | 一次执行的事实记录，钉死定义版本，全过程可回放 |
 | 记忆 | 知识（事实）· 案例（教训）· 方法（做法），按 服务×环境 分区 |
@@ -52,6 +58,12 @@ export AGENT_ROOT_TOKEN=dev-root AGENT_DB_PASSWORD=... MODEL_TOKEN_A=...
 temporal server start-dev &                       # 本地 Temporal
 AGENT_ENV=dev agent-platform check                # 连库、建表、播种
 AGENT_ENV=dev agent-platform serve                # http://127.0.0.1:8100，用 root token 登录控制台
+```
+
+测试（不需要 PG / Temporal）：
+
+```bash
+python -m unittest discover -s tests
 ```
 
 控制台前端：
@@ -85,8 +97,9 @@ src/agent_platform/   服务源码（地图见设计文档 §8）
 web/                  控制台源码
 sdk/agent_client/     Python SDK + agent-chat
 conf/                 部署配置（base + env 差异）与种子（只在库里没有时播种）
-deploy/               systemd 单元、polkit 规则、install.sh
+deploy/               systemd 单元、polkit 规则、install.sh（系统级）；user/ + install-user.sh（用户级）
 mcp_servers/          仓库自带的 MCP server
 scripts/migrate_v5.py 从 v5 迁移
+tests/                unittest
 docs/                 文档
 ```

@@ -1,21 +1,22 @@
 title: 经营看板
 description: 面向业务的经营指标看板（Node.js），数据来自 ads 层
-root: /srv/board
-code_paths: [/srv/board]
+# 每个环境一份代码（内建任务 code-sync 按环境切版本）；配置文件放在代码目录外，按环境一份
+root: /srv/svc/board/code/{env}
+repo: git@gitlab.internal:bi/board.git
+ref: main
 hosts: [10.0.0.21]
 configs:
-  - {canonical: /srv/board/.env, template: "/srv/board/conf/.env.{env}"}
+  - {canonical: "/srv/svc/board/code/{env}/.env", template: "/srv/svc/board/conf/{env}/.env"}
 processes:
   server:
     cmd: [node, server.js]
-    workdir: /srv/board
     ports: {prod: 8080, test: 8081, dev: 8082}
     env_vars: {PORT: "{port}"}
     lease_hours: 4
 envs:
-  prod: {readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@prod-db:5432/board"}
-  test: {readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@test-db:5432/board", hosts: [10.0.1.21]}
-  dev: {readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@dev-db:5432/board"}
+  prod: {ref: release, readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@prod-db:5432/board"}
+  test: {ref: test, readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@test-db:5432/board", hosts: [10.0.1.21]}
+  dev: {ref: dev, readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@dev-db:5432/board"}
 profile:
   conventions: GMV 不含退款；total_fee 单位是分；"本月"按自然月，不是近 30 天
   pitfalls: 看板缓存 10 分钟，刚改的数据不会立刻出现

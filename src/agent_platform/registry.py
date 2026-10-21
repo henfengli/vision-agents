@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -17,7 +15,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from .domain import (CONFIG_SECTIONS, EnvDef, EnvsConfig, PolicyDef, Rejected, ResolvedRole, RoleDef, RoleError,
-                     ServiceDef, TaskDef, merge_task, resolve_role)
+                     ServiceDef, ServiceView, TaskDef, merge_task, resolve_role)
 from .domain.services import check_service_name
 from .domain.tasks import check_task_name, split_subtask_name
 from .store.definitions import DefinitionStore, Kind
@@ -125,6 +123,12 @@ class Registry:
 
     async def service(self, name: str) -> Entry[ServiceDef] | None:
         return await self.entry("service", name)
+
+    async def service_view(self, name: str, env: str) -> ServiceView | None:
+        """服务×环境视图（startable 按环境默认补齐）。服务不存在返回 None；环境不存在抛 unknown_env。"""
+        env_def = await self.env(env)
+        s = await self.service(name)
+        return s.spec.view(name, env_def.name, env_def.startable) if s else None
 
     async def roles(self) -> list[Entry[RoleDef]]:
         return await self.entries("role")
@@ -297,17 +301,14 @@ class Registry:
         种子文件在播种之后又改过的，启动时提示一次：库内版本才是生效版本，去控制台改。
 
         目录：settings.yaml（平台配置各节）/ services/*.yaml（一个文件一个服务）/
-              roles.yaml / tasks.yaml / policies.yaml（{名字: 定义}）。值里可用 ${环境变量}。
+              roles.yaml / tasks.yaml / policies.yaml（{名字: 定义}）。
+        值里的 ${VAR} 原样入库，用到时才取环境变量（credentials.expand）：口令只在 secrets.env 里。
         """
         if not seeds_dir.is_dir():
             return
 
         def load(path: Path) -> dict:
-            """读种子文件；值里的 ${VAR} 取环境变量，取不到为空串。"""
-            if not path.is_file():
-                return {}
-            text = re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), path.read_text())
-            return yaml.safe_load(text) or {}
+            return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.is_file() else {}
 
         for section, body in load(seeds_dir / "settings.yaml").items():
             if section in CONFIG_SECTIONS and await self.store.seeded_version("config", section) is None:

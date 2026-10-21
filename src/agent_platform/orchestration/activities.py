@@ -30,6 +30,7 @@ from ..memory import distill, recall
 from ..memory.gardener import run_gardener
 from ..notify import Message, Notifier
 from ..registry import Registry
+from ..services import codesync
 from ..store import artifacts as artifacts_store
 from ..store import assets as assets_store
 from ..store import cases as cases_store
@@ -376,8 +377,20 @@ async def _gardener(d: Deps, spec: RunSpec) -> dict:
     return report
 
 
+async def _code_sync(d: Deps, spec: RunSpec) -> dict:
+    """把本运行的 服务×环境 的代码目录切到 input.ref（不填 = 该环境跟踪的分支）。"""
+    view = await _view(d, spec)
+    if view is None:
+        raise ApplicationError("代码同步需要指定服务", "invalid_input", type="Rejected", non_retryable=True)
+    try:
+        return await codesync.sync(view, spec.input.get("ref") or None)
+    except codesync.SyncError as e:
+        raise ApplicationError(str(e), "code_sync_failed", type="Rejected", non_retryable=True) from None
+
+
 BUILTINS: dict[str, Callable[[Deps, RunSpec], Awaitable[dict]]] = {
     "memory-gardener": _gardener,
+    "code-sync": _code_sync,
 }
 
 
@@ -389,8 +402,17 @@ _STATUS_TEXT = {"success": "成功", "failed": "失败", "cancelled": "已取消
 async def _view(d: Deps, spec: RunSpec):
     if not spec.service:
         return None
-    s = await d.registry.service(spec.service)
-    return s.spec.view(spec.service, spec.env) if s else None
+    return await d.registry.service_view(spec.service, spec.env)
+
+
+async def _hidden(d: Deps) -> tuple[str, ...]:
+    """agent 沙箱里遮蔽的路径：所有服务所有环境的配置文件 + 平台密钥与凭据 + 进程启动规格。
+    跨服务也遮：board 的运行里同样读不到 dagster 的生产配置。"""
+    envs = (await d.registry.envs()).names
+    paths = set(d.settings.hidden_paths) | {d.settings.instances_dir}
+    for s in await d.registry.services():
+        paths |= s.spec.secret_paths(envs)
+    return tuple(sorted(paths))
 
 
 async def _scope(d: Deps, spec: RunSpec, tools: list[str]) -> run_scope.RunScope:
@@ -398,7 +420,7 @@ async def _scope(d: Deps, spec: RunSpec, tools: list[str]) -> run_scope.RunScope
     return run_scope.RunScope(
         run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
-        notify_channel=(spec.deliver or {}).get("channel"))
+        notify_channel=(spec.deliver or {}).get("channel"), hidden=await _hidden(d))
 
 
 async def _cancelled(run_id: str) -> bool:

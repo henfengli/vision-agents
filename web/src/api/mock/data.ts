@@ -28,9 +28,9 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 // ———————— 环境 ————————
 
 export const envs: Env[] = [
-  { name: "prod", title: "生产", description: "线上环境：危险命令与进程启停需审批", protected: true, color: "red" },
-  { name: "test", title: "测试", description: "集成测试环境，数据每周从生产脱敏同步", protected: false, color: "amber" },
-  { name: "dev", title: "开发", description: "开发自测，库每周一重置", protected: false, color: "blue" },
+  { name: "prod", title: "生产", description: "线上环境：只看不起，危险命令需审批", protected: true, startable: false, color: "red" },
+  { name: "test", title: "测试", description: "集成测试环境，数据每周从生产脱敏同步", protected: false, startable: true, color: "amber" },
+  { name: "dev", title: "开发", description: "开发自测，库每周一重置", protected: false, startable: true, color: "blue" },
 ];
 
 // ———————— 服务 ————————
@@ -40,16 +40,17 @@ const by = (name: string, at: number) => ({ updated_by: name, updated_at: iso(at
 export const services: Service[] = [
   {
     name: "dagster", title: "Dagster 数据编排", description: "数仓 ETL 编排：ods → dwd → ads 三层资产，按天物化",
-    root: "/srv/dagster", code_paths: ["/srv/dagster"], hosts: ["10.0.0.11"], readonly_dsn: null,
-    configs: [{ canonical: "/srv/dagster/dagster.yaml", template: "/srv/dagster/conf/dagster.{env}.yaml" },
-      { canonical: "/srv/dagster/workspace.yaml", template: "/srv/dagster/conf/workspace.{env}.yaml" }],
+    root: "/srv/svc/dagster/code/{env}", code_paths: [], repo: "git@gitlab.internal:data/dagster.git", ref: "main",
+    hosts: ["10.0.0.11"], readonly_dsn: null,
+    configs: [{ canonical: "/srv/svc/dagster/code/{env}/dagster.yaml", template: "/srv/svc/dagster/conf/{env}/dagster.yaml" },
+      { canonical: "/srv/svc/dagster/code/{env}/workspace.yaml", template: "/srv/svc/dagster/conf/{env}/workspace.yaml" }],
     processes: {
-      webserver: { cmd: ["/srv/dagster/venv/bin/dagster-webserver", "-w", "workspace.yaml", "-p", "{port}"], workdir: "/srv/dagster", ports: { prod: 3000, test: 3001, dev: 3002 }, lease_hours: 2 },
-      daemon: { cmd: ["/srv/dagster/venv/bin/dagster-daemon", "run", "-w", "workspace.yaml"], workdir: "/srv/dagster", lease_hours: 2 },
+      webserver: { cmd: ["/srv/svc/dagster/venv/bin/dagster-webserver", "-w", "workspace.yaml", "-p", "{port}"], ports: { prod: 3000, test: 3001, dev: 3002 }, lease_hours: 2 },
+      daemon: { cmd: ["/srv/svc/dagster/venv/bin/dagster-daemon", "run", "-w", "workspace.yaml"], lease_hours: 2 },
     },
     envs: {
-      prod: { hosts: ["10.0.0.11", "10.0.0.12"], readonly_dsn: "postgresql://ro@prod-db:5432/dagster" },
-      test: { hosts: ["10.0.1.11"], readonly_dsn: "postgresql://ro@test-db:5432/dagster" },
+      prod: { ref: "release", hosts: ["10.0.0.11", "10.0.0.12"], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@prod-db:5432/dagster" },
+      test: { ref: "test", hosts: ["10.0.1.11"], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@test-db:5432/dagster" },
     },
     profile: {
       conventions: "资产按 dt 分区（yyyy-mm-dd），T+1 物化；ads 层依赖 dwd 全部完成",
@@ -61,13 +62,14 @@ export const services: Service[] = [
   },
   {
     name: "board", title: "经营看板", description: "面向业务的经营指标看板（Node.js），数据来自 ads 层",
-    root: "/srv/board", code_paths: ["/srv/board"], hosts: ["10.0.0.21"], readonly_dsn: "postgresql://ro@prod-db:5432/board",
-    configs: [{ canonical: "/srv/board/.env", template: "/srv/board/conf/.env.{env}" }],
-    processes: { server: { cmd: ["node", "server.js"], workdir: "/srv/board", ports: { prod: 8080, test: 8081, dev: 8082 }, lease_hours: 4 } },
+    root: "/srv/svc/board/code/{env}", code_paths: [], repo: "git@gitlab.internal:bi/board.git", ref: "main",
+    hosts: ["10.0.0.21"], readonly_dsn: null,
+    configs: [{ canonical: "/srv/svc/board/code/{env}/.env", template: "/srv/svc/board/conf/{env}/.env" }],
+    processes: { server: { cmd: ["node", "server.js"], ports: { prod: 8080, test: 8081, dev: 8082 }, lease_hours: 4 } },
     envs: {
-      prod: { readonly_dsn: "postgresql://ro@prod-db:5432/board" },
-      test: { readonly_dsn: "postgresql://ro@test-db:5432/board", hosts: ["10.0.1.21"] },
-      dev: { readonly_dsn: "postgresql://ro@dev-db:5432/board" },
+      prod: { ref: "release", readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@prod-db:5432/board" },
+      test: { ref: "test", readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@test-db:5432/board", hosts: ["10.0.1.21"] },
+      dev: { ref: "dev", readonly_dsn: "postgresql://ro:***@dev-db:5432/board" },
     },
     profile: {
       conventions: "GMV 不含退款；total_fee 单位是分；“本月”按自然月，不是近 30 天",
@@ -77,16 +79,17 @@ export const services: Service[] = [
   },
   {
     name: "config-center", title: "配置中心", description: "各服务运行时配置的发布与审计（Java）",
-    root: "/srv/config-center", code_paths: ["/srv/config-center"], hosts: ["10.0.0.31"], readonly_dsn: "postgresql://ro@prod-db:5432/config",
-    configs: [{ canonical: "/srv/config-center/application.yaml", template: "/srv/config-center/conf/application.{env}.yaml" }],
-    processes: { app: { cmd: ["./bin/config-center", "--port", "{port}"], workdir: "/srv/config-center", ports: { prod: 9080, test: 9081, dev: 9082 }, lease_hours: 2 } },
+    root: "/srv/svc/config-center/code/{env}", code_paths: [], repo: "git@gitlab.internal:infra/config-center.git", ref: "master",
+    hosts: ["10.0.0.31"], readonly_dsn: "postgresql://ro:${CONFIG_RO_PASSWORD}@prod-db:5432/config",
+    configs: [{ canonical: "/srv/svc/config-center/code/{env}/application.yaml", template: "/srv/svc/config-center/conf/{env}/application.yaml" }],
+    processes: { app: { cmd: ["./bin/config-center", "--port", "{port}"], ports: { prod: 9080, test: 9081, dev: 9082 }, lease_hours: 2 } },
     envs: { dev: { enabled: false } },
     profile: { no_go: "发布接口在 prod 只读调用，审计只看不改" },
     enabled: true, version: 2, ...by("lihf", 9 * DAY),
   },
   {
     name: "report-engine", title: "报表引擎", description: "定时报表渲染与邮件分发",
-    root: "/srv/report-engine", code_paths: ["/srv/report-engine"], hosts: ["10.0.0.41"], readonly_dsn: null,
+    root: "/srv/report-engine", code_paths: ["/srv/report-engine"], repo: "", ref: "", hosts: ["10.0.0.41"], readonly_dsn: null,
     configs: [{ canonical: "/srv/report-engine/config.toml", template: "/srv/report-engine/conf/config.{env}.toml" }],
     processes: { worker: { cmd: ["python", "-m", "report_engine.worker"], workdir: "/srv/report-engine", lease_hours: 2 } },
     envs: {}, profile: {}, enabled: false, version: 1, ...by("chenyu", 14 * DAY),
@@ -250,6 +253,13 @@ export const tasks: Task[] = [
     input: { report: { type: "str", required: true }, baseline: { type: "str" } }, envs: ["test"],
     triggers: [trig.api()], deliver: { url: "http://10.0.0.41:7000/hooks/regression" }, timeout_s: 900,
     enabled: false, version: 1, ...by("chenyu", 14 * DAY),
+  },
+  {
+    ...taskBase, name: "code-sync", title: "代码同步", description: "把服务在某个环境的代码目录切到指定版本；GitLab 部署成功后自动切到刚部署的提交",
+    service: "*", role: null, form: "builtin", handler: "code-sync", envs: [],
+    input: { ref: { type: "str", description: "分支 / tag / 提交；不填 = 该环境跟踪的分支" } },
+    triggers: [trig.api(), { id: "board-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^board$" }, map: { ref: "sha" }, rules: [], session: null, service: "board" }],
+    dedup: { key: "ref", window_s: 300 }, timeout_s: 600, version: 1, ...by("seed", 20 * DAY),
   },
   {
     ...taskBase, name: "memory-gardener", title: "记忆园丁", description: "夜间维护：code_ref 漂移巡检、负反馈条目处置提示",
@@ -534,7 +544,7 @@ export const approvals: Approval[] = [
 
 export const instances: Instance[] = services.flatMap((s) => Object.entries(s.processes).flatMap(([proc, def]) =>
   envs.map((e): Instance => {
-    const running = (s.name === "dagster" && e.name === "test") || (s.name === "board" && e.name !== "dev" && proc === "server") || (s.name === "config-center" && e.name === "test");
+    const running = (s.name === "dagster" && e.name === "test") || (s.name === "board" && e.name === "test" && proc === "server") || (s.name === "config-center" && e.name === "test");
     const startedAgo = between(10, 90) * MIN;
     return {
       service: s.name, env: e.name, process: proc, state: running ? "running" : s.name === "report-engine" && e.name === "test" ? "failed" : "stopped",
@@ -542,6 +552,7 @@ export const instances: Instance[] = services.flatMap((s) => Object.entries(s.pr
       started_at: running ? iso(startedAgo) : null, lease_until: running ? new Date(NOW - startedAgo + (def.lease_hours ?? 2) * HOUR).toISOString() : null,
       started_by: running ? pick(["lihf", "run:7d0f1132", "wangzh"]) : null,
       last_exit: running ? null : s.name === "report-engine" && e.name === "test" ? { code: 1, at: iso(3 * HOUR) } : { code: 0, at: iso(between(3, 40) * HOUR) },
+      startable: s.envs[e.name]?.startable ?? e.startable,
     };
   })));
 

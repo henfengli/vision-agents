@@ -17,7 +17,12 @@ temporal:
 
 process_control:
   backend: local                    # systemd（生产）/ local（开发机）/ off
+  scope: system                     # system：系统级单元 + polkit（deploy/install.sh）；user：systemd --user（deploy/install-user.sh）
   unit: agent-svc                   # systemd 模板单元名：agent-svc@<服务:环境:进程>.service
+
+# agent 沙箱与业务进程里都遮蔽的路径（存在的才遮；目录换成空目录）。服务声明的配置文件总是遮蔽，不用写在这里。
+# 不写 = 平台密钥目录 + 运行用户的 ~/.ssh、~/.git-credentials、~/.netrc、~/.pgpass、~/.config/agent-platform
+# hidden_paths: [/etc/agent-platform, /home/agent/.ssh]
 
 langfuse:
   enabled: false                    # 可选的后台链路追踪（OTEL → Langfuse），页面不依赖它
@@ -31,12 +36,18 @@ langfuse:
 #   datasource_uid: prometheus
 #   token: "${GRAFANA_TOKEN}"
 
-# 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}，工具会出现在角色的工具列表里
+# 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}，工具会出现在角色的工具列表里。
+# 和别的工具一样绑定运行的 服务×环境：service 限定只在哪个服务的运行里可用；
+# envs 给每个环境一份连接（深合并到上面），调用按运行的环境路由。不写 envs = 一份连接、不分环境。
 # mcp_servers:
 #   dagster:
 #     transport: stdio
 #     command: python
 #     args: ["/opt/agent-platform/mcp_servers/dagster_mcp.py"]
+#     service: dagster
+#     envs:
+#       prod: {env: {DAGSTER_URL: "http://10.0.0.11:3000"}}
+#       test: {env: {DAGSTER_URL: "http://10.0.1.11:3001"}}
 #   browser:
 #     transport: stdio
 #     command: npx

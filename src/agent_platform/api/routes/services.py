@@ -3,7 +3,8 @@
     GET  /v1/services/{s}/envs/{env}                               该环境的解析结果（目录、配置文件、git、档案）
     GET  /v1/services/{s}/envs/{env}/config?path=                  读本环境声明过的配置文件（密钥打码）
     GET  /v1/services/{s}/processes                                全部 环境×进程 的实例状态
-    POST /v1/services/{s}/envs/{env}/processes/{p}/start|stop|renew  启停 / 续期；受保护环境的启停先审批
+    POST /v1/services/{s}/envs/{env}/processes/{p}/start|stop|renew  启停 / 续期；受保护环境的启停先审批，
+                                                                      只看不起的环境拒绝 start（start_not_allowed）
     GET  /v1/services/{s}/envs/{env}/processes/{p}/logs?lines=
 """
 
@@ -21,11 +22,10 @@ router = APIRouter(prefix="/v1/services/{service}")
 
 
 async def _view(rt: Runtime, service: str, env: str) -> ServiceView:
-    s = await rt.registry.service(service)
-    if s is None:
+    view = await rt.registry.service_view(service, env)
+    if view is None:
         raise Rejected.not_found(f"服务 {service}")
-    await rt.registry.env(env)
-    return s.spec.view(service, env)
+    return view
 
 
 @router.get("/envs/{env}")
@@ -51,6 +51,8 @@ async def process_action(service: str, env: str, process: str, action: str, body
     if action not in ("start", "stop", "renew"):
         raise Rejected.not_found(f"动作 {action}")
     hours = body.hours if body else None
+    if action == "start":
+        await rt.controller.ensure_startable(service, env)
     if action != "renew" and (await rt.registry.env(env)).protected:
         await rt.controller.get(service, env, process)          # 先确认进程存在
         verb = "启动" if action == "start" else "停止"

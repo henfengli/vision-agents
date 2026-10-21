@@ -11,7 +11,7 @@ import { SaveBar } from "@/components/save-bar";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor, type KvSuggestion } from "@/components/ui/data";
-import { Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
+import { Field, Input, Segmented, Switch, TagInput, Textarea } from "@/components/ui/form";
 import { toast } from "@/components/ui/overlay";
 import { Card, CardHeader } from "@/components/ui/primitives";
 import { invalidate, useMutation } from "@/lib/query";
@@ -23,11 +23,13 @@ export const PROFILE_SUGGESTIONS: KvSuggestion[] = [
   { key: "pitfalls", label: "常见坑", placeholder: "如：上游 03:00 后完成会级联失败" },
 ];
 
-type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "hosts" | "readonly_dsn" | "configs" | "processes" | "envs" | "profile">;
+type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "repo" | "ref" | "hosts" | "readonly_dsn" | "configs" | "processes" | "envs" | "profile">;
 
 function toDraft(s: ServiceSummary): Draft {
-  return structuredClone({ title: s.title, description: s.description, root: s.root, code_paths: s.code_paths, hosts: s.hosts, readonly_dsn: s.readonly_dsn, configs: s.configs, processes: s.processes, envs: s.envs, profile: s.profile });
+  return structuredClone({ title: s.title, description: s.description, root: s.root, code_paths: s.code_paths, repo: s.repo, ref: s.ref, hosts: s.hosts, readonly_dsn: s.readonly_dsn, configs: s.configs, processes: s.processes, envs: s.envs, profile: s.profile });
 }
+
+const DSN_HELP = "口令写成 ${VAR}，真实值放 secrets.env；直接写的口令回显为 ***，原样保存表示不改";
 
 function Section({ id, icon, title, description, children }: { id: string; icon: ReactNode; title: string; description: string; children: ReactNode }) {
   return (
@@ -76,26 +78,28 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
         ))}
       </nav>
       <div className="min-w-0 space-y-4 pb-20">
-        <Section id="basic" icon={<LuSettings />} title="基本信息" description="代码目录用于读代码、校验记忆的新鲜度（code_ref 对应的 commit 变了即过期）">
+        <Section id="basic" icon={<LuSettings />} title="基本信息" description="路径里可以写 {env}：每个环境一份代码（如 /srv/svc/board/code/{env}），各环境停在不同的提交上。代码目录用于读代码、校验记忆新鲜度（引用的文件改过即过期）">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="显示名"><Input value={draft.title} onChange={(e) => set("title", e.target.value)} /></Field>
-            <Field label="部署目录" help="agent 只读访问"><Input mono value={draft.root} onChange={(e) => set("root", e.target.value)} /></Field>
+            <Field label="部署目录" help="agent 只读访问；可含 {env}"><Input mono value={draft.root} placeholder="/srv/svc/xxx/code/{env}" onChange={(e) => set("root", e.target.value)} /></Field>
             <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={draft.description} onChange={(e) => set("description", e.target.value)} /></Field>
+            <Field label="代码仓库" help="git 远端；配了才能在服务页「同步代码」，GitLab 部署事件也会自动同步"><Input mono value={draft.repo} onChange={(e) => set("repo", e.target.value)} placeholder="git@gitlab.internal:group/xxx.git" /></Field>
+            <Field label="跟踪分支" help="代码同步的默认目标；各环境可在「环境」里覆盖"><Input mono value={draft.ref} onChange={(e) => set("ref", e.target.value)} placeholder="远端默认分支" /></Field>
             <Field label="代码目录" help="回车添加；缺省 = 部署目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="/srv/xxx" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
             <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="10.0.0.11" /></Field>
-            <Field label="只读库 DSN" help="sql_query 的数据源，只给只读账号；可按环境覆盖" className="md:col-span-2">
-              <Input mono value={draft.readonly_dsn ?? ""} onChange={(e) => set("readonly_dsn", e.target.value || null)} placeholder="postgresql://ro@host:5432/db" />
+            <Field label="只读库 DSN" help={`sql_query 的数据源，只给只读账号；可按环境覆盖。${DSN_HELP}`} className="md:col-span-2">
+              <Input mono value={draft.readonly_dsn ?? ""} onChange={(e) => set("readonly_dsn", e.target.value || null)} placeholder="postgresql://ro:${RO_PASSWORD}@host:5432/db" />
             </Field>
           </div>
         </Section>
 
-        <Section id="configs" icon={<LuFileText />} title="配置文件" description="固定路径 ← 每环境一份的模板（{env} 占位）。启动进程时选中环境的文件 bind 到固定路径，其余环境的同名文件遮蔽，进程不可能读错环境。">
+        <Section id="configs" icon={<LuFileText />} title="配置文件" description="固定路径 ← 每环境一份的模板（{env} 占位）。启动进程时选中环境的文件 bind 到固定路径，其余环境的文件遮蔽，进程不可能读错环境；agent 的 bash 里所有配置文件都被遮蔽，只能经 service_info 读本环境（密钥打码）。">
           <div className="space-y-2">
             {draft.configs.map((c, i) => (
               <div key={i} className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2">
-                <Input mono value={c.template} placeholder="/srv/x/conf/app.{env}.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, template: e.target.value } : x)))} />
+                <Input mono value={c.template} placeholder="/srv/svc/x/conf/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, template: e.target.value } : x)))} />
                 <span className="text-fg-3">→</span>
-                <Input mono value={c.canonical} placeholder="/srv/x/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, canonical: e.target.value } : x)))} />
+                <Input mono value={c.canonical} placeholder="/srv/svc/x/code/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, canonical: e.target.value } : x)))} />
                 <Button variant="ghost" size="icon-sm" onClick={() => set("configs", draft.configs.filter((_, j) => j !== i))}><LuTrash2 /></Button>
               </div>
             ))}
@@ -169,7 +173,13 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                   </div>
                   {o.enabled !== false && <div className="grid gap-3 md:grid-cols-2">
                     <Field label="主机"><TagInput mono value={o.hosts ?? []} onChange={(v) => setO({ hosts: v })} placeholder={draft.hosts.join(", ") || "继承基座"} /></Field>
-                    <Field label="只读库 DSN"><Input mono value={o.readonly_dsn ?? ""} onChange={(ev) => setO({ readonly_dsn: ev.target.value || undefined })} placeholder={draft.readonly_dsn ?? "继承基座"} /></Field>
+                    <Field label="只读库 DSN" help={DSN_HELP}><Input mono value={o.readonly_dsn ?? ""} onChange={(ev) => setO({ readonly_dsn: ev.target.value || undefined })} placeholder={draft.readonly_dsn ?? "继承基座"} /></Field>
+                    <Field label="跟踪分支"><Input mono value={o.ref ?? ""} onChange={(ev) => setO({ ref: ev.target.value || undefined })} placeholder={draft.ref || "继承基座"} /></Field>
+                    <Field label="起进程" help={`空 = 跟随环境默认（${e.startable ? "可起" : "只看不起"}）`}>
+                      <Segmented value={o.startable == null ? "inherit" : o.startable ? "yes" : "no"}
+                        onChange={(v) => setO({ startable: v === "inherit" ? undefined : v === "yes" })}
+                        options={[{ value: "inherit", label: "跟随环境" }, { value: "yes", label: "可起" }, { value: "no", label: "只看不起" }]} />
+                    </Field>
                     <Field label="档案补充（只对该环境）" className="md:col-span-2">
                       <KeyValueEditor value={o.profile ?? {}} onChange={(v) => setO({ profile: v })} suggestions={PROFILE_SUGGESTIONS.slice(1, 3)} />
                     </Field>

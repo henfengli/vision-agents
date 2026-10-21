@@ -1,4 +1,4 @@
-"""平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml，${VAR} 从环境变量插值。
+"""平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），${VAR} 从环境变量插值。
 
 这里只有部署参数：数据库、模型、Temporal、鉴权引导密钥、数据目录、外部系统地址。
 服务/角色/任务/策略与平台配置（环境、审批、通知、记忆、进程）都是数据，存库、在控制台编辑；
@@ -68,10 +68,19 @@ class GrafanaConfig(BaseModel):
 
 class ProcessControlConfig(BaseModel):
     """服务进程启停的执行方式。systemd：模板单元 agent-svc@.service（生产）；local：本机子进程（开发）。
+    scope=user：平台跑在某个普通用户的 systemd --user 里（deploy/install-user.sh），没有 root 也能装。
     租约时长是平台配置（设置 → 进程），不在这里。"""
 
     backend: Literal["systemd", "local", "off"] = "local"
+    scope: Literal["system", "user"] = "system"
     unit: str = "agent-svc"                    # 模板单元名前缀（agent-svc@<实例>.service）
+
+
+def _default_hidden() -> list[str]:
+    """agent 沙箱与业务进程里都看不到的路径：平台密钥，以及运行用户的凭据（用户级部署时就是同一个用户）。"""
+    home = Path.home()
+    return ["/etc/agent-platform", str(home / ".config/agent-platform"), str(home / ".ssh"),
+            str(home / ".git-credentials"), str(home / ".netrc"), str(home / ".pgpass")]
 
 
 class Settings(BaseModel):
@@ -86,6 +95,7 @@ class Settings(BaseModel):
     grafana: GrafanaConfig | None = None
     process_control: ProcessControlConfig = ProcessControlConfig()
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
+    hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
 
     @property
     def scratch_dir(self) -> str:
@@ -135,11 +145,19 @@ def deep_merge(base: dict, overlay: dict) -> dict:
     return merged
 
 
+def _env_overlay(profile: str, seen: tuple[str, ...] = ()) -> dict:
+    """conf/env/{profile}.yaml；文件里写 extends: <另一份> 时先合并那一份（只写差异）。"""
+    if profile in seen:
+        raise ValueError(f"部署配置 extends 成环：{' → '.join((*seen, profile))}")
+    env_file = CONF_ROOT / f"env/{profile}.yaml"
+    overlay = (yaml.safe_load(env_file.read_text(encoding="utf-8")) or {}) if env_file.exists() else {}
+    parent = overlay.pop("extends", None)
+    return deep_merge(_env_overlay(parent, (*seen, profile)), overlay) if parent else overlay
+
+
 def load_settings(profile: str | None = None) -> Settings:
     profile = profile or os.environ.get("AGENT_ENV", "dev")
-    base = yaml.safe_load((CONF_ROOT / "base/common.yaml").read_text()) or {}
-    env_file = CONF_ROOT / f"env/{profile}.yaml"
-    overlay = (yaml.safe_load(env_file.read_text()) or {}) if env_file.exists() else {}
-    merged = deep_merge(base, overlay)
+    base = yaml.safe_load((CONF_ROOT / "base/common.yaml").read_text(encoding="utf-8")) or {}
+    merged = deep_merge(base, _env_overlay(profile))
     merged["profile"] = profile
     return Settings.model_validate(_interpolate(merged))

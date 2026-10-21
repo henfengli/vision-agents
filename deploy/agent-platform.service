@@ -19,6 +19,9 @@ RestartSec=5
 ProtectSystem=strict
 # scratch：agent 工作区；assets：沉淀的方法文件；instances：进程启动规格与本地后端日志
 ReadWritePaths=/var/lib/agent-platform
+# 业务服务目录（各环境代码 + 配置）：代码同步要写、进程启动前要建配置文件的固定路径占位。没有这个目录也能启动（-）
+ReadWritePaths=-/srv/svc
+# 业务代码不能放在 /home 下（读不到）；放 /srv/svc。要放 home 就用用户级部署（install-user.sh）
 ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true

@@ -15,7 +15,7 @@ import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
 import { Checkbox, Field, Input, Segmented, Select, Switch, TagInput, Textarea } from "@/components/ui/form";
-import { confirm, toast } from "@/components/ui/overlay";
+import { Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, Empty, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
@@ -78,7 +78,7 @@ export function EnvsSettingsPage() {
       {(d, set) => (
         <>
           <Card>
-            <CardHeader title="环境列表" actions={<Button size="sm" icon={<LuPlus />} onClick={() => set({ ...d, items: [...d.items, { name: "", title: "", description: "", protected: false, color: "gray" }] })}>添加环境</Button>} />
+            <CardHeader title="环境列表" actions={<Button size="sm" icon={<LuPlus />} onClick={() => set({ ...d, items: [...d.items, { name: "", title: "", description: "", protected: false, startable: true, color: "gray" }] })}>添加环境</Button>} />
             <div className="divide-y divide-line">
               {d.items.map((e, i) => {
                 const patch = (p: Partial<typeof e>) => set({ ...d, items: d.items.map((x, j) => (j === i ? { ...x, ...p } : x)) });
@@ -97,6 +97,9 @@ export function EnvsSettingsPage() {
                         ))}
                       </div>
                       <Switch checked={e.protected} onChange={(v) => patch({ protected: v })} label={<span className="text-[12.5px]">受保护</span>} />
+                      <Tooltip content="关掉 = 只看不起：平台不在本机用这个环境的配置起进程（会真的连该环境的库、跑它的调度）。读代码、读配置、查只读库不受影响；单个服务可在服务页「环境」里放开。">
+                        <span><Switch checked={e.startable !== false} onChange={(v) => patch({ startable: v })} label={<span className="text-[12.5px]">允许起进程</span>} /></span>
+                      </Tooltip>
                       <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-fg-2">
                         <input type="radio" checked={d.default === e.name} onChange={() => set({ ...d, default: e.name })} className="accent-[var(--color-accent)]" />默认
                       </label>

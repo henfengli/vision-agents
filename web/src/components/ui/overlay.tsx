@@ -109,7 +109,7 @@ export function Popover({ trigger, children, className, align = "start" }: { tri
       <PopoverButton as="div" className="inline-flex">{trigger}</PopoverButton>
       <PopoverPanel anchor={{ to: `bottom ${align}`, gap: 6 }} transition
         className={cn("z-50 rounded-lg border border-line bg-raised shadow-[var(--shadow-pop)] outline-none transition duration-100 data-[closed]:opacity-0", className)}>
-        {({ close }) => (typeof children === "function" ? children(close) : children)}
+        {({ close }) => <>{typeof children === "function" ? children(close) : children}</>}
       </PopoverPanel>
     </HPopover>
   );

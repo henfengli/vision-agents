@@ -31,7 +31,7 @@ failure-analysis:
 "failure-analysis:dwd_trade_order":
   extends: failure-analysis
   profile:
-    code_refs: /srv/dagster/assets/dwd/trade_order.py
+    code_refs: assets/dwd/trade_order.py（代码目录下）
     upstream: ods_order、ods_payment（03:00 前到齐）
     pitfalls: 支付回调乱序时会出现 amount 为负的脏数据，过滤规则在 transform_payment()
 
@@ -73,6 +73,22 @@ daily-inspection:
     - {id: morning, type: schedule, cron: "50 8 * * *", envs: [prod, test], input: {scope: full}}
     - {id: api, type: api}
   deliver: {channel: default}
+  timeout_s: 600
+
+code-sync:
+  title: 代码同步
+  description: 把服务在某个环境的代码目录切到指定版本；GitLab 部署成功后自动切到刚部署的提交
+  service: "*"
+  form: builtin
+  handler: code-sync
+  input:
+    ref: {type: str, description: 分支 / tag / 提交；不填 = 该环境跟踪的分支（服务 → 环境 → ref）}
+  triggers:
+    - {id: api, type: api}
+    - {id: board-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^board$"}, service: board, map: {ref: sha}}
+    - {id: dagster-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^dagster$"}, service: dagster, map: {ref: sha}}
+    - {id: config-center-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^config-center$"}, service: config-center, map: {ref: sha}}
+  dedup: {key: ref, window_s: 300}
   timeout_s: 600
 
 memory-gardener:

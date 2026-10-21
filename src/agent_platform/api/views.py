@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .. import credentials
+from ..domain import EnvDef
 from ..registry import Entry
 from ..store import approvals as approvals_store
 from ..store import artifacts as artifacts_store
@@ -11,18 +13,20 @@ from ..store import knowledge as knowledge_store
 from ..store import runs
 
 
-def service_summary(entry: Entry, env_names: list[str], health: dict, running: dict, task_count: int) -> dict:
-    """Service + 每个环境的健康汇总。"""
+def service_summary(entry: Entry, envs: list[EnvDef], health: dict, running: dict, task_count: int) -> dict:
+    """Service + 每个环境的健康汇总。定义里的只读库口令不回显（redact_service）。"""
     procs = len(entry.spec.processes)
     per_env = {}
-    for env in env_names:
+    for e in envs:
+        env = e.name
+        view = entry.spec.view(entry.name, env, e.startable)
         h = health.get((entry.name, env), {})
         per_env[env] = {
-            "enabled": entry.spec.view(entry.name, env).enabled,
+            "enabled": view.enabled, "startable": view.startable,
             "runs_24h": h.get("runs_24h", 0), "failed_24h": h.get("failed_24h", 0), "last_run": h.get("last_run"),
             "running_processes": running.get((entry.name, env), 0), "total_processes": procs,
         }
-    return {**entry.dump(), "task_count": task_count, "health": per_env}
+    return {**credentials.redact_service(entry.dump()), "task_count": task_count, "health": per_env}
 
 
 def task_summary(effective: Entry, own: Entry, stats: dict, next_fire: dict | None, subtask_count: int) -> dict:

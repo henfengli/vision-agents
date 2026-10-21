@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body
 
+from ... import credentials
 from ...domain import Rejected
 from ...store import instances as instances_store
 from ...store import runs
@@ -30,7 +31,7 @@ SCHEDULE_AFFECTING = {"service", "task"}         # 改了要重新同步定时
 # ———————— 服务 ————————
 
 async def _service_summaries(rt: Runtime, names: set[str] | None = None) -> list[dict]:
-    envs = (await rt.registry.envs()).names
+    envs = (await rt.registry.envs()).items
     health = await runs.service_health()
     running = await instances_store.counts()
     tasks = [t for t in await rt.registry.tasks() if not t.spec.extends]
@@ -135,16 +136,26 @@ def _writes(plural: str, kind: str) -> None:
     """为一种定义注册写入与版本路由（四种定义的写法完全一样）。"""
     after_write = (lambda rt: rt.resync_schedules()) if kind in SCHEDULE_AFFECTING else (lambda rt: None)
 
+    async def unmasked(rt: Runtime, name: str, body: dict) -> dict:
+        """服务的只读库口令回显是 ***：原样传回表示不改，换回库里的值。"""
+        if kind != "service":
+            return body
+        current = await rt.registry.store.get(kind, name)
+        body = credentials.restore_service(body, current["definition"] if current else {})
+        if why := credentials.unresolved_mask(body):
+            raise Rejected("invalid_definition", why, 422)
+        return body
+
     async def create(body: dict = Body(...), rt: Runtime = RT, who: Caller = ADMIN):
         name = str(body.get("name") or "").strip()
         if not name:
             raise Rejected("invalid_definition", "缺少 name", 422)
-        await rt.registry.create(kind, name, body, who.name)
+        await rt.registry.create(kind, name, await unmasked(rt, name, body), who.name)
         after_write(rt)
         return await _shaped(rt, kind, name)
 
     async def update(name: str, body: dict = Body(...), rt: Runtime = RT, who: Caller = ADMIN):
-        await rt.registry.update(kind, name, body, who.name)
+        await rt.registry.update(kind, name, await unmasked(rt, name, body), who.name)
         after_write(rt)
         return await _shaped(rt, kind, name)
 
@@ -157,6 +168,8 @@ def _writes(plural: str, kind: str) -> None:
         history = await rt.registry.store.history(kind, name)
         if not history:
             raise Rejected.not_found(f"{plural}/{name}")
+        if kind == "service":
+            history = [{**h, "definition": credentials.redact_service(h["definition"])} for h in history]
         return history
 
     async def restore(name: str, version: int, rt: Runtime = RT, who: Caller = ADMIN):

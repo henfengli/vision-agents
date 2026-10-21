@@ -6,7 +6,7 @@ import { ApiError } from "../client";
 import type {
   FeedbackEntry, FeedbackReason,
   ApiKey, Approval, Asset, ConfigSection, Instance, Knowledge, Page, RunAccepted, RunListItem, SearchHit,
-  ServiceSummary, Stats, Task, TaskSummary, UpcomingFire, Version,
+  Service, ServiceSummary, Stats, Task, TaskSummary, UpcomingFire, Version,
 } from "../types";
 import * as db from "./data";
 import { cronNextOf } from "./schedule";
@@ -110,6 +110,28 @@ on("GET", "/v1/meta", () => ({
 // ———————— 服务 ————————
 
 const envEnabled = (s: (typeof db.services)[number], env: string) => s.enabled && s.envs[env]?.enabled !== false;
+const envStartable = (s: (typeof db.services)[number], env: string) => s.envs[env]?.startable ?? db.envs.find((e) => e.name === env)?.startable ?? true;
+const render = (path: string, env: string) => path.replaceAll("{env}", env);
+
+// 只读库口令：占位（${VAR}）原样显示，明文换成 ***；保存时 *** 原样传回表示不改
+const DSN = /^([a-z][\w+.-]*:\/\/[^:/@]*:)(.*)(@[^@]*)$/i;
+const redactDsn = (dsn: string | null | undefined) => {
+  const m = dsn ? DSN.exec(dsn) : null;
+  return !dsn || !m || !m[2] || /^\$\{\w+\}$/.test(m[2]) ? dsn ?? null : `${m[1]}***${m[3]}`;
+};
+const restoreDsn = (next: string | null | undefined, current: string | null | undefined) =>
+  next && current && DSN.exec(next)?.[2] === "***" && redactDsn(current) === next ? current : next ?? null;
+function redactService<T extends (typeof db.services)[number]>(s: T): T {
+  return { ...s, readonly_dsn: redactDsn(s.readonly_dsn), envs: Object.fromEntries(Object.entries(s.envs).map(([k, o]) => [k, o.readonly_dsn ? { ...o, readonly_dsn: redactDsn(o.readonly_dsn) } : o])) };
+}
+function restoreService(body: Partial<Service>, current: (typeof db.services)[number]): Partial<Service> {
+  const out = structuredClone(body);
+  if (out.readonly_dsn) out.readonly_dsn = restoreDsn(out.readonly_dsn, current.readonly_dsn);
+  for (const [env, o] of Object.entries(out.envs ?? {})) if (o.readonly_dsn) o.readonly_dsn = restoreDsn(o.readonly_dsn, current.envs[env]?.readonly_dsn);
+  const masked = [out.readonly_dsn, ...Object.values(out.envs ?? {}).map((o) => o.readonly_dsn)].some((d) => d && DSN.exec(d)?.[2] === "***");
+  if (masked) throw new ApiError(422, "invalid_definition", "只读库口令显示为 *** 的那一项对不上原值，请重新填写口令（建议写成 ${VAR}）");
+  return out;
+}
 
 function serviceSummary(s: (typeof db.services)[number]): ServiceSummary {
   const health: ServiceSummary["health"] = {};
@@ -119,6 +141,7 @@ function serviceSummary(s: (typeof db.services)[number]): ServiceSummary {
     const last = rs[0];
     health[e.name] = {
       enabled: envEnabled(s, e.name),
+      startable: envStartable(s, e.name),
       runs_24h: rs.filter((r) => within(r.created_at, 24)).length,
       failed_24h: rs.filter((r) => within(r.created_at, 24) && r.status === "failed").length,
       last_run: last ? { run_id: last.run_id, status: last.status, created_at: last.created_at } : null,
@@ -126,17 +149,20 @@ function serviceSummary(s: (typeof db.services)[number]): ServiceSummary {
       total_processes: Object.keys(s.processes).length,
     };
   }
-  return { ...s, task_count: db.tasks.filter((t) => t.service === s.name && !t.extends).length, health };
+  return { ...redactService(s), task_count: db.tasks.filter((t) => t.service === s.name && !t.extends).length, health };
 }
 
 const findService = (name: string) => db.services.find((x) => x.name === name) ?? (() => { throw notFound("服务 " + name); })();
 
 on("GET", "/v1/services", () => db.services.map(serviceSummary));
 on("GET", "/v1/services/:name", (p) => serviceSummary(findService(p.name)));
-on("PATCH", "/v1/services/:name", (p, _q, body) => serviceSummary(bump("services/" + p.name, findService(p.name), body)));
+on("PATCH", "/v1/services/:name", (p, _q, body) => {
+  const s = findService(p.name);
+  return serviceSummary(bump("services/" + p.name, s, restoreService(body, s)));
+});
 on("POST", "/v1/services", (_p, _q, body) => {
   if (db.services.some((s) => s.name === body.name)) throw new ApiError(409, "conflict", `服务 ${body.name} 已存在`);
-  const s = { title: "", description: "", root: "", code_paths: [], hosts: [], readonly_dsn: null, configs: [], processes: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now() };
+  const s = { title: "", description: "", root: "", code_paths: [], repo: "", ref: "", hosts: [], readonly_dsn: null, configs: [], processes: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now() };
   db.services.push(s);
   return serviceSummary(s);
 });
@@ -149,12 +175,15 @@ on("DELETE", "/v1/services/:name", (p) => {
 on("GET", "/v1/services/:name/envs/:env", (p) => {
   const s = findService(p.name);
   const o = s.envs[p.env] ?? {};
+  const ref = o.ref ?? s.ref;
   return {
-    service: s.name, env: p.env, root: s.root, code_paths: o.code_paths ?? s.code_paths, hosts: o.hosts ?? s.hosts,
-    readonly_dsn: (o.readonly_dsn ?? s.readonly_dsn)?.replace(/:\/\/([^:@]+)(:[^@]*)?@/, "://$1:***@") ?? null,
-    config_files: s.configs.map((c) => ({ canonical: c.canonical, path: c.template.replace("{env}", p.env), exists: !(s.name === "report-engine" && p.env === "dev"), size: 1200 + c.template.length * 37 })),
+    service: s.name, env: p.env, enabled: envEnabled(s, p.env), startable: envStartable(s, p.env),
+    root: render(s.root, p.env), code_paths: (o.code_paths ?? (s.code_paths.length ? s.code_paths : [s.root])).map((x) => render(x, p.env)),
+    repo: s.repo, ref, hosts: o.hosts ?? s.hosts,
+    readonly_dsn: redactDsn(o.readonly_dsn ?? s.readonly_dsn),
+    config_files: s.configs.map((c) => ({ canonical: render(c.canonical, p.env), path: render(c.template, p.env), exists: !(s.name === "report-engine" && p.env === "dev"), size: 1200 + c.template.length * 37 })),
     profile: { ...s.profile, ...(o.profile ?? {}) },
-    git: s.name === "report-engine" ? null : { branch: p.env === "prod" ? "release/2026.10" : "main", commit: db.hex(7), dirty: p.env === "dev", committed_at: new Date(Date.now() - 20 * H).toISOString() },
+    git: s.name === "report-engine" ? null : { branch: "HEAD", commit: db.hex(7), dirty: false, committed_at: new Date(Date.now() - 20 * H).toISOString() },
   };
 });
 on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
@@ -170,13 +199,17 @@ on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
         : `# ${file}\n[server]\nport = ${env === "prod" ? 9080 : 9081}\nprofile = "${env}"\n`,
   };
 });
-on("GET", "/v1/services/:name/processes", (p) => db.instances.filter((i) => i.service === p.name));
+on("GET", "/v1/services/:name/processes", (p) => {
+  const s = findService(p.name);
+  return db.instances.filter((i) => i.service === p.name).map((i) => ({ ...i, startable: envStartable(s, i.env) }));
+});
 for (const action of ["start", "stop", "renew"]) {
   on("POST", `/v1/services/:name/envs/:env/processes/:proc/${action}`, (p, _q, body) => {
     const inst = db.instances.find((i) => i.service === p.name && i.env === p.env && i.process === p.proc);
     if (!inst) throw notFound("进程");
     const svc = findService(p.name);
     if (action === "start" && !envEnabled(svc, p.env)) throw new ApiError(400, "service_env_disabled", `服务 ${p.name} 在 ${p.env} 环境已停用`);
+    if (action === "start" && !envStartable(svc, p.env)) throw new ApiError(400, "start_not_allowed", `服务 ${p.name} 在 ${p.env} 只看不起：平台不在这个环境启动进程（服务 → 环境 → 允许启动进程）`);
     const env = db.envs.find((e) => e.name === p.env);
     if (env?.protected && action !== "renew") {
       const a: Approval = { id: Date.now() % 100000, kind: "process", run_id: null, title: `进程${action === "start" ? "启动" : "停止"} · ${p.name}/${p.proc}@${p.env}`, detail: `${ME.name} 请求在受保护环境 ${p.env} ${action === "start" ? "启动" : "停止"} ${p.name}/${p.proc}`, service: p.name, env: p.env, task: null, payload: { service: p.name, env: p.env, process: p.proc, action, executor: "api" }, requested_by: ME.name, status: "pending", decided_by: null, comment: null, created_at: now(), decided_at: null, expires_at: new Date(Date.now() + 30 * 60_000).toISOString() };

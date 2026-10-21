@@ -28,6 +28,7 @@ class RunScope:
     caller: str = ""
     tools: tuple[str, ...] = field(default_factory=tuple)   # 本运行角色的工具白名单（run_code 桩用）
     notify_channel: str | None = None                       # notify 工具发往的渠道（任务投递渠道）
+    hidden: tuple[str, ...] = field(default_factory=tuple)  # bash / run_code 沙箱里遮蔽的路径（配置文件、密钥）
 
 
 _current: ContextVar[RunScope | None] = ContextVar("run_scope", default=None)

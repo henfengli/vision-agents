@@ -8,7 +8,7 @@ Type=simple
 User=agent-svc
 Group=agent-svc
 # start-dev 是单进程开发模式：持久层用内嵌 SQLite（--db-filename），
-# 不依赖 Postgres；生产建议改为集群模式 + Postgres 持久层（见 README 部署节）
+# 不依赖 Postgres。单机够用：执行状态的事实源在平台的 PG，丢了 SQLite 只影响排障（docs/部署指南.md §7）
 ExecStart=/usr/local/bin/temporal server start-dev \
   --db-filename /var/lib/temporal/history.db \
   --ip 127.0.0.1 --port 7233 --ui-port 8233
