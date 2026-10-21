@@ -14,6 +14,7 @@
   "dependencies": {
     "@floating-ui/react": "0.27.20",
     "@headlessui/react": "2.2.10",
+    "class-variance-authority": "^0.7.1",
     "clsx": "2.1.1",
     "d3-scale": "^4.0.2",
     "dayjs": "1.11.23",
