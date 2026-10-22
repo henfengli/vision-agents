@@ -9,7 +9,7 @@
 - processes      进程启停：默认租约与上限
 
 "某服务在某环境是否启用"不在这里——那是服务自己的配置（ServiceDef.envs[env].enabled）。
-部署级参数（数据库、模型、Temporal…）仍在 conf/ 文件里，不进库。
+部署级参数（数据库、模型、执行并发…）仍在 conf/ 文件里，不进库。
 """
 
 from __future__ import annotations
@@ -29,8 +29,7 @@ class EnvDef(BaseModel):
     name: str
     title: str = ""
     description: str = ""
-    protected: bool = False        # 受保护：危险命令、进程启停、命中审批策略的提交都要人放行
-    startable: bool = True         # 平台能否在此环境起服务进程（各服务可在 envs[env].startable 覆盖）
+    protected: bool = False        # 受保护：审批开在"受保护环境"时，这里的危险命令与进程启停要人放行
     color: EnvColor = "gray"
 
     @field_validator("name")
@@ -43,7 +42,7 @@ class EnvDef(BaseModel):
 
 class EnvsConfig(BaseModel):
     items: list[EnvDef] = Field(default_factory=lambda: [
-        EnvDef(name="prod", title="生产", protected=True, startable=False, color="red"),
+        EnvDef(name="prod", title="生产", protected=True, color="red"),
         EnvDef(name="test", title="测试", color="amber"),
         EnvDef(name="dev", title="开发", color="blue"),
     ])
@@ -71,11 +70,18 @@ class EnvsConfig(BaseModel):
 # ———————— 审批 ————————
 
 class ApprovalsConfig(BaseModel):
+    """运行中途的人工门（危险命令、进程启停）。默认关闭：配置是只读账户、文件系统只读，
+    agent 现在做不了真正危险的事；等以后让它执行变更类任务时再在设置里打开。"""
+
     danger_patterns: list[str] = Field(default_factory=lambda: [
         r"\brm\s+-[a-z]*[rf]", r"\bdrop\s+(table|database|schema)\b", r"\btruncate\b", r"\bdelete\s+from\b",
         r"\bkill(all)?\b", r"\bsystemctl\s+(stop|restart|disable)\b", r"\bgit\s+push\b"])
-    required_in: Literal["protected", "all"] = "protected"   # 危险命令在哪些环境要审批
+    required_in: Literal["off", "protected", "all"] = "off"  # 关闭 / 只在受保护环境 / 所有环境
     timeout_minutes: int = 30                                # 超时未处理视同拒绝
+
+    def applies(self, protected: bool) -> bool:
+        """这个环境的危险操作要不要审批。"""
+        return self.required_in == "all" or (self.required_in == "protected" and protected)
 
     @field_validator("danger_patterns")
     @classmethod

@@ -1,4 +1,7 @@
-"""运行的取值空间与提交请求。"""
+"""运行的取值空间与提交请求。
+
+状态机：queued → running →（awaiting_approval ⇄ running）→ success | failed | cancelled。
+"""
 
 from __future__ import annotations
 
@@ -11,13 +14,14 @@ from .tasks import MemoryOverride
 RunStatus = Literal["queued", "awaiting_approval", "running", "success", "failed", "cancelled"]
 RUN_STATUSES: tuple[str, ...] = ("queued", "awaiting_approval", "running", "success", "failed", "cancelled")
 TERMINAL = frozenset({"success", "failed", "cancelled"})
+ACTIVE = frozenset({"queued", "awaiting_approval", "running"})
 
-# 怎么结束的：agent 执行 / 任务图 / 内建处理器 / 规则先行命中
-Resolution = Literal["agent", "graph", "builtin", "rule"]
-RESOLUTIONS: tuple[str, ...] = ("agent", "graph", "builtin", "rule")
+# 怎么结束的：agent 执行 / 内建处理器 / 规则先行命中
+Resolution = Literal["agent", "builtin", "rule"]
+RESOLUTIONS: tuple[str, ...] = ("agent", "builtin", "rule")
 
-# 触发类型：任务上可声明的四种 + 平台内部产生的几种
-TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction"]
+# 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放）
+TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"]
 DECLARABLE = frozenset({"api", "chat", "schedule", "event"})
 
 

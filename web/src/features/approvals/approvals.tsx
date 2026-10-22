@@ -1,11 +1,11 @@
 /**
  * 审批收件箱：待办按等待时长排（等最久的在最上），右侧详情可直接放行/拒绝并留言。
- * 四类审批同一个收件箱：提交审批 / 危险命令 / 产物门禁 / 受保护环境的进程启停。
+ * 两类审批同一个收件箱：运行中的危险命令 / 进程启停。审批默认关闭，在设置 → 审批里打开才会出现。
  */
 import { useEffect, useState } from "react";
 import { LuArrowUpRight, LuCircleCheck, LuCircleX, LuClock, LuInbox, LuShieldCheck } from "react-icons/lu";
 
-import { api, useApprovals } from "@/api/hooks";
+import { api, useApprovals, useSettings } from "@/api/hooks";
 import type { Approval, ApprovalKind } from "@/api/types";
 import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
@@ -29,13 +29,17 @@ export function ApprovalsPage() {
   const { data: pending } = useApprovals({ status: "pending", ...scope });
   const { data, loading } = useApprovals({ status: tab, ...scope });
   const selected = data?.find((a) => String(a.id) === s.id) ?? (tab === "pending" ? data?.[0] : undefined);
+  const { data: settings } = useSettings();
+  const off = settings?.approvals.required_in === "off";
   useEffect(() => {
     if (!s.id && selected && tab === "pending") setS({ id: String(selected.id) });
   }, [s.id, selected, tab, setS]);
 
   return (
     <Page wide>
-      <PageHeader title="审批" description="人工门：提交审批、危险命令、产物门禁、受保护环境的进程启停。超时视同拒绝（安全侧默认）。" />
+      <PageHeader title="审批" description={<>运行中途的人工门：危险命令、进程启停要人放行，超时视同拒绝。{off
+        ? <>当前<b className="font-medium text-fg-2">已关闭</b>，不会再挂起新的运行（<Link to="/settings/approvals" className="text-accent hover:underline">设置 → 审批</Link>）。</>
+        : <>范围见 <Link to="/settings/approvals" className="text-accent hover:underline">设置 → 审批</Link>。</>}</>} />
       <div className="mb-4 flex flex-wrap items-end gap-x-4 gap-y-3 border-b border-line">
         <Tabs className="-mb-px border-b-0" value={tab} onChange={(v) => setS({ tab: v === "pending" ? undefined : v, id: undefined })} tabs={[
           { value: "pending", label: "待办", count: pending?.length ?? null }, { value: "decided", label: "已处理" },
@@ -53,7 +57,7 @@ export function ApprovalsPage() {
         <Card className="h-fit overflow-hidden">
           {loading ? <SkeletonRows /> : !data?.length ? (
             <Empty icon={tab === "pending" ? <LuCircleCheck className="text-ok" /> : <LuInbox />} title={tab === "pending" ? "没有待办" : "还没有处理记录"}
-              description={s.service || s.env || s.kind ? "当前筛选下没有，试试清除筛选" : tab === "pending" ? "所有审批都处理完了" : undefined} />
+              description={s.service || s.env || s.kind ? "当前筛选下没有，试试清除筛选" : tab === "pending" ? (off ? "审批已关闭，运行中的危险命令与进程启停直接执行" : "所有审批都处理完了") : undefined} />
           ) : (
             <ul className="divide-y divide-line">
               {data.map((a) => (
@@ -105,11 +109,10 @@ function ApprovalDetail({ a }: { a: Approval }) {
         )}
       </div>
       <div className="space-y-4 p-5">
-        <CodeBlock code={a.detail} wrap title={a.kind === "command" ? "将要执行的命令" : a.kind === "process" ? "进程操作" : "内容"} />
+        <CodeBlock code={a.detail} wrap title={a.kind === "command" ? "将要执行的命令" : "进程操作"} />
         <DescList items={[
           ["发起方", a.requested_by],
           ["服务", a.service ? <Link to={`/services/${a.service}${a.env ? "?env=" + a.env : ""}`} className="hover:text-accent">{a.service}</Link> : "—"],
-          ...(a.kind === "submit" && a.payload.policy ? [["命中策略", <Link to="/settings/policies" className="font-mono hover:text-accent">{String(a.payload.policy)}</Link>] as [string, React.ReactNode]] : []),
           ["任务", a.task ? <Link to={`/tasks/${encodeURIComponent(a.task)}`} className="hover:text-accent">{a.task}</Link> : "—"],
           ["运行", a.run_id ? <Link to={`/runs/${a.run_id}`} className="inline-flex items-center gap-1 font-mono hover:text-accent">{shortId(a.run_id)}<LuArrowUpRight className="size-3" /></Link> : "—"],
           ["发起时间", datetime(a.created_at, true)],

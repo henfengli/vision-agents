@@ -6,7 +6,6 @@ from .. import credentials
 from ..domain import EnvDef
 from ..registry import Entry
 from ..store import approvals as approvals_store
-from ..store import artifacts as artifacts_store
 from ..store import assets as assets_store
 from ..store import feedback as feedback_store
 from ..store import knowledge as knowledge_store
@@ -19,10 +18,10 @@ def service_summary(entry: Entry, envs: list[EnvDef], health: dict, running: dic
     per_env = {}
     for e in envs:
         env = e.name
-        view = entry.spec.view(entry.name, env, e.startable)
+        view = entry.spec.view(entry.name, env)
         h = health.get((entry.name, env), {})
         per_env[env] = {
-            "enabled": view.enabled, "startable": view.startable,
+            "enabled": view.enabled, "python": view.python,
             "runs_24h": h.get("runs_24h", 0), "failed_24h": h.get("failed_24h", 0), "last_run": h.get("last_run"),
             "running_processes": running.get((entry.name, env), 0), "total_processes": procs,
         }
@@ -47,7 +46,8 @@ def list_item(run: dict, titles: dict[str, str]) -> dict:
 
 
 async def run_detail(run: dict, titles: dict[str, str]) -> dict:
-    """Run：列表字段 + 输入输出 + 待审批 + 上下文（注入了什么、沉淀了什么、同会话的其他轮、任务图）。"""
+    """Run：列表字段 + 输入输出 + 待审批 + 上下文（注入了什么、沉淀了什么、同会话的其他轮）。
+    replay_of：回归重放出来的运行，指向被重放的原运行。"""
     run_id = run["run_id"]
     events = await runs.events(run_id)
     stage = {e["payload"].get("stage"): e["payload"] for e in events if e["kind"] == "stage"}
@@ -56,6 +56,7 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
     return {
         **list_item(run, titles),
         "task_version": run.get("task_version"), "role_version": run.get("role_version"),
+        "replay_of": run["trigger"]["id"] if run["trigger"]["type"] == "replay" else None,
         "input": run["input"], "output": run.get("output"), "error_code": run.get("error_code"),
         "memory": run.get("memory") or {},
         "pending_approval": await approvals_store.pending_of_run(run_id),
@@ -64,26 +65,12 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
             "profile": (stage.get("profile") or {}).get("content", ""),
             "recalled_knowledge": (stage.get("recall") or {}).get("hits", []),
             "recalled_assets": (stage.get("assets") or {}).get("assets", []),
-            "saved_knowledge": [{"id": k["id"], "key": k["key"]} for k in await knowledge_store.by_source_run(run_id)
-                                if not k["key"].startswith("session:")],
+            "saved_knowledge": [{"id": k["id"], "key": k["key"], "kind": k["kind"]}
+                                for k in await knowledge_store.by_source_run(run_id) if k["kind"] != "handoff"],
             "saved_assets": [{"id": a["id"], "kind": a["kind"], "name": a["name"]}
                              for a in await assets_store.by_source_run(run_id)],
             "session_runs": session_runs,
-            "graph": await _graph(run_id, stage.get("graph"), events),
         },
-    }
-
-
-async def _graph(run_id: str, topology: dict | None, events: list[dict]) -> dict | None:
-    if not topology:
-        return None
-    status = {a["name"]: a["status"] for a in await artifacts_store.list_by_run(run_id)}
-    latest = {e["payload"]["node"]: e["payload"] for e in events if e["kind"] == "artifact"}
-    return {
-        "nodes": [{"id": n["id"], "kind": n["kind"],
-                   "status": status.get(n["id"]) or ("running" if latest.get(n["id"], {}).get("status") == "running" else "pending"),
-                   "summary": latest.get(n["id"], {}).get("content")} for n in topology["nodes"]],
-        "edges": topology["edges"],
     }
 
 

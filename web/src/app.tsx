@@ -10,6 +10,7 @@ import { ChatPage } from "./features/chat/chat";
 import { LoginPage } from "./features/login";
 import { MemoryPage } from "./features/memory/memory";
 import { OverviewPage } from "./features/overview/overview";
+import { ReplayDetailPage, ReplaysRedirect } from "./features/runs/replays";
 import { RunDetailPage } from "./features/runs/run-detail";
 import { RunsPage } from "./features/runs/runs";
 import { ServiceDetailPage } from "./features/services/service-detail";
@@ -18,7 +19,6 @@ import { ApiKeysPage } from "./features/settings/api-keys";
 import {
   ApprovalsSettingsPage, EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, ProcessesSettingsPage,
 } from "./features/settings/platform";
-import { PoliciesPage } from "./features/settings/policies";
 import { PreferencesPage } from "./features/settings/preferences";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
 import { TaskDetailPage } from "./features/tasks/task-detail";
@@ -34,6 +34,8 @@ const routes: RouteDef[] = [
   { path: "/tasks/:name", component: TaskDetailPage },
   { path: "/runs", component: RunsPage },
   { path: "/runs/:id", component: RunDetailPage },
+  { path: "/replays", component: ReplaysRedirect },
+  { path: "/replays/:id", component: ReplayDetailPage },
   { path: "/chat", component: ChatPage },
   { path: "/chat/:session", component: ChatPage },
   { path: "/approvals", component: ApprovalsPage },
@@ -47,7 +49,6 @@ const routes: RouteDef[] = [
   { path: "/settings/processes", component: ProcessesSettingsPage },
   { path: "/settings/roles", component: RolesPage },
   { path: "/settings/roles/:name", component: RoleDetailPage },
-  { path: "/settings/policies", component: PoliciesPage },
   { path: "/settings/api-keys", component: ApiKeysPage },
 ];
 

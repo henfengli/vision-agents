@@ -1,10 +1,10 @@
 """服务×环境：agent 实际看到的东西与进程启停。
 
-    GET  /v1/services/{s}/envs/{env}                               该环境的解析结果（目录、配置文件、git、档案）
+    GET  /v1/services/{s}/envs/{env}                               该环境的解析结果（目录、解释器、配置文件、git、档案）
     GET  /v1/services/{s}/envs/{env}/config?path=                  读本环境声明过的配置文件（密钥打码）
     GET  /v1/services/{s}/processes                                全部 环境×进程 的实例状态
-    POST /v1/services/{s}/envs/{env}/processes/{p}/start|stop|renew  启停 / 续期；受保护环境的启停先审批，
-                                                                      只看不起的环境拒绝 start（start_not_allowed）
+    GET  /v1/services/{s}/tools?reload=                            服务自己声明的 MCP 工具（按环境连接）
+    POST /v1/services/{s}/envs/{env}/processes/{p}/start|stop|renew  启停 / 续期；设置里打开了审批时先审批
     GET  /v1/services/{s}/envs/{env}/processes/{p}/logs?lines=
 """
 
@@ -44,21 +44,37 @@ async def processes(service: str, rt: Runtime = RT, _: Caller = WHO):
     return await rt.controller.list(service)
 
 
+@router.get("/tools")
+async def service_tools(service: str, reload: bool = False, rt: Runtime = RT, _: Caller = WHO):
+    """服务自己声明的 MCP 工具：{servers, loaded, tools: [{name, description, server, envs}], failed}。
+    没加载过（还没有运行用到）时现连一次；reload=true 强制重连（改了 MCP 服务端之后）。"""
+    from ...orchestration.pipeline import service_mcp_tools
+
+    s = await rt.registry.service(service)
+    if s is None:
+        raise Rejected.not_found(f"服务 {service}")
+    if reload:
+        rt.service_mcp.forget(service)
+    if s.spec.mcp:
+        await service_mcp_tools(rt.registry, rt.service_mcp, service)
+    return {"servers": list(s.spec.mcp), **rt.service_mcp.describe(service)}
+
+
 @router.post("/envs/{env}/processes/{process}/{action}")
 async def process_action(service: str, env: str, process: str, action: str, body: ProcessBody | None = None,
                          rt: Runtime = RT, who: Caller = ADMIN):
-    """返回 {instance, approval}：受保护环境的 start/stop 先建审批单（approval 非空），放行后才执行。"""
+    """返回 {instance, approval}：要审批时（设置 → 审批）start/stop 先建审批单（approval 非空），放行后才执行。"""
     if action not in ("start", "stop", "renew"):
         raise Rejected.not_found(f"动作 {action}")
     hours = body.hours if body else None
     if action == "start":
         await rt.controller.ensure_startable(service, env)
-    if action != "renew" and (await rt.registry.env(env)).protected:
+    if action != "renew" and await rt.gate.required((await rt.registry.env(env)).protected):
         await rt.controller.get(service, env, process)          # 先确认进程存在
         verb = "启动" if action == "start" else "停止"
         approval = await approvals_store.create(
             kind="process", title=f"进程{verb} · {service}/{process}@{env}",
-            detail=f"{who.name} 请求在受保护环境 {env} {verb} {service}/{process}", service=service, env=env,
+            detail=f"{who.name} 请求在 {env} {verb} {service}/{process}", service=service, env=env,
             payload={"service": service, "env": env, "process": process, "action": action, "hours": hours,
                      "executor": "api", "by": who.name},
             requested_by=who.name, timeout_s=(await rt.registry.config("approvals")).timeout_minutes * 60)

@@ -3,8 +3,7 @@
 # 业务进程有独立 pid 命名空间，读不到平台进程的环境变量。
 [Unit]
 Description=agent-platform（用户级）
-After=network-online.target temporal-server.service
-Wants=temporal-server.service
+After=network-online.target
 
 [Service]
 Environment=AGENT_ENV=prod-user

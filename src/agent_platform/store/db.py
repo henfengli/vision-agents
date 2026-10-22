@@ -1,20 +1,21 @@
 """Postgres 连接池与建表。全库唯一的 schema 定义点，启动时幂等执行。
 
 表一览：
-- definitions        服务/角色/任务/策略 + 平台配置的版本化定义（写一次 = 一个新版本，历史全留；
+- definitions        服务/角色/任务 + 平台配置的版本化定义（写一次 = 一个新版本，历史全留；
                      删除 = 写一个 deleted 版本，恢复旧版本即复活）
 - api_keys           调用方密钥（只存哈希；可限定服务与环境）
-- runs / run_events  运行台账与全过程事件（审计与排障的事实源）
-- approvals          人工审批单（提交 / 危险命令 / 产物门禁 / 进程启停）
+- runs / run_events  运行台账与全过程事件（审计与排障的事实源）；runs 同时是执行队列：
+                     status=queued 的行由 worker 用 FOR UPDATE SKIP LOCKED 认领，heartbeat_at 判断执行者是否还活着
+- approvals          人工审批单（危险命令 / 进程启停）
 - service_instances  服务×环境×进程的运行状态（租约、pid、最近退出）
-- artifacts          任务图产物（血缘 + 输入指纹 + 重跑复用）
-- knowledge / knowledge_history / recall_hits   知识（时序化、内容历史、召回埋点）
-- cases              案例（报错指纹 → 结论）
+- knowledge / knowledge_history / recall_hits   记忆（agent 记下的事：fact 事实 / lesson 报错教训 / handoff 交接摘要；
+                     时序化、内容历史、召回埋点）。env 为空 = 对该服务所有环境成立
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
 - feedback           反馈（对整次运行或某一步：分数 + 问题类型 + 说明；一人一步一条）
+- replays / replay_items   回归重放：拿被 👎 过的运行用当前定义重跑，并排对比、模型判定有没有改好
 
-记忆三表与产物都按 (env, service) 分区；schema_version 记录库结构版本，
-从 v5 升级见 scripts/migrate_v5.py。
+档案（人写的）不在库表里，在服务 / 任务定义的 profile 字段。
+schema_version 记录库结构版本；旧的 cases 表（v7 前的案例）启动时并进 knowledge（kind=lesson）后不再使用。
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 
 CREATE TABLE IF NOT EXISTS definitions (
-    kind       TEXT NOT NULL,                -- service / role / task / policy / config
+    kind       TEXT NOT NULL,                -- service / role / task / config
     name       TEXT NOT NULL,
     version    INT  NOT NULL,
     definition JSONB NOT NULL,
@@ -80,12 +81,15 @@ CREATE TABLE IF NOT EXISTS runs (
     memory          JSONB NOT NULL DEFAULT '{}', -- 本次运行的记忆开关覆盖 {recall, save}
     output          JSONB,
     status          TEXT NOT NULL,           -- queued/awaiting_approval/running/success/failed/cancelled
-    resolution      TEXT,                    -- agent/graph/builtin/rule
+    resolution      TEXT,                    -- agent/builtin/rule
     error_code      TEXT,
     dedup_key       TEXT,
     idempotency_key TEXT,
     tokens          INT,
     duration_ms     INT,
+    resume          BOOLEAN NOT NULL DEFAULT false,  -- 下次认领时从 checkpoint 接着跑
+    worker          TEXT,                    -- 认领它的 worker（主机:pid）
+    heartbeat_at    TIMESTAMPTZ,             -- 执行中每 20 秒刷新；停了就是执行进程没了
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at      TIMESTAMPTZ,
     finished_at     TIMESTAMPTZ
@@ -97,6 +101,10 @@ CREATE INDEX IF NOT EXISTS idx_runs_service_env ON runs (service, env, created_a
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_dedup ON runs (dedup_key, created_at) WHERE dedup_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idem ON runs (idempotency_key) WHERE idempotency_key IS NOT NULL;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS resume BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS worker TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_runs_queue ON runs (created_at) WHERE status = 'queued';
 
 CREATE TABLE IF NOT EXISTS run_events (
     id         BIGSERIAL PRIMARY KEY,
@@ -110,7 +118,7 @@ CREATE TABLE IF NOT EXISTS run_events (
 
 CREATE TABLE IF NOT EXISTS approvals (
     id           BIGSERIAL PRIMARY KEY,
-    kind         TEXT NOT NULL,              -- submit / command / artifact / process
+    kind         TEXT NOT NULL,              -- command / process
     run_id       TEXT,
     title        TEXT NOT NULL,
     detail       TEXT NOT NULL DEFAULT '',
@@ -145,24 +153,14 @@ CREATE TABLE IF NOT EXISTS service_instances (
     PRIMARY KEY (service, env, process)
 );
 
-CREATE TABLE IF NOT EXISTS artifacts (
-    run_id     TEXT NOT NULL REFERENCES runs (run_id) ON DELETE CASCADE,
-    task       TEXT NOT NULL,
-    name       TEXT NOT NULL,
-    env        TEXT NOT NULL,
-    content    JSONB,
-    input_hash TEXT,
-    status     TEXT NOT NULL,                -- materialized/reused/skipped/rejected/failed
-    created_at TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (run_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_artifacts_reuse ON artifacts (env, task, name, input_hash, created_at);
-
 CREATE TABLE IF NOT EXISTS knowledge (
     id             BIGSERIAL PRIMARY KEY,
-    env            TEXT NOT NULL,
+    env            TEXT NOT NULL,             -- '' = 对该服务所有环境成立
     service        TEXT NOT NULL,
     task           TEXT NOT NULL DEFAULT '',  -- 沉淀来源任务（谱系排序依据）
+    kind           TEXT NOT NULL DEFAULT 'fact',  -- fact / lesson / handoff
+    fingerprint    TEXT,                      -- lesson：报错指纹（同类报错精确命中）
+    category       TEXT,                      -- lesson：code / data / infra / upstream
     key            TEXT NOT NULL,
     content        TEXT NOT NULL,
     source_run     TEXT,
@@ -175,6 +173,12 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at     TIMESTAMPTZ DEFAULT now(),
     UNIQUE (env, service, key)
 );
+
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact';
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS fingerprint TEXT;
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS category TEXT;
+UPDATE knowledge SET kind='handoff' WHERE kind='fact' AND key LIKE 'session:%';
+CREATE INDEX IF NOT EXISTS idx_knowledge_lesson ON knowledge (service, fingerprint) WHERE kind = 'lesson';
 
 CREATE TABLE IF NOT EXISTS knowledge_history (
     id         BIGSERIAL PRIMARY KEY,
@@ -201,21 +205,17 @@ CREATE TABLE IF NOT EXISTS recall_hits (
 );
 CREATE INDEX IF NOT EXISTS idx_recall_hits_entry ON recall_hits (env, entry_id, created_at);
 
-CREATE TABLE IF NOT EXISTS cases (
-    id          BIGSERIAL PRIMARY KEY,
-    env         TEXT NOT NULL,
-    service     TEXT NOT NULL DEFAULT '',
-    fingerprint TEXT NOT NULL,
-    category    TEXT,
-    conclusion  TEXT,
-    source_run  TEXT,
-    thumbs_up   INT NOT NULL DEFAULT 0,
-    thumbs_down INT NOT NULL DEFAULT 0,
-    valid_to    TIMESTAMPTZ,
-    superseded_by TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (env, service, fingerprint)
-);
+-- v7 前的案例表：并进 knowledge（kind=lesson，key = lesson:<指纹>），幂等
+DO $$ BEGIN
+    IF to_regclass('cases') IS NOT NULL THEN
+        INSERT INTO knowledge (env, service, task, kind, fingerprint, category, key, content, source_run,
+                               valid_to, superseded_by, created_at)
+        SELECT env, service, '', 'lesson', fingerprint, category, 'lesson:' || fingerprint, COALESCE(conclusion, ''),
+               source_run, valid_to, superseded_by, created_at
+        FROM cases WHERE service <> '' AND COALESCE(conclusion, '') <> ''
+        ON CONFLICT (env, service, key) DO NOTHING;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS assets (
     id             BIGSERIAL PRIMARY KEY,
@@ -267,6 +267,27 @@ CREATE TABLE IF NOT EXISTS feedback (
     UNIQUE (run_id, step_seq, created_by)        -- 一人一步一条：改主意是覆盖
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_negative ON feedback (created_at DESC) WHERE score < 0;
+
+CREATE TABLE IF NOT EXISTS replays (
+    id         BIGSERIAL PRIMARY KEY,
+    title      TEXT NOT NULL DEFAULT '',
+    filter     JSONB NOT NULL DEFAULT '{}',      -- 选样条件（任务 / 服务 / 环境 / 时间 / 指定运行）
+    note       TEXT NOT NULL DEFAULT '',         -- 这次改了什么（"data_searcher 提示词加了口径确认"）
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS replay_items (
+    id           BIGSERIAL PRIMARY KEY,
+    replay_id    BIGINT NOT NULL REFERENCES replays (id) ON DELETE CASCADE,
+    source_run   TEXT NOT NULL,                  -- 被 👎 的原运行
+    new_run      TEXT,                           -- 重放出来的运行
+    verdict      TEXT,                           -- fixed / same / worse / unclear；空 = 还没判
+    reason       TEXT NOT NULL DEFAULT '',
+    judged_at    TIMESTAMPTZ,
+    UNIQUE (replay_id, source_run)
+);
+CREATE INDEX IF NOT EXISTS idx_replay_items_new_run ON replay_items (new_run);
 
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;

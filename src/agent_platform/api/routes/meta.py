@@ -72,7 +72,8 @@ async def search(q: str, rt: Runtime = RT, _: Caller = WHO):
                      "subtitle": f"{r['task']} · {r['env']} · {r['run_id'][:8]}", "href": f"/runs/{r['run_id']}"})
     for k in (await knowledge_store.list_entries(q=q.strip(), limit=6)):
         hits.append({"type": "knowledge", "id": str(k["id"]), "title": k["key"],
-                     "subtitle": f"{k['service']}@{k['env']} · {k['content'][:40]}", "href": f"/memory?knowledge={k['id']}"})
+                     "subtitle": f"{k['service']}@{k['env'] or '所有环境'} · {k['content'][:40]}",
+                     "href": f"/memory?knowledge={k['id']}"})
     return hits[:30]
 
 

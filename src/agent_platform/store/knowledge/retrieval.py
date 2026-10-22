@@ -1,4 +1,6 @@
-"""知识检索：pg_trgm + pgvector 混合召回，RRF 融合；code_ref 新鲜度校验。"""
+"""记忆检索：pg_trgm + pgvector 混合召回，RRF 融合；code_ref 新鲜度校验。
+
+检索范围：本服务里本环境的条目 + 所有环境通用的条目（env=''），事实与教训一起检索，交接摘要不参与。"""
 
 from __future__ import annotations
 
@@ -39,7 +41,8 @@ def code_base(path: str, code_paths: list[str]) -> str | None:
     沉淀（distill 记 commit）与校验（is_entry_fresh）共用本函数选仓库——
     两边各选各的会在多代码目录的域里记错 commit、误判漂移。
     """
-    matches = [b for b in code_paths if str(path).startswith(b)]
+    p = str(path)
+    matches = [b for b in code_paths if p == b.rstrip("/") or p.startswith(b.rstrip("/") + "/")]
     return max(matches, key=len) if matches else None
 
 
@@ -113,20 +116,22 @@ async def search(env: str, service: str, query: str, limit: int = 5,
     return [
         {"id": i, "key": k, "content": c,
          "code_ref": json.loads(r) if isinstance(r, str) else r,
-         "source_run": s, "task": t}
-        for i, k, c, r, s, t, *_ in rows  # 查询多带的分数字段，丢弃
+         "source_run": s, "task": t, "kind": kd, "env": e}
+        for i, k, c, r, s, t, kd, e, *_ in rows  # 查询多带的分数字段，丢弃
     ]
 
 
-MANUAL_BONUS_POINTS = 3      # 人工录入的条目（source_run 为空）相当于多 3 个 👍
+MANUAL_BONUS_POINTS = 3      # 人工录入的条目（source_run 为空）加 3 分
+PENALTY_FLOOR = -5           # 👎 扣分封顶
 
 
 async def _weight_by_feedback(candidates: list, limit: int,
                               fb_per_point: float = 0.01) -> list:
-    """反馈加权终排：RRF 名次分 1/(60+rank) + (反馈分 + 人工加成) × 系数，反馈分 ±5 封顶。
+    """终排：RRF 名次分 1/(60+rank) + (👎 扣分 + 人工加成) × 系数。
 
-    单通道（仅 trgm/仅向量）也走同一公式——反馈对所有召回路径生效。
-    候选集在 limit 截断前加权，高反馈、人工写的后排条目能挤进前 limit。
+    只罚不奖：没人会去点 👍，正分没有信号。扣分来自两处（store/feedback.shift_memory_weight）——
+    沉淀出它的运行被 👎，或召回了它的运行被 👎。人工录入的条目加分。
+    候选集在 limit 截断前加权，人工写的后排条目能挤进前 limit，反复惹麻烦的会沉下去。
     """
     if not candidates:
         return []
@@ -134,7 +139,7 @@ async def _weight_by_feedback(candidates: list, limit: int,
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, COALESCE(feedback_score, 0), source_run IS NULL FROM knowledge WHERE id = ANY(%s)", (ids,))
-        points = {i: max(-5, min(5, fb)) + (MANUAL_BONUS_POINTS if manual else 0)
+        points = {i: max(PENALTY_FLOOR, min(0, fb)) + (MANUAL_BONUS_POINTS if manual else 0)
                   for i, fb, manual in await cur.fetchall()}
 
     def score(rank_row):
@@ -162,9 +167,9 @@ async def _search_vector(env, service, vec: list[float], limit):
     try:
         async with pool().connection() as conn:
             cur = await conn.execute(
-                "SELECT id, key, content, code_ref, source_run, task,"
+                "SELECT id, key, content, code_ref, source_run, task, kind, env,"
                 " 1 - (embedding <=> %s::vector) AS sim FROM knowledge"
-                " WHERE env=%s AND service=%s AND expired=false AND valid_to IS NULL"
+                " WHERE env IN ('', %s) AND service=%s AND kind <> 'handoff' AND expired=false AND valid_to IS NULL"
                 " AND embedding IS NOT NULL"
                 " ORDER BY embedding <=> %s::vector LIMIT %s",
                 (lit, env, service, lit, limit))
@@ -179,9 +184,9 @@ async def _search_trgm(env, service, terms, limit):
     sim_expr = "GREATEST(" + ", ".join(
         ["word_similarity(%s, key || ' ' || content)"] * len(terms)) + ")"
     like_expr = " OR ".join(["key ILIKE %s OR content ILIKE %s"] * len(terms))
-    sql = (f"SELECT id, key, content, code_ref, source_run, task, {sim_expr} AS sim"
+    sql = (f"SELECT id, key, content, code_ref, source_run, task, kind, env, {sim_expr} AS sim"
            f" FROM knowledge"
-           f" WHERE env=%s AND service=%s AND expired=false AND valid_to IS NULL"
+           f" WHERE env IN ('', %s) AND service=%s AND kind <> 'handoff' AND expired=false AND valid_to IS NULL"
            f" AND ({sim_expr} > 0.08 OR {like_expr})"
            f" ORDER BY sim DESC, feedback_score DESC, created_at DESC LIMIT %s")
     params = (list(terms)
@@ -204,8 +209,8 @@ async def _search_ilike(env, service, terms, limit):
         params += [f"%{t}%", f"%{t}%"]
     async with pool().connection() as conn:
         cur = await conn.execute(
-            f"SELECT id, key, content, code_ref, source_run, task FROM knowledge"
-            f" WHERE env=%s AND service=%s AND expired=false AND valid_to IS NULL"
+            f"SELECT id, key, content, code_ref, source_run, task, kind, env FROM knowledge"
+            f" WHERE env IN ('', %s) AND service=%s AND kind <> 'handoff' AND expired=false AND valid_to IS NULL"
             f" AND ({where})"
             f" ORDER BY feedback_score DESC, created_at DESC LIMIT %s",
             (*params, limit))

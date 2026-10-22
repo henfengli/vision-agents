@@ -1,11 +1,11 @@
 /**
- * ⌘K 命令面板：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/知识）。
+ * ⌘K 命令面板：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/记忆）。
  * 键盘：↑↓ 选择、Enter 执行、Esc 关闭。
  */
 import { Dialog, DialogPanel } from "@headlessui/react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
-  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSlidersHorizontal, LuSun,
+  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSun,
 } from "react-icons/lu";
 
 import { api, useEnvs } from "@/api/hooks";
@@ -29,7 +29,7 @@ interface Cmd { id: string; label: ReactNode; hint?: ReactNode; icon: ReactNode;
 const HIT_ICON: Record<SearchHit["type"], ReactNode> = {
   service: <LuServer />, task: <LuListTodo />, run: <LuActivity />, role: <LuBot />, knowledge: <LuBrain />, session: <LuMessageSquare />,
 };
-const HIT_GROUP: Record<SearchHit["type"], string> = { service: "服务", task: "任务", run: "运行", role: "角色", knowledge: "知识", session: "会话" };
+const HIT_GROUP: Record<SearchHit["type"], string> = { service: "服务", task: "任务", run: "运行", role: "角色", knowledge: "记忆", session: "会话" };
 
 export function CommandPalette() {
   const isOpen = useSyncExternalStore((l) => { subs.add(l); return () => subs.delete(l); }, () => open);
@@ -58,11 +58,12 @@ export function CommandPalette() {
       { id: "nav-tasks", label: "任务", icon: <LuListTodo />, group: "跳转", run: go("/tasks"), keywords: "tasks" },
       { id: "nav-runs", label: "运行", icon: <LuActivity />, group: "跳转", run: go("/runs"), keywords: "runs" },
       { id: "nav-failed", label: "失败的运行", hint: "近 24h", icon: <LuActivity />, group: "跳转", run: go("/runs?status=failed&hours=24"), keywords: "failed" },
+      { id: "nav-feedback", label: "反馈", hint: "👎 收件箱", icon: <LuMessageSquareWarning />, group: "跳转", run: go("/runs?view=feedback"), keywords: "feedback thumbs" },
+      { id: "nav-replays", label: "回归重放", hint: "用当前定义重跑被 👎 的运行", icon: <LuFlaskConical />, group: "跳转", run: go("/runs?view=replays"), keywords: "replay regression eval" },
       { id: "nav-chat", label: "对话", icon: <LuMessageSquare />, group: "跳转", run: go("/chat"), keywords: "chat" },
       { id: "nav-approvals", label: "审批", icon: <LuShieldCheck />, group: "跳转", run: go("/approvals"), keywords: "approvals" },
       { id: "nav-memory", label: "记忆", icon: <LuBrain />, group: "跳转", run: go("/memory"), keywords: "memory knowledge" },
       { id: "nav-roles", label: "角色", icon: <LuBot />, group: "跳转", run: go("/settings/roles"), keywords: "roles" },
-      { id: "nav-policies", label: "策略", icon: <LuSlidersHorizontal />, group: "跳转", run: go("/settings/policies"), keywords: "policies" },
       { id: "nav-settings", label: "设置", icon: <LuSettings />, group: "跳转", run: go("/settings"), keywords: "settings admin" },
       { id: "nav-prefs", label: "个人偏好", icon: <LuSettings />, group: "跳转", run: go("/settings/preferences"), keywords: "preferences theme" },
       { id: "nav-envs", label: "环境设置", icon: <LuLayers />, group: "跳转", run: go("/settings/envs"), keywords: "envs" },

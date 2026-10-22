@@ -8,7 +8,7 @@ class Rejected(ValueError):
 
     原因码清单（对外契约，见 docs/外部接口文档.md）：
     - 闸门：service_disabled / service_env_disabled / task_disabled / env_not_allowed /
-      trigger_not_allowed / policy
+      trigger_not_allowed
     - 解析：unknown_task / unknown_service / unknown_env / service_required /
       service_not_allowed / invalid_subtask / invalid_input / invalid_definition
     - 权限：unauthorized / forbidden

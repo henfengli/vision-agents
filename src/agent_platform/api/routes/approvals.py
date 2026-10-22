@@ -1,13 +1,12 @@
-"""审批。四类人工门共用一张单子：submit（提交命中审批策略）/ command（危险命令）/
-artifact（任务图闸门节点）/ process（受保护环境的进程启停）。
+"""审批（默认关闭，设置 → 审批）。两类人工门共用一张单子：command（危险命令）/ process（进程启停）。
 
     GET  /v1/approvals            列表：status=pending|decided  kind  service  env
     GET  /v1/approvals/{id}
     POST /v1/approvals/{id}/approve   {comment}
     POST /v1/approvals/{id}/reject    {comment}
 
-运行中途的门（command / artifact / 运行里发起的 process）由等待中的运行自己继续；
-提交审批放行后启动运行；控制台发起的进程启停放行后在这里执行。
+运行中途的门（command / 运行里发起的 process）由等待中的运行自己继续；
+控制台发起的进程启停放行后在这里执行。
 """
 
 from __future__ import annotations
@@ -58,9 +57,7 @@ async def _decide(rt: Runtime, approval_id: int, approved: bool, comment: str, w
     if decided is None:
         raise Rejected("already_decided", f"已被 {current['decided_by'] or '系统'} 处理（{current['status']}）", 409)
 
-    if decided["kind"] == "submit":
-        await rt.submitter.on_submit_decision(decided)
-    elif decided["kind"] == "process" and decided["payload"].get("executor") == "api" and approved:
+    if decided["kind"] == "process" and decided["payload"].get("executor") == "api" and approved:
         p = decided["payload"]
         try:
             await perform(rt, p["action"], p["service"], p["env"], p["process"], p.get("hours"), p.get("by") or who.name)

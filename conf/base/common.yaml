@@ -1,7 +1,7 @@
 # 部署配置（所有机器共享的默认值）。env/{AGENT_ENV}.yaml 只写差异（深合并）；${VAR} 从环境变量取。
 #
-# 这里只放"这台平台怎么跑起来"：数据库、模型、Temporal、引导密钥、外部系统地址。
-# 服务 / 角色 / 任务 / 策略与平台配置（环境、审批、通知、记忆、进程）都在控制台里改，存库、带版本；
+# 这里只放"这台平台怎么跑起来"：数据库、模型、执行并发、引导密钥、外部系统地址。
+# 服务 / 角色 / 任务与平台配置（环境、审批、通知、记忆、进程）都在控制台里改，存库、带版本；
 # conf/seeds/ 只在库里还没有对应对象时播种一次。
 
 model:
@@ -10,10 +10,14 @@ model:
   max_concurrency: 10
   # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索
 
-temporal:
-  address: 127.0.0.1:7233
-  namespace: default
-  task_queue: agent-platform
+# 执行队列就是 PG 里的 runs 表（不依赖别的编排服务）：同时执行几个运行
+worker:
+  max_concurrent_runs: 10
+
+# 项目内核（py 工具）：每个 会话×服务×环境 一个常驻 Python 进程
+kernel:
+  idle_minutes: 30                  # 空闲多久回收
+  max_kernels: 8                    # 同时最多几个（超了回收最久没用的）
 
 process_control:
   backend: local                    # systemd（生产）/ local（开发机）/ off
@@ -36,19 +40,11 @@ langfuse:
 #   datasource_uid: prometheus
 #   token: "${GRAFANA_TOKEN}"
 
-# 内部 MCP 服务器（可选）：{名字: langchain-mcp-adapters 连接配置}，工具会出现在角色的工具列表里。
-# 和别的工具一样绑定运行的 服务×环境：service 限定只在哪个服务的运行里可用；
-# envs 给每个环境一份连接（深合并到上面），调用按运行的环境路由。不写 envs = 一份连接、不分环境。
+# 平台 MCP（可选）：通用能力，{名字: langchain-mcp-adapters 连接配置}。角色里写工具名，或 "mcp:<名字>" 引用整个 server。
+# 某个服务特有的能力（比如 dagster 的 GraphQL）写在服务定义的 mcp 里，运行在该服务上时自动出现，不用写进角色。
+# 这里也能写 service（只在该服务的运行里可用）和 envs（每个环境一份连接，调用按运行的环境路由）。
 # mcp_servers:
-#   dagster:
-#     transport: stdio
-#     command: python
-#     args: ["/opt/agent-platform/mcp_servers/dagster_mcp.py"]
-#     service: dagster
-#     envs:
-#       prod: {env: {DAGSTER_URL: "http://10.0.0.11:3000"}}
-#       test: {env: {DAGSTER_URL: "http://10.0.1.11:3001"}}
-#   browser:
+#   browser:                           # qa_engineer 角色用 "mcp:browser"；页面地址来自服务的 urls
 #     transport: stdio
 #     command: npx
 #     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--output-dir", "/var/lib/agent-platform/scratch"]

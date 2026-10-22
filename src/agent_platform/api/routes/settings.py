@@ -67,8 +67,6 @@ async def put_section(section: str, body: dict, rt: Runtime = RT, who: Caller = 
             if ch.get("token") == MASK:
                 ch["token"] = previous.channels[name].token if name in previous.channels else ""
     await rt.registry.put_config(section, body, who.name)
-    if section == "envs":
-        rt.resync_schedules()
     return await _shown(rt, section)
 
 

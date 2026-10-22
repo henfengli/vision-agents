@@ -6,26 +6,15 @@
 3. task_disabled         任务停用（子任务停用或其父任务停用）
 4. env_not_allowed       任务的 envs 不含该环境
 5. trigger_not_allowed   任务没有声明这种触发
-6. policy                提交策略：deny 直接拒；require_approval 先审批
 
-续跑 / 重跑 / 审批放行 / 定时触发只过 1–4（check_switches）；新提交过全部（admit）。
+续跑 / 重跑 / 回归重放只过 1–4（check_switches）；新提交过全部（admit）。
+所有运行被 worker 认领后再过一遍 1–4：排队期间开关可能变了。
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-
 from ..domain import Rejected, TaskDef
 from ..registry import Registry
-
-
-@dataclass
-class Admission:
-    """放行结论。approval_policy 非空 = 命中 require_approval 策略，先审批再执行。"""
-
-    approval_policy: str | None = None
-    approval_message: str = ""
 
 
 async def check_switches(reg: Registry, *, task_name: str, task: TaskDef, service: str | None, env: str) -> None:
@@ -48,21 +37,9 @@ async def check_switches(reg: Registry, *, task_name: str, task: TaskDef, servic
 
 
 async def admit(reg: Registry, *, task_name: str, task: TaskDef, service: str | None, env: str,
-                trigger_type: str | None, input_data: dict) -> Admission:
-    """全部 6 环。trigger_type=None：控制台手动运行，人点的，不受任务触发声明约束。"""
+                trigger_type: str | None) -> None:
+    """全部 5 环。trigger_type=None：控制台手动运行，人点的，不受任务触发声明约束。"""
     await check_switches(reg, task_name=task_name, task=task, service=service, env=env)
     if not task.allows(trigger_type):
         declared = "、".join(sorted({t.type for t in task.triggers if t.enabled})) or "无"
         raise Rejected("trigger_not_allowed", f"任务 {task_name} 没有声明 {trigger_type} 触发（已声明：{declared}）")
-
-    text = json.dumps(input_data, ensure_ascii=False, default=str)
-    needs_approval = None
-    for p in await reg.policies():
-        if not (p.spec.enabled and p.spec.applies_to.covers(task_name, service, env) and p.spec.matches(text)):
-            continue
-        if p.spec.action == "deny":
-            raise Rejected("policy", p.spec.message or f"命中提交策略 {p.name}", detail={"policy": p.name})
-        needs_approval = needs_approval or p          # 多条 require_approval 时按 order 取第一条
-    if needs_approval:
-        return Admission(needs_approval.name, needs_approval.spec.message or f"命中策略 {needs_approval.name}，需人工放行")
-    return Admission()

@@ -1,5 +1,5 @@
 /**
- * 版本历史：时间线 + 任选两版 diff + 恢复。服务 / 角色 / 任务 / 策略与平台配置各节共用。
+ * 版本历史：时间线 + 任选两版 diff + 恢复。服务 / 角色 / 任务与平台配置各节共用。
  */
 import { useEffect, useMemo, useState } from "react";
 import { LuGitCompare, LuHistory, LuRotateCcw } from "react-icons/lu";

@@ -4,13 +4,12 @@
 envs:
   default: test                       # 请求不带 env 时打到测试环境：生产必须显式指定
   items:
-    # startable: false = 只看不起：平台不在本机用生产配置起副本（会真的连生产库、跑生产调度）；单个服务可在「环境」里放开
-    - {name: prod, title: 生产, protected: true, startable: false, color: red, description: 线上环境，只看不起；危险命令需审批}
+    - {name: prod, title: 生产, protected: true, color: red, description: 线上环境（配置里是只读账户）}
     - {name: test, title: 测试, color: amber, description: 集成测试环境，数据每周从生产脱敏同步}
     - {name: dev, title: 开发, color: blue, description: 开发自测}
 
 approvals:
-  required_in: protected              # 危险命令只在受保护环境审批；改成 all 则处处审批
+  required_in: "off"                  # 关闭；以后让 agent 执行变更类任务时改成 protected（受保护环境审批）或 all
   timeout_minutes: 30
 
 notifications:

@@ -1,7 +1,7 @@
 /**
  * 反馈：对整次运行（step=0）或其中一步的 👍👎。
  *
- * - 👍 一点即存，再点撤回。
+ * - 👍 一点即存，再点撤回（只留档；记忆的召回权重只看 👎）。
  * - 👎 打开面板：选问题类型（可多选）+ 写说明；整次运行还可以勾选"按这条意见让 agent 重答"（= 纠正）。
  * - 一人一步一条，再提交就是改；面板里能撤回。
  *
@@ -49,7 +49,7 @@ export function FeedbackButtons({ runId, step = 0, mine, onSaved, onCorrect, siz
         save(null);
       } else {
         save(await api.rate(runId, step, { score: 1, reasons: [], comment: "" }));
-        if (!step) toast("已标记为有用", { description: "这次运行沉淀的知识与方法会被加权" });
+        if (!step) toast("已标记为有用");
       }
     } catch (e) { toast.error("反馈失败", (e as Error).message); }
   };
@@ -92,7 +92,7 @@ function NegativeForm({ runId, step, current, onCorrect, onDone }: {
     try {
       const entry = await api.rate(runId, step, { score: -1, reasons, comment: comment.trim() });
       if (redo && onCorrect && comment.trim()) onCorrect(comment.trim());
-      toast(editing ? "反馈已更新" : "已记录反馈", { description: step ? "单步反馈只留档，供改进角色时回看" : "这次运行沉淀的知识与方法会被降权" });
+      toast(editing ? "反馈已更新" : "已记录反馈", { description: step ? "单步反馈只留档，供改进角色时回看" : "这次运行记下的、召回的记忆会扣分，召回时排在后面" });
       onDone(entry);
     } catch (e) { toast.error("反馈失败", (e as Error).message); } finally { setBusy(false); }
   };
@@ -117,7 +117,7 @@ function NegativeForm({ runId, step, current, onCorrect, onDone }: {
         placeholder={step ? "例如：这里应该查 ods 层而不是 dwd 层" : "说说正确的应该是什么，例如：GMV 不扣退款，按支付日统计"} />
       {onCorrect && !step && (
         <Checkbox checked={redo} onChange={setRedo} disabled={!comment.trim()}
-          label="按这条意见让 agent 重答" hint="在同一会话开新一轮（纠正），意见会沉淀为人工知识" />
+          label="按这条意见让 agent 重答" hint="在同一会话开新一轮（纠正），意见会记成人工记忆" />
       )}
       <div className="flex items-center gap-2">
         {editing && <span className="text-[11px] text-fg-3">{ago(current.updated_at)}提交</span>}

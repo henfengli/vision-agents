@@ -1,5 +1,16 @@
-# 任务 = 要做的事：归属（服务 / "*" 通用 / 不写 = 平台任务）+ 形态（agent / graph / builtin）+ 输入 + 触发 + 投递。
+# 任务 = 要做的事：归属（服务 / "*" 通用 / 不写 = 平台任务）+ 形态（agent / builtin）+ 输入 + 触发 + 投递。
 # 子任务写成 "父任务:对象名"，只写和父任务不同的字段。
+# ask 是通用入口：任何服务、任何环境直接提问或交代一件事，不用先建任务；要定时、事件、投递、去重时再建正式任务。
+
+ask:
+  title: 问一下
+  description: 通用入口：对这个服务这个环境直接提问或交代一件事
+  service: "*"
+  role: generalist
+  input:
+    question: {type: text, required: true, description: 问题或要做的事}
+  triggers: [{id: chat, type: chat}, {id: api, type: api}]
+  timeout_s: 900
 
 failure-analysis:
   title: Dagster 失败分析

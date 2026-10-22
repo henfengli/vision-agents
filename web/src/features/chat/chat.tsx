@@ -21,17 +21,24 @@ import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
 import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea, objectNameError } from "@/components/ui/form";
 import { Popover, Tooltip, toast } from "@/components/ui/overlay";
-import { Skeleton } from "@/components/ui/primitives";
+import { Badge, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
 import { invalidate } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
+import { ASK_TASK } from "../tasks/run-dialog";
 
 interface LiveTurn extends ChatTurn { streaming?: boolean }
 
+/** 通用入口 ask 排第一个（没指定任务时后端也是：服务专属的对话任务优先，其次 ask） */
+const askFirst = (a: TaskSummary, b: TaskSummary) => Number(b.name === ASK_TASK) - Number(a.name === ASK_TASK);
 const chatTasksFor = (tasks: TaskSummary[] | undefined, service: string) =>
-  (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat") && (t.service === service || t.service === "*"));
+  (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat") && (t.service === service || t.service === "*")).sort(askFirst);
+
+const chatTaskOption = (t: TaskSummary) => t.name === ASK_TASK
+  ? { value: t.name, label: <span className="flex items-center gap-1.5">{t.title || t.name}<Badge tone="accent">通用</Badge></span>, hint: "ask · 任何服务任何环境直接问" }
+  : { value: t.name, label: t.title || t.name, hint: `${t.name}${t.service === "*" ? " · 通用" : ""}` };
 
 export function ChatPage() {
   const { session } = useParams<{ session?: string }>();
@@ -47,7 +54,7 @@ export function ChatPage() {
     }
     return [["今天", today], ["近 7 天", week], ["更早", older]] as const;
   }, [sessions]);
-  const chatTaskOptions = (tasks ?? []).filter((t) => !t.extends && t.triggers.some((tr) => tr.type === "chat")).map((t) => ({ value: t.name, label: t.title || t.name }));
+  const chatTaskOptions = (tasks ?? []).filter((t) => !t.extends && t.triggers.some((tr) => tr.type === "chat")).sort(askFirst).map((t) => ({ value: t.name, label: t.title || t.name }));
 
   return (
     <div className="flex h-full">
@@ -219,9 +226,9 @@ function Conversation({ sessionId }: { sessionId?: string }) {
               <Select size="sm" className="w-24" value={env || null} disabled={locked} onChange={setEnv}
                 options={(envs ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: svc?.health[e.name]?.enabled === false ? "该服务在此环境已停用" : e.title }))} />
             </Dim>
-            <Dim label="任务" locked={locked} hint="问哪一类问题：服务上声明了「对话」触发的任务都能选，不同任务用不同的角色与档案">
+            <Dim label="任务" locked={locked} hint="问哪一类问题：服务上声明了「对话」触发的任务都能选，不同任务用不同的角色与档案；拿不准就用「问一下」（通用入口，什么都能问、能交代事）">
               <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
-                placeholder="该服务没有对话任务" options={chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: `${t.name}${t.service === "*" ? " · 通用" : ""}` }))} />
+                placeholder="该服务没有对话任务" options={chatTasks.map(chatTaskOption)} />
             </Dim>
             <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个指标、一张表）问。会带上这个对象的专属档案，沉淀的知识也记在它名下；输入新名字会自动建一个。`}>
               {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
@@ -249,7 +256,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
               </span>
             }>
               <div className="w-64 space-y-3 p-3">
-                <Switch checked={memory.recall} onChange={(recall) => setMemory({ ...memory, recall })} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查知识、案例、方法</span></span>} />
+                <Switch checked={memory.recall} onChange={(recall) => setMemory({ ...memory, recall })} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查记忆与方法</span></span>} />
                 <Switch checked={memory.save} onChange={(save) => setMemory({ ...memory, save })} label={<span>沉淀<span className="ml-1 text-[11.5px] text-fg-3">回答后存可复用结论</span></span>} />
                 <div className="text-[11.5px] text-fg-3">只影响接下来的消息；平台默认在 设置 → 记忆。</div>
               </div>

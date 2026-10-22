@@ -8,12 +8,13 @@
 - local（开发）：本机子进程跑 svcrun，日志写 <数据目录>/instances/<实例>.log。
 - off：只读，不允许启停。
 
-只看不起：服务在该环境 startable=false 时拒绝启动（start_not_allowed），停止照常——
-平台起的是本机副本，用生产配置起一份副本会真的连生产库、跑生产调度。
+按需启停：服务在该环境启用（envs[env].enabled）就能起，用完停；平台起的是本机副本。
 
 租约：每次启动带租约（默认取进程定义，封顶 max_lease_hours），到期自动停——
 调试用的环境不会被遗忘地一直跑着。续期从当前到期时间往后加。
-审批不在这里：受保护环境的启停由调用方（API / service_ctl 工具）先过人工门。
+审批不在这里：设置里打开了审批时，由调用方（API / service_ctl 工具）先过人工门。
+
+env_spec() 是"按环境把配置文件就位"的唯一出处：进程启动规格和项目内核（services/kernel.py）共用。
 """
 
 from __future__ import annotations
@@ -73,10 +74,9 @@ class ProcessController:
             raise Rejected.not_found(f"服务 {service} 的进程 {process}")
         return s.spec, proc.ports.get(env)
 
-    async def build_spec(self, service: str, svc: ServiceDef, env: str, process: str) -> dict:
-        """启动规格：命令/工作目录渲染好，配置文件 bind 到固定路径，其他环境的文件与平台密钥遮蔽。"""
-        proc = svc.processes[process]
-        port = proc.ports.get(env)
+    async def env_spec(self, svc: ServiceDef, env: str) -> dict:
+        """这个环境的配置文件 bind 到固定路径，其他环境的同名文件与平台密钥遮蔽。
+        → {binds: [[源, 固定路径]], masks: [...], python, env_vars}。缺配置文件时报 config_missing。"""
         binds, masks = [], list(self._settings.hidden_paths)
         all_envs = (await self._reg.envs()).names
         for c in svc.configs:
@@ -88,18 +88,47 @@ class ProcessController:
                 for p in (c.path_for(other), c.canonical_for(other)):
                     if p not in (selected, c.canonical_for(env)) and os.path.exists(p):
                         masks.append(p)
+        view = svc.view("", env)
+        return {"binds": binds, "masks": masks, "python": view.python, "env_vars": view.env_vars}
+
+    async def runtime_spec(self, service: str, env: str) -> dict:
+        """项目内核用：该服务×环境的解释器、工作目录、配置就位规格。不依赖进程控制后端（off 也能用）。"""
+        s = await self._reg.service(service)
+        if s is None:
+            raise Rejected.not_found(f"服务 {service}")
+        view = await self._reg.service_view(service, env)
+        if not view.enabled:
+            raise Rejected("service_env_disabled", f"服务 {service} 在 {env} 环境已停用")
+        spec = {**await self.env_spec(s.spec, env), "service": service, "env": env, "workdir": view.root or None}
+        self.prepare_binds(spec, service, env)
+        return spec
+
+    @staticmethod
+    def prepare_binds(spec: dict, service: str, env: str) -> None:
+        """起进程 / 内核前：配置文件得在，固定路径得有个占位（bwrap 只能往已存在的路径上 bind）。"""
+        missing = [src for src, _ in spec["binds"] if not os.path.exists(src)]
+        if missing:
+            raise Rejected("config_missing", f"{service} 在 {env} 的配置文件不存在：{'、'.join(missing)}")
+        _ensure_mount_points([dst for _, dst in spec["binds"]])
+
+    async def build_spec(self, service: str, svc: ServiceDef, env: str, process: str) -> dict:
+        """启动规格：命令/工作目录渲染好（cmd 里可写 {env} {port} {python}），配置文件按环境就位。"""
+        proc = svc.processes[process]
+        port = proc.ports.get(env)
+        base = await self.env_spec(svc, env)
+        python = base["python"]
         return {
             "instance": instance_name(service, env, process), "service": service, "env": env, "process": process,
-            "argv": [render(a, env, port) for a in proc.cmd],
+            "argv": [render(a, env, port, python) for a in proc.cmd],
             "workdir": render(proc.workdir or svc.root, env, port) or None, "port": port,
-            "binds": binds, "masks": masks,
-            "env_vars": {k: render(v, env, port) for k, v in proc.env_vars.items()},
+            "binds": base["binds"], "masks": base["masks"],
+            "env_vars": {**base["env_vars"], **{k: render(v, env, port, python) for k, v in proc.env_vars.items()}},
         }
 
     # —— 观察 ——
 
     async def list(self, service: str) -> list[dict]:
-        """该服务全部 (环境 × 进程) 的实例状态，未启动过的也列出（stopped）。startable：该环境能不能起。"""
+        """该服务全部 (环境 × 进程) 的实例状态，未启动过的也列出（stopped）。enabled：服务在该环境是否启用。"""
         s = await self._reg.service(service)
         if s is None:
             raise Rejected.not_found(f"服务 {service}")
@@ -107,14 +136,14 @@ class ProcessController:
         out = []
         for e in (await self._reg.envs()).items:
             env = e.name
-            startable = s.spec.view(service, env, e.startable).startable
+            enabled = s.spec.view(service, env).enabled
             for process, pdef in s.spec.processes.items():
                 row = rows.get((env, process)) or {
                     "service": service, "env": env, "process": process, "state": "stopped", "port": None, "pid": None,
                     "started_at": None, "lease_until": None, "started_by": None, "last_exit": None}
                 if row["port"] is None:
                     row["port"] = pdef.ports.get(env)
-                out.append({**await self._reconcile(row), "startable": startable})
+                out.append({**await self._reconcile(row), "enabled": enabled})
         return out
 
     async def get(self, service: str, env: str, process: str) -> dict:
@@ -177,16 +206,13 @@ class ProcessController:
             raise Rejected("process_control_off", "平台未开启进程启停（process_control.backend=off）")
 
     async def ensure_startable(self, service: str, env: str) -> None:
-        """能不能在这个环境起进程。受保护环境的调用方要在发审批前先问这里，免得审批一张注定被拒的单。"""
+        """能不能在这个环境起进程：开了进程控制、服务在该环境启用。要审批的调用方先问这里，免得审批注定失败的单。"""
         self._require_enabled()
         view = await self._reg.service_view(service, env)
         if view is None:
             raise Rejected.not_found(f"服务 {service}")
         if not view.enabled:
             raise Rejected("service_env_disabled", f"服务 {service} 在 {env} 环境已停用")
-        if not view.startable:
-            raise Rejected("start_not_allowed",
-                           f"服务 {service} 在 {env} 只看不起：平台不在这个环境启动进程（服务 → 环境 → 允许启动进程）")
 
     async def start(self, service: str, env: str, process: str, *, by: str, lease_hours: float | None = None) -> dict:
         svc, port = await self._resolve(service, env, process)
@@ -195,10 +221,7 @@ class ProcessController:
         if current["state"] in ("running", "starting"):
             return current
         spec = await self.build_spec(service, svc, env, process)
-        missing = [src for src, _ in spec["binds"] if not os.path.exists(src)]
-        if missing:
-            raise Rejected("config_missing", f"{service} 在 {env} 的配置文件不存在：{'、'.join(missing)}")
-        _ensure_mount_points([dst for _, dst in spec["binds"]])
+        self.prepare_binds(spec, service, env)
         spec_path(self._settings.instances_dir, spec["instance"]).write_text(json.dumps(spec, ensure_ascii=False, indent=2))
         limits = await self._reg.config("processes")
         lease = min(lease_hours or svc.processes[process].lease_hours or limits.default_lease_hours, limits.max_lease_hours)

@@ -4,22 +4,22 @@
  */
 import { del, get, patch, post, put } from "./client";
 import type {
-  ApiKey, Approval, ApprovalFilters, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, Case, ConfigSection, ConfigSections, Instance, Knowledge,
-  KnowledgeRevision, MemoryFilters, MemoryHealth, Meta, Page, Policy, ResolvedRole, Role, Run, RunAccepted, RunEvent,
-  RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary, ServiceView, SessionDetail, SessionSummary, Settings,
-  Stats, SubtaskCreate, TaskSummary, UpcomingFire, Version,
+  ApiKey, Approval, ApprovalFilters, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigSection, ConfigSections, Instance, Knowledge,
+  KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters, MemoryHealth, Meta, Page, ReplayDetail,
+  ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary,
+  ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire, Version,
 } from "./types";
 import { useQuery, type QueryOptions } from "../lib/query";
 
 const enc = encodeURIComponent;
 
 /** 定义的复数资源名（路径用） */
-export type DefinitionPath = "services" | "roles" | "tasks" | "policies";
+export type DefinitionPath = "services" | "roles" | "tasks";
 
 export const api = {
   meta: () => get<Meta>("/v1/meta"),
 
-  // —— 定义（服务 / 角色 / 任务 / 策略）——
+  // —— 定义（服务 / 角色 / 任务）——
   create: <T>(kind: DefinitionPath, body: object) => post<T>(`/v1/${kind}`, body),
   update: <T>(kind: DefinitionPath, name: string, body: object) => patch<T>(`/v1/${kind}/${enc(name)}`, body),
   remove: (kind: DefinitionPath, name: string) => del<{ deleted: string[] }>(`/v1/${kind}/${enc(name)}`),
@@ -34,6 +34,8 @@ export const api = {
   serviceConfig: (name: string, env: string, path: string) =>
     get<{ path: string; content: string }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),
   processes: (name: string) => get<Instance[]>(`/v1/services/${enc(name)}/processes`),
+  /** 服务自己声明的 MCP 工具；reload=true 强制重连（改了 MCP 服务端之后） */
+  serviceTools: (name: string, reload = false) => get<ServiceTools>(`/v1/services/${enc(name)}/tools`, { reload: reload || undefined }),
   processAction: (name: string, env: string, proc: string, action: "start" | "stop" | "renew", hours?: number) =>
     post<{ instance: Instance; approval: Approval | null }>(
       `/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/${action}`, hours ? { hours } : {}),
@@ -49,8 +51,6 @@ export const api = {
   subtasks: (name: string) => get<TaskSummary[]>(`/v1/tasks/${enc(name)}/subtasks`),
   createSubtask: (name: string, body: SubtaskCreate) => post<TaskSummary>(`/v1/tasks/${enc(name)}/subtasks`, body),
   taskSchedule: (name: string) => get<UpcomingFire[]>(`/v1/tasks/${enc(name)}/schedule`),
-
-  policies: () => get<Policy[]>("/v1/policies"),
 
   // —— 运行 ——
   runs: (f: RunFilters) => get<Page<RunListItem>>("/v1/runs", { ...f }),
@@ -69,6 +69,12 @@ export const api = {
     del(step ? `/v1/runs/${enc(id)}/events/${step}/feedback` : `/v1/runs/${enc(id)}/feedback`),
   feedbackInbox: (f: FeedbackFilters) => get<FeedbackInboxItem[]>("/v1/feedback", { ...f }),
 
+  // —— 回归重放：拿被 👎 的运行用当前定义重跑，模型判定改好没有 ——
+  replays: () => get<ReplaySummary[]>("/v1/replays"),
+  replay: (id: number) => get<ReplayDetail>(`/v1/replays/${id}`),
+  startReplay: (body: ReplayRequest) => post<ReplayDetail>("/v1/replays", body),
+  rejudgeReplay: (id: number) => post<ReplayDetail>(`/v1/replays/${id}/judge`),
+
   // —— 对话 ——
   sessions: (f: { service?: string; env?: string; task?: string; q?: string } = {}) => get<SessionSummary[]>("/v1/sessions", f),
   session: (id: string) => get<SessionDetail>(`/v1/sessions/${enc(id)}`),
@@ -78,20 +84,21 @@ export const api = {
   approve: (id: number, comment = "") => post<Approval>(`/v1/approvals/${id}/approve`, { comment }),
   reject: (id: number, comment = "") => post<Approval>(`/v1/approvals/${id}/reject`, { comment }),
 
-  // —— 记忆 ——
-  knowledge: (f: MemoryFilters) => get<Knowledge[]>("/v1/knowledge", { ...f }),
+  // —— 记忆（agent 记下的：事实 / 教训）与方法；档案在服务 / 任务定义里 ——
+  knowledge: (f: KnowledgeFilters) => get<Knowledge[]>("/v1/knowledge", { ...f }),
   knowledgeHealth: (f: { service?: string; env?: string }) => get<MemoryHealth>("/v1/knowledge/health", f),
+  /** 近 30 天被 ≥5 次运行召回、没挨过 👎 的事实：值得升格进档案 */
+  knowledgePromotable: (f: { service?: string; env?: string }) => get<Knowledge[]>("/v1/knowledge/promotable", f),
+  knowledgeEntry: (id: number) => get<Knowledge>(`/v1/knowledge/${id}`),
   knowledgeHistory: (id: number) => get<KnowledgeRevision[]>(`/v1/knowledge/${id}/history`),
-  createKnowledge: (body: { service: string; env: string; task?: string; key: string; content: string }) =>
-    post<Knowledge>("/v1/knowledge", body),
+  createKnowledge: (body: KnowledgeCreate) => post<Knowledge>("/v1/knowledge", body),
   patchKnowledge: (id: number, body: { content?: string; status?: "active" | "expired" }) => patch<Knowledge>(`/v1/knowledge/${id}`, body),
+  promoteKnowledge: (id: number, body: KnowledgePromote) => post<KnowledgePromoted>(`/v1/knowledge/${id}/promote`, body),
   searchKnowledge: (body: { query: string; service: string; env: string; task?: string }) =>
     post<{ hits: (Knowledge & { rank: number })[]; block: string }>("/v1/knowledge/search", body),
   assets: (f: MemoryFilters & { kind?: string }) => get<Asset[]>("/v1/assets", { ...f }),
   createAsset: (body: Pick<Asset, "service" | "env" | "task" | "kind" | "name" | "summary" | "content">) => post<Asset>("/v1/assets", body),
   patchAsset: (id: number, body: { summary?: string; content?: string; status?: "active" | "superseded" }) => patch<Asset>(`/v1/assets/${id}`, body),
-  cases: (f: { service?: string; env?: string }) => get<Case[]>("/v1/cases", f),
-  removeCase: (id: number) => del(`/v1/cases/${id}`),
 
   // —— 设置 ——
   settings: () => get<Settings>("/v1/settings"),
@@ -120,7 +127,6 @@ export const useRole = (name: string) => useQuery(["roles", name], () => api.rol
 export const useTasks = (service?: string) => useQuery(["tasks", service ?? ""], () => api.tasks(service));
 export const useTask = (name: string) => useQuery(["tasks", "one", name], () => api.task(name));
 export const useSubtasks = (name: string) => useQuery(["tasks", "subtasks", name], () => api.subtasks(name), { enabled: !!name });
-export const usePolicies = () => useQuery(["policies"], api.policies);
 export const useVersions = (kind: DefinitionPath | `settings/${ConfigSection}`, name?: string) =>
   useQuery(["versions", kind, name ?? ""], () => api.versions(kind, name));
 export const useRuns = (f: RunFilters, o?: QueryOptions) => useQuery(["runs", "list", f], () => api.runs(f), { refetchInterval: 8000, ...o });
@@ -129,10 +135,15 @@ export const useRunEvents = (id: string, live = false) => useQuery(["runs", "eve
 export const useSessions = (f: { service?: string; env?: string; task?: string; q?: string } = {}) => useQuery(["sessions", f], () => api.sessions(f));
 export const useSession = (id: string) => useQuery(["sessions", "one", id], () => api.session(id), { enabled: !!id });
 export const useApprovals = (f: ApprovalFilters = {}) => useQuery(["approvals", f], () => api.approvals(f), { refetchInterval: 10_000 });
-export const useKnowledge = (f: MemoryFilters) => useQuery(["memory", "knowledge", f], () => api.knowledge(f));
+export const useServiceTools = (name: string) => useQuery(["services", name, "tools"], () => api.serviceTools(name), { staleTime: 30_000 });
+export const useKnowledge = (f: KnowledgeFilters) => useQuery(["memory", "knowledge", f], () => api.knowledge(f));
+export const usePromotable = (f: { service?: string; env?: string }) => useQuery(["memory", "promotable", f], () => api.knowledgePromotable(f));
 export const useAssets = (f: MemoryFilters & { kind?: string }) => useQuery(["memory", "assets", f], () => api.assets(f));
-export const useCases = (f: { service?: string; env?: string }) => useQuery(["memory", "cases", f], () => api.cases(f));
 export const useFeedbackInbox = (f: FeedbackFilters) => useQuery(["feedback", f], () => api.feedbackInbox(f));
+export const useReplays = (o?: QueryOptions) => useQuery(["replays", "list"], api.replays, o);
+/** 还有没判完的条目时每 5 秒刷新（判定在重放运行结束后异步进行） */
+export const useReplay = (id: number, live = false) =>
+  useQuery(["replays", "one", id], () => api.replay(id), { enabled: Number.isFinite(id), refetchInterval: live ? 5000 : undefined, live });
 export const useSettings = () => useQuery(["settings"], api.settings);
 export const useApiKeys = () => useQuery(["settings", "api-keys"], api.apiKeys);
 export const useStats = (q: { hours?: number; env?: string; service?: string }) => useQuery(["stats", q], () => api.stats(q), { refetchInterval: 30_000 });

@@ -50,6 +50,7 @@ export interface ToolInfo {
   description: string;
   group: "core" | "service" | "memory" | "notify" | "mcp";
   dangerous: boolean;
+  server?: string | null;      // group=mcp：所属的平台 MCP server（角色里可整组写成 "mcp:<server>"）
 }
 
 export interface EventSourceInfo {
@@ -79,8 +80,7 @@ export interface Env {
   name: string;          // prod / test / dev
   title: string;
   description: string;
-  protected: boolean;    // 受保护：危险命令、进程启停、命中审批策略的提交都要人放行
-  startable: boolean;    // 平台能否在此环境起服务进程（只看不起 = false；各服务可覆盖）
+  protected: boolean;    // 受保护：审批开在"受保护环境"时，这里的危险命令与进程启停要人放行
   color: EnvColor;
 }
 
@@ -89,9 +89,10 @@ export interface EnvsConfig {
   default: string;
 }
 
+/** 运行中途的人工门（危险命令、进程启停）。默认关闭 */
 export interface ApprovalsConfig {
   danger_patterns: string[];
-  required_in: "protected" | "all";
+  required_in: "off" | "protected" | "all";   // 关闭 / 只在受保护环境 / 所有环境
   timeout_minutes: number;
 }
 
@@ -175,14 +176,18 @@ export interface ProcessDef {
 }
 
 export interface ServiceEnvOverride {
-  enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程
-  startable?: boolean | null;   // 空 = 跟随环境默认（设置 → 环境）
+  enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程和内核
   ref?: string | null;          // 该环境跟踪的分支 / tag（代码同步的默认目标）
+  python?: string | null;       // 该环境的解释器；空 = 跟随服务的 python
   hosts?: string[] | null;
   readonly_dsn?: string | null;
   code_paths?: string[] | null;
+  urls?: Record<string, string>;  // 按键覆盖服务的 urls
   profile?: Record<string, string>;
 }
+
+/** 服务自己的 MCP server 连接配置（langchain-mcp-adapters 形状）；另可写 envs: {环境: 深合并的覆盖} */
+export type McpConnection = Record<string, unknown>;
 
 export interface Service extends Ledger {
   name: string;
@@ -192,10 +197,16 @@ export interface Service extends Ledger {
   code_paths: string[];
   repo: string;          // git 远端：代码同步从这里拉
   ref: string;           // 默认跟踪的分支
+  python: string;        // 项目解释器，可含 {env}（如 /srv/svc/board/venv/{env}/bin/python）；空 = python3
+  env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核与进程都带上；不支持 ${VAR}
+  /** 有名字的地址：可写 {env} 与 {port:进程名}（如 local: "http://127.0.0.1:{port:server}"）；mcp 配置里用 {url:名字} 引用 */
+  urls: Record<string, string>;
   hosts: string[];
   readonly_dsn: string | null;   // 明文口令回显为 ***，原样传回表示不改
   configs: ConfigFile[];
   processes: Record<string, ProcessDef>;
+  /** 服务自己的 MCP server：{名字: 连接配置}。字符串里可写 {env}、{url:名字}、${VAR}、{platform}、{platform_python} */
+  mcp: Record<string, McpConnection>;
   envs: Record<string, ServiceEnvOverride>;
   profile: Record<string, string>;
   enabled: boolean;
@@ -206,16 +217,26 @@ export interface ServiceView {
   service: string;
   env: string;
   enabled: boolean;
-  startable: boolean;    // false = 只看不起
+  python: string;        // 该环境的解释器（已渲染 {env}，空则 python3）
   root: string;
   code_paths: string[];
   repo: string;
   ref: string;           // 该环境跟踪的分支（已合并基座）
+  urls: Record<string, string>;   // 该环境的地址（已渲染 {env} / {port:进程名}）
+  mcp_servers: string[];          // 服务自己声明的 MCP server（运行在本服务上时工具自动出现）
   hosts: string[];
   readonly_dsn: string | null;
   config_files: { canonical: string; path: string; exists: boolean; size: number | null }[];
   profile: Record<string, string>;
   git: { branch: string; commit: string; dirty: boolean; committed_at: ISODate } | null;
+}
+
+/** GET /v1/services/{s}/tools：服务自己声明的 MCP 工具（按环境连接） */
+export interface ServiceTools {
+  servers: string[];
+  loaded: boolean;               // 还没连过（没有运行用到）时为 false
+  tools: { name: string; description: string; server: string | null; envs: string[] }[];
+  failed: string[];              // 连不上的连接名，形如 "dagster.dagster@prod"
 }
 
 export type InstanceState = "stopped" | "starting" | "running" | "stopping" | "failed";
@@ -231,12 +252,12 @@ export interface Instance {
   lease_until: ISODate | null;
   started_by: string | null;    // 人 / run:<id> / lease
   last_exit: { code: number | null; at: ISODate } | null;
-  startable: boolean;           // 该环境能否由平台启动
+  enabled: boolean;             // 服务在该环境是否启用（停用的环境不能起进程）
 }
 
 export interface ServiceEnvHealth {
   enabled: boolean;
-  startable: boolean;
+  python: string;               // 该环境的解释器
   runs_24h: number;
   failed_24h: number;
   last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
@@ -252,12 +273,18 @@ export interface ServiceSummary extends Service {
 
 // ———————————————————— 角色 ————————————————————
 
+/**
+ * tools 写法：内置工具名 / 平台 MCP 工具名 / "*"（全部内置 + 全部平台 MCP）/ "mcp:<server>"（某个平台 MCP server 的全部工具）。
+ * 继承：子角色写了 tools / subagents / service_tools 就整体替换父角色的，没写就跟随；提示词追加 prompt_append。
+ */
 export interface Role extends Ledger {
   name: string;
   title: string;
-  description: string;
+  description: string;          // 也是委派时给主角色看的"这个子代理擅长什么"
   prompt: string;
-  tools: string[];
+  tools: string[];              // 空 = 跟随父角色
+  subagents: string[] | null;   // 可委派的子代理角色名（只委派一层）；null = 跟随父角色，[] = 明确不要
+  service_tools: boolean | null;   // 自动带上运行所在服务声明的 MCP 工具；null = 跟随父角色（没有父角色就是 true）
   extends: string | null;
   prompt_append: string;
 }
@@ -268,12 +295,14 @@ export interface ResolvedRole {
   description: string;
   prompt: string;
   tools: string[];
+  subagents: string[];
+  service_tools: boolean;
   lineage: string[];
 }
 
 // ———————————————————— 任务 ————————————————————
 
-export type TaskForm = "agent" | "graph" | "builtin";
+export type TaskForm = "agent" | "builtin";
 
 export interface InputField {
   type: "str" | "text" | "int" | "bool" | "json" | "enum";
@@ -339,17 +368,7 @@ export interface Task extends Ledger {
   profile: Record<string, string>;
   extends: string | null;
   auto_created: boolean;
-  graph?: Record<string, GraphNodeDef> | null;
-  handler?: string | null;
-}
-
-export interface GraphNodeDef {
-  deps?: string[];
-  code?: string;
-  agent?: { role: string; contract?: string };
-  route?: { by?: string; choices: string[] };
-  map?: string;
-  gate?: { when: string };
+  handler?: string | null;      // form=builtin 的处理器名
 }
 
 export interface TaskSummary extends Task {
@@ -378,29 +397,16 @@ export interface UpcomingFire {
   at: ISODate;
 }
 
-// ———————————————————— 策略 ————————————————————
-
-export interface Policy extends Ledger {
-  name: string;
-  description: string;
-  order: number;
-  applies_to: { tasks: string[]; services: string[]; envs: string[] };
-  match_regex: string;
-  action: "deny" | "require_approval";
-  message: string;
-  enabled: boolean;
-}
-
 // ———————————————————— 运行 ————————————————————
 
 export type RunStatus =
   | "queued" | "awaiting_approval" | "running" | "success" | "failed" | "cancelled";
 
-export type Resolution = "agent" | "graph" | "builtin" | "rule" | null;
+export type Resolution = "agent" | "builtin" | "rule" | null;
 
 export interface RunTrigger {
-  type: TriggerType | "web" | "rerun" | "resume" | "correction";
-  id: string | null;           // 触发器 id（schedule/event）
+  type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay";   // replay = 回归重放产生的运行
+  id: string | null;           // 触发器 id（schedule/event）；replay 时是被重放的原运行
   source: string | null;       // 事件来源
   caller: string;              // 调用身份：API 密钥名 / 控制台用户 / schedule
 }
@@ -426,6 +432,7 @@ export interface RunListItem {
 export interface Run extends RunListItem {
   task_version: number | null;
   role_version: number | null;
+  replay_of: string | null;    // 回归重放出来的运行：指向被重放的原运行
   input: Record<string, unknown>;
   output: { answer?: string; error?: string; [k: string]: unknown } | null;
   error_code: string | null;
@@ -437,30 +444,22 @@ export interface Run extends RunListItem {
 
 export interface RunContext {
   profile: string;                                   // 注入的档案原文
-  recalled_knowledge: { id: number; key: string; rank: number }[];
+  recalled_knowledge: { id: number; key: string; kind: KnowledgeKind; rank: number }[];
   recalled_assets: { id: number; kind: string; name: string }[];
-  saved_knowledge: { id: number; key: string }[];
+  saved_knowledge: { id: number; key: string; kind: KnowledgeKind }[];   // 不含交接摘要
   saved_assets: { id: number; kind: string; name: string }[];
   session_runs: { run_id: string; task: string; status: RunStatus; created_at: ISODate }[];
-  graph: { nodes: GraphNodeState[]; edges: { from: string; to: string }[] } | null;
-}
-
-export interface GraphNodeState {
-  id: string;
-  kind: "code" | "agent" | "route" | "map";
-  status: "pending" | "running" | "materialized" | "reused" | "skipped" | "rejected" | "failed";
-  summary?: string;
 }
 
 export type RunEventKind =
-  | "stage" | "thought" | "tool_call" | "tool_result" | "approval" | "artifact" | "final" | "error";
+  | "stage" | "thought" | "tool_call" | "tool_result" | "approval" | "final" | "error";
 
 export interface RunEvent {
   seq: number;
   kind: RunEventKind;
   at: ISODate;
   payload: {
-    stage?: string;            // profile/recall/assets/graph/rule/resume/deliver…
+    stage?: string;            // profile/recall/assets/rule/resume/deliver…
     title?: string;
     content?: string;
     tool?: string;
@@ -470,7 +469,6 @@ export interface RunEvent {
     tokens?: number;
     approval_id?: number;
     decision?: "approved" | "rejected";
-    node?: string;
     status?: string;
     [k: string]: unknown;
   };
@@ -478,7 +476,8 @@ export interface RunEvent {
 
 /** POST /v1/runs */
 export interface RunRequest {
-  task: string;
+  task?: string;               // 不填 = 通用入口 ask
+
   subtask?: string | null;     // 不存在则按父任务自动创建
   service?: string | null;
   env?: string | null;
@@ -495,7 +494,6 @@ export interface RunAccepted {
   output: Run["output"];
   dedup: boolean;              // 命中幂等键或任务去重，返回的是已有运行
   subtask_created: string | null;
-  approval_id: number | null;
 }
 
 export interface RunFilters {
@@ -553,6 +551,73 @@ export interface FeedbackFilters {
   hours?: number;
 }
 
+// ———————————————————— 回归重放 ————————————————————
+// 改完提示词 / 任务定义 / 档案后，拿被 👎 的运行用当前定义重跑；
+// 模型对照"原答案 + 人指出的问题 + 新答案"判定改好没有。
+
+/** fixed 改好了 / same 没改好 / worse 更差 / unclear 判断不了 / error 重放没跑成；null = 还没判 */
+export type ReplayVerdict = "fixed" | "same" | "worse" | "unclear" | "error";
+
+/** 发起时的选样条件（原样回显） */
+export interface ReplayFilter {
+  run_ids?: string[];
+  task?: string;
+  service?: string;
+  env?: string;
+  hours?: number;
+  limit?: number;
+}
+
+export interface ReplayCounts {
+  total: number;
+  fixed: number;
+  same: number;
+  worse: number;
+  unclear: number;             // 含 error
+  pending: number;             // 还没判
+}
+
+export interface ReplaySummary {
+  id: number;
+  title: string;
+  filter: ReplayFilter;
+  note: string;                // 这次改了什么
+  created_by: string;
+  created_at: ISODate;
+  counts: ReplayCounts;
+}
+
+export interface ReplaySide {
+  task_version: number | null;
+  role_version: number | null;
+  answer: string | null;
+}
+
+export interface ReplayItem {
+  id: number;
+  source_run: string;
+  new_run: string | null;      // 没建成（verdict=error）时为空
+  verdict: ReplayVerdict | null;
+  reason: string;
+  judged_at: ISODate | null;
+  task: string;
+  service: string | null;
+  env: string;
+  summary: string;
+  before: ReplaySide & { status: RunStatus };
+  after: ReplaySide & { status: RunStatus | null };
+}
+
+export interface ReplayDetail extends ReplaySummary {
+  items: ReplayItem[];
+}
+
+/** POST /v1/replays：不给 run_ids 就按条件选被 👎 的 agent 运行；没有符合条件的返回 400 nothing_to_replay */
+export interface ReplayRequest extends ReplayFilter {
+  title?: string;
+  note?: string;
+}
+
 // ———————————————————— 对话 ————————————————————
 
 /** POST /v1/chat */
@@ -593,7 +658,8 @@ export interface SessionDetail extends SessionSummary {
 
 // ———————————————————— 审批 ————————————————————
 
-export type ApprovalKind = "submit" | "command" | "artifact" | "process";
+/** 运行中途的危险命令 / 进程启停（设置里打开审批才会出现） */
+export type ApprovalKind = "command" | "process";
 
 export interface Approval {
   id: number;
@@ -622,18 +688,29 @@ export interface ApprovalFilters {
 }
 
 // ———————————————————— 记忆 ————————————————————
+// 档案 = 人写的（服务 / 任务定义的 profile，逐字置顶注入）；记忆 = agent 记下的（这一节）；方法 = 可执行的做法与脚本（assets）。
+
+/** fact 事实 / lesson 报错教训 / handoff 交接摘要（会话内部用，列表默认不含） */
+export type KnowledgeKind = "fact" | "lesson" | "handoff";
+
+/** 教训的类别 */
+export type LessonCategory = "code" | "data" | "infra" | "upstream";
 
 export interface Knowledge {
   id: number;
   service: string;
-  env: string;
+  env: string;                  // "" = 对该服务所有环境成立
   task: string;
-  key: string;
+  kind: KnowledgeKind;
+  key: string;                  // 教训的键是 lesson:<指纹>
   content: string;
+  fingerprint: string | null;   // 教训：报错指纹（同类报错精确命中）
+  category: string | null;      // 教训：code / data / infra / upstream
   source_run: string | null;    // 空 = 人工录入
   code_ref: { path: string; commit: string } | null;
   status: "active" | "expired" | "superseded";
-  feedback_score: number;
+  superseded_by: string | null; // 升格进档案后形如 "profile:service:board:conventions"
+  feedback_score: number;       // 只罚不奖：≤ 0（被 👎 的运行沉淀或召回过它）
   hits_30d: number;
   last_hit_at: ISODate | null;
   updated_at: ISODate;
@@ -646,18 +723,29 @@ export interface KnowledgeRevision {
   created_at: ISODate;
 }
 
-export interface Case {
-  id: number;
-  service: string | null;
-  env: string;
-  fingerprint: string;
-  category: string;
-  conclusion: string;
-  source_run: string | null;
-  thumbs_up: number;
-  thumbs_down: number;
-  status: "active" | "superseded";
-  updated_at: ISODate;
+/** POST /v1/knowledge：人工记一条。lesson 不填 key，按报错原文 error 算指纹 */
+export interface KnowledgeCreate {
+  service: string;
+  env?: string;                 // "" = 所有环境（默认）
+  kind: "fact" | "lesson";
+  key?: string;                 // fact 必填
+  content: string;
+  task?: string;
+  error?: string;               // lesson 必填：报错原文
+  category?: LessonCategory | "";
+}
+
+/** POST /v1/knowledge/{id}/promote：升格进档案 */
+export interface KnowledgePromote {
+  target: "service" | "task";
+  key: string;                  // 档案的键：conventions / pitfalls / 自定义
+  task?: string;                // target=task 时写进哪个任务；不填用条目的来源任务
+  content?: string;             // 写进档案的文字；不填用条目原文
+}
+
+export interface KnowledgePromoted {
+  entry: Knowledge;             // 原条目，已变成 superseded
+  profile: { target: string; key: string };   // target 形如 service:board、service:board@prod、task:data-qa
 }
 
 export type AssetKind = "procedure" | "script" | "query" | "baseline";
@@ -680,6 +768,7 @@ export interface Asset {
   updated_at: ISODate;
 }
 
+/** env=X：该环境的 + 所有环境通用的；env="*"：只看通用的 */
 export interface MemoryFilters {
   service?: string;
   env?: string;
@@ -688,12 +777,19 @@ export interface MemoryFilters {
   q?: string;
 }
 
+/** 记忆列表的筛选：kind 不给 = 事实与教训（不含交接摘要） */
+export interface KnowledgeFilters extends MemoryFilters {
+  kind?: KnowledgeKind;
+}
+
 export interface MemoryHealth {
   active: number;
   zero_recall: number;
   negative: number;
   drifted: number;
   conflicts: number;
+  lessons: number;              // 生效中的教训数
+  promotable: number;           // 可升格进档案的事实数
 }
 
 // ———————————————————— 统计 / 搜索 ————————————————————

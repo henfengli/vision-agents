@@ -18,7 +18,7 @@ from ..config import Settings
 from ..domain import Rejected
 from ..runtime import assemble
 from ..webui import mount_console
-from .routes import approvals, chat, definitions, feedback, memory, meta, runs, services, settings, tasks
+from .routes import approvals, chat, definitions, feedback, memory, meta, replays, runs, services, settings, tasks
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def error(status: int, code: str, message: str, detail=None) -> JSONResponse:
 
 
 def create_app(cfg: Settings, *, worker: bool = True) -> FastAPI:
-    """worker=True：本进程同时跑 Temporal Worker 与维护循环（单机部署的默认方式）。"""
+    """worker=True：本进程同时跑执行队列、定时与维护循环（单机部署的默认方式）。"""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -66,7 +66,7 @@ def create_app(cfg: Settings, *, worker: bool = True) -> FastAPI:
     async def healthz():
         return {"ok": True, "version": __version__, "profile": cfg.profile}
 
-    for r in (meta, definitions, tasks, services, runs, feedback, chat, approvals, memory, settings):
+    for r in (meta, definitions, tasks, services, runs, feedback, replays, chat, approvals, memory, settings):
         app.include_router(r.router)
     mount_console(app, cfg.webui_dist)
     return app

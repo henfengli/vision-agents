@@ -1,7 +1,7 @@
 """平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），${VAR} 从环境变量插值。
 
-这里只有部署参数：数据库、模型、Temporal、鉴权引导密钥、数据目录、外部系统地址。
-服务/角色/任务/策略与平台配置（环境、审批、通知、记忆、进程）都是数据，存库、在控制台编辑；
+这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、外部系统地址。
+服务/角色/任务与平台配置（环境、审批、通知、记忆、进程）都是数据，存库、在控制台编辑；
 conf/seeds/ 只在库里还没有对应对象时播种一次。
 AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test/dev）无关。
 """
@@ -47,10 +47,17 @@ class ModelConfig(BaseModel):
     embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
 
 
-class TemporalConfig(BaseModel):
-    address: str = "127.0.0.1:7233"
-    namespace: str = "default"
-    task_queue: str = "agent-platform"
+class WorkerConfig(BaseModel):
+    """执行队列（runs 表）的消费端：同时执行几个运行。"""
+
+    max_concurrent_runs: int = 10
+
+
+class KernelConfig(BaseModel):
+    """项目内核（py 工具）：每个 会话×服务×环境 一个常驻 Python 进程。"""
+
+    idle_minutes: float = 30          # 空闲多久回收
+    max_kernels: int = 8              # 同时最多几个（超了回收最久没用的）
 
 
 class LangfuseConfig(BaseModel):
@@ -90,7 +97,8 @@ class Settings(BaseModel):
     root_token: str                            # 引导密钥：首次登录与创建 API 密钥用，权限最高
     public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用
     data_dir: str = Field(default_factory=_default_data_dir)
-    temporal: TemporalConfig = TemporalConfig()
+    worker: WorkerConfig = WorkerConfig()
+    kernel: KernelConfig = KernelConfig()
     langfuse: LangfuseConfig = LangfuseConfig()
     grafana: GrafanaConfig | None = None
     process_control: ProcessControlConfig = ProcessControlConfig()

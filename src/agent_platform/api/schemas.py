@@ -13,7 +13,7 @@ from ..domain import MemoryOverride
 class RunBody(BaseModel):
     """POST /v1/runs"""
 
-    task: str = Field(description="任务名；子任务可写成 父任务:对象，或用 subtask 字段")
+    task: str = Field("ask", description="任务名；子任务可写成 父任务:对象，或用 subtask 字段。不填 = 通用入口 ask")
     subtask: str | None = Field(None, description="子任务对象名；不存在则按父任务自动创建")
     service: str | None = Field(None, description="通用任务必填；专属任务可省略")
     env: str | None = Field(None, description="缺省为平台默认环境")
@@ -53,6 +53,19 @@ class CorrectBody(BaseModel):
     text: str = Field(min_length=1)
 
 
+class ReplayBody(BaseModel):
+    """POST /v1/replays：不给 run_ids 就按条件选被 👎 的 agent 运行。"""
+
+    run_ids: list[str] | None = Field(None, description="直接点名要重放的运行")
+    task: str | None = Field(None, description="父任务名即包含其子任务")
+    service: str | None = None
+    env: str | None = None
+    hours: int | None = Field(None, ge=1, description="只看最近多少小时内被 👎 的")
+    limit: int = Field(20, ge=1, le=100)
+    title: str = ""
+    note: str = Field("", description="这次改了什么，方便回看")
+
+
 class DecisionBody(BaseModel):
     comment: str = ""
 
@@ -62,16 +75,30 @@ class ProcessBody(BaseModel):
 
 
 class KnowledgeCreate(BaseModel):
+    """人工记一条记忆。env 空 = 对该服务所有环境成立。教训（lesson）要给报错原文 error，按它算指纹。"""
+
     service: str
-    env: str
-    key: str = Field(min_length=1, max_length=200)
+    env: str = ""
+    kind: Literal["fact", "lesson"] = "fact"
+    key: str = Field("", max_length=200, description="fact 必填；lesson 不填（按报错指纹生成）")
     content: str = Field(min_length=1)
     task: str = ""
+    error: str = Field("", description="lesson：报错原文")
+    category: str = Field("", description="lesson：code / data / infra / upstream")
 
 
 class KnowledgePatch(BaseModel):
     content: str | None = None
     status: Literal["active", "expired"] | None = None
+
+
+class KnowledgePromote(BaseModel):
+    """把一条记忆升格进档案：写进服务档案（条目只在某环境成立时写进该环境的覆盖）或任务档案，原条目标为被取代。"""
+
+    target: Literal["service", "task"]
+    key: str = Field(min_length=1, max_length=60, description="档案的键，如 conventions / pitfalls / 自定义")
+    task: str = Field("", description="target=task 时写进哪个任务；不填用条目的来源任务")
+    content: str | None = Field(None, description="写进档案的文字；不填用条目原文")
 
 
 class KnowledgeSearch(BaseModel):

@@ -15,7 +15,7 @@ SECRETS_DIR="$HOME/.config/agent-platform"
 UNITS="$HOME/.config/systemd/user"
 
 # 1. 代码与数据目录
-mkdir -p "$APP" "$DATA"/{scratch,assets,instances} "$HOME/.local/share/temporal" "$SECRETS_DIR" "$UNITS"
+mkdir -p "$APP" "$DATA"/{scratch,assets,instances} "$SECRETS_DIR" "$UNITS"
 chmod 700 "$SECRETS_DIR"
 cp -r "$REPO"/src "$REPO"/conf "$REPO"/mcp_servers "$REPO"/pyproject.toml "$APP"/
 
@@ -43,10 +43,7 @@ loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q '=yes' || \
   echo "!! 种子里的服务目录在 /srv/svc：请管理员执行一次 install -d -o $USER -m 750 /srv/svc，或在控制台把服务路径改到你可写的目录"
 
 # 5. systemd 用户单元
-TEMPORAL="$(command -v temporal || echo /usr/local/bin/temporal)"
-sed "s#@TEMPORAL@#$TEMPORAL#" "$REPO/deploy/user/temporal-server.service" > "$UNITS/temporal-server.service"
 cp "$REPO/deploy/user/agent-platform.service" "$REPO/deploy/user/agent-svc@.service" "$UNITS"/
 systemctl --user daemon-reload
-systemctl --user enable --now temporal-server
 systemctl --user enable --now agent-platform
 systemctl --user --no-pager status agent-platform || true

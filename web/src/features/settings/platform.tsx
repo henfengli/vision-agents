@@ -74,11 +74,11 @@ const COLOR_DOT: Record<EnvColor, string> = { red: "bg-[#ef4444]", amber: "bg-[#
 export function EnvsSettingsPage() {
   const { data: services } = useServices();
   return (
-    <SectionPage section="envs" title="环境" description={<>平台可操作的业务环境。每个运行请求都带环境（不带就用默认环境）；运行、记忆、产物复用都按它分区。<b className="font-medium text-fg-2">某个服务在某个环境是否启用</b>，在服务页的「环境」里设置。</>}>
+    <SectionPage section="envs" title="环境" description={<>平台可操作的业务环境。每个运行请求都带环境（不带就用默认环境）；运行与方法按它分区，记忆可以只对某个环境成立，也可以对所有环境成立。<b className="font-medium text-fg-2">某个服务在某个环境是否启用</b>，在服务页的「环境」里设置。</>}>
       {(d, set) => (
         <>
           <Card>
-            <CardHeader title="环境列表" actions={<Button size="sm" icon={<LuPlus />} onClick={() => set({ ...d, items: [...d.items, { name: "", title: "", description: "", protected: false, startable: true, color: "gray" }] })}>添加环境</Button>} />
+            <CardHeader title="环境列表" actions={<Button size="sm" icon={<LuPlus />} onClick={() => set({ ...d, items: [...d.items, { name: "", title: "", description: "", protected: false, color: "gray" }] })}>添加环境</Button>} />
             <div className="divide-y divide-line">
               {d.items.map((e, i) => {
                 const patch = (p: Partial<typeof e>) => set({ ...d, items: d.items.map((x, j) => (j === i ? { ...x, ...p } : x)) });
@@ -96,9 +96,8 @@ export function EnvsSettingsPage() {
                             className={cn("size-5 rounded-full ring-offset-2 ring-offset-panel", COLOR_DOT[c], e.color === c && "ring-2 ring-accent")} />
                         ))}
                       </div>
-                      <Switch checked={e.protected} onChange={(v) => patch({ protected: v })} label={<span className="text-[12.5px]">受保护</span>} />
-                      <Tooltip content="关掉 = 只看不起：平台不在本机用这个环境的配置起进程（会真的连该环境的库、跑它的调度）。读代码、读配置、查只读库不受影响；单个服务可在服务页「环境」里放开。">
-                        <span><Switch checked={e.startable !== false} onChange={(v) => patch({ startable: v })} label={<span className="text-[12.5px]">允许起进程</span>} /></span>
+                      <Tooltip content="审批开在「只在受保护环境」时，这里的危险命令与进程启停要人放行（设置 → 审批）">
+                        <span><Switch checked={e.protected} onChange={(v) => patch({ protected: v })} label={<span className="text-[12.5px]">受保护</span>} /></span>
                       </Tooltip>
                       <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-fg-2">
                         <input type="radio" checked={d.default === e.name} onChange={() => set({ ...d, default: e.name })} className="accent-[var(--color-accent)]" />默认
@@ -113,7 +112,7 @@ export function EnvsSettingsPage() {
                 );
               })}
             </div>
-            <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">受保护：危险命令、进程启停、命中「需审批」策略的提交都要人放行（规则见「审批」）。</div>
+            <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">受保护：审批开在「只在受保护环境」时，这里的危险命令与进程启停要人放行（见 <Link to="/settings/approvals" className="text-accent hover:underline">审批</Link>，默认关闭）。</div>
           </Card>
           <Card>
             <CardHeader title="各服务的启用情况" description="点服务名去服务页修改（服务 → 环境 → 启用）" />
@@ -143,27 +142,30 @@ export function EnvsSettingsPage() {
 export function ApprovalsSettingsPage() {
   const [sample, setSample] = useState("rm -rf /srv/board/logs/2026-09-*");
   return (
-    <SectionPage section="approvals" title="审批" description="agent 在运行中要执行危险命令时挂起等人放行；超时视同拒绝。提交时的审批由「提交策略」决定，进程启停在受保护环境总是要审批。">
+    <SectionPage section="approvals" title="审批" description="运行中途的人工门：agent 要执行危险命令、启停进程（含服务页上的手动启停）时挂起等人放行，超时视同拒绝。默认关闭——配置是只读账户、文件系统只读，agent 目前做不了真正危险的事；让它执行变更类任务时再打开。">
       {(d, set) => {
         const hit = d.danger_patterns.find((p) => { try { return new RegExp(p, "i").test(sample); } catch { return false; } });
+        const off = d.required_in === "off";
         return (
           <>
             <Card>
               <div className="divide-y divide-line">
-                <SettingRow title="哪些环境要审批危险命令" hint="仅受保护环境：prod 这类；所有环境：test/dev 里的危险命令也要审批">
-                  <Segmented value={d.required_in} onChange={(v) => set({ ...d, required_in: v })} options={[{ value: "protected", label: "仅受保护环境" }, { value: "all", label: "所有环境" }]} />
+                <SettingRow title="哪些环境要审批" hint="只在受保护环境：prod 这类（设置 → 环境 → 受保护）；所有环境：test/dev 里的危险命令与进程启停也要审批">
+                  <Segmented value={d.required_in} onChange={(v) => set({ ...d, required_in: v })} options={[
+                    { value: "off", label: "关闭（默认）" }, { value: "protected", label: "只在受保护环境" }, { value: "all", label: "所有环境" },
+                  ]} />
                 </SettingRow>
                 <SettingRow title="等待时长" hint="超过这个时间没人处理，视同拒绝">
-                  <div className="flex items-center gap-2"><Input className="w-20" inputMode="numeric" value={d.timeout_minutes} onChange={(e) => set({ ...d, timeout_minutes: Number(e.target.value) || 1 })} /><span className="text-[12.5px] text-fg-3">分钟</span></div>
+                  <div className={cn("flex items-center gap-2", off && "opacity-60")}><Input className="w-20" inputMode="numeric" disabled={off} value={d.timeout_minutes} onChange={(e) => set({ ...d, timeout_minutes: Number(e.target.value) || 1 })} /><span className="text-[12.5px] text-fg-3">分钟</span></div>
                 </SettingRow>
               </div>
             </Card>
             <Card>
-              <CardHeader title="危险命令模式" description="正则，不区分大小写；bash、run_code 的代码、service_ctl 都按它判断" />
+              <CardHeader title="危险命令模式" description={off ? "审批关闭时不生效；打开后 bash、run_code / py 的代码、service_ctl 都按它判断" : "正则，不区分大小写；bash、run_code / py 的代码、service_ctl 都按它判断"} />
               <div className="space-y-4 p-4">
                 <Textarea mono rows={Math.max(5, d.danger_patterns.length + 1)} value={d.danger_patterns.join("\n")}
                   onChange={(e) => set({ ...d, danger_patterns: e.target.value.split("\n").filter((x, i, a) => x.trim() || i < a.length - 1) })} />
-                <Field label="试一下" help={hit ? <span className="text-warn">命中 <code className="font-mono">{hit}</code> → 挂起等审批</span> : <span className="text-ok">未命中 → 直接执行</span>}>
+                <Field label="试一下" help={hit ? <span className="text-warn">命中 <code className="font-mono">{hit}</code> → {off ? "审批关闭，仍直接执行" : "挂起等审批"}</span> : <span className="text-ok">未命中 → 直接执行</span>}>
                   <Input mono value={sample} onChange={(e) => setSample(e.target.value)} />
                 </Field>
               </div>
@@ -275,8 +277,8 @@ export function MemorySettingsPage() {
       {(d, set) => (
         <Card>
           <div className="divide-y divide-line">
-            <SettingRow title="召回" hint="运行前按问题检索历史知识、同类案例与方法，拼进提示"><Switch checked={d.recall} onChange={(recall) => set({ ...d, recall })} /></SettingRow>
-            <SettingRow title="沉淀" hint="运行成功后用一次轻量模型调用提炼可复用的知识与案例"><Switch checked={d.save} onChange={(save) => set({ ...d, save })} /></SettingRow>
+            <SettingRow title="召回" hint="运行前按问题检索记忆（事实、同类报错的教训）与方法，拼进提示"><Switch checked={d.recall} onChange={(recall) => set({ ...d, recall })} /></SettingRow>
+            <SettingRow title="沉淀" hint="运行结束后用一次轻量模型调用提炼可复用的事实与报错教训"><Switch checked={d.save} onChange={(save) => set({ ...d, save })} /></SettingRow>
             <SettingRow title="会话交接摘要" hint="同一会话里，每轮结束写「结论 / 被否方案 / 当前约束 / 未决问题」，下一个同类会话召回置顶"><Switch checked={d.handoff_summary} onChange={(handoff_summary) => set({ ...d, handoff_summary })} /></SettingRow>
             <SettingRow title="每次最多召回知识" hint="条"><Input className="w-20" inputMode="numeric" value={d.knowledge_limit} onChange={(e) => set({ ...d, knowledge_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>
             <SettingRow title="每次最多注入方法" hint="条；本任务的方法优先，其次服务通用"><Input className="w-20" inputMode="numeric" value={d.asset_limit} onChange={(e) => set({ ...d, asset_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>

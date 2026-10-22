@@ -1,4 +1,4 @@
-"""服务 / 角色 / 任务 / 策略：同一套增删改与版本历史。
+"""服务 / 角色 / 任务：同一套增删改与版本历史。
 
     GET    /v1/{kind}                       列表
     POST   /v1/{kind}                       新建（请求体含 name）
@@ -8,7 +8,8 @@
     GET    /v1/{kind}/{name}/versions       版本历史（新的在前）
     POST   /v1/{kind}/{name}/versions/{v}/restore
 
-kind ∈ services / roles / tasks / policies。服务与任务的列表与单个带统计（views.py）。
+kind ∈ services / roles / tasks。服务与任务的列表与单个带统计（views.py）。
+定义改了即时生效（定义缓存最多 5 秒），定时触发每轮读最新定义，不需要额外同步。
 """
 
 from __future__ import annotations
@@ -24,8 +25,7 @@ from ..deps import ADMIN, RT, WHO, Caller, Runtime
 
 router = APIRouter(prefix="/v1")
 
-KINDS = {"services": "service", "roles": "role", "tasks": "task", "policies": "policy"}
-SCHEDULE_AFFECTING = {"service", "task"}         # 改了要重新同步定时
+KINDS = {"services": "service", "roles": "role", "tasks": "task"}
 
 
 # ———————— 服务 ————————
@@ -52,7 +52,7 @@ async def get_service(name: str, rt: Runtime = RT, _: Caller = WHO):
     return found[0]
 
 
-# ———————— 角色 / 策略 ————————
+# ———————— 角色 ————————
 
 @router.get("/roles")
 async def list_roles(rt: Runtime = RT, _: Caller = WHO):
@@ -72,19 +72,6 @@ async def resolved_role(name: str, rt: Runtime = RT, _: Caller = WHO):
     """继承合并后的生效提示词与工具。"""
     role, _versions = await rt.registry.resolved_role(name)
     return role.model_dump()
-
-
-@router.get("/policies")
-async def list_policies(rt: Runtime = RT, _: Caller = WHO):
-    return [p.dump() for p in await rt.registry.policies()]
-
-
-@router.get("/policies/{name}")
-async def get_policy(name: str, rt: Runtime = RT, _: Caller = WHO):
-    p = await rt.registry.entry("policy", name)
-    if p is None:
-        raise Rejected.not_found(f"策略 {name}")
-    return p.dump()
 
 
 # ———————— 任务 ————————
@@ -133,8 +120,7 @@ async def _shaped(rt: Runtime, kind: str, name: str) -> dict:
 
 
 def _writes(plural: str, kind: str) -> None:
-    """为一种定义注册写入与版本路由（四种定义的写法完全一样）。"""
-    after_write = (lambda rt: rt.resync_schedules()) if kind in SCHEDULE_AFFECTING else (lambda rt: None)
+    """为一种定义注册写入与版本路由（三种定义的写法完全一样）。"""
 
     async def unmasked(rt: Runtime, name: str, body: dict) -> dict:
         """服务的只读库口令回显是 ***：原样传回表示不改，换回库里的值。"""
@@ -151,17 +137,14 @@ def _writes(plural: str, kind: str) -> None:
         if not name:
             raise Rejected("invalid_definition", "缺少 name", 422)
         await rt.registry.create(kind, name, await unmasked(rt, name, body), who.name)
-        after_write(rt)
         return await _shaped(rt, kind, name)
 
     async def update(name: str, body: dict = Body(...), rt: Runtime = RT, who: Caller = ADMIN):
         await rt.registry.update(kind, name, await unmasked(rt, name, body), who.name)
-        after_write(rt)
         return await _shaped(rt, kind, name)
 
     async def delete(name: str, rt: Runtime = RT, who: Caller = ADMIN):
         removed = await rt.registry.delete(kind, name, who.name)
-        after_write(rt)
         return {"deleted": removed}
 
     async def versions(name: str, rt: Runtime = RT, _: Caller = WHO):
@@ -174,7 +157,6 @@ def _writes(plural: str, kind: str) -> None:
 
     async def restore(name: str, version: int, rt: Runtime = RT, who: Caller = ADMIN):
         await rt.registry.restore(kind, name, version, who.name)
-        after_write(rt)
         return await _shaped(rt, kind, name)
 
     router.add_api_route(f"/{plural}", create, methods=["POST"], status_code=201)

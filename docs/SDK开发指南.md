@@ -1,6 +1,6 @@
 # SDK 开发指南
 
-`sdk/agent_client` 是 `/v1` 接口的 Python 薄封装（包名 `agent-client`，版本 2.x，对应服务端 v6）。
+`sdk/agent_client` 是 `/v1` 接口的 Python 薄封装（包名 `agent-client`，版本 2.x，对应服务端 v8）。
 它只做转发，不含业务逻辑，**HTTP 接口才是唯一契约**。
 
 其他语言的项目、或不想多一个依赖的项目，照着 `agent_client/client.py` 抄一份即可：一个文件，
@@ -35,7 +35,7 @@ from agent_client import AgentClient, AgentError
 
 agent = AgentClient(service="board", env="test")
 
-# 1) 对话：用服务的对话任务；同一个 client 自动续会话
+# 1) 对话：用服务的对话任务（没有专属的就用通用入口 ask）；同一个 client 自动续会话
 print(agent.ask("3 月以来 total_fee 是多少"))
 print(agent.ask("环比 2 月呢"))             # 记得上一问
 agent.ask("换个话题", new_session=True)     # 另起一段
@@ -76,7 +76,7 @@ agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_sessi
 
 - 返回回答文本。运行没有成功结束时抛 `AgentError`，`code` 为 `run_failed` / `run_cancelled`。
 - 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。
-- `task` 不传时，用该服务声明了 `chat` 触发的任务；`subtask` 选用子任务（不存在会按父任务自动建）。
+- `task` 不传时，该服务专属的对话任务（声明了 `chat` 触发）优先，没有就用通用入口 `ask`；`subtask` 选用子任务（不存在会按父任务自动建）。
 - `recall` / `save` 按次覆盖记忆开关，`None` 表示跟随任务与平台默认。
 - `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`thought`、`tool_call`、`tool_result`、`approval`。
 - `**input_fields` 是对话任务的其他输入字段。
@@ -95,10 +95,12 @@ agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
 | `idempotency_key` | 网络重试安全：同一个键只受理一次 |
 | `recall` / `save` | 这一次的记忆开关；`None` 表示跟随任务和平台默认 |
 
+SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask", {"question": "…"})`（HTTP 接口不写 `task` 就是 `ask`）。
+
 `run` 的返回值有两种形状：
 
 - 等到了结束：返回运行详情，包含 `status`、`output`、`context` 等，字段见接口文档 §2。
-- `wait=False`，或运行在等审批：立即返回回执 `{run_id, session_id, status, output, dedup, subtask_created, approval_id}`。
+- `wait=False`，或服务端等待结束时运行正停在审批上（设置里打开了审批才会有）：立即返回回执 `{run_id, session_id, status, output, dedup, subtask_created}`。
 
 | 方法 | 说明 |
 |---|---|
@@ -108,7 +110,7 @@ agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
 | `cancel(run_id)` | 取消 |
 | `rerun(run_id)` | 同样的输入新开一次运行 |
 | `resume(run_id)` | 失败的运行从断点续跑 |
-| `correct(run_id, text)` | 纠正结论：同会话重答，纠正内容沉淀为人工知识 |
+| `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代上一轮沉淀的记忆 |
 | `feedback(run_id, score, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
 
 ### 事件
@@ -123,7 +125,8 @@ agent.emit("webhook", {"service": "board", "env": "test", "version": "1.2.0"}, e
 ## 幂等与去重
 
 - **幂等键**由调用方提供，解决网络重试的问题：同一个键只受理一次，重复提交返回同一个运行（`dedup: true`）。
-- **任务去重**写在任务定义里（`dedup: {key, window_s}`），解决业务重复：时间窗内同键的成功运行直接复用结果。
+  键不限时间；只有失败的运行会释放这个键。
+- **任务去重**写在任务定义里（`dedup: {key, window_s}`），解决业务重复：时间窗内同键、还在排队 / 运行中或已成功的运行直接返回它。
 
 两者是独立的两层。
 
@@ -137,8 +140,8 @@ try:
 except AgentError as e:
     if e.code == "service_env_disabled":
         ...                      # 服务在 prod 停用了
-    elif e.code == "policy":
-        print(e.detail["policy"])
+    elif e.code == "env_not_allowed":
+        ...                      # 任务不能在 prod 跑
     else:
         raise
 ```
@@ -152,12 +155,8 @@ except AgentError as e:
 | `service_disabled` / `service_env_disabled` / `task_disabled` | 停用 | 控制台启用，或换环境 |
 | `env_not_allowed` | 任务不能在这个环境跑 | 换环境 |
 | `trigger_not_allowed` | 任务没开放 API 调用 | 在任务定义里加 `api` 触发 |
-| `policy` | 命中拒绝策略 | 改输入，或找管理员 |
 | `unknown_task` / `unknown_service` / `unknown_env` | 名字写错 | — |
 | `run_failed` / `run_cancelled` | `ask` 的运行没有成功结束 | 去控制台看运行详情 |
-
-命中 `require_approval` 策略**不抛错**：`run()` 立即返回 `status="awaiting_approval"` 的回执，
-放行后运行自动开始，之后用 `wait(run_id)` 等结果。
 
 ## 命令行：agent-chat
 

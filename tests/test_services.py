@@ -1,4 +1,4 @@
-"""服务×环境视图、闸门、进程控制器：{env} 渲染、只看不起、配置与密钥遮蔽。"""
+"""服务×环境视图、闸门、进程控制器：{env} 渲染、按环境启用、配置与密钥遮蔽。"""
 
 import asyncio
 import os
@@ -27,12 +27,14 @@ class ServiceViewTest(unittest.TestCase):
         self.assertEqual(v.config_files,
                          [{"canonical": "/srv/svc/b/code/test/.env", "path": "/srv/svc/b/conf/test/.env"}])
 
-    def test_startable_follows_env_default_unless_service_overrides(self):
-        svc = ServiceDef.model_validate({"envs": {"test": {"startable": False}, "prod": {"startable": True}}})
-        self.assertTrue(svc.view("b", "prod", startable_default=False).startable)
-        self.assertFalse(svc.view("b", "test", startable_default=True).startable)
-        self.assertFalse(ServiceDef().view("b", "prod", startable_default=False).startable)
-        self.assertTrue(ServiceDef().view("b", "dev", startable_default=True).startable)
+    def test_python_and_env_vars_render_per_env(self):
+        svc = ServiceDef.model_validate({"python": "/srv/svc/b/venv/{env}/bin/python",
+                                         "env_vars": {"DAGSTER_HOME": "/srv/svc/b/code/{env}"},
+                                         "envs": {"dev": {"python": "/usr/bin/python3"}}})
+        self.assertEqual(svc.view("b", "test").python, "/srv/svc/b/venv/test/bin/python")
+        self.assertEqual(svc.view("b", "test").env_vars, {"DAGSTER_HOME": "/srv/svc/b/code/test"})
+        self.assertEqual(svc.view("b", "dev").python, "/usr/bin/python3")
+        self.assertEqual(ServiceDef().view("b", "prod").python, "python3")
 
     def test_ref_override_per_env(self):
         svc = ServiceDef.model_validate({"repo": "git@x:b.git", "ref": "main", "envs": {"prod": {"ref": "release"}}})
@@ -48,10 +50,11 @@ class ServiceViewTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ServiceDef.model_validate({"processes": {"web": {"cmd": ["x"], "env_vars": {"DB": "${PW}"}}}})
 
-    def test_prompt_block_tells_agent_when_view_only(self):
+    def test_prompt_block_points_to_kernel_and_processes(self):
         svc = ServiceDef.model_validate({"processes": {"web": {"cmd": ["x"]}}})
-        self.assertIn("只看不起", svc.view("b", "prod", False).prompt_block())
-        self.assertIn("可启停进程", svc.view("b", "test", True).prompt_block())
+        block = svc.view("b", "prod").prompt_block()
+        self.assertIn("py 工具", block)
+        self.assertIn("可启停进程", block)
 
 
 class RegistryTest(unittest.TestCase):
@@ -61,7 +64,7 @@ class RegistryTest(unittest.TestCase):
     def test_every_seed_is_valid(self):
         import yaml
         from support import SEEDS
-        for kind, path in (("task", "tasks.yaml"), ("role", "roles.yaml"), ("policy", "policies.yaml")):
+        for kind, path in (("task", "tasks.yaml"), ("role", "roles.yaml")):
             wanted = set(yaml.safe_load((SEEDS / path).read_text(encoding="utf-8")))
             got = {e.name for e in run(self.reg.entries(kind))}
             self.assertEqual(wanted, got, kind)
@@ -72,10 +75,6 @@ class RegistryTest(unittest.TestCase):
         self.assertIn("${BOARD_RO_PASSWORD}", board["envs"]["prod"]["readonly_dsn"])
         channels = run(self.reg.store.get("config", "notifications"))["definition"]["channels"]
         self.assertEqual(channels["default"]["token"], "${DINGTALK_ACCESS_TOKEN}")
-
-    def test_prod_is_view_only_out_of_the_box(self):
-        self.assertFalse(run(self.reg.service_view("board", "prod")).startable)
-        self.assertTrue(run(self.reg.service_view("board", "test")).startable)
 
     def test_unknown_env_is_rejected(self):
         with self.assertRaises(Rejected) as cm:
@@ -121,17 +120,14 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(spec["workdir"], f"{r}/code/test")
         self.assertEqual((spec["port"], spec["env_vars"]), (8081, {"PORT": "8081"}))
 
-    def test_view_only_env_refuses_start(self):
-        with self.assertRaises(Rejected) as cm:
-            run(self.ctl.ensure_startable("board", "prod"))
-        self.assertEqual(cm.exception.code, "start_not_allowed")
-        run(self.ctl.ensure_startable("board", "test"))
+    def test_every_enabled_env_can_start(self):
+        for env in ("prod", "test", "dev"):
+            run(self.ctl.ensure_startable("board", env))
 
-    def test_service_can_open_up_a_view_only_env(self):
-        envs = run(self.reg.store.get("service", "board"))["definition"]["envs"]
-        envs["prod"]["startable"] = True
-        run(self.reg.update("service", "board", {"envs": envs}, "test"))
-        run(self.ctl.ensure_startable("board", "prod"))
+    def test_disabled_env_refuses_start(self):
+        with self.assertRaises(Rejected) as cm:
+            run(self.ctl.ensure_startable("config-center", "dev"))
+        self.assertEqual(cm.exception.code, "service_env_disabled")
 
     def test_backend_off_refuses(self):
         ctl = ProcessController(settings(str(self.root / "data"), process_control=ProcessControlConfig(backend="off")),

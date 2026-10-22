@@ -25,20 +25,22 @@ _HISTORY_KEEP = 20
 # 读一遍即可懂）：差别仅是有无 embedding 一列。
 _SQL_UPSERT = (
     "INSERT INTO knowledge (env, service, task, key, content, source_run,"
-    " code_ref) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+    " code_ref, kind, fingerprint, category) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
     " ON CONFLICT (env, service, key) DO UPDATE SET"
     " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
-    " code_ref=EXCLUDED.code_ref,"
+    " code_ref=EXCLUDED.code_ref, kind=EXCLUDED.kind,"
+    " fingerprint=EXCLUDED.fingerprint, category=EXCLUDED.category,"
     " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
     " expired=false, created_at=now()")
 _SQL_UPSERT_WITH_VEC = (
     "INSERT INTO knowledge (env, service, task, key, content, source_run,"
-    " code_ref, embedding) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::vector)"
+    " code_ref, kind, fingerprint, category, embedding) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)"
     " ON CONFLICT (env, service, key) DO UPDATE SET"
     " task=EXCLUDED.task,"
     " content=EXCLUDED.content, source_run=EXCLUDED.source_run,"
-    " code_ref=EXCLUDED.code_ref,"
+    " code_ref=EXCLUDED.code_ref, kind=EXCLUDED.kind,"
+    " fingerprint=EXCLUDED.fingerprint, category=EXCLUDED.category,"
     " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
     " expired=false, created_at=now(), embedding=EXCLUDED.embedding")
 
@@ -75,17 +77,19 @@ async def _snapshot_if_changed(conn, env: str, service: str, key: str,
 
 async def upsert(env: str, service: str, key: str, content: str,
                  source_run: str | None = None, code_ref: dict | None = None,
-                 task: str = "", embedder=None) -> None:
+                 task: str = "", embedder=None, kind: str = "fact",
+                 fingerprint: str | None = None, category: str | None = None) -> None:
     """幂等 upsert（同 key 整替换）；embedder 存在时同步写入向量。
     覆盖前旧内容快照进 knowledge_history（与 upsert 同事务）。
-    task = 沉淀来源任务名（召回按任务谱系分区的依据；手工/通用知识留空）。"""
+    env = '' 表示对该服务所有环境成立；task = 沉淀来源任务名（召回按任务谱系排序；手工/通用留空）。
+    kind：fact 事实 / lesson 报错教训（带 fingerprint、category）/ handoff 交接摘要。"""
     vec = None
-    if embedder is not None:
+    if embedder is not None and kind != "handoff":
         vecs = await embedder([f"{key} {content}"])
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
     params = (env, service, task, key, content, source_run,
-              json.dumps(code_ref) if code_ref else None)
+              json.dumps(code_ref) if code_ref else None, kind, fingerprint, category)
     source = source_run or "upsert"
     if vec is not None:
         try:
@@ -276,7 +280,10 @@ async def update_content(entry_id: int, content: str,
     """
     vec = None
     if embedder is not None:
-        vecs = await embedder([content])
+        async with pool().connection() as conn:
+            cur = await conn.execute("SELECT key FROM knowledge WHERE id=%s", (entry_id,))
+            row = await cur.fetchone()
+        vecs = await embedder([f"{row[0] if row else ''} {content}"])     # 与 upsert 同口径：key + 内容
         if vecs:
             vec = "[%s]" % ",".join(f"{x:.6f}" for x in vecs[0])
 
@@ -320,20 +327,23 @@ async def list_by_service(env: str, service: str) -> list[dict]:
 
 
 async def list_all(env: str, service: str | None = None,
-                   include_inactive: bool = False) -> list[dict]:
-    """管理页用：全量列出（可选含已过期/被取代）。"""
-    where = "WHERE env=%s"
+                   include_inactive: bool = False, with_code_ref: bool = False) -> list[dict]:
+    """全量列出某环境适用的条目（env 本身 + 所有环境通用的）。园丁巡检用 with_code_ref 只取带 code_ref 的，不限条数。"""
+    where = "WHERE env IN ('', %s)"
     params: list = [env]
     if service:
         where += " AND service=%s"
         params.append(service)
     if not include_inactive:
         where += " AND expired=false AND valid_to IS NULL"
+    if with_code_ref:
+        where += " AND code_ref IS NOT NULL"
+    limit = "" if with_code_ref else " LIMIT 500"
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, service, key, content, expired, valid_to IS NOT NULL,"
             " feedback_score, code_ref, created_at, task FROM knowledge " + where +
-            " ORDER BY service, key LIMIT 500", tuple(params))
+            " ORDER BY service, key" + limit, tuple(params))
         rows = await cur.fetchall()
     return [{"id": r[0], "service": r[1], "key": r[2], "content": r[3],
              "expired": r[4], "superseded": r[5], "feedback_score": r[6],
@@ -345,7 +355,15 @@ async def by_source_run(run_id: str) -> list[dict]:
     """反查：某次 run 沉淀了哪些知识条目（run 详情「本次沉淀」用）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, service, key FROM knowledge WHERE source_run=%s"
+            "SELECT id, service, key, kind FROM knowledge WHERE source_run=%s"
             " ORDER BY id", (run_id,))
         rows = await cur.fetchall()
-    return [{"id": r[0], "service": r[1], "key": r[2]} for r in rows]
+    return [{"id": r[0], "service": r[1], "key": r[2], "kind": r[3]} for r in rows]
+
+
+async def supersede_entry(entry_id: int, superseded_by: str) -> None:
+    """把一条记忆标为被取代（升格进档案后用：档案里已经有了，召回不再重复注入）。"""
+    async with pool().connection() as conn:
+        await conn.execute(
+            "UPDATE knowledge SET valid_to=now(), superseded_by=%s WHERE id=%s AND valid_to IS NULL",
+            (superseded_by, entry_id))

@@ -85,7 +85,8 @@ def git_log(path: str, n: int = 10) -> str:
 def view_dict(view: ServiceView) -> dict:
     """API 的 ServiceView 形状。"""
     base = view.code_paths[0] if view.code_paths else view.root
-    return {"service": view.service, "env": view.env, "enabled": view.enabled, "startable": view.startable,
+    return {"service": view.service, "env": view.env, "enabled": view.enabled, "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "repo": view.repo, "ref": view.ref,
+            "urls": view.urls, "mcp_servers": view.mcp_servers,
             "hosts": view.hosts, "readonly_dsn": credentials.redact_dsn(view.readonly_dsn),
             "config_files": config_files(view), "profile": view.profile, "git": git_state(base) if base else None}

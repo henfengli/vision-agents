@@ -15,10 +15,12 @@ export function ServiceFilter({ value, onChange, includeNone }: { value: string;
   return <FilterSelect label="服务" allLabel="全部" value={value} onChange={onChange} options={options} />;
 }
 
-export function EnvFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+/** includeShared：记忆按服务分区，env 为空的条目对所有环境成立——选某个环境 = 该环境的 + 通用的；"*" = 只看通用的 */
+export function EnvFilter({ value, onChange, includeShared }: { value: string; onChange: (v: string) => void; includeShared?: boolean }) {
   const { data } = useEnvs();
-  return <FilterSelect label="环境" allLabel="全部" value={value} onChange={onChange}
-    options={(data ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: e.title }))} />;
+  const options: Option[] = (data ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: includeShared ? `${e.title} + 通用` : e.title }));
+  if (includeShared) options.push({ value: "*", label: "所有环境", hint: "只看通用的" });
+  return <FilterSelect label="环境" allLabel="全部" value={value} onChange={onChange} options={options} />;
 }
 
 /** 一行筛选条：左边筛选项，右边额外内容；有任一筛选生效时显示"清除" */

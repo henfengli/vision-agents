@@ -1,14 +1,15 @@
 title: 配置中心
-description: 各服务运行时配置的发布与审计（Java）
+description: 各服务运行时配置的发布与审计（Python）
 root: /srv/svc/config-center/code/{env}
 repo: git@gitlab.internal:infra/config-center.git
 ref: master
+python: /srv/svc/config-center/venv/{env}/bin/python
 hosts: [10.0.0.31]
 configs:
   - {canonical: "/srv/svc/config-center/code/{env}/application.yaml", template: "/srv/svc/config-center/conf/{env}/application.yaml"}
 processes:
   app:
-    cmd: [./bin/config-center, --port, "{port}"]
+    cmd: ["{python}", "-m", "config_center", "--port", "{port}"]
     ports: {prod: 9080, test: 9081, dev: 9082}
 envs:
   dev: {enabled: false}               # 开发环境没部署配置中心

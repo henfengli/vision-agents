@@ -1,4 +1,4 @@
-"""版本化定义存储：服务 / 角色 / 任务 / 策略 / 平台配置共用一张表。
+"""版本化定义存储：服务 / 角色 / 任务 / 平台配置共用一张表。
 
 - 最新版本即生效版本；每次写入都是新版本，历史只增不改
 - 删除 = 写一个 deleted 版本（名字随即可复用）；恢复任一旧版本 = 把它的内容写成新版本
@@ -15,7 +15,7 @@ import psycopg
 
 from .db import pool
 
-Kind = Literal["service", "role", "task", "policy", "config"]
+Kind = Literal["service", "role", "task", "config"]
 
 _TTL_S = 5.0
 

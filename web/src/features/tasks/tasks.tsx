@@ -3,7 +3,7 @@
  * 搜索同时匹配子任务（对象名），命中子任务时父任务自动展开；「展开全部子任务」一键全开。
  */
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { LuChevronDown, LuChevronRight, LuGitBranch, LuListTodo, LuPlay, LuPlus, LuTerminal, LuWorkflow } from "react-icons/lu";
+import { LuBot, LuChevronDown, LuChevronRight, LuGitBranch, LuListTodo, LuPlay, LuPlus, LuTerminal } from "react-icons/lu";
 
 import { api, useRoles, useServices, useTasks } from "@/api/hooks";
 import type { Task, TaskSummary, Trigger } from "@/api/types";
@@ -20,7 +20,7 @@ import { cn } from "@/lib/cn";
 import { ago, pct, until } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate, useSearch } from "@/lib/router";
-import { RunTaskDialog } from "./run-dialog";
+import { ASK_TASK, RunTaskDialog } from "./run-dialog";
 
 const taskHref = (name: string) => `/tasks/${encodeURIComponent(name)}`;
 const objectOf = (name: string) => name.split(":")[1] ?? name;
@@ -58,7 +58,8 @@ export function TasksPage() {
     const map = new Map<string, TaskRow[]>();
     for (const r of rows) map.set(r.task.service ?? "", [...(map.get(r.task.service ?? "") ?? []), r]);
     return order.filter((k) => map.has(k)).map((k) => ({
-      key: k, rows: map.get(k)!,
+      // 通用入口 ask 排在通用任务的最前面
+      key: k, rows: [...map.get(k)!].sort((a, b) => Number(b.task.name === ASK_TASK) - Number(a.task.name === ASK_TASK)),
       title: k === "*" ? "通用任务" : k === "" ? "平台任务" : services?.find((s) => s.name === k)?.title ?? k,
       hint: k === "*" ? "调用时指定服务" : k === "" ? "不涉及业务服务" : k,
     }));
@@ -124,7 +125,7 @@ export function TriggerChips({ triggers, max = 3 }: { triggers: Trigger[]; max?:
 }
 
 export const FORM_META: Record<Task["form"], { label: string; icon: React.ReactNode }> = {
-  agent: { label: "单角色", icon: <LuTerminal /> }, graph: { label: "任务图", icon: <LuWorkflow /> }, builtin: { label: "内建", icon: <LuTerminal /> },
+  agent: { label: "单角色", icon: <LuBot /> }, builtin: { label: "内建", icon: <LuTerminal /> },
 };
 
 /**
@@ -221,9 +222,11 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
             </button>
           ) : <span className="w-[18px] shrink-0" />}
           <Link to={taskHref(t.name)} onClick={(e) => e.stopPropagation()} className="truncate font-medium text-fg hover:text-accent">{t.title || t.name}</Link>
+          {t.name === ASK_TASK && <Badge tone="accent">通用入口</Badge>}
           {t.form !== "agent" && <Badge tone="accent" icon={FORM_META[t.form].icon}>{FORM_META[t.form].label}</Badge>}
           {!t.enabled && <Badge tone="idle">已停用</Badge>}
         </div>
+        {t.name === ASK_TASK && <div className="mt-0.5 pl-[22px] text-[11.5px] text-fg-3">通用入口：要定时、事件、投递时再建正式任务</div>}
         <div className="mt-0.5 flex items-center gap-2 pl-[22px] font-mono text-[11px] text-fg-3">
           {t.name}
           {n > 0 && (
@@ -313,7 +316,6 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
         <Field label="形态">
           <Select value={form} onChange={(v) => setForm(v as Task["form"])} options={[
             { value: "agent", label: "单角色", hint: "一个角色完成整件事（最常用）" },
-            { value: "graph", label: "任务图", hint: "节点是产物、边是依赖，可复用未变的产物" },
             { value: "builtin", label: "内建处理器", hint: "不过模型的确定性维护作业" },
           ]} />
         </Field>

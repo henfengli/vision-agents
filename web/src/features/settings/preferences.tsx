@@ -70,11 +70,11 @@ export function PreferencesPage() {
               <Select className="w-52" value={ui.chat.env} onChange={(env) => setChat({ env })}
                 options={[{ value: "", label: "跟随默认环境视角" }, ...(envs ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: e.title }))]} />
             </SettingRow>
-            <SettingRow title="任务" hint="不选则用服务的对话任务">
+            <SettingRow title="任务" hint="不选则用服务专属的对话任务，没有就用通用入口「问一下」">
               <Select className="w-52" value={ui.chat.task} onChange={(task) => setChat({ task })}
-                options={[{ value: "", label: "服务的对话任务" }, ...chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: t.name }))]} />
+                options={[{ value: "", label: "服务的对话任务" }, ...chatTasks.map((t) => ({ value: t.name, label: t.title || t.name, hint: t.name === "ask" ? "ask · 通用入口" : t.name }))]} />
             </SettingRow>
-            <SettingRow title="召回记忆" hint="提问前先查知识、案例与方法">
+            <SettingRow title="召回记忆" hint="提问前先查记忆（事实、报错教训）与方法">
               <Switch checked={ui.chat.recall} onChange={(recall) => setChat({ recall })} />
             </SettingRow>
             <SettingRow title="沉淀记忆" hint="回答后把可复用的结论存进知识库">

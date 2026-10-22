@@ -1,25 +1,31 @@
-"""定时触发：任务上的 schedule 触发器 × 环境 → Temporal Schedule，一个组合一个。
+"""定时触发：任务上的 schedule 触发器 × 环境，进程内按 cron 触发（替代 Temporal Schedule）。
 
-Schedule id = run:<任务>:<触发器>:<环境>。sync() 幂等：该有的建/改，多余的删。
-定义一改（任务、服务启停、服务的环境开关）就调一次；另有周期对账兜底。
+每 20 秒看一眼：上一次看之后到现在之间该触发的，各提交一次运行。
+- 不重复：每次触发带幂等键 schedule:<任务>:<触发器>:<环境>:<计划时间>，worker 重启或多个 worker 同时在跑都只会建一条
+- 不重叠：同一个触发器在同一环境上一次还没跑完（排队 / 运行中），这次跳过
+- 停机期间错过的不补（启动时只回看 90 秒，覆盖重启间隙）
 
-什么时候不建：任务（或父任务）停用、触发器停用、任务不允许该环境、服务停用或服务在该环境停用。
+什么时候不触发：任务（或父任务）停用、触发器停用、任务不允许该环境、服务停用或服务在该环境停用。
 子任务只有自己声明了 triggers 才有自己的定时——否则每个子任务都会继承父任务的定时，重复触发。
+定义改了不用通知谁：每轮都读最新定义（定义缓存最多 5 秒）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from ..domain import TaskDef
+from ..domain import Rejected, RunRequest, RunTrigger, TaskDef
 from ..domain.cron import next_fire
 from ..registry import Registry
+from ..store import runs
 
 log = logging.getLogger(__name__)
 
-PREFIX = "run:"
+TICK_S = 20.0
+LOOKBACK_S = 90
 
 
 @dataclass(frozen=True)
@@ -31,16 +37,11 @@ class Fire:
     timezone: str
     service: str | None
 
-    @property
-    def schedule_id(self) -> str:
-        return f"{PREFIX}{self.task}:{self.trigger_id}:{self.env}"
-
 
 class Scheduler:
-    def __init__(self, client, registry: Registry, task_queue: str):
-        self._client = client
+    def __init__(self, registry: Registry, submitter=None):
         self._reg = registry
-        self._queue = task_queue
+        self._submitter = submitter
 
     async def wanted(self) -> list[Fire]:
         services = {s.name: s.spec for s in await self._reg.services()}
@@ -64,41 +65,49 @@ class Scheduler:
                         out.append(Fire(name, t.id, env, t.cron, t.timezone, service))
         return out
 
-    async def sync(self) -> int:
-        from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleOverlapPolicy, SchedulePolicy,
-                                       ScheduleSpec, ScheduleUpdate)
-        from temporalio.common import WorkflowIDReusePolicy
-
-        from .workflows import ScheduleWorkflow
-
-        wanted = {f.schedule_id: f for f in await self.wanted()}
-        existing = set()
-        async for s in await self._client.list_schedules():
-            if s.id.startswith(PREFIX):
-                existing.add(s.id)
-        for sid in existing - set(wanted):
+    async def run_forever(self) -> None:
+        since = datetime.now(timezone.utc) - timedelta(seconds=LOOKBACK_S)
+        while True:
+            now = datetime.now(timezone.utc)
             try:
-                await self._client.get_schedule_handle(sid).delete()
-            except Exception:  # noqa: BLE001 —— 单个失败不阻塞其余，下一轮对账再删
-                log.exception("删除定时 %s 失败", sid)
-        for sid, f in wanted.items():
-            schedule = Schedule(
-                action=ScheduleActionStartWorkflow(
-                    ScheduleWorkflow.run, args=[f.task, f.trigger_id, f.env], id=f"fire:{sid}",
-                    task_queue=self._queue, id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE),
-                spec=ScheduleSpec(cron_expressions=[f.cron], time_zone_name=f.timezone),
-                policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))      # 上一次还没跑完就跳过这次
-            try:
-                if sid in existing:
-                    await self._client.get_schedule_handle(sid).update(lambda _, s=schedule: ScheduleUpdate(schedule=s))
-                else:
-                    await self._client.create_schedule(sid, schedule)
-            except Exception:  # noqa: BLE001
-                log.exception("同步定时 %s 失败", sid)
-        return len(wanted)
+                await self.tick(since, now)
+            except Exception:  # noqa: BLE001 —— 下一轮再来
+                log.exception("定时触发检查失败")
+            since = now
+            await asyncio.sleep(TICK_S)
+
+    async def tick(self, since: datetime, until: datetime) -> int:
+        """(since, until] 之间该触发的都提交，返回提交数。"""
+        fired = 0
+        for f in await self.wanted():
+            at = next_fire(f.cron, f.timezone, since)
+            while at is not None and at <= until:
+                fired += await self._fire(f, at)
+                at = next_fire(f.cron, f.timezone, at)
+        return fired
+
+    async def _fire(self, f: Fire, at: datetime) -> int:
+        if busy := await runs.active_of_trigger(f.task, f.trigger_id, f.env):
+            log.info("定时 %s/%s@%s 上一次（%s）还没跑完，跳过 %s", f.task, f.trigger_id, f.env, busy, at.isoformat())
+            return 0
+        entry = await self._reg.task(f.task)
+        trigger = entry.spec.trigger(f.trigger_id) if entry else None
+        if trigger is None or trigger.type != "schedule":
+            return 0
+        base, _, obj = f.task.partition(":")
+        req = RunRequest(task=base, subtask=obj or None, env=f.env, input=trigger.input,
+                         service=trigger.service if entry.spec.service == "*" else None)
+        key = f"schedule:{f.task}:{f.trigger_id}:{f.env}:{at.astimezone(timezone.utc).isoformat()}"
+        try:
+            accepted = await self._submitter.submit(
+                req, trigger=RunTrigger(type="schedule", id=f.trigger_id, caller="schedule"), idempotency_key=key)
+        except Rejected as e:
+            log.warning("定时触发 %s/%s@%s 被拒：%s（%s）", f.task, f.trigger_id, f.env, e.message, e.code)
+            return 0
+        return 0 if accepted.dedup else 1
 
     async def upcoming(self, limit: int | None = None) -> list[dict]:
-        """接下来的触发（本地按 cron 算，不问 Temporal）：[{task, trigger_id, service, env, at}]，按时间排序。"""
+        """接下来的触发（按 cron 算）：[{task, trigger_id, service, env, at}]，按时间排序。"""
         now = datetime.now(timezone.utc)
         out = []
         for f in await self.wanted():
@@ -108,4 +117,3 @@ class Scheduler:
                             "at": at.isoformat()})
         out.sort(key=lambda x: x["at"])
         return out[:limit] if limit else out
-

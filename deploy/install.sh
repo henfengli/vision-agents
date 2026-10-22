@@ -15,10 +15,10 @@ id agent-svc &>/dev/null || useradd -r -s /usr/sbin/nologin agent-svc
 id svc-runner &>/dev/null || useradd -r -s /usr/sbin/nologin svc-runner
 
 # 2. 代码与数据目录（代码 root 所有、平台只读；数据目录平台可写）
-mkdir -p "$APP" "$DATA"/{scratch,assets,instances} /etc/agent-platform /var/lib/temporal
+mkdir -p "$APP" "$DATA"/{scratch,assets,instances} /etc/agent-platform
 cp -r "$REPO"/src "$REPO"/conf "$REPO"/mcp_servers "$REPO"/pyproject.toml "$APP"/
 chown -R root:root "$APP"
-chown -R agent-svc:agent-svc "$DATA" /var/lib/temporal
+chown -R agent-svc:agent-svc "$DATA"
 chmod 755 "$DATA" "$DATA/instances"          # svc-runner 要读启动规格
 # 业务服务目录：/srv/svc/<服务>/code/<环境>（代码）+ /srv/svc/<服务>/conf/<环境>（配置）。
 # 平台写（代码同步、固定路径占位），业务进程（svc-runner 组）读，其他用户进不来
@@ -41,11 +41,9 @@ command -v bwrap >/dev/null || echo "!! 缺少 bubblewrap（apt-get install -y b
   echo "!! 请创建 /etc/agent-platform/secrets.env：AGENT_ROOT_TOKEN、AGENT_DB_PASSWORD、MODEL_TOKEN_A、DINGTALK_ACCESS_TOKEN …"
 
 # 6. systemd 与 polkit
-cp "$REPO"/deploy/agent-platform.service "$REPO"/deploy/agent-svc@.service "$REPO"/deploy/temporal-server.service \
-   /etc/systemd/system/
+cp "$REPO"/deploy/agent-platform.service "$REPO"/deploy/agent-svc@.service /etc/systemd/system/
 sed -i "s/AGENT_ENV=prod/AGENT_ENV=${PROFILE}/" /etc/systemd/system/agent-platform.service
 install -m 644 "$REPO"/deploy/50-agent-svc.rules /etc/polkit-1/rules.d/50-agent-svc.rules
 systemctl daemon-reload
-systemctl enable --now temporal-server
 systemctl enable --now agent-platform
 systemctl --no-pager status agent-platform

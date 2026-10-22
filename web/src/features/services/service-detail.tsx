@@ -4,12 +4,12 @@
  */
 import { useMemo, useState } from "react";
 import {
-  LuBrain, LuCircleStop, LuClock, LuEllipsis, LuFileText, LuFolder, LuGitBranch, LuHistory, LuListTodo,
-  LuPlay, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard, LuEye,
+  LuBrain, LuCircleAlert, LuCircleStop, LuClock, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuGitBranch, LuHistory, LuListTodo,
+  LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
   LuGitPullRequestArrow,
 } from "react-icons/lu";
 
-import { api, useEnvs, useProcesses, useRuns, useService, useServiceEnv, useSettings, useTasks } from "@/api/hooks";
+import { api, useEnvs, useMeta, useProcesses, useRuns, useService, useServiceEnv, useServiceTools, useSettings, useTasks } from "@/api/hooks";
 import type { Instance, ServiceEnvOverride, ServiceSummary } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, InstanceBadge } from "@/components/status";
@@ -21,7 +21,7 @@ import { Drawer, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, datetime, until } from "@/lib/format";
-import { invalidate, useQuery } from "@/lib/query";
+import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { AssetList, KnowledgeList } from "../memory/memory";
@@ -31,7 +31,7 @@ import { RunTaskDialog } from "../tasks/run-dialog";
 import { TasksTable, taskRowsOf } from "../tasks/tasks";
 import { ServiceConfigEditor } from "./service-config";
 
-type TabKey = "overview" | "envs" | "tasks" | "runs" | "memory" | "config" | "versions";
+type TabKey = "overview" | "envs" | "tasks" | "runs" | "memory" | "tools" | "config" | "versions";
 
 export function ServiceDetailPage() {
   const { name } = useParams<{ name: string }>();
@@ -104,20 +104,25 @@ export function ServiceDetailPage() {
         { value: "tasks", label: "任务", icon: <LuListTodo />, count: tasks?.filter((t) => !t.extends).length },
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "memory", label: "记忆", icon: <LuBrain /> },
+        { value: "tools", label: "工具", icon: <LuPlug />, count: svc && Object.keys(svc.mcp ?? {}).length ? Object.keys(svc.mcp).length : undefined },
         { value: "config", label: "配置", icon: <LuSettings /> },
         { value: "versions", label: "版本", icon: <LuHistory /> },
       ]} />
 
       {!svc ? <Skeleton className="h-96" /> : (
         <>
-          {tab === "overview" && <OverviewTab svc={svc} env={env} onOpenEnvs={() => setSearch({ tab: "envs" })} />}
+          {tab === "overview" && <OverviewTab svc={svc} env={env} onOpenEnvs={() => setSearch({ tab: "envs" })} onOpenTools={() => setSearch({ tab: "tools" })} />}
           {tab === "envs" && <EnvsTab svc={svc} onSaved={refetch} />}
           {tab === "tasks" && <Card><TasksTable groups={[{ key: "all", rows: taskRowsOf(tasks) }]} /></Card>}
           {tab === "runs" && <RunsTab service={svc.name} env={env} />}
           {tab === "memory" && <div className="space-y-4">
+            <div className="text-xs text-fg-3">
+              {env} 的记忆连同对所有环境成立的条目一起列出。人写的约定在「配置 → 服务档案」；记忆被反复用到、确认无误后可以在条目里升格进档案（<Link to={`/memory?tab=promotable&service=${svc.name}`} className="text-accent hover:underline">看可升格的</Link>）。
+            </div>
             <KnowledgeList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
             <AssetList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
           </div>}
+          {tab === "tools" && <ToolsTab svc={svc} onOpenConfig={() => setSearch({ tab: "config" })} />}
           {tab === "config" && <ServiceConfigEditor svc={svc} onSaved={refetch} />}
           {tab === "versions" && <VersionHistory kind="services" name={svc.name} onRestored={refetch} />}
         </>
@@ -132,7 +137,7 @@ function RunsTab({ service, env }: { service: string; env: string }) {
   return <Card><RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]} /></Card>;
 }
 
-function OverviewTab({ svc, env, onOpenEnvs }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void }) {
+function OverviewTab({ svc, env, onOpenEnvs, onOpenTools }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void; onOpenTools: () => void }) {
   const { data: view } = useServiceEnv(svc.name, env);
   const { data: recent } = useRuns({ service: svc.name, env, limit: 8 });
   const h = svc.health[env];
@@ -143,13 +148,6 @@ function OverviewTab({ svc, env, onOpenEnvs }: { svc: ServiceSummary; env: strin
           <div className="flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-[13px] text-warn">
             <LuPower className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 环境已停用：不接收运行、不启动进程、定时暂停。</span>
             <Button size="sm" onClick={onOpenEnvs}>去启用</Button>
-          </div>
-        )}
-        {h?.enabled && h.startable === false && Object.keys(svc.processes).length > 0 && (
-          <div className="flex items-center gap-3 rounded-lg border border-line bg-sunken px-4 py-3 text-[13px] text-fg-2">
-            <LuEye className="size-4 shrink-0 text-fg-3" />
-            <span className="flex-1">{env} 只看不起：agent 照常读代码、读配置、查只读库，但平台不在本机用 {env} 的配置起进程（会真的连该环境的库、跑它的调度）。</span>
-            <Button size="sm" variant="ghost" onClick={onOpenEnvs}>环境设置</Button>
           </div>
         )}
         <Processes svc={svc} env={env} />
@@ -167,6 +165,14 @@ function OverviewTab({ svc, env, onOpenEnvs }: { svc: ServiceSummary; env: strin
               <DescList items={[
                 ["部署目录", <Mono copy>{view.root}</Mono>],
                 ["代码目录", <div className="space-y-0.5">{view.code_paths.map((p) => <Mono key={p}>{p}</Mono>)}</div>],
+                ["解释器", <div><Mono copy>{view.python}</Mono><div className="mt-0.5 text-[11.5px] text-fg-3">py 工具的项目内核、进程 cmd 里的 {"{python}"} 都用它</div></div>],
+                ["地址", Object.keys(view.urls ?? {}).length ? <UrlList urls={view.urls} /> : <span className="text-fg-3">未配置</span>],
+                ["服务工具", (view.mcp_servers ?? []).length ? (
+                  <button type="button" onClick={onOpenTools} className="flex flex-wrap items-center gap-1 text-left hover:text-accent">
+                    {view.mcp_servers.map((m) => <Badge key={m} tone="outline" icon={<LuPlug />} className="font-mono">{m}</Badge>)}
+                    <span className="text-[11.5px] text-fg-3">MCP，运行里自动带上</span>
+                  </button>
+                ) : <span className="text-fg-3">无（可在「配置 → MCP」声明）</span>],
                 ["主机", view.hosts.length ? view.hosts.join("、") : <span className="text-fg-3">未登记</span>],
                 ["只读库", view.readonly_dsn ? <Mono copy>{view.readonly_dsn}</Mono> : <span className="text-fg-3">未配置（sql_query 不可用）</span>],
                 ["代码版本", view.git ? (
@@ -232,6 +238,84 @@ function SyncCode({ service, env, gitRef }: { service: string; env: string; gitR
   return <Button size="sm" icon={<LuGitPullRequestArrow />} loading={busy} onClick={sync}>同步代码</Button>;
 }
 
+/** 该环境的地址：http(s) 的可以点开（新窗口） */
+function UrlList({ urls }: { urls: Record<string, string> }) {
+  return (
+    <ul className="space-y-0.5">
+      {Object.entries(urls).map(([name, url]) => (
+        <li key={name} className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 font-mono text-[11.5px] text-fg-3">{name}</span>
+          {/^https?:\/\//.test(url)
+            ? <a href={url} target="_blank" rel="noreferrer" className="flex min-w-0 items-center gap-1 font-mono text-[12px] text-accent hover:underline">
+                <span className="truncate">{url}</span><LuExternalLink className="size-3 shrink-0" />
+              </a>
+            : <Mono copy>{url}</Mono>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// ———————— 工具：服务自己声明的 MCP ————————
+
+function ToolsTab({ svc, onOpenConfig }: { svc: ServiceSummary; onOpenConfig: () => void }) {
+  const { data, loading, error, refetch } = useServiceTools(svc.name);
+  const [reloading, setReloading] = useState(false);
+  const reload = async () => {
+    setReloading(true);
+    try {
+      const next = await api.serviceTools(svc.name, true);
+      setQueryData(["services", svc.name, "tools"], () => next);
+      if (next.failed.length) toast.error("已重新连接，仍有连接失败", next.failed.join("、"));
+      else toast("已重新连接", { description: `${next.tools.length} 个工具` });
+    } catch (e) {
+      toast.error("重新连接失败", (e as Error).message);
+    } finally {
+      setReloading(false);
+    }
+  };
+  const servers = data?.servers ?? Object.keys(svc.mcp ?? {});
+  return (
+    <Card>
+      <CardHeader title="服务工具（MCP）" icon={<LuPlug />}
+        description="服务自己声明的 MCP server（在「配置 → MCP」里写）：运行在本服务上时这些工具自动出现，调用按运行的环境连接；角色关了「自动带上服务工具」就不带。"
+        actions={servers.length > 0 && <Button size="sm" icon={<LuRefreshCw />} loading={reloading} onClick={reload}>重新连接</Button>} />
+      {error ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={4} /> : !servers.length ? (
+        <Empty icon={<LuPlug />} title="这个服务没有声明 MCP"
+          description="在「配置 → MCP」里加一个 server（名字 + 连接配置），这里就会列出它的工具；比如 dagster 服务接上 Dagster 的运行记录与日志。"
+          action={<Button size="sm" onClick={onOpenConfig}>去配置</Button>} />
+      ) : (
+        <>
+          {!!data?.failed.length && (
+            <div className="flex gap-2 border-b border-line bg-warn-soft px-4 py-2.5 text-[12.5px] text-warn">
+              <LuCircleAlert className="mt-0.5 size-4 shrink-0" />
+              <span>这些连接失败：<span className="font-mono">{data.failed.join("、")}</span>。检查连接配置、环境变量与服务端是否在线，改好后点「重新连接」。</span>
+            </div>
+          )}
+          {data && !data.loaded && <div className="border-b border-line px-4 py-2.5 text-[12.5px] text-fg-3">还没连过：点「重新连接」现连一次。</div>}
+          {!data?.tools.length ? (
+            <Empty title="没有可用的工具" description={`声明了 ${servers.join("、")}，但没有拿到工具：看上面的连接失败提示，或检查 MCP 服务端`} />
+          ) : (
+            <Table>
+              <thead><tr><Th>工具</Th><Th>说明</Th><Th>Server</Th><Th>可用环境</Th></tr></thead>
+              <tbody>
+                {data.tools.map((t) => (
+                  <Tr key={t.name}>
+                    <Td className="whitespace-nowrap"><code className="font-mono text-[12.5px] font-medium text-fg">{t.name}</code></Td>
+                    <Td className="max-w-[460px] text-[12.5px] text-fg-2">{t.description || <span className="text-fg-3">—</span>}</Td>
+                    <Td>{t.server ? <Badge tone="outline" className="font-mono">{t.server}</Badge> : <span className="text-fg-3">—</span>}</Td>
+                    <Td><span className="flex flex-wrap gap-1">{t.envs.length ? t.envs.map((e) => <EnvBadge key={e} env={e} />) : <span className="text-[12px] text-fg-3">—</span>}</span></Td>
+                  </Tr>
+                ))}
+              </tbody>
+            </Table>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 export const PROFILE_LABEL: Record<string, string> = {
   conventions: "口径与术语", no_go: "禁区", env_notes: "环境差异", pitfalls: "常见坑", code_refs: "代码位置",
   upstream: "上游依赖", downstream: "下游影响", runbook: "运维备注",
@@ -257,20 +341,10 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
   const toggle = async (env: string, enabled: boolean) => {
     const ok = await confirm({
       title: enabled ? `在 ${env} 启用 ${svc.name}？` : `在 ${env} 停用 ${svc.name}？`,
-      description: enabled ? "启用后该环境立即接收运行，定时恢复。" : "停用后：该环境的新运行全部拒收（原因码 service_env_disabled），定时暂停，进程不能启动；其它环境不受影响。",
+      description: enabled ? "启用后该环境立即接收运行，定时恢复，可以按需起进程。" : "停用后：该环境的新运行全部拒收（原因码 service_env_disabled），定时暂停，进程与项目内核不能启动；其它环境不受影响。",
       confirmText: enabled ? "启用" : "停用", danger: !enabled,
     });
     if (ok) await save(env, { enabled: enabled ? undefined : false }, enabled ? `${env} 已启用` : `${env} 已停用`);
-  };
-  const toggleStart = async (env: string, envDefault: boolean, startable: boolean) => {
-    const ok = await confirm({
-      title: startable ? `允许平台在 ${env} 起 ${svc.name} 的进程？` : `${env} 改为只看不起？`,
-      description: startable
-        ? `平台会在本机用 ${env} 的配置起一份副本：它会真的连 ${env} 的库、跑 ${env} 的调度和消费者。确认这个服务在 ${env} 起副本是安全的再打开。`
-        : "agent 照常读代码、读配置、查只读库；平台不再在这个环境启动进程，已在跑的进程不受影响（可以手动停）。",
-      confirmText: startable ? "允许" : "改为只看", danger: startable,
-    });
-    if (ok) await save(env, { startable: startable === envDefault ? undefined : startable }, startable ? `${env} 可以起进程了` : `${env} 只看不起`);
   };
   const saveRef = async (env: string) => {
     if (!(env in refs)) return;
@@ -281,25 +355,24 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
   };
   return (
     <Card>
-      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行；起进程 = 平台能在本机用该环境的配置起副本（关掉即只看不起）；跟踪 = 代码同步的默认分支。主机、只读库、档案的环境差异在「配置」里改。" icon={<LuLayers />} />
+      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行、能起进程和项目内核；跟踪 = 代码同步的默认分支。主机、只读库、解释器、地址、档案的环境差异在「配置」里改。" icon={<LuLayers />} />
       <ul className="divide-y divide-line">
         {(envs ?? []).map((e) => {
           const o = svc.envs[e.name] ?? {};
-          const on = svc.health[e.name]?.enabled !== false;
-          const startable = svc.health[e.name]?.startable ?? e.startable;
-          const hasProcs = Object.keys(svc.processes).length > 0;
-          const overrides = [o.hosts && "主机", o.readonly_dsn && "只读库", o.code_paths && "代码目录", o.profile && Object.keys(o.profile).length && "档案"].filter(Boolean);
+          const h = svc.health[e.name];
+          const on = h?.enabled !== false;
+          const overrides = [o.hosts && "主机", o.readonly_dsn && "只读库", o.code_paths && "代码目录", o.python && "解释器", o.urls && Object.keys(o.urls).length && "地址", o.profile && Object.keys(o.profile).length && "档案"].filter(Boolean);
           return (
             <li key={e.name} className={cn("flex flex-wrap items-center gap-4 px-4 py-3.5", !on && "bg-sunken/50")}>
               <EnvBadge env={e.name} className="h-6 px-2 text-[12px]" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-[13px] font-medium text-fg">
                   {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">已停用</Badge>}
-                  {on && hasProcs && !startable && <Badge tone="idle">只看不起</Badge>}
                 </div>
                 <div className="mt-0.5 text-[12px] text-fg-3">
-                  {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"} · 近 24h {svc.health[e.name]?.runs_24h ?? 0} 次运行 · 进程 {svc.health[e.name]?.running_processes ?? 0}/{svc.health[e.name]?.total_processes ?? 0} 运行中
+                  {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"} · 近 24h {h?.runs_24h ?? 0} 次运行 · 进程 {h?.running_processes ?? 0}/{h?.total_processes ?? 0} 运行中
                 </div>
+                {h?.python && <div className="mt-0.5 truncate font-mono text-[11.5px] text-fg-3" title="该环境的解释器">{h.python}</div>}
               </div>
               {svc.repo && (
                 <label className="flex items-center gap-1.5 text-[12px] text-fg-3">跟踪
@@ -307,11 +380,6 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
                     onChange={(ev) => setRefs((r) => ({ ...r, [e.name]: ev.target.value }))}
                     onBlur={() => saveRef(e.name)} onKeyDown={(ev) => { if (ev.key === "Enter") ev.currentTarget.blur(); }} />
                 </label>
-              )}
-              {hasProcs && (
-                <Tooltip content={o.startable == null ? `跟随环境默认（${e.startable ? "可起" : "只看不起"}）` : "本服务单独设置，覆盖环境默认"}>
-                  <span><Switch checked={startable} disabled={!svc.enabled || !on} onChange={(v) => toggleStart(e.name, e.startable, v)} label={<span className="text-[12.5px]">起进程</span>} /></span>
-                </Tooltip>
               )}
               <Switch checked={on} disabled={!svc.enabled} onChange={(v) => toggle(e.name, v)} label={<span className="text-[12.5px]">{on ? "启用" : "停用"}</span>} />
             </li>
@@ -330,20 +398,25 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
   const { data, loading, refetch } = useProcesses(svc.name);
   const { data: envs } = useEnvs();
   const { data: settings } = useSettings();
+  const { data: meta } = useMeta();
   const defaultLease = settings?.processes.default_lease_hours ?? 2;
-  const envOff = svc.health[env]?.enabled === false;
   const [logs, setLogs] = useState<Instance | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const rows = (data ?? []).filter((i) => i.env === env);
-  const protectedEnv = envs?.find((e) => e.name === env)?.protected;
-  const startable = svc.health[env]?.startable !== false;
+  const backend = meta?.features.process_control;
+  const controlOff = backend === "off";
+  /** 能不能起：只看服务在该环境是否启用（实例上的 enabled）与平台是否开了进程启停 */
+  const envOff = !svc.enabled || svc.health[env]?.enabled === false;
+  const protectedEnv = !!envs?.find((e) => e.name === env)?.protected;
+  const approvalIn = settings?.approvals.required_in ?? "off";
+  const needsApproval = approvalIn === "all" || (approvalIn === "protected" && protectedEnv);
 
   const act = async (i: Instance, action: "start" | "stop" | "renew") => {
     if (action !== "renew") {
       const ok = await confirm({
         title: `${action === "start" ? "启动" : "停止"} ${i.process}@${env}？`,
-        description: protectedEnv ? "受保护环境：会先创建审批单，审批通过后才执行。" : action === "start" ? `按 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时租约启动，到期自动停止（可续期）。` : "进程会收到 SIGTERM，15 秒后仍未退出则强制结束。",
-        confirmText: protectedEnv ? "提交审批" : action === "start" ? "启动" : "停止", danger: action === "stop",
+        description: needsApproval ? "设置里打开了审批：会先创建审批单，有人放行后才执行。" : action === "start" ? `按 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时租约启动，到期自动停止（可续期）。` : "进程会收到 SIGTERM，15 秒后仍未退出则强制结束。",
+        confirmText: needsApproval ? "提交审批" : action === "start" ? "启动" : "停止", danger: action === "stop",
       });
       if (!ok) return;
     }
@@ -364,7 +437,11 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
 
   return (
     <Card>
-      <CardHeader title="进程" icon={<LuServer />} description={!startable ? "只看不起：可以看状态和日志，平台不在这个环境启动进程" : protectedEnv ? "受保护环境：启停需审批" : "按需启动、租约到期自动停止；systemd 托管，日志进 journald"}
+      <CardHeader title="进程" icon={<LuServer />} description={
+        controlOff ? "平台未开启进程启停（部署配置 process_control.backend=off）：只能看状态和日志"
+          : envOff ? `${svc.name} 在 ${env} 已停用：不能启动进程`
+            : needsApproval ? "已开启审批（设置 → 审批）：启停要人放行"
+              : `按需启动、租约到期自动停止；${backend === "local" ? "本机子进程托管" : "systemd 托管，日志进 journald"}`}
         actions={<Button size="icon-sm" variant="ghost" onClick={() => refetch()} aria-label="刷新"><LuRefreshCw /></Button>} />
       {loading ? <SkeletonRows rows={2} /> : rows.length === 0 ? (
         <Empty title="没有托管进程" description="在「配置」里声明进程（启动命令、端口），即可在这里按环境启停" />
@@ -390,14 +467,14 @@ function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
                   <Td className="text-right">
                     <div className="flex justify-end gap-1">
                       {i.state === "running" ? <>
-                        <Tooltip content={`续期 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时`}><Button size="icon-xs" variant="ghost" onClick={() => act(i, "renew")} loading={busy === i.process + "renew"}><LuClock /></Button></Tooltip>
+                        <Tooltip content={`续期 ${svc.processes[i.process]?.lease_hours ?? defaultLease} 小时`}><Button size="icon-xs" variant="ghost" onClick={() => act(i, "renew")} loading={busy === i.process + "renew"} disabled={controlOff}><LuClock /></Button></Tooltip>
                         <Tooltip content="日志"><Button size="icon-xs" variant="ghost" onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>
-                        <Button size="xs" variant="danger-ghost" icon={<LuCircleStop />} onClick={() => act(i, "stop")} loading={busy === i.process + "stop"}>停止</Button>
+                        <Button size="xs" variant="danger-ghost" icon={<LuCircleStop />} onClick={() => act(i, "stop")} loading={busy === i.process + "stop"} disabled={controlOff}>停止</Button>
                       </> : <>
                         {i.last_exit && <Tooltip content="上次运行的日志"><Button size="icon-xs" variant="ghost" onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>}
-                        {startable
-                          ? <Button size="xs" icon={<LuPlay />} onClick={() => act(i, "start")} loading={busy === i.process + "start"} disabled={!svc.enabled || envOff}>启动</Button>
-                          : <Tooltip content="只看不起：服务 → 环境 → 起进程"><span><Button size="xs" icon={<LuEye />} disabled>只看</Button></span></Tooltip>}
+                        {controlOff || envOff || !i.enabled
+                          ? <Tooltip content={controlOff ? "平台未开启进程启停" : `${svc.name} 在 ${env} 已停用（服务 → 环境）`}><span><Button size="xs" icon={<LuPlay />} disabled>启动</Button></span></Tooltip>
+                          : <Button size="xs" icon={<LuPlay />} onClick={() => act(i, "start")} loading={busy === i.process + "start"}>启动</Button>}
                       </>}
                     </div>
                   </Td>

@@ -1,16 +1,16 @@
 /**
- * 运行详情：结论 → 步骤时间线（思考 / 工具调用+结果 / 审批 / 阶段，逐步 👍👎）
- * → 右栏上下文（输入、注入的档案、召回与沉淀、同会话运行、版本谱系）。
- * 进行中的运行 1.5 秒增量刷新；任务图运行额外给 DAG。
+ * 运行详情：主视图是步骤时间线——思考 / 工具调用（参数 + 结果）/ 审批 / 最终答案，逐步 👍👎；
+ * 右栏是上下文（输入、执行谱系、注入的档案、召回与沉淀、反馈、同会话运行）。
+ * 进行中的运行 1.5 秒增量刷新；被 👎 过的 agent 运行可以用当前定义重放（回归）。
  */
 import { useMemo, useState } from "react";
 import {
-  LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuMessageSquare, LuMessageSquareWarning, LuPencilLine,
-  LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuWrench, LuZap, LuFlag,
+  LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
+  LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
 import { api, useMeta, useRun, useRunEvents } from "@/api/hooks";
-import type { Run, RunEvent } from "@/api/types";
+import type { KnowledgeKind, Run, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TriggerBadge } from "@/components/status";
@@ -23,7 +23,8 @@ import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate, useParams } from "@/lib/router";
-import { GraphView } from "./graph-view";
+import { KindBadge } from "../memory/memory";
+import { StartReplayDialog } from "./replays";
 
 const LIVE = new Set(["queued", "running", "awaiting_approval"]);
 
@@ -48,13 +49,6 @@ export function RunDetailPage() {
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-4">
           {run.pending_approval && <ApprovalBanner run={run} />}
-          <Outcome run={run} />
-          {run.context.graph && (
-            <Card>
-              <CardHeader title="任务图" description="节点是产物、边是依赖；复用 = 输入指纹未变直接沿用旧产物" />
-              <GraphView graph={run.context.graph} />
-            </Card>
-          )}
           <Timeline run={run} events={events} live={live} />
         </div>
         <Sidebar run={run} />
@@ -79,11 +73,14 @@ function Header({ run }: { run: Run }) {
     try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); }
   };
   const [correcting, setCorrecting] = useState(false);
+  const [replaying, setReplaying] = useState(false);
+  /** 回归重放只收被 👎 过的 agent 运行 */
+  const replayable = !live && run.resolution === "agent" && run.feedback.some((f) => f.score < 0);
   const failed = run.status === "failed";
   /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run，跳过去重） */
   const again = async () => {
     const ok = await confirm(failed
-      ? { title: "断点续跑？", description: "沿用同一个 run id，从失败处继续：已完成的步骤与复用的产物不重做。", confirmText: "续跑" }
+      ? { title: "断点续跑？", description: "沿用同一个 run id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
       : { title: "用同样的输入再跑一次？", description: "新开一个 run，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
     if (!ok) return;
     try {
@@ -102,6 +99,11 @@ function Header({ run }: { run: Run }) {
         <EnvBadge env={run.env} />
         <TriggerBadge type={run.trigger.type} source={run.trigger.source} />
         <ResolutionTag resolution={run.resolution} />
+        {run.replay_of && (
+          <span className="flex items-center gap-1 text-fg-2"><LuFlaskConical className="size-3.5 text-fg-3" />回归重放自
+            <Link to={`/runs/${run.replay_of}`} className="font-mono text-accent hover:underline">{shortId(run.replay_of)}</Link>
+          </span>
+        )}
         <span title={datetime(run.created_at, true)}>{ago(run.created_at)}</span>
         <span>耗时 {live ? "进行中" : duration(run.duration_ms)}</span>
         {!!run.tokens && <span>{num(run.tokens)} tokens</span>}
@@ -114,15 +116,17 @@ function Header({ run }: { run: Run }) {
         )}
         {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
         {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
+        {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)} title="改完提示词 / 任务定义 / 档案后，用当前定义重跑这条，看 👎 指出的问题改好没有">重放</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} onClick={cancel}>取消</Button>
           : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
         <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
+        {replayable && <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={{ run_ids: [run.run_id] }} />}
       </>}
     />
   );
 }
 
-/** 纠正：告诉 agent 哪里错了，在同一会话里带着原结论与纠正重答；纠正内容会沉淀为高优先级知识 */
+/** 纠正：告诉 agent 哪里错了，在同一会话里带着原结论与纠正重答；纠正内容会记成高优先级的人工记忆 */
 function CorrectDialog({ run, open, onClose }: { run: Run; open: boolean; onClose: () => void }) {
   const [text, setText] = useState("");
   const submit = useMutation(async () => {
@@ -135,7 +139,7 @@ function CorrectDialog({ run, open, onClose }: { run: Run; open: boolean; onClos
     } catch (e) { toast.error("提交失败", (e as Error).message); }
   });
   return (
-    <Dialog open={open} onClose={onClose} size="lg" title="纠正这次结论" description="在同一会话里新开一次运行：agent 看到原结论和你的纠正后重答。纠正本身会作为人工知识沉淀。"
+    <Dialog open={open} onClose={onClose} size="lg" title="纠正这次结论" description="在同一会话里新开一次运行：agent 看到原结论和你的纠正后重答。纠正本身会记成人工记忆。"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!text.trim()} loading={submit.pending} onClick={() => submit.mutate(undefined)}>提交纠正</Button></>}>
       {run.output?.answer && <div className="mb-3 max-h-40 overflow-auto rounded-md border border-line bg-sunken/50 p-3 text-[12.5px] text-fg-2"><Markdown text={run.output.answer} /></div>}
       <Field label="哪里不对" required help="说清楚正确的口径或事实，例如：GMV 不扣退款，退款看 refund_amount">
@@ -174,47 +178,20 @@ function ApprovalBanner({ run }: { run: Run }) {
   );
 }
 
-function Outcome({ run }: { run: Run }) {
-  if (LIVE.has(run.status) && !run.output) {
-    return (
-      <Card className="flex items-center gap-3 px-4 py-4">
-        <span className="relative flex size-2.5"><span className="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-60" /><span className="relative inline-flex size-2.5 rounded-full bg-info" /></span>
-        <span className="text-[13px] text-fg-2">{run.status === "awaiting_approval" ? "挂起中：审批通过后继续" : "执行中…步骤实时出现在下方时间线"}</span>
-      </Card>
-    );
-  }
-  if (run.output?.error) {
-    return (
-      <Card className="border-bad/30">
-        <CardHeader icon={<LuCircleAlert className="text-bad" />} title="失败" description={run.error_code && <code className="font-mono">{run.error_code}</code>} />
-        <div className="p-4"><CodeBlock code={run.output.error} wrap /></div>
-      </Card>
-    );
-  }
-  if (run.output?.answer) {
-    return (
-      <Card>
-        <CardHeader icon={<LuCircleCheck className="text-ok" />} title="结论" actions={<CopyButton text={run.output.answer} label="复制结论" />} />
-        <div className="px-5 py-4"><Markdown text={run.output.answer} /></div>
-      </Card>
-    );
-  }
-  return null;
-}
+// ———————— 时间线（主视图） ————————
 
-// ———————— 时间线 ————————
-
+/** 一步：工具调用与它的结果合成一步（参数 + 结果），其余事件各占一步 */
 interface Step {
   key: string;
-  kind: "stage" | "thought" | "tool" | "approval" | "final" | "error" | "artifact";
+  kind: "stage" | "thought" | "tool" | "approval" | "final" | "error";
   at: string;
-  seq: number;
+  seq: number;                 // 0 = 由运行输出补出来的一步（事件里没有），不能单独评价
   call?: RunEvent;
   result?: RunEvent;
   ev: RunEvent;
 }
 
-function buildSteps(events: RunEvent[]): Step[] {
+function buildSteps(run: Run, events: RunEvent[]): Step[] {
   const steps: Step[] = [];
   const open: Step[] = [];
   for (const ev of events) {
@@ -228,27 +205,46 @@ function buildSteps(events: RunEvent[]): Step[] {
       steps.push({ key: ev.kind + ev.seq, kind: ev.kind, at: ev.at, seq: ev.seq, ev });
     }
   }
+  // 运行已结束但事件里没有最终答案 / 出错（比如出错在执行之前）：用运行输出补上，时间线总以结果收尾
+  if (!LIVE.has(run.status)) {
+    const at = run.finished_at ?? events[events.length - 1]?.at ?? run.created_at;
+    const synth = (kind: "final" | "error", content: string): Step =>
+      ({ key: kind + "-out", kind, at, seq: 0, ev: { seq: 0, kind, at, payload: { content } } });
+    if (run.output?.error && !steps.some((s) => s.kind === "error")) steps.push(synth("error", run.output.error));
+    else if (run.output?.answer && !steps.some((s) => s.kind === "final")) steps.push(synth("final", run.output.answer));
+  }
   return steps;
 }
 
 function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefined; live: boolean }) {
-  const steps = useMemo(() => buildSteps(events ?? []), [events]);
+  const steps = useMemo(() => buildSteps(run, events ?? []), [run, events]);
   const [expandAll, setExpandAll] = useState(false);
   const t0 = run.created_at ? new Date(run.created_at).getTime() : 0;
   const tools = steps.filter((s) => s.kind === "tool").length;
+  const thoughts = steps.filter((s) => s.kind === "thought").length;
+  const final = steps.find((s) => s.kind === "final" || s.kind === "error");
   return (
     <Card>
-      <CardHeader title="执行过程" description={events ? `${steps.length} 步 · ${tools} 次工具调用${live ? " · 实时" : ""}` : "加载中"}
-        actions={<Button size="xs" variant="ghost" onClick={() => setExpandAll((v) => !v)}>{expandAll ? "全部收起" : "全部展开"}</Button>} />
+      <CardHeader title="执行过程" icon={<LuSparkles />}
+        description={events ? `${thoughts} 次思考 · ${tools} 次工具调用${live ? " · 实时" : ""}` : "加载中"}
+        actions={<>
+          {final && steps.length > 6 && (
+            <Button size="xs" variant="ghost" icon={<LuArrowDown />} onClick={() => document.getElementById("step-final")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              {final.kind === "final" ? "最终答案" : "出错处"}
+            </Button>
+          )}
+          <Button size="xs" variant="ghost" onClick={() => setExpandAll((v) => !v)}>{expandAll ? "全部收起" : "全部展开"}</Button>
+        </>} />
       {!events ? <div className="p-4"><Skeleton className="h-40" /></div> : (
         <ol className="relative px-4 py-3">
+          {steps.length === 0 && !live && <li className="py-6 text-center text-[12.5px] text-fg-3">这次运行没有记录步骤</li>}
           {steps.map((s, i) => (
             <StepRow key={s.key} step={s} run={run} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} />
           ))}
           {live && (
             <li className="flex items-center gap-3 py-2 pl-[3px]">
               <span className="relative flex size-[18px] items-center justify-center"><span className="absolute size-2.5 animate-ping rounded-full bg-info/50" /><span className="size-2 rounded-full bg-info" /></span>
-              <span className="text-[12.5px] text-fg-3">等待下一步…</span>
+              <span className="text-[12.5px] text-fg-3">{run.status === "awaiting_approval" ? "挂起中：有人放行后继续" : run.status === "queued" ? "排队中…" : "执行中…下一步会实时出现在这里"}</span>
             </li>
           )}
         </ol>
@@ -257,31 +253,36 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
   );
 }
 
-const STEP_ICON: Record<Step["kind"], { icon: React.ReactNode; cls: string }> = {
-  stage: { icon: <LuFlag />, cls: "bg-sunken text-fg-3" },
-  thought: { icon: <LuSparkles />, cls: "bg-accent-soft text-accent" },
-  tool: { icon: <LuWrench />, cls: "bg-info-soft text-info" },
-  approval: { icon: <LuShieldCheck />, cls: "bg-warn-soft text-warn" },
-  final: { icon: <LuCircleCheck />, cls: "bg-ok-soft text-ok" },
-  error: { icon: <LuCircleAlert />, cls: "bg-bad-soft text-bad" },
-  artifact: { icon: <LuZap />, cls: "bg-accent-soft text-accent" },
+const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
+  stage: { icon: <LuFlag />, cls: "bg-sunken text-fg-3", label: "阶段" },
+  thought: { icon: <LuSparkles />, cls: "bg-accent-soft text-accent", label: "思考" },
+  tool: { icon: <LuWrench />, cls: "bg-info-soft text-info", label: "工具调用" },
+  approval: { icon: <LuShieldCheck />, cls: "bg-warn-soft text-warn", label: "审批" },
+  final: { icon: <LuCircleCheck />, cls: "bg-ok-soft text-ok", label: "最终答案" },
+  error: { icon: <LuCircleAlert />, cls: "bg-bad-soft text-bad", label: "出错" },
 };
 
 function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean }) {
   const [open, setOpen] = useState<boolean | null>(null);
-  const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval");
+  const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval" || step.kind === "final");
   const mine = useMine(run)(step.seq);
-  const others = run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0);
-  const rateable = step.kind === "tool" || step.kind === "thought" || step.kind === "final";
+  const others = step.seq ? run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0) : [];
+  const rateable = step.seq > 0 && (step.kind === "tool" || step.kind === "thought" || step.kind === "final");
   const p = step.ev.payload;
-  const meta = STEP_ICON[step.kind];
+  const meta = STEP_META[step.kind];
+  const tool = step.call?.payload.tool ?? step.result?.payload.tool;
   const title = step.kind === "tool"
-    ? <span className="flex items-center gap-2"><code className="font-mono text-[12.5px] font-medium text-fg">{step.call?.payload.tool ?? step.result?.payload.tool}</code><span className="truncate text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
-    : step.kind === "thought" ? "思考" : step.kind === "final" ? "结论" : step.kind === "error" ? "出错" : step.kind === "approval" ? (p.title ?? "审批") : (p.title ?? p.stage);
-  const right = step.kind === "tool" && step.result?.payload.duration_ms !== undefined ? duration(step.result.payload.duration_ms as number) : p.tokens ? `${num(p.tokens as number)} tok` : null;
+    ? <span className="flex items-center gap-2"><span className="shrink-0 text-fg-3">{step.call ? "工具调用" : "工具结果"}</span><code className="shrink-0 font-mono text-[12.5px] font-medium text-fg">{tool}</code><span className="truncate font-normal text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
+    : step.kind === "approval" ? (p.title ?? meta.label)
+      : step.kind === "stage" ? (p.title ?? p.stage)
+        : step.kind === "error" && run.error_code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{run.error_code}</code></span>
+          : meta.label;
+  const right = step.kind === "tool" && step.result?.payload.duration_ms !== undefined ? duration(step.result.payload.duration_ms as number)
+    : step.kind === "tool" && !step.result && LIVE.has(run.status) ? "进行中" : p.tokens ? `${num(p.tokens as number)} tok` : null;
   const collapsible = step.kind !== "stage";
+  const outcome = step.kind === "final" || step.kind === "error";
   return (
-    <li className="group relative flex gap-3 pb-1">
+    <li id={outcome ? "step-final" : undefined} className="group relative flex scroll-mt-4 gap-3 pb-1">
       {!last && <span className="absolute left-[11px] top-7 bottom-0 w-px bg-line" />}
       <span className={cn("relative z-10 mt-1 flex size-[22px] shrink-0 items-center justify-center rounded-full [&_svg]:size-3", meta.cls)}>{meta.icon}</span>
       <div className="min-w-0 flex-1 pb-2">
@@ -290,10 +291,13 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
           <span className={cn("min-w-0 flex-1 truncate", step.kind === "stage" ? "text-fg-2" : "font-medium text-fg")}>{title}</span>
           {step.kind === "stage" && p.content && <span className="truncate text-[12px] text-fg-3">{String(p.content)}</span>}
           {right && <span className="shrink-0 text-[11.5px] tabular-nums text-fg-3">{right}</span>}
+          {step.kind === "final" && <span className="shrink-0" onClick={(e) => e.stopPropagation()}><CopyButton text={String(p.content ?? "")} label="复制" /></span>}
           <span className="w-14 shrink-0 text-right font-mono text-[11px] text-fg-3" title={clock(step.at)}>+{duration(Math.max(0, offset))}</span>
           {rateable && (
-            <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} step={step.seq} mine={mine} size="sm"
-              onSaved={() => invalidate("runs")} className={cn("shrink-0", !mine && "opacity-0 group-hover:opacity-100 focus-within:opacity-100")} />
+            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+              <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} step={step.seq} mine={mine} size="sm"
+                onSaved={() => invalidate("runs")} className={cn("shrink-0", !mine && "opacity-0 group-hover:opacity-100 focus-within:opacity-100")} />
+            </span>
           )}
         </div>
         {others.length > 0 && (
@@ -304,12 +308,14 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
         {expanded && collapsible && (
           <div className="mt-1.5 space-y-2 pl-6">
             {step.kind === "thought" && <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-fg-2">{String(p.content)}</div>}
-            {step.kind === "final" && <Markdown text={String(p.content)} className="text-[13px]" />}
+            {step.kind === "final" && (
+              <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
+            )}
             {step.kind === "error" && <CodeBlock code={String(p.content)} wrap />}
             {step.kind === "approval" && <CodeBlock code={String(p.content)} wrap />}
             {step.kind === "tool" && <>
               {step.call && <ToolArgs args={step.call.payload.args} />}
-              {step.result ? <CodeBlock title="输出" code={String(step.result.payload.output ?? "")} maxHeight={260} /> : <div className="text-xs text-fg-3">等待返回…</div>}
+              {step.result ? <CodeBlock title="工具结果" code={String(step.result.payload.output ?? "")} maxHeight={260} /> : <div className="text-xs text-fg-3">等待返回…</div>}
             </>}
           </div>
         )}
@@ -350,7 +356,9 @@ function Sidebar({ run }: { run: Run }) {
           <DescList items={[
             ["任务", <Link to={`/tasks/${encodeURIComponent(run.task)}?tab=versions`} className="hover:text-accent">{run.task} <span className="text-fg-3">v{run.task_version ?? "—"}</span></Link>],
             ["角色", run.role ? <Link to={`/settings/roles/${run.role}`} className="flex items-center gap-1 hover:text-accent"><LuBot className="size-3.5 text-fg-3" />{run.role} <span className="text-fg-3">v{run.role_version ?? "—"}</span></Link> : "—"],
-            ["触发", <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""}</span>],
+            ["触发", run.replay_of
+              ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
+              : <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""}</span>],
             ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
             ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
@@ -368,10 +376,10 @@ function Sidebar({ run }: { run: Run }) {
       <Card>
         <CardHeader title="记忆" icon={<LuBrain />} description="本次召回了什么、沉淀了什么" />
         <div className="space-y-4 p-4">
-          <MemList title="召回的知识" empty="无" items={c.recalled_knowledge.map((k) => ({ key: String(k.id), label: k.key, hint: `#${k.rank}`, href: `/memory?tab=knowledge&id=${k.id}` }))} />
+          <MemList title="召回的记忆" empty="无" items={c.recalled_knowledge.map((k) => ({ key: String(k.id), label: memLabel(k.key), kind: k.kind, hint: `#${k.rank}`, href: `/memory?id=${k.id}` }))} />
           <MemList title="召回的方法" empty="无" items={c.recalled_assets.map((a) => ({ key: String(a.id), label: `${a.kind}:${a.name}`, href: `/memory?tab=assets&id=${a.id}` }))} />
-          <MemList title="本次沉淀" empty={run.status === "success" ? "没有可沉淀的结论" : "运行结束后沉淀"} items={[
-            ...c.saved_knowledge.map((k) => ({ key: "k" + k.id, label: k.key, hint: "知识", href: `/memory?tab=knowledge&id=${k.id}` })),
+          <MemList title="本次沉淀" empty={run.trigger.type === "replay" ? "回归重放不沉淀记忆" : run.status === "success" ? "没有可沉淀的结论" : "运行结束后沉淀"} items={[
+            ...c.saved_knowledge.map((k) => ({ key: "k" + k.id, label: memLabel(k.key), kind: k.kind, href: `/memory?id=${k.id}` })),
             ...c.saved_assets.map((a) => ({ key: "a" + a.id, label: `${a.kind}:${a.name}`, hint: "方法", href: `/memory?tab=assets&id=${a.id}` })),
           ]} />
         </div>
@@ -407,14 +415,24 @@ function Sidebar({ run }: { run: Run }) {
 
 const onOff = (v: boolean | null | undefined) => (v === false ? "关" : v === true ? "开" : "默认");
 
-function MemList({ title, items, empty }: { title: string; items: { key: string; label: string; hint?: string; href: string }[]; empty: string }) {
+/** 教训的键是 lesson:<指纹>，只显示指纹前 8 位 */
+const memLabel = (key: string) => key.replace(/^lesson:([0-9a-f]{8})[0-9a-f]*$/, "lesson:$1");
+
+/** kind：记忆条目的类型（事实 / 教训），用小标签区分 */
+function MemList({ title, items, empty }: { title: string; items: { key: string; label: string; kind?: KnowledgeKind; hint?: string; href: string }[]; empty: string }) {
   return (
     <div>
       <SectionTitle>{title}</SectionTitle>
       {items.length === 0 ? <div className="text-[12.5px] text-fg-3">{empty}</div> : (
         <ul className="space-y-1">
           {items.map((i) => (
-            <li key={i.key}><Link to={i.href} className="flex items-center gap-2 rounded px-1 py-0.5 text-[12.5px] hover:bg-hover"><span className="truncate font-mono text-fg-2">{i.label}</span>{i.hint && <Badge className="ml-auto">{i.hint}</Badge>}</Link></li>
+            <li key={i.key}>
+              <Link to={i.href} className="flex items-center gap-2 rounded px-1 py-0.5 text-[12.5px] hover:bg-hover">
+                {i.kind && <KindBadge kind={i.kind} className="shrink-0" />}
+                <span className="truncate font-mono text-fg-2">{i.label}</span>
+                {i.hint && <Badge className="ml-auto">{i.hint}</Badge>}
+              </Link>
+            </li>
           ))}
         </ul>
       )}

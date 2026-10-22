@@ -3,8 +3,8 @@
 - host_tools(names)：给 run_code 桩函数的原生 async callable（同一实现）
 
 所有工具从 RunScope 取"当前服务×环境"，签名里没有 service/env：
-sql_query 只能查本服务本环境的只读库，service_ctl 只能启停本服务本环境的进程。
-危险操作（bash/run_code/service_ctl）统一过 Gatekeeper。
+py 在本服务本环境的项目内核里执行，sql_query 只能查本服务本环境的只读库，
+service_ctl 只能启停本服务本环境的进程。危险操作统一过 Gatekeeper（设置里打开审批才生效）。
 
 deepagents 的文件工具（read_file/write_file/edit_file/ls/grep/glob）由框架中间件注入，
 根目录是 scratch（与 bash 的工作目录同一块），不在本目录里登记、不受白名单控制。
@@ -23,7 +23,7 @@ from ...config import Settings
 from ...domain import Rejected
 from ...notify import Message, Notifier
 from ...services import inspect as svc_inspect
-from ...store import artifacts as artifacts_store
+from ...services.kernel import KernelError, KernelManager, kernel_key
 from ...store import assets as assets_store
 from .. import scope as run_scope
 from ..approvals import ApprovalRejected, Gatekeeper
@@ -55,11 +55,12 @@ class ToolInfo:
 
 class Toolbox:
     def __init__(self, settings: Settings, gate: Gatekeeper, notifier: Notifier, controller: Any = None,
-                 mcp_tools: list | None = None):
+                 mcp_tools: list | None = None, kernels: KernelManager | None = None):
         self._s = settings
         self._gate = gate
         self._ctl = controller
         self._notifier = notifier
+        self._kernels = kernels
         self._mcp = {t.name: t for t in (mcp_tools or [])}
         self._fns: dict[str, Fn] = {}
         self._info: dict[str, ToolInfo] = {}
@@ -74,30 +75,52 @@ class Toolbox:
 
     def info(self) -> list[dict]:
         out = [i.dump() for i in self._info.values()]
-        out += [ToolInfo(n, n, (t.description or "").split("\n")[0][:120], "mcp").dump() for n, t in self._mcp.items()]
+        out += [{**ToolInfo(n, n, (t.description or "").split("\n")[0][:120], "mcp").dump(),
+                 "server": (t.metadata or {}).get("mcp_server")} for n, t in self._mcp.items()]
         return out
 
     @property
     def names(self) -> set[str]:
         return set(self._fns) | set(self._mcp)
 
-    def unknown(self, names: list[str]) -> list[str]:
-        return [n for n in names if n not in self.names and n not in FILE_TOOLS]
+    def mcp_servers(self) -> list[str]:
+        return sorted({(t.metadata or {}).get("mcp_server") or "" for t in self._mcp.values()} - {""})
 
-    def langchain_tools(self, names: list[str]) -> list:
+    def expand(self, names: list[str] | tuple[str, ...]) -> list[str]:
+        """角色里的工具写法 → 具体工具名："*" = 全部内置 + 全部平台 MCP；"mcp:<server>" = 该 server 的全部工具。"""
+        out: list[str] = []
+        for n in names:
+            if n == "*":
+                items = [*self._fns, *self._mcp]
+            elif n.startswith("mcp:"):
+                items = [k for k, t in self._mcp.items() if (t.metadata or {}).get("mcp_server") == n[4:]]
+            else:
+                items = [n]
+            out += [x for x in items if x not in out]
+        return out
+
+    def unknown(self, names: list[str]) -> list[str]:
+        servers = set(self.mcp_servers())
+        return [n for n in names if n not in self.names and n not in FILE_TOOLS and n != "*"
+                and not (n.startswith("mcp:") and n[4:] in servers)]
+
+    def langchain_tools(self, names: list[str], extra: list | None = None) -> list:
+        """角色白名单里的工具，加上 extra（运行所在服务的 MCP 工具；和白名单重名的以白名单为准）。"""
         from langchain_core.tools import tool
 
         out = []
-        for n in names:
+        for n in self.expand(names):
             if n in self._fns:
                 out.append(tool(self._fns[n]))
             elif n in self._mcp:
                 out.append(self._mcp[n])
             elif n not in FILE_TOOLS:
                 log.warning("角色声明了未登记的工具 %s，已忽略", n)
-        return out
+        taken = {t.name for t in out}
+        return out + [t for t in (extra or []) if t.name not in taken]
 
     def host_tools(self, names: list[str] | tuple[str, ...]) -> dict[str, Fn]:
+        names = self.expand(names)
         out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n != "run_code"}
         out.update({n: self._mcp[n].coroutine for n in names if n in self._mcp})   # MCP 工具按关键字参数调用
         return out
@@ -105,7 +128,32 @@ class Toolbox:
     # —— 实现 ——
 
     def _register(self) -> None:
-        s, gate, ctl, toolbox = self._s, self._gate, self._ctl, self
+        s, gate, ctl, toolbox, kernels = self._s, self._gate, self._ctl, self, self._kernels
+
+        async def py(code: str, timeout: int = 120, restart: bool = False) -> str:
+            """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是该环境的，工作目录是部署目录，
+            本环境的配置文件已在项目读的路径上，可以直接 import 项目模块、调用项目自己的函数和数据访问层
+            （口径函数、ORM、dagster 资产……），用项目的方式连只读库。变量在本会话内保留，最后一个表达式的值会显示。
+            沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
+            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）。restart=true 清空变量重新开始。"""
+            sc = run_scope.current()
+            if kernels is None or ctl is None or sc.view is None:
+                return "[不可用] 本运行没有关联业务服务，没有项目内核"
+            try:
+                await gate.review("py", code)
+            except ApprovalRejected as e:
+                return f"[未执行] {e}"
+            key = kernel_key(sc.session_id, sc.service, sc.env)
+            try:
+                spec = await ctl.runtime_spec(sc.service, sc.env)
+                if restart or not kernels.alive(key):
+                    # 文件类方法（沉淀的脚本）的目录放上 sys.path：内核里直接 import，不用复制一遍
+                    methods = await assets_store.search_active(sc.env, sc.service, sc.task.split(":")[0], limit=20)
+                    spec["method_paths"] = [m["path"] for m in methods if m.get("path")]
+                return await kernels.execute(key, spec, code, timeout=max(1, min(timeout, 1800)), hidden=sc.hidden,
+                                             restart=restart)
+            except (Rejected, KernelError) as e:
+                return f"[失败] {getattr(e, 'message', None) or e}"
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件与密钥被遮蔽，配置用 service_info 读）、
@@ -158,9 +206,9 @@ class Toolbox:
             return "\n".join(lines)
 
         async def service_ctl(action: str, process: str = "", lines: int = 100) -> str:
-            """启停本服务在本环境的进程。action：status / start / stop / restart / logs。
-            process 为进程名（只有一个进程时可省略）。受保护环境的 start/stop/restart 需人工审批；
-            只看不起的环境（如生产）不能 start/restart，只能看状态与日志。启动带租约，到期自动停止。"""
+            """启停本服务在本环境的进程（本机副本，用该环境的配置起）。action：status / start / stop / restart / logs。
+            process 为进程名（只有一个进程时可省略）。只是跑一段项目代码用 py，需要长驻（起 webserver 看页面、
+            让别的工具连它）才起进程。启动带租约，到期自动停止。"""
             sc = run_scope.current()
             if ctl is None or sc.view is None:
                 return "[不可用] 本运行没有可操作的服务进程"
@@ -180,7 +228,7 @@ class Toolbox:
                     return "[参数] action 须为 status/start/stop/restart/logs"
                 if action in ("start", "restart"):
                     await ctl.ensure_startable(sc.service, sc.env)
-                if sc.protected:
+                if await gate.required(sc.protected):
                     await gate.hold(kind="process", title=f"进程{action} · {sc.service}/{process}@{sc.env}",
                                     detail=f"运行 {sc.run_id} 请求 {action} {sc.service}/{process}（环境 {sc.env}）",
                                     payload={"service": sc.service, "env": sc.env, "process": process,
@@ -263,14 +311,6 @@ class Toolbox:
                 return f"已沉淀 {kind}:{name}（{where}，{n_files} 个文件 {n_bytes // 1024}KB）→ {path}"
             return f"已沉淀 {kind}:{name}（{where}），后续运行会自动召回"
 
-        async def read_artifact(name: str) -> str:
-            """读取本次任务图运行里某个上游节点的完整产物（提示里只给了摘要）。"""
-            sc = run_scope.current()
-            a = await artifacts_store.get(sc.run_id, name)
-            if a is None or a["content"] is None:
-                return f"[不存在] 产物 {name}（未物化或被跳过）"
-            return json.dumps(a["content"], ensure_ascii=False, indent=2, default=str)
-
         async def notify(title: str, content: str) -> str:
             """发一条 markdown 通知到本任务的通知渠道（任务投递渠道，未配置则用名为 default 的渠道）。"""
             sc = run_scope.current()
@@ -285,6 +325,8 @@ class Toolbox:
                 return f"[失败] 发送出错：{type(e).__name__}: {str(e)[:200]}"
             return f"已发送到渠道 {channel}"
 
+        if kernels is not None and ctl is not None:
+            self._add(py, "项目内核", "service", summary="在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数，变量会话内保留")
         self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、工作目录可写、默认断网")
         self._add(run_code, "代码编排", "core", dangerous=True, summary="CodeAct：一段 Python 编排多个工具调用")
         self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置文件内容、git 状态")
@@ -294,5 +336,4 @@ class Toolbox:
         if s.grafana is not None:
             self._add(host_metrics, "主机指标", "service", summary="部署主机内存/负载/根盘（Grafana）")
         self._add(save_asset, "沉淀方法", "memory", summary="把可复用的方法/脚本/查询/基线存入记忆")
-        self._add(read_artifact, "读产物", "memory", summary="读取任务图上游节点的完整产物")
         self._add(notify, "发通知", "notify", summary="发 markdown 通知到任务的通知渠道")

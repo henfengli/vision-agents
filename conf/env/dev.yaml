@@ -1,4 +1,4 @@
-# 开发机：本地 Postgres + 本地 Temporal（temporal server start-dev），进程用本地子进程启停。
+# 开发机：本地 Postgres，进程用本地子进程启停。
 db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
 root_token: "${AGENT_ROOT_TOKEN}"
 public_url: "http://127.0.0.1:8100"

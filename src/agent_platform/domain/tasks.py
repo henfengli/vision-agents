@@ -20,7 +20,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import cron
-from .graph import NodeDef, topo_layers
 
 SUBTASK_SEP = ":"
 TASK_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,48}$")
@@ -163,7 +162,7 @@ class Dedup(BaseModel):
 
 # ———————— 任务 ————————
 
-TaskForm = Literal["agent", "graph", "builtin"]
+TaskForm = Literal["agent", "builtin"]
 
 
 class TaskDef(BaseModel):
@@ -183,7 +182,6 @@ class TaskDef(BaseModel):
     profile: dict[str, str] = Field(default_factory=dict)
     extends: str | None = None
     auto_created: bool = False
-    graph: dict[str, NodeDef] | None = None
     handler: str | None = None
 
     @field_validator("timeout_s")
@@ -206,10 +204,6 @@ class TaskDef(BaseModel):
             return self   # 子任务只存差异，形态一致性在合并后的生效定义上校验
         if self.form == "agent" and not self.role:
             raise ValueError("单角色任务需要指定角色")
-        if self.form == "graph":
-            if not self.graph:
-                raise ValueError("任务图需要定义节点")
-            topo_layers(self.graph)          # 环 / 悬空依赖在保存时就挡住
         if self.form == "builtin" and not self.handler:
             raise ValueError("内建任务需要处理器名")
         ids = [t.id for t in self.triggers]
@@ -231,9 +225,6 @@ class TaskDef(BaseModel):
 
     def trigger(self, trigger_id: str) -> Any | None:
         return next((t for t in self.triggers if t.id == trigger_id), None)
-
-    def graph_roles(self) -> set[str]:
-        return {n.agent["role"] for n in (self.graph or {}).values() if n.agent and n.agent.get("role")}
 
     def validate_input(self, data: dict[str, Any]) -> dict[str, str]:
         """按输入 schema 校验；返回 {字段: 错误}。未声明的字段原样放行（向前兼容）。"""

@@ -1,9 +1,12 @@
-"""runs / run_events：运行台账。
+"""runs / run_events：运行台账，同时是执行队列。
 
-状态机：queued →（awaiting_approval →）running → success | failed | cancelled。
+状态机：queued → running →（awaiting_approval ⇄ running）→ success | failed | cancelled。
 started_at 在第一次进入 running 时落，finished_at 在进入终态时落——耗时、
 时间线偏移、SLA 统计都从这两列算，不从事件里猜。
 caller 永不为空：调用方没给身份时回退为触发类型（定时跑的 caller 就是 schedule）。
+
+队列：进入 queued 就 pg_notify('runs_queued')；worker 用 FOR UPDATE SKIP LOCKED 认领，
+执行期间刷新 heartbeat_at。心跳停了（执行进程崩溃/被杀）的运行由维护循环标为失败，可续跑。
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ def _list_row(r) -> dict:
 
 def _row(cur, row) -> dict:
     d = {c.name: v for c, v in zip(cur.description, row)}
-    for k in ("created_at", "started_at", "finished_at"):
+    for k in ("created_at", "started_at", "finished_at", "heartbeat_at"):
         d[k] = _iso(d.get(k))
     d["trigger"] = {"type": d.pop("trigger_type"), "id": d.pop("trigger_id"), "source": d.pop("trigger_source"), "caller": d["caller"]}
     return d
@@ -55,6 +58,56 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
              (caller or "").strip() or trigger_type, summary[:300], json.dumps(input_data, ensure_ascii=False, default=str),
              json.dumps(memory or {}), status, dedup_key or None, idempotency_key or None,
              json.dumps(output, ensure_ascii=False) if output is not None else None, resolution))
+        if status == "queued":
+            await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
+
+
+# ———————— 执行队列 ————————
+
+async def enqueue(run_id: str, *, resume: bool = False) -> None:
+    """把一个已有的运行放回队列（续跑 / 审批放行），并叫醒 worker。"""
+    async with db.pool().connection() as conn:
+        await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL WHERE run_id=%s",
+                           (resume, run_id))
+        await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
+
+
+async def claim_next(worker: str) -> str | None:
+    """认领最早的一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "UPDATE runs SET status='running', worker=%s, heartbeat_at=now(),"
+            " started_at=COALESCE(started_at, now())"
+            " WHERE run_id = (SELECT run_id FROM runs WHERE status='queued' ORDER BY created_at"
+            "                 FOR UPDATE SKIP LOCKED LIMIT 1)"
+            " RETURNING run_id", (worker,))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def heartbeat(run_ids: list[str]) -> None:
+    if run_ids:
+        async with db.pool().connection() as conn:
+            await conn.execute("UPDATE runs SET heartbeat_at=now() WHERE run_id = ANY(%s)", (run_ids,))
+
+
+async def orphaned(stale_s: int) -> list[str]:
+    """执行中却很久没心跳的运行（执行进程崩溃或被杀）。等提交前审批的运行没有心跳，不算。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id FROM runs WHERE status IN ('running','awaiting_approval')"
+            " AND heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => %s)", (stale_s,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def active_of_trigger(task: str, trigger_id: str, env: str) -> str | None:
+    """同一个定时触发器在同一环境还没跑完的运行（定时不重叠）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id FROM runs WHERE task=%s AND trigger_id=%s AND env=%s"
+            " AND status IN ('queued','awaiting_approval','running') LIMIT 1", (task, trigger_id, env))
+        row = await cur.fetchone()
+    return row[0] if row else None
 
 
 async def get(run_id: str) -> dict | None:
@@ -95,20 +148,21 @@ async def add_tokens(run_id: str, n: int) -> None:
 
 
 async def find_dedup(dedup_key: str, window_s: int) -> dict | None:
-    """时间窗内同键的成功运行（任务声明的去重）。"""
+    """时间窗内同键、没有失败或取消的运行（任务声明的去重）。排队、等审批、运行中的也算：
+    重复回调（Dagster 重发、GitLab 重投）不该在前一次还没跑完时再起一份。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT * FROM runs WHERE dedup_key=%s AND status='success'"
+            "SELECT * FROM runs WHERE dedup_key=%s AND status IN ('queued','awaiting_approval','running','success')"
             " AND created_at > now() - make_interval(secs => %s) ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
         row = await cur.fetchone()
     return _row(cur, row) if row else None
 
 
 async def find_idempotent(key: str) -> dict | None:
-    """调用方幂等键：24h 内非失败的运行都命中（排队/运行中也算），失败允许同键重提。"""
+    """调用方幂等键：非失败的运行都命中（排队/运行中也算），失败允许同键重提。
+    不限时间窗：唯一索引是全局的，过了窗口再用同一个键会撞索引。"""
     async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT * FROM runs WHERE idempotency_key=%s AND created_at > now() - interval '24 hours'", (key,))
+        cur = await conn.execute("SELECT * FROM runs WHERE idempotency_key=%s", (key,))
         row = await cur.fetchone()
     if not row:
         return None
@@ -378,12 +432,3 @@ async def search(term: str, limit: int = 8) -> list[dict]:
             (term + "%", "%" + term + "%", limit))
         return [_list_row(r) for r in await cur.fetchall()]
 
-
-async def stale_running(older_than_s: int) -> list[str]:
-    """长时间停在 running 却没有任何新事件的运行（worker 崩溃遗留），启动对账用。"""
-    async with db.pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT r.run_id FROM runs r WHERE r.status IN ('running','queued')"
-            " AND COALESCE((SELECT max(created_at) FROM run_events e WHERE e.run_id=r.run_id), r.created_at)"
-            "   < now() - make_interval(secs => %s)", (older_than_s,))
-        return [r[0] for r in await cur.fetchall()]

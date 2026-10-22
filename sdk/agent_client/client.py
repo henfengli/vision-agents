@@ -8,7 +8,7 @@
     run = agent.run("frontend-smoke", {"version": "1.2.0"})     # 任务：等到结束，返回运行详情
     run = agent.run("failure-analysis", {...}, subtask="ods_orders", wait=False)   # 只提交
 
-出错抛 AgentError，e.code 是服务端的原因码（如 task_disabled、service_env_disabled、policy）。
+出错抛 AgentError，e.code 是服务端的原因码（如 task_disabled、service_env_disabled、trigger_not_allowed）。
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """AgentFactory：按角色装配 agent，并执行一次调用。
 
-一个角色 = 一个 agent：系统提示 = 平台基础约定 + 角色提示，工具 = 角色白名单。
-没有"总控 + 全部角色当子代理"——任务指定哪个角色，就只有那个角色的能力在场，
-角色的工具白名单是实打实的边界。
+一个角色 = 一个 agent：系统提示 = 平台基础约定 + 角色提示，工具 = 角色白名单 + 运行所在服务的 MCP 工具
+（角色 service_tools=false 时不带）。角色声明了 subagents 时，这些角色作为子代理挂上：主角色运行中按需委派子问题，
+子代理用自己的提示词和工具、独立上下文，结论交回主角色——动态委派，不是静态流水线。
 
-编译好的 agent 按（角色名, 角色版本, 继承链版本）缓存：角色一改版本号就变，
-下一次运行自然用新定义，无需 TTL 轮询重建。DeepAgents 是 pre-1.0 依赖，
-本模块是唯一 import 它的地方。
+编译好的 agent 按（角色, 服务, 角色与子代理的版本, 服务 MCP 的版本）缓存：定义一改版本号就变，
+下一次运行自然用新定义，无需 TTL 轮询重建。DeepAgents 是 pre-1.0 依赖，本模块是唯一 import 它的地方。
 
 会话 = LangGraph thread（PG checkpointer），崩溃后同 thread 断点续跑。
 """
@@ -27,10 +26,17 @@ log = logging.getLogger(__name__)
 BASE_PROMPT = """你是 agent-platform 上的一个业务 agent。平台约定：
 - 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。
 - 档案（[档案——…]）是人写的一手事实，优先级最高；历史知识与方法是过去运行沉淀的，可能过时，与代码或数据矛盾时以实际为准并指出。
-- 工作目录：bash 的当前目录与文件工具（read_file/write_file/edit_file/ls/grep）的根目录是同一块可写区；服务代码只读，用 bash 直接读取原路径。
+- 工作目录：bash 的当前目录与文件工具（read_file/write_file/edit_file/ls/grep）的根目录是同一块可写区（py 里是 $SCRATCH）；服务代码只读，用 bash 直接读取原路径。
+- 要跑项目自己的代码（import 项目模块、调口径函数、用项目的数据访问层取数、复现某个函数的报错），用 py：它就在本环境的项目 Python 里，配置已就位，变量在会话内保留。不要在 bash 里自己拼环境去跑项目代码。
 - 配置文件（各环境的配置、密钥文件）在 bash 里被遮蔽、读到的是空文件；本环境的配置用 service_info(what=config) 读，密钥已打码。
 - 脚本先写进工作目录、跑通，再用 save_asset 收编成方法；以后同类运行会自动召回。
 - 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。"""
+
+
+SUBAGENT_PROMPT = """你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
+- 你和主 agent 在同一次运行里：同一个服务、同一个环境，工具只作用于它们。
+- 只做交给你的那件事，做完给出可核对的结论（依据：命令输出、SQL、代码位置），不确定就明说。
+- 跑项目代码用 py；配置用 service_info(what=config) 读。"""
 
 
 def _scratch_backend(scratch_dir: str) -> Any:
@@ -56,29 +62,41 @@ class AgentFactory:
             await self._http.aclose()
             self._http = None
 
-    async def agent_for(self, role: ResolvedRole, version_key: tuple) -> Any:
-        key = (role.name, version_key, tuple(role.tools))
+    async def agent_for(self, role: ResolvedRole, subagents: list[ResolvedRole], version_key: tuple,
+                        service: str | None = None, service_tools: list | None = None, service_key: str = "") -> Any:
+        """缓存键 = 角色（含子代理）的版本 + 运行所在服务的 MCP 工具版本：同一角色在不同服务上带的服务工具不同。"""
+        variant = (role.name, service or "", service_key)
+        key = (*variant, version_key)
         if key in self._cache:
             return self._cache[key]
         async with self._lock:
             if key not in self._cache:
-                # 同一角色的旧版本不再需要
-                for k in [k for k in self._cache if k[0] == role.name]:
+                # 同一角色在同一服务上的旧版本不再需要
+                for k in [k for k in self._cache if k[:3] == variant]:
                     self._cache.pop(k)
-                self._cache[key] = await self._build(role)
+                self._cache[key] = await self._build(role, subagents, service_tools or [])
         return self._cache[key]
 
-    async def _build(self, role: ResolvedRole) -> Any:
+    async def _build(self, role: ResolvedRole, subagents: list[ResolvedRole], service_tools: list) -> Any:
         try:
             from deepagents import create_deep_agent
         except ImportError as e:
             raise RuntimeError("未安装 deepagents：pip install agent-platform 会装锁定版本") from e
-        unknown = self._toolbox.unknown(role.tools)
-        if unknown:
-            log.warning("角色 %s 声明了未登记的工具：%s（已忽略）", role.name, "、".join(unknown))
+        for r in (role, *subagents):
+            unknown = self._toolbox.unknown(r.tools)
+            if unknown:
+                log.warning("角色 %s 声明了未登记的工具：%s（已忽略）", r.name, "、".join(unknown))
         prompt = BASE_PROMPT + (f"\n\n[角色：{role.title}]\n{role.prompt}" if role.prompt else "")
+        if subagents:
+            prompt += "\n\n[可委派的子代理] 子问题明显属于下面某个角色的专长时，用 task 工具交给它，它会用自己的工具独立完成并交回结论：\n" \
+                + "\n".join(f"- {r.name}（{r.title}）：{r.description or '—'}" for r in subagents)
+        subs = [{"name": r.name, "description": f"{r.title}：{r.description}" if r.description else r.title,
+                 "system_prompt": SUBAGENT_PROMPT + (f"\n\n[角色：{r.title}]\n{r.prompt}" if r.prompt else ""),
+                 "tools": self._toolbox.langchain_tools(r.tools, service_tools if r.service_tools else None)}
+                for r in subagents]
         return create_deep_agent(
-            model=self._model(), tools=self._toolbox.langchain_tools(role.tools), system_prompt=prompt,
+            model=self._model(), tools=self._toolbox.langchain_tools(role.tools, service_tools if role.service_tools else None),
+            system_prompt=prompt, subagents=subs or None,
             checkpointer=await self._checkpointer(), backend=_scratch_backend(self._s.scratch_dir))
 
     async def _checkpointer(self) -> Any:

@@ -1,10 +1,10 @@
 /**
  * 设置：左侧分组导航 + 右侧内容。分三组——
- * 个人（只存在这台浏览器）/ 平台（对所有人生效，带版本历史）/ 定义与接入（角色、策略、API 密钥）。
+ * 个人（只存在这台浏览器）/ 平台（对所有人生效，带版本历史）/ 定义与接入（角色、API 密钥）。
  */
 import { type ReactNode } from "react";
 import {
-  LuBell, LuBot, LuBrain, LuCpu, LuKeyRound, LuLayers, LuShieldCheck, LuSlidersHorizontal, LuUserCog,
+  LuBell, LuBot, LuBrain, LuCpu, LuKeyRound, LuLayers, LuShieldCheck, LuUserCog,
 } from "react-icons/lu";
 
 import { Page } from "@/components/layout/shell";
@@ -25,7 +25,6 @@ const GROUPS: { title: string; hint: string; items: { to: string; label: string;
   {
     title: "定义与接入", hint: "", items: [
       { to: "/settings/roles", label: "角色", icon: <LuBot /> },
-      { to: "/settings/policies", label: "提交策略", icon: <LuSlidersHorizontal /> },
       { to: "/settings/api-keys", label: "API 密钥", icon: <LuKeyRound /> },
     ],
   },

@@ -1,6 +1,6 @@
 """定义的读写面：库里的 JSON ⇄ 类型化对象（domain 模型）。
 
-全平台读写服务 / 角色 / 任务 / 策略 / 平台配置都经过这里：校验、跨对象引用检查、
+全平台读写服务 / 角色 / 任务 / 平台配置都经过这里：校验、跨对象引用检查、
 子任务合并、默认值只在这一处。API、播种、编排共用。
 """
 
@@ -14,8 +14,8 @@ from typing import Any, Generic, TypeVar
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from .domain import (CONFIG_SECTIONS, EnvDef, EnvsConfig, PolicyDef, Rejected, ResolvedRole, RoleDef, RoleError,
-                     ServiceDef, ServiceView, TaskDef, merge_task, resolve_role)
+from .domain import (CONFIG_SECTIONS, EnvDef, EnvsConfig, Rejected, ResolvedRole, RoleDef, RoleError, ServiceDef,
+                     ServiceView, TaskDef, merge_task, resolve_role)
 from .domain.services import check_service_name
 from .domain.tasks import check_task_name, split_subtask_name
 from .store.definitions import DefinitionStore, Kind
@@ -24,8 +24,8 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-MODELS: dict[str, type[BaseModel]] = {"service": ServiceDef, "role": RoleDef, "task": TaskDef, "policy": PolicyDef}
-LABELS = {"service": "服务", "role": "角色", "task": "任务", "policy": "策略", "config": "配置"}
+MODELS: dict[str, type[BaseModel]] = {"service": ServiceDef, "role": RoleDef, "task": TaskDef}
+LABELS = {"service": "服务", "role": "角色", "task": "任务", "config": "配置"}
 
 
 @dataclass
@@ -125,10 +125,10 @@ class Registry:
         return await self.entry("service", name)
 
     async def service_view(self, name: str, env: str) -> ServiceView | None:
-        """服务×环境视图（startable 按环境默认补齐）。服务不存在返回 None；环境不存在抛 unknown_env。"""
+        """服务×环境视图。服务不存在返回 None；环境不存在抛 unknown_env。"""
         env_def = await self.env(env)
         s = await self.service(name)
-        return s.spec.view(name, env_def.name, env_def.startable) if s else None
+        return s.spec.view(name, env_def.name) if s else None
 
     async def roles(self) -> list[Entry[RoleDef]]:
         return await self.entries("role")
@@ -145,8 +145,17 @@ class Registry:
             raise Rejected("invalid_definition", str(e), 500) from e
         return role, tuple(entries[n].version for n in role.lineage)
 
-    async def policies(self) -> list[Entry[PolicyDef]]:
-        return sorted(await self.entries("policy"), key=lambda e: (e.spec.order, e.name))
+    async def agent_roles(self, name: str) -> tuple[ResolvedRole, list[ResolvedRole], tuple]:
+        """装配一个 agent 要的全部角色：主角色 + 它可委派的子代理角色（只一层），加上整体的版本键。"""
+        entries = {e.name: e for e in await self.roles()}
+        defs = {n: e.spec for n, e in entries.items()}
+        try:
+            main = resolve_role(name, defs)
+            subs = [resolve_role(s, defs) for s in main.subagents if s in defs]
+        except RoleError as e:
+            raise Rejected("invalid_definition", str(e), 500) from e
+        key = tuple((r.name, tuple(entries[n].version for n in r.lineage)) for r in (main, *subs))
+        return main, subs, key
 
     async def tasks(self) -> list[Entry[TaskDef]]:
         """全部任务（含子任务），存的是原样（子任务只有差异）。"""
@@ -235,8 +244,9 @@ class Registry:
 
     async def _users_of(self, kind: str, name: str) -> list[str]:
         if kind == "role":
-            tasks = [f"任务 {t.name}" for t in await self.tasks() if name in {t.spec.role, *t.spec.graph_roles()}]
-            roles = [f"角色 {r.name}" for r in await self.roles() if r.spec.extends == name]
+            tasks = [f"任务 {t.name}" for t in await self.tasks() if t.spec.role == name]
+            roles = [f"角色 {r.name}" for r in await self.roles()
+                     if r.spec.extends == name or name in (r.spec.subagents or [])]
             return tasks + roles
         if kind == "service":
             return [f"任务 {t.name}" for t in await self.tasks() if t.spec.service == name]
@@ -254,12 +264,17 @@ class Registry:
 
         if isinstance(spec, ServiceDef):
             await self._check_envs(list(spec.envs))
-        elif isinstance(spec, RoleDef) and spec.extends:
+        elif isinstance(spec, RoleDef):
             defs = {e.name: e.spec for e in await self.roles()} | {name: spec}
             try:
                 resolve_role(name, defs)
             except RoleError as e:
                 raise Rejected("invalid_definition", str(e), 422) from e
+            missing = [s for s in spec.subagents or [] if s not in defs]
+            if missing:
+                raise Rejected("invalid_definition", f"子代理角色不存在：{'、'.join(missing)}", 422)
+            if name in (spec.subagents or []):
+                raise Rejected("invalid_definition", "角色不能把自己列为子代理", 422)
         elif isinstance(spec, TaskDef):
             await self._check_task(name, spec)
 
@@ -273,9 +288,8 @@ class Registry:
                 raise Rejected("invalid_definition", f"父任务 {base} 不存在", 422)
         elif spec.extends:
             raise Rejected("invalid_definition", "只有子任务（名字形如 父任务:对象）才能声明 extends", 422)
-        for role in {spec.role, *spec.graph_roles()} - {None}:
-            if await self.entry("role", role) is None:
-                raise Rejected("invalid_definition", f"角色 {role} 不存在", 422)
+        if spec.role and await self.entry("role", spec.role) is None:
+            raise Rejected("invalid_definition", f"角色 {spec.role} 不存在", 422)
         if spec.service and spec.service != "*" and await self.entry("service", spec.service) is None:
             raise Rejected("invalid_definition", f"服务 {spec.service} 不存在", 422)
         envs = list(spec.envs)
@@ -301,7 +315,7 @@ class Registry:
         种子文件在播种之后又改过的，启动时提示一次：库内版本才是生效版本，去控制台改。
 
         目录：settings.yaml（平台配置各节）/ services/*.yaml（一个文件一个服务）/
-              roles.yaml / tasks.yaml / policies.yaml（{名字: 定义}）。
+              roles.yaml / tasks.yaml（{名字: 定义}）。
         值里的 ${VAR} 原样入库，用到时才取环境变量（credentials.expand）：口令只在 secrets.env 里。
         """
         if not seeds_dir.is_dir():
@@ -312,12 +326,14 @@ class Registry:
 
         for section, body in load(seeds_dir / "settings.yaml").items():
             if section in CONFIG_SECTIONS and await self.store.seeded_version("config", section) is None:
-                await self.put_config(section, body or {}, "seed")
+                try:
+                    await self.put_config(section, body or {}, "seed")
+                except Rejected as e:
+                    log.error("种子设置 %s 不合法，跳过：%s", section, e.message)
         plan: list[tuple[Kind, dict]] = [
             ("service", {p.stem: load(p) for p in sorted((seeds_dir / "services").glob("*.yaml"))}),
             ("role", load(seeds_dir / "roles.yaml")),
             ("task", load(seeds_dir / "tasks.yaml")),
-            ("policy", load(seeds_dir / "policies.yaml")),
         ]
         for kind, items in plan:
             pending: dict[str, str] = {}

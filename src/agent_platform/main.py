@@ -1,7 +1,7 @@
 """命令行入口。
 
     agent-platform serve [--host 127.0.0.1] [--port 8100] [--no-worker]   接口 + 控制台（默认同进程跑 worker）
-    agent-platform worker                                                  只跑 Temporal Worker 与维护循环
+    agent-platform worker                                                  只跑 worker：执行队列、定时、维护循环
     agent-platform check                                                   读配置、连库、播种，然后退出
 
 uvicorn 直接起：uvicorn --factory agent_platform.main:app
@@ -40,7 +40,10 @@ def _worker(_args) -> None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:          # Windows 的事件循环不支持：Ctrl+C 走 KeyboardInterrupt
+                pass
         await stop.wait()
         await rt.close()
 

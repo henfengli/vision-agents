@@ -1,9 +1,10 @@
 /**
- * 运行页两个标签：
+ * 运行页三个标签：
  * - 运行：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上；环境默认跟随顶栏，每页条数取个人偏好。
  * - 反馈：大家点的 👍👎（默认只看 👎），见 feedback-inbox.tsx。
+ * - 回归：拿被 👎 的运行用当前定义重放、看问题改好没有，见 replays.tsx。
  */
-import { LuActivity, LuChevronLeft, LuChevronRight, LuMessageSquareWarning, LuRefreshCw } from "react-icons/lu";
+import { LuActivity, LuChevronLeft, LuChevronRight, LuFlaskConical, LuMessageSquareWarning, LuRefreshCw } from "react-icons/lu";
 
 import { useApiKeys, useMeta, useRuns, useTasks } from "@/api/hooks";
 import type { RunFilters, RunStatus } from "@/api/types";
@@ -18,6 +19,7 @@ import { cn } from "@/lib/cn";
 import { useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { FeedbackInbox, type InboxSearch } from "./feedback-inbox";
+import { ReplayList } from "./replays";
 import { RunsTable } from "./runs-table";
 
 const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
@@ -25,21 +27,24 @@ const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
   { value: "awaiting_approval", label: "待审批" }, { value: "success", label: "成功" }, { value: "cancelled", label: "已取消" },
 ];
 
-const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction"];
+const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"];
+
+type View = "runs" | "feedback" | "replays";
 
 type Search = { status: string; hours: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
 
 export function RunsPage() {
-  const [s, setS] = useSearch<Search & InboxSearch & { view: string }>();
-  const view = s.view ?? "runs";
+  const [s, setS] = useSearch<Search & InboxSearch & { view: View }>();
+  const view: View = s.view === "feedback" || s.view === "replays" ? s.view : "runs";
   return (
     <Page wide>
-      <PageHeader title="运行" description="每一次执行的事实记录：钉死任务 / 角色版本，全过程事件可回放；人给的评价集中在「反馈」" />
-      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : "feedback", cursor: undefined, score: undefined, reason: undefined })} tabs={[
+      <PageHeader title="运行" description="每一次执行的事实记录：钉死任务 / 角色版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义后在「回归」里拿 👎 过的运行重放验证" />
+      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
+        { value: "replays", label: "回归", icon: <LuFlaskConical /> },
       ]} />
-      {view === "runs" ? <RunList /> : <FeedbackInbox s={s} set={(patch) => setS(patch)} />}
+      {view === "runs" ? <RunList /> : view === "feedback" ? <FeedbackInbox s={s} set={(patch) => setS(patch)} /> : <ReplayList />}
     </Page>
   );
 }

@@ -4,7 +4,7 @@
 改过的标记 expired（召回只惰性校验被命中的条目，巡检管全库）。
 
 扩展点（需求成熟时在此实现）：
-- 衰减：feedback_score 按半衰期衰减，长期未命中条目降权出召回区
+- 衰减：长期零召回的条目降权出召回区
 - 矛盾检测：同服务高相似条目结论冲突 → 记忆页"冲突"计数（MemoryHealth.conflicts）
 """
 
@@ -24,7 +24,7 @@ async def run_gardener(env: str, code_paths_of: dict[str, list[str]]) -> dict:
 async def sweep_code_ref_drift(env: str, code_paths_of: dict[str, list[str]]) -> int:
     count = 0
     for service, paths in code_paths_of.items():
-        for e in await knowledge_store.list_all(env, service):
+        for e in await knowledge_store.list_all(env, service, with_code_ref=True):
             if e.get("expired") or e.get("superseded") or not e.get("code_ref"):
                 continue
             if not await asyncio.to_thread(knowledge_store.is_entry_fresh, e["code_ref"], paths):

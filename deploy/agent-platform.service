@@ -2,7 +2,7 @@
 # 权限收口：低权限用户、全盘只读、只有数据目录可写。agent 的 bash 工具继承这些限制，再套一层 bwrap。
 [Unit]
 Description=agent-platform
-After=network.target postgresql.service temporal-server.service
+After=network.target postgresql.service
 
 [Service]
 User=agent-svc

@@ -1,7 +1,6 @@
-"""RunSpec：一次运行的完整规格，提交端写一次，workflow 与各 activity 只读传递。
+"""RunSpec：一次运行的完整规格。worker 认领运行时从台账行建出来，各步骤之间传的就是它。
 
-Temporal 的参数必须可序列化，所以它是普通 dict 往返的 pydantic 模型；
-prepare 阶段补齐的字段（prompt、版本、代码目录…）也在这里，一份结构走到底。
+prepare 阶段补齐的字段（prompt、代码目录…）也在这里，一份结构走到底。
 """
 
 from __future__ import annotations
@@ -14,11 +13,11 @@ from ..domain import RunTrigger
 
 
 class RunSpec(BaseModel):
-    # —— 提交时确定 ——
+    # —— 从台账行确定 ——
     run_id: str
     session_id: str
     task: str                                  # 生效任务名（子任务含冒号）
-    form: str                                  # agent / graph / builtin / rule（规则先行命中，结论已定）
+    form: str                                  # agent / builtin / rule（规则先行命中，结论已定）
     role: str | None = None
     service: str | None = None
     env: str
@@ -26,10 +25,10 @@ class RunSpec(BaseModel):
     question: str = ""
     trigger: RunTrigger = Field(default_factory=RunTrigger)
     timeout_s: int = 300
+    approval_budget_s: int = 0                 # 等人工审批的时间不算进 timeout_s（按一次审批的超时预留）
     deliver: dict[str, str] | None = None      # {"channel": 名} 或 {"url": 地址}；空 = 只等调用方来取
-    recall: bool = True                        # 记忆开关（请求 > 任务 > 平台默认，提交时定好）
+    recall: bool = True                        # 记忆开关（请求 > 任务 > 平台默认）
     save: bool = True
-    graph: dict[str, Any] | None = None        # form=graph：节点定义（提交时冻结）
     handler: str | None = None                 # form=builtin
     rule_output: dict[str, Any] | None = None  # form=rule：命中规则给出的结论
     resume: bool = False                       # 断点续跑：沿用 thread，不重新拼提示
@@ -44,9 +43,8 @@ class RunSpec(BaseModel):
         """事件类任务约定把报错放在 input.error：案例召回与沉淀都按它的指纹。"""
         return str(self.input.get("error") or "")
 
-    def to_dict(self) -> dict:
-        return self.model_dump(mode="json")
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> "RunSpec":
-        return cls.model_validate(raw)
+    @property
+    def thread_id(self) -> str:
+        """会话的 LangGraph thread 按 服务×环境 分开：同一个会话键（比如事件模板 dagster:{asset_key}:…）
+        在 prod 和 test 各有各的上下文，一次运行只看得到自己服务×环境的对话历史。项目内核也用这个键。"""
+        return f"{self.session_id}@{self.service or '-'}:{self.env}"

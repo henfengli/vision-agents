@@ -1,11 +1,10 @@
-"""人工门：运行中途需要人放行的地方（危险命令、受保护环境的进程启停、任务图闸门节点）。
+"""人工门：运行中途需要人放行的地方（危险命令、进程启停）。默认关闭（设置 → 审批）。
 
 一处实现"发起 → 通知 → 挂起等待 → 放行 / 拒绝 / 超时"：
 - DB 行是事实源；决定后 pg_notify 毫秒唤醒，轮询兜底（notify 只是提示）
 - 等待期间运行状态是 awaiting_approval，放行后回到 running，列表与详情实时可见
-- 在 Temporal activity 里等待时持续 heartbeat，长时间等待不会被判定卡死
 - 超时视同拒绝（安全侧默认）
-哪些命令算危险、哪些环境必审、多久超时：设置 → 审批。
+哪些命令算危险、哪些环境要审、多久超时：设置 → 审批。
 """
 
 from __future__ import annotations
@@ -26,14 +25,6 @@ class ApprovalRejected(PermissionError):
     """被拒或超时：工具把它转成给模型的文本，图节点把它转成跳过。"""
 
 
-def _heartbeat() -> None:
-    try:
-        from temporalio import activity
-        activity.heartbeat("waiting-approval")
-    except Exception:  # noqa: BLE001 —— 不在 activity 里（API 进程直接调用）时空操作
-        pass
-
-
 async def wait_decision(approval_id: int, timeout_s: float, poll_s: float = 10.0) -> str:
     """等审批单离开 pending，返回最终状态：approved / rejected / expired。"""
     import psycopg
@@ -46,7 +37,6 @@ async def wait_decision(approval_id: int, timeout_s: float, poll_s: float = 10.0
         listener = None
     try:
         while True:
-            _heartbeat()
             status = await approvals_store.status_of(approval_id)
             if status and status != "pending":
                 return status
@@ -76,13 +66,18 @@ class Gatekeeper:
         """工具执行前调用：危险就挂起等审批，被拒抛 ApprovalRejected。"""
         s = run_scope.current()
         cfg: ApprovalsConfig = await self._reg.config("approvals")
-        if cfg.required_in == "protected" and not s.protected:
+        if not cfg.applies(s.protected):
             return
         pattern = next((p for p in cfg.danger_patterns if re.search(p, text, re.IGNORECASE)), None)
         if pattern is None:
             return
         await self.hold(kind="command", title=f"{tool} · {s.service or '平台'}@{s.env}", detail=text,
                         payload={"tool": tool, "pattern": pattern})
+
+    async def required(self, protected: bool) -> bool:
+        """这个环境的危险操作（进程启停等）要不要审批：设置 → 审批。"""
+        cfg: ApprovalsConfig = await self._reg.config("approvals")
+        return cfg.applies(protected)
 
     async def hold(self, *, kind: str, title: str, detail: str, payload: dict | None = None) -> None:
         """在当前运行里发起审批并挂起，直到有结论。"""

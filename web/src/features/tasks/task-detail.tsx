@@ -430,7 +430,7 @@ function SubtasksTab({ task }: { task: TaskSummary }) {
   );
 }
 
-// ———————— 记忆：这个任务名下的知识与方法 ————————
+// ———————— 记忆：这个任务名下的记忆（事实 / 教训）与方法 ————————
 
 function MemoryTab({ task }: { task: TaskSummary }) {
   const ui = useUi();
@@ -443,9 +443,10 @@ function MemoryTab({ task }: { task: TaskSummary }) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         {!fixedService && <ServiceFilter value={service} onChange={setService} />}
-        <EnvFilter value={env} onChange={setEnv} />
+        <EnvFilter value={env} onChange={setEnv} includeShared />
         <span className="text-xs text-fg-3">
-          {task.extends ? "只看这个对象名下的条目" : "包括子任务名下的条目"}；召回时还会带上服务通用的条目。
+          {task.extends ? "只看这个对象名下的条目" : "包括子任务名下的条目"}；选某个环境时连同对所有环境成立的条目一起列出，召回时还会带上服务通用的条目。
+          人写的约定在「档案」标签里；记忆被反复用到、确认无误后可以升格进档案。
         </span>
       </div>
       <KnowledgeList filters={filters} scope={scope} />

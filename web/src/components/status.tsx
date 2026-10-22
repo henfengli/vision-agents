@@ -1,13 +1,14 @@
 /**
- * 领域徽标：运行状态、环境、触发类型、实例状态、审批类型——全站一致的颜色与措辞。
+ * 领域徽标：运行状态、环境、触发类型、实例状态、审批类型、回归判定——全站一致的颜色与措辞。
  */
 import { type ReactNode } from "react";
 import {
-  LuBan, LuBot, LuCalendarClock, LuCircleCheck, LuCircleDot, LuCirclePause, LuCircleX, LuCode, LuGlobe, LuHand,
-  LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuWebhook, LuWorkflow, LuZap,
+  LuBan, LuBot, LuCalendarClock, LuCircleCheck, LuCircleDot, LuCircleHelp, LuCircleMinus, LuCirclePause, LuCircleX, LuCode,
+  LuFlaskConical, LuGlobe, LuHand, LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuTrendingDown,
+  LuWebhook, LuZap,
 } from "react-icons/lu";
 
-import type { ApprovalKind, Env, InstanceState, Resolution, RunStatus, TriggerType } from "@/api/types";
+import type { ApprovalKind, Env, InstanceState, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
 import { useEnvs } from "@/api/hooks";
 import { cn } from "@/lib/cn";
 import { Badge, Dot, type Tone } from "./ui/primitives";
@@ -74,6 +75,7 @@ export const TRIGGER: Record<string, { label: string; icon: ReactNode }> = {
   rerun: { label: "重跑", icon: <LuRotateCcw /> },
   resume: { label: "续跑", icon: <LuRotateCcw /> },
   correction: { label: "纠正", icon: <LuHand /> },
+  replay: { label: "回归重放", icon: <LuFlaskConical /> },
 };
 
 export function TriggerBadge({ type, source, className }: { type: TriggerType | string; source?: string | null; className?: string }) {
@@ -83,7 +85,7 @@ export function TriggerBadge({ type, source, className }: { type: TriggerType | 
 
 export function ResolutionTag({ resolution }: { resolution: Resolution }) {
   if (!resolution || resolution === "agent") return null;
-  const m = { rule: { label: "规则", icon: <LuZap /> }, graph: { label: "任务图", icon: <LuWorkflow /> }, builtin: { label: "内建", icon: <LuTerminal /> } }[resolution];
+  const m = { rule: { label: "规则", icon: <LuZap /> }, builtin: { label: "内建", icon: <LuTerminal /> } }[resolution];
   return <Badge tone="accent" icon={m.icon}>{m.label}</Badge>;
 }
 
@@ -103,10 +105,23 @@ export function InstanceBadge({ state }: { state: InstanceState }) {
 
 export const APPROVAL_KIND: Record<ApprovalKind, { label: string; icon: ReactNode }> = {
   command: { label: "危险命令", icon: <LuTerminal /> },
-  submit: { label: "提交审批", icon: <LuShieldCheck /> },
   process: { label: "进程启停", icon: <LuCircleDot /> },
-  artifact: { label: "产物门禁", icon: <LuWorkflow /> },
 };
+
+/** 回归重放的判定：fixed 绿 / same 琥珀 / worse 红 / unclear、error 灰 / null 判定中 */
+export const REPLAY_VERDICT: Record<ReplayVerdict | "pending", { label: string; tone: Tone; icon: ReactNode }> = {
+  fixed: { label: "已改好", tone: "ok", icon: <LuCircleCheck /> },
+  same: { label: "没改好", tone: "warn", icon: <LuCircleMinus /> },
+  worse: { label: "更差", tone: "bad", icon: <LuTrendingDown /> },
+  unclear: { label: "判断不了", tone: "idle", icon: <LuCircleHelp /> },
+  error: { label: "没跑成", tone: "idle", icon: <LuCircleX /> },
+  pending: { label: "判定中", tone: "info", icon: <LuLoaderCircle className="animate-spin" /> },
+};
+
+export function VerdictBadge({ verdict, className }: { verdict: ReplayVerdict | null; className?: string }) {
+  const v = REPLAY_VERDICT[verdict ?? "pending"];
+  return <Badge tone={v.tone} icon={v.icon} className={className}>{v.label}</Badge>;
+}
 
 export function RoleChip({ role }: { role: string | null }) {
   if (!role) return <span className="text-fg-3">—</span>;

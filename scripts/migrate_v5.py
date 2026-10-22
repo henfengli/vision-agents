@@ -10,7 +10,8 @@
 3. 搬数据：
    - 定义：v5 按"实例环境"存（--profile 选哪一套），role/task/domain 三类；domain → service。
      搬不动的（v6 校验不过）记日志跳过，启动时由 conf/seeds 补种子
-   - 运行台账、事件、产物、反馈、审批、知识、案例、方法：domain → service、target_env → env、task_type → task
+   - 运行台账、事件、反馈、审批、知识、案例、方法：domain → service、target_env → env、task_type → task
+     （任务图与产物不搬：已不再支持，留在备份里）
 4. 删掉 _v5_* 表
 
 v6 的平台配置（环境、审批、通知…）不从 v5 搬：首次启动按 conf/seeds/settings.yaml 播种，再在设置页调整。
@@ -45,11 +46,13 @@ MEMORY_TABLES = [
     ("recall_hits",
      "id, env, service, entry_id, run_id, source, rank, created_at",
      "id, env, domain, entry_id, run_id, source, rank, created_at"),
-    ("cases",
-     "id, env, service, fingerprint, category, conclusion, source_run, thumbs_up, thumbs_down, valid_to,"
+    # 案例并进记忆表（kind=lesson）；必须排在 knowledge 之后（不带 id，用 knowledge 已经 setval 过的序列）
+    ("knowledge",
+     "env, service, task, kind, fingerprint, category, key, content, source_run, valid_to, superseded_by, created_at",
+     "env, domain, '', 'lesson', fingerprint, category, 'lesson:' || fingerprint, conclusion, source_run, valid_to,"
      " superseded_by, created_at",
-     "id, env, COALESCE(domain, ''), fingerprint, category, conclusion, source_run, COALESCE(thumbs_up, 0),"
-     " COALESCE(thumbs_down, 0), valid_to, superseded_by, created_at"),
+     "cases",
+     " WHERE COALESCE(domain, '') <> '' AND COALESCE(conclusion, '') <> '' ON CONFLICT (env, service, key) DO NOTHING"),
     ("assets",
      "id, env, service, task, kind, name, summary, content, path, source_run, use_count, last_used_at,"
      " feedback_score, valid_from, valid_to, superseded_by, created_at",
@@ -80,8 +83,8 @@ def convert_task(d: dict) -> dict:
     elif d.get("output_channel") == "http" and d.get("output_callback"):
         out["deliver"] = {"url": d["output_callback"]}
     if d.get("artifacts"):
-        out["form"], out["graph"] = "graph", d["artifacts"]
-    elif d.get("handler"):
+        raise ValueError("任务图已不再支持，改成单角色任务后手工重建")
+    if d.get("handler"):
         out["form"] = "builtin"
     if not d.get("extends"):
         triggers = [{"id": "api", "type": "api"}]
@@ -181,9 +184,7 @@ def main() -> None:
                 SELECT DISTINCT ON (run_id, seq) run_id, seq, {kind_case}, COALESCE(payload, '{{}}'), created_at
                 FROM _v5_run_events WHERE kind IN ({', '.join(f"'{k}'" for k in EVENT_KINDS)})
                   AND run_id IN (SELECT run_id FROM runs) ORDER BY run_id, seq, id""")
-            conn.execute("""INSERT INTO artifacts (run_id, task, name, env, content, input_hash, status, created_at)
-                            SELECT run_id, task_type, name, COALESCE(NULLIF(target_env, ''), %s), content, input_hash,
-                                   status, created_at FROM _v5_artifacts""", (args.profile,))
+            # 产物（任务图）不搬：任务图已去掉，v5 的产物留在 v5_backup 里
             # 反馈：v5 每点一下一行、没有操作人；v6 一人一步一条。每步只留最后一次评价，记在 v5 名下。
             # v5 的纠正留痕（kind=correction）不搬：v6 的纠正本身就是一次运行。
             conn.execute("""INSERT INTO feedback (run_id, step_seq, score, comment, created_by, created_at, updated_at)
@@ -197,9 +198,10 @@ def main() -> None:
                                    CASE status WHEN 'pending' THEN 'expired' ELSE status END, decided_by, created_at,
                                    decided_at FROM _v5_approvals""")
             # 记忆类表：列一一对应，只有 domain 改名为 service
-            for table, columns, select in MEMORY_TABLES:
-                if table in counts:
-                    conn.execute(f"INSERT INTO {table} ({columns}) SELECT {select} FROM _v5_{table}")
+            for table, columns, select, *rest in MEMORY_TABLES:
+                source, tail = (rest + [table, ""])[:2] if rest else (table, "")
+                if source in counts:
+                    conn.execute(f"INSERT INTO {table} ({columns}) SELECT {select} FROM _v5_{source}{tail}")
                     conn.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'),"
                                  f" COALESCE((SELECT max(id) FROM {table}), 1))")
             if "knowledge" in counts:

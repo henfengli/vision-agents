@@ -1,11 +1,11 @@
 /**
- * 任务定义编辑器：基本 / 输入 / 触发 / 结果与去重 / 记忆 / 环境 / 高级（任务图、处理器）。
+ * 任务定义编辑器：基本 / 输入 / 触发 / 结果与去重 / 记忆 / 环境 / 处理器（内建任务）。
  * 分节表单 + 本地草稿 + 未保存提示条。档案不在这里——它是内容不是结构，在「档案」标签里就地编辑。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   LuBrain, LuCalendarClock, LuCode, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuSend, LuSettings, LuTrash2,
-  LuWebhook, LuWorkflow, LuZap,
+  LuWebhook, LuZap,
 } from "react-icons/lu";
 
 import { api, useEnvs, useMeta, useRoles, useServices, useSettings } from "@/api/hooks";
@@ -22,11 +22,11 @@ import { cn } from "@/lib/cn";
 import { dayjs } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 
-type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s" | "graph" | "handler">;
+type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s" | "handler">;
 
 const toDraft = (t: TaskSummary): Draft => structuredClone({
   title: t.title, description: t.description, service: t.service, role: t.role, form: t.form, input: t.input, envs: t.envs,
-  triggers: t.triggers, deliver: t.deliver, dedup: t.dedup, memory: t.memory ?? {}, timeout_s: t.timeout_s, graph: t.graph ?? null, handler: t.handler ?? null,
+  triggers: t.triggers, deliver: t.deliver, dedup: t.dedup, memory: t.memory ?? {}, timeout_s: t.timeout_s, handler: t.handler ?? null,
 });
 
 function Section({ id, icon, title, description, children, actions }: { id: string; icon: ReactNode; title: string; description: ReactNode; children: ReactNode; actions?: ReactNode }) {
@@ -47,14 +47,11 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
   const { data: meta } = useMeta();
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((s) => ({ ...s, [k]: v }));
   const dirty = useMemo(() => JSON.stringify(d) !== JSON.stringify(toDraft(task)), [d, task]);
-  const [graphText, setGraphText] = useState(() => JSON.stringify(task.graph ?? {}, null, 2));
-  const graphError = useMemo(() => { if (d.form !== "graph") return null; try { JSON.parse(graphText); return null; } catch (e) { return (e as Error).message; } }, [graphText, d.form]);
   const triggerErrors = d.triggers.some((t) => t.type === "schedule" && (validateCron(t.cron) || !t.envs.length || (d.service === "*" && !t.service)));
 
   const save = useMutation(async () => {
     try {
-      const body = { ...d, graph: d.form === "graph" ? JSON.parse(graphText) : null };
-      const r = await api.update<TaskSummary>("tasks", task.name, body);
+      const r = await api.update<TaskSummary>("tasks", task.name, d);
       toast(`已保存为 v${r.version}`, { description: "定时触发已重新同步" });
       invalidate("tasks");
       onSaved();
@@ -65,7 +62,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
   const envNames = (envs ?? []).map((e) => e.name);
   const generic = d.service === "*";
-  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["deliver", "结果与去重"], ["memory", "记忆"], ["envs", "环境"], ...(d.form !== "agent" ? [["advanced", d.form === "graph" ? "任务图" : "处理器"]] : [])];
+  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["deliver", "结果与去重"], ["memory", "记忆"], ["envs", "环境"], ...(d.form === "builtin" ? [["advanced", "处理器"]] : [])];
 
   return (
     <div className="grid gap-5 lg:grid-cols-[160px_1fr]">
@@ -87,7 +84,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
             </Field>
             <Field label="说明" className="md:col-span-2" help="会进入 agent 的任务说明"><Textarea rows={2} value={d.description} onChange={(e) => set("description", e.target.value)} /></Field>
             <Field label="形态">
-              <Segmented value={d.form} onChange={(v) => set("form", v)} options={[{ value: "agent", label: "单角色" }, { value: "graph", label: "任务图", icon: <LuWorkflow /> }, { value: "builtin", label: "内建" }]} />
+              <Segmented value={d.form} onChange={(v) => set("form", v)} options={[{ value: "agent", label: "单角色" }, { value: "builtin", label: "内建" }]} />
             </Field>
             {d.form !== "builtin" && (
               <Field label="执行角色">
@@ -146,13 +143,6 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
           </div>
         </Section>
 
-        {d.form === "graph" && (
-          <Section id="advanced" icon={<LuWorkflow />} title="任务图" description="节点是产物、边是依赖；每个节点恰好一种物化方式：code / agent / route，可加 map（扇出）与 gate（审批）">
-            <Field error={graphError}>
-              <Textarea mono rows={16} value={graphText} onChange={(e) => setGraphText(e.target.value)} aria-invalid={!!graphError} />
-            </Field>
-          </Section>
-        )}
         {d.form === "builtin" && (
           <Section id="advanced" icon={<LuCode />} title="内建处理器" description="不过模型的确定性作业，处理器在内核代码里登记">
             <Field label="处理器名"><Input mono value={d.handler ?? ""} onChange={(e) => set("handler", e.target.value)} placeholder="memory-gardener" /></Field>
@@ -161,8 +151,8 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
       </div>
 
       <SaveBar visible={dirty} saving={save.pending} label={`保存为 v${task.version + 1}`}
-        onSave={() => { if (graphError || triggerErrors) toast.error("还有错误没改", graphError ?? "检查触发器：cron、环境、通用任务的服务"); else save.mutate(undefined); }}
-        onDiscard={() => { setD(toDraft(task)); setGraphText(JSON.stringify(task.graph ?? {}, null, 2)); }} />
+        onSave={() => { if (triggerErrors) toast.error("还有错误没改", "检查触发器：cron、环境、通用任务的服务"); else save.mutate(undefined); }}
+        onDiscard={() => setD(toDraft(task))} />
     </div>
   );
 }
@@ -212,8 +202,8 @@ function MemoryEditor({ value, onChange }: { value: MemoryOverride; onChange: (v
   };
   return (
     <div className="divide-y divide-line">
-      {row("recall", "召回", "运行前按问题检索知识、案例、方法，注入提示词")}
-      {row("save", "沉淀", "成功后把可复用的结论存进知识库（agent 判断值不值得存）")}
+      {row("recall", "召回", "运行前按问题检索记忆（事实、报错教训）与方法，注入提示词")}
+      {row("save", "沉淀", "结束后把可复用的事实与报错教训记下来（agent 判断值不值得记）")}
     </div>
   );
 }
