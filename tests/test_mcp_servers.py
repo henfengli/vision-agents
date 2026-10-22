@@ -29,7 +29,7 @@ async def _list_tools(command, args, env=None):
 @unittest.skipUnless(HAS_FASTMCP and HAS_NPX, "fastmcp 或 npx 不可用")
 class TestOfficialBrowserMcp(unittest.TestCase):
     def test_playwright_mcp_lists_tools(self):
-        # 与 conf/env/prod.yaml 的 browser 示例同包同版本
+        # 与 conf/base/common.yaml 里 mcp_servers 注释的 browser 示例同包同版本
         tools = asyncio.run(_list_tools(
             "npx", ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated"]))
         self.assertIn("browser_navigate", tools)

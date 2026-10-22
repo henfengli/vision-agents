@@ -1,0 +1,46 @@
+title: Dagster 数据编排
+description: 数仓 ETL 编排：ods → dwd → ads 三层资产，按天物化
+root: /srv/svc/dagster/code/{env}
+repo: git@gitlab.internal:data/dagster.git
+ref: main
+python: /srv/svc/dagster/venv/{env}/bin/python
+# dagster.yaml 从 DAGSTER_HOME 读：指到代码目录，bind 进去的本环境 dagster.yaml 才生效
+env_vars: {DAGSTER_HOME: "/srv/svc/dagster/code/{env}"}
+# 有名字的地址：local = 本机副本的 webserver（要先 service_ctl start webserver）；deployed = 线上部署（各环境覆盖）
+urls:
+  local: "http://127.0.0.1:{port:webserver}"
+hosts: [10.0.0.11]
+configs:
+  - {canonical: "/srv/svc/dagster/code/{env}/dagster.yaml", template: "/srv/svc/dagster/conf/{env}/dagster.yaml"}
+  - {canonical: "/srv/svc/dagster/code/{env}/workspace.yaml", template: "/srv/svc/dagster/conf/{env}/workspace.yaml"}
+processes:
+  webserver:
+    cmd: ["/srv/svc/dagster/venv/{env}/bin/dagster-webserver", -w, workspace.yaml, -p, "{port}"]
+    ports: {prod: 3000, test: 3001, dev: 3002}
+  daemon:
+    cmd: ["/srv/svc/dagster/venv/{env}/bin/dagster-daemon", run, -w, workspace.yaml]
+# 服务自己的 MCP：运行在 dagster 上时工具自动出现，按运行的环境连到该环境线上部署的 Dagster（GraphQL，只读查询）。
+# 需要平台装了 dagster-mcp 依赖（pip install 'agent-platform[dagster-mcp,mcp]'）
+mcp:
+  dagster:
+    transport: stdio
+    command: "{platform_python}"
+    args: ["{platform}/mcp_servers/dagster_mcp.py"]
+    env: {DAGSTER_URL: "{url:deployed}"}
+    envs: {prod: {}, test: {}}          # 只有这两个环境有线上部署
+envs:
+  prod:
+    ref: release
+    hosts: [10.0.0.11, 10.0.0.12]
+    readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@prod-db:5432/dagster"
+    urls: {deployed: "http://10.0.0.11:3000"}
+  test:
+    ref: test
+    hosts: [10.0.1.11]
+    readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@test-db:5432/dagster"
+    urls: {deployed: "http://10.0.1.11:3001"}
+profile:
+  conventions: 资产按 dt 分区（yyyy-mm-dd），T+1 物化；ads 层依赖 dwd 全部完成
+  no_go: prod 不手工触发 backfill，需走变更单；dagster 的 MCP 工具只做查询
+  env_notes: 线上的运行记录、物化历史用 dagster 的 MCP 工具查；复现某个资产的问题优先用 py 在进程内 materialize；本机起的 daemon 会按该环境的配置真的跑调度和传感器，不起 daemon
+  pitfalls: 上游 ods_order 延迟到 03:00 后会导致 dwd_trade_order 级联失败，先看上游

@@ -1,7 +1,7 @@
-"""agent 层：角色、引擎、人工审批、工具——agent 能力的一切。
+"""agent 层：按角色装配并执行 agent。
 
-- roles     角色定义/继承解析/DeepAgents 装配
-- engine    agent 生命周期（按需构建、TTL 惰性重建、热加载）
-- approvals 危险命令人工审批（LISTEN/NOTIFY 唤醒）
-- tools     工具层（sandbox/bash/sql/run_code/mcp/registry）
+- factory    AgentFactory：（角色, 版本）→ 编译好的 agent，缓存复用；invoke 执行一次并把事件流落台账
+- scope      RunScope：工具调用时的"当前运行 / 服务×环境"
+- approvals  人工门（危险命令、进程启停；默认关闭）
+- tools      工具目录与实现
 """

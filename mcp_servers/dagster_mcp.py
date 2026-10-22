@@ -1,9 +1,9 @@
-"""参考实现：Dagster 内部 MCP server（FastMCP，stdio）。
+"""参考实现：Dagster 的 MCP server（FastMCP，stdio），只读查询线上部署的 Dagster。
 
-把 Dagster GraphQL 包成带 schema 的类型化工具，agent 不再靠 curl 猜接口。
-运行：python mcp_servers/dagster_mcp.py
-配置：agent-platform 的 settings.mcp_servers = {"dagster": {"transport": "stdio",
-      "command": "python", "args": ["mcp_servers/dagster_mcp.py"]}}
+把 Dagster GraphQL 包成带 schema 的类型化工具，agent 不再靠 curl 猜接口。高频、固定的查询放这里；
+临时的、不常用的，agent 可以直接在 py 内核里用 dagster 自带的 GraphQL 客户端调。
+运行：DAGSTER_URL=http://... python mcp_servers/dagster_mcp.py
+接入：写在 dagster 服务定义的 mcp 里（见 conf/seeds/services/dagster.yaml），每个环境连该环境的线上部署。
 """
 
 import os
@@ -57,6 +57,29 @@ async def get_asset_materializations(asset_key: str, limit: int = 5) -> list[dic
         {"k": {"path": asset_key.split(".")}, "l": limit})
     asset = data["assetOrError"]
     return asset.get("assetMaterializations", []) if isinstance(asset, dict) else []
+
+
+@mcp.tool
+async def recent_runs(limit: int = 20, status: str = "") -> list[dict]:
+    """最近的运行（新的在前）。status 可选 FAILURE / SUCCESS / STARTED / QUEUED / CANCELED，空 = 全部。"""
+    run_filter = {"statuses": [status.upper()]} if status else {}
+    data = await _gql(
+        "query($f: RunsFilter, $l: Int){ runsOrError(filter:$f, limit:$l){ __typename "
+        "... on Runs { results { runId status jobName startTime endTime } } ... on PythonError { message } } }",
+        {"f": run_filter, "l": max(1, min(limit, 100))})
+    runs = data["runsOrError"]
+    return runs.get("results", []) if isinstance(runs, dict) else []
+
+
+@mcp.tool
+async def asset_info(asset_key: str) -> dict:
+    """资产的定义：描述、分组、上游依赖、所属 job（asset_key 用 . 分隔层级，如 dwd.trade_order）。"""
+    data = await _gql(
+        "query($k: AssetKeyInput!){ assetOrError(assetKey:$k){ __typename ... on Asset { "
+        "definition { description groupName jobNames dependencyKeys { path } } } } }",
+        {"k": {"path": asset_key.split(".")}})
+    asset = data["assetOrError"]
+    return (asset.get("definition") or {}) if isinstance(asset, dict) else {}
 
 
 if __name__ == "__main__":

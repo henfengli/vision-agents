@@ -35,111 +35,111 @@ _KEEP_REVISIONS = 5
 _HISTORY_KEEP = 20
 
 
-async def _put_history(conn, env: str, domain: str, task: str, kind: str,
+async def _put_history(conn, env: str, service: str, task: str, kind: str,
                        name: str, summary: str, content: str,
                        path: str | None, source: str) -> None:
     """把旧内容快照进 asset_history（版本 = 键内递增）并裁到最近 N 版。"""
     cur = await conn.execute(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM asset_history"
-        " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
-        (env, domain, task, kind, name))
+        " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s",
+        (env, service, task, kind, name))
     version = (await cur.fetchone())[0]
     await conn.execute(
-        "INSERT INTO asset_history (env, domain, task, kind, name, version,"
+        "INSERT INTO asset_history (env, service, task, kind, name, version,"
         " summary, content, path, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (env, domain, task, kind, name, version, summary, content, path,
+        (env, service, task, kind, name, version, summary, content, path,
          source))
     await conn.execute(
         "DELETE FROM asset_history"
-        " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
+        " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s"
         " AND version <= %s",
-        (env, domain, task, kind, name, version - _HISTORY_KEEP))
+        (env, service, task, kind, name, version - _HISTORY_KEEP))
 
 
-async def upsert(env: str, domain: str, task: str, kind: str, name: str,
+async def upsert(env: str, service: str, task: str, kind: str, name: str,
                  summary: str, content: str,
                  source_run: str | None = None,
                  path: str | None = None) -> None:
-    """幂等 upsert（同 (domain, task, kind, name) 整替换并刷新有效期）。
+    """幂等 upsert（同 (service, task, kind, name) 整替换并刷新有效期）。
     覆盖前旧内容快照进 asset_history（内容没变不记）。"""
     async with pool().connection() as conn, conn.transaction():
         cur = await conn.execute(
             "SELECT summary, content, path FROM assets"
-            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
-            (env, domain, task, kind, name))
+            " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s",
+            (env, service, task, kind, name))
         old = await cur.fetchone()
         if old and (old[0], old[1], old[2]) != (summary, content, path):
-            await _put_history(conn, env, domain, task, kind, name,
+            await _put_history(conn, env, service, task, kind, name,
                                old[0], old[1], old[2],
                                source_run or "upsert")
         await conn.execute(
-            "INSERT INTO assets (env, domain, task, kind, name, summary,"
+            "INSERT INTO assets (env, service, task, kind, name, summary,"
             " content, source_run, path) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-            " ON CONFLICT (env, domain, task, kind, name) DO UPDATE SET"
+            " ON CONFLICT (env, service, task, kind, name) DO UPDATE SET"
             " summary=EXCLUDED.summary, content=EXCLUDED.content,"
             " source_run=EXCLUDED.source_run, path=EXCLUDED.path,"
             " valid_from=now(), valid_to=NULL, superseded_by=NULL,"
             " created_at=now()",
-            (env, domain, task, kind, name, summary, content, source_run,
+            (env, service, task, kind, name, summary, content, source_run,
              path))
 
 
-async def list_content_history(env: str, domain: str, task: str, kind: str,
+async def list_content_history(env: str, service: str, task: str, kind: str,
                                name: str) -> list[dict]:
     """内容历史（新版本在前）：回滚选择与审计用。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT version, summary, content, path, source, created_at"
             " FROM asset_history"
-            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
-            " ORDER BY version DESC", (env, domain, task, kind, name))
+            " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s"
+            " ORDER BY version DESC", (env, service, task, kind, name))
         rows = await cur.fetchall()
     return [{"version": r[0], "summary": r[1], "content": r[2], "path": r[3],
              "source": r[4], "created_at": r[5].isoformat()} for r in rows]
 
 
-async def restore_content(env: str, domain: str, task: str, kind: str,
+async def restore_content(env: str, service: str, task: str, kind: str,
                           name: str, version: int) -> None:
     """把历史版本写回主表（当前内容先快照，回滚可逆）。版本不存在 KeyError。"""
     async with pool().connection() as conn, conn.transaction():
         cur = await conn.execute(
             "SELECT summary, content FROM asset_history"
-            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s"
-            " AND version=%s", (env, domain, task, kind, name, version))
+            " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s"
+            " AND version=%s", (env, service, task, kind, name, version))
         hist = await cur.fetchone()
         if hist is None:
             raise KeyError(f"无历史版本 v{version}")
         cur = await conn.execute(
             "SELECT summary, content, path FROM assets"
-            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
-            (env, domain, task, kind, name))
+            " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s",
+            (env, service, task, kind, name))
         cur_row = await cur.fetchone()
         if cur_row is None:
             raise KeyError("资产本体不存在")
         if (cur_row[0], cur_row[1]) != (hist[0], hist[1]):
-            await _put_history(conn, env, domain, task, kind, name,
+            await _put_history(conn, env, service, task, kind, name,
                                cur_row[0], cur_row[1], cur_row[2],
                                f"rollback-to-v{version}")
         # 文件载体不回滚（文件版本走 .revs 那套）；只回文本内容
         await conn.execute(
             "UPDATE assets SET summary=%s, content=%s, valid_from=now(),"
             " valid_to=NULL, superseded_by=NULL, created_at=now()"
-            " WHERE env=%s AND domain=%s AND task=%s AND kind=%s AND name=%s",
-            (hist[0], hist[1], env, domain, task, kind, name))
+            " WHERE env=%s AND service=%s AND task=%s AND kind=%s AND name=%s",
+            (hist[0], hist[1], env, service, task, kind, name))
 
 
-async def search_active(env: str, domain: str, task: str,
+async def search_active(env: str, service: str, task: str,
                         limit: int = 8) -> list[dict]:
-    """prepare 注入用：任务级资产优先，其次域级通用；同类内按复用数/反馈排。"""
+    """prepare 注入用：任务级资产优先，其次服务通用；同类内按复用数/反馈排。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, task, kind, name, summary, content, use_count,"
             " feedback_score, source_run, path FROM assets"
-            " WHERE env=%s AND domain=%s AND task IN (%s, '')"
+            " WHERE env=%s AND service=%s AND task IN (%s, '')"
             " AND valid_to IS NULL"
             " ORDER BY CASE WHEN task=%s THEN 0 ELSE 1 END, use_count DESC,"
             " COALESCE(feedback_score,0) DESC, created_at DESC LIMIT %s",
-            (env, domain, task, task, limit * 2))
+            (env, service, task, task, limit * 2))
         rows = await cur.fetchall()
     rows = sorted(rows, key=lambda r: (
         0 if r[1] == task else 1, _KIND_ORDER.get(r[2], 9)))[:limit]
@@ -156,15 +156,15 @@ async def mark_used(ids: list[int]) -> None:
             " WHERE id = ANY(%s)", (ids,))
 
 
-async def list_all(env: str, domain: str | None = None,
+async def list_all(env: str, service: str | None = None,
                    include_inactive: bool = True) -> list[dict]:
-    rows, _, _ = await list_filtered(env, domain=domain,
+    rows, _, _ = await list_filtered(env, service=service,
                                      active=None if include_inactive else True,
                                      limit=500)
     return rows
 
 
-async def list_filtered(env: str, domain: str | None = None,
+async def list_filtered(env: str, service: str | None = None,
                         q: str | None = None, kind: str | None = None,
                         active: bool | None = None, offset: int = 0,
                         limit: int = 50) -> tuple[list[dict], int, int]:
@@ -174,9 +174,9 @@ async def list_filtered(env: str, domain: str | None = None,
     高 churn 的 runs 表才用 keyset（见 store/runs.py）。
     """
     conds, params = ["env=%s"], [env]
-    if domain:
-        conds.append("domain=%s")
-        params.append(domain)
+    if service:
+        conds.append("service=%s")
+        params.append(service)
     if kind:
         conds.append("kind=%s")
         params.append(kind)
@@ -188,7 +188,7 @@ async def list_filtered(env: str, domain: str | None = None,
         conds.append("(name ILIKE %s OR summary ILIKE %s)")
         params += ["%" + q + "%", "%" + q + "%"]
     where = " WHERE " + " AND ".join(conds)
-    cols = ("id, domain, task, kind, name, summary, use_count, last_used_at,"
+    cols = ("id, service, task, kind, name, summary, use_count, last_used_at,"
             " feedback_score, valid_to IS NOT NULL, superseded_by, source_run,"
             " created_at, path")
     async with pool().connection() as conn:
@@ -202,12 +202,12 @@ async def list_filtered(env: str, domain: str | None = None,
     return [{**_row_meta(r)} for r in rows], total, offset
 
 
-async def domain_counts(env: str) -> dict[str, dict]:
+async def service_counts(env: str) -> dict[str, dict]:
     """侧栏域计数（生效/失效），与列表过滤解耦。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT domain, valid_to IS NOT NULL, count(*) FROM assets"
-            " WHERE env=%s GROUP BY domain, valid_to IS NOT NULL", (env,))
+            "SELECT service, valid_to IS NOT NULL, count(*) FROM assets"
+            " WHERE env=%s GROUP BY service, valid_to IS NOT NULL", (env,))
         rows = await cur.fetchall()
     side: dict[str, dict] = {}
     for dom, expired, n in rows:
@@ -228,13 +228,13 @@ async def kind_stats(env: str) -> dict[str, int]:
 async def get_entry(asset_id: int) -> dict | None:
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, env, domain, task, kind, name, summary, content,"
+            "SELECT id, env, service, task, kind, name, summary, content,"
             " use_count, last_used_at, feedback_score, valid_to, source_run,"
             " created_at, path FROM assets WHERE id=%s", (asset_id,))
         row = await cur.fetchone()
     if not row:
         return None
-    return {"id": row[0], "env": row[1], "domain": row[2], "task": row[3],
+    return {"id": row[0], "env": row[1], "service": row[2], "task": row[3],
             "kind": row[4], "name": row[5], "summary": row[6],
             "content": row[7], "use_count": row[8],
             "last_used_at": row[9].isoformat() if row[9] else None,
@@ -251,7 +251,7 @@ async def update(asset_id: int, summary: str, content: str) -> None:
     覆盖前旧内容快照进 asset_history（source=web-edit）。"""
     async with pool().connection() as conn, conn.transaction():
         cur = await conn.execute(
-            "SELECT env, domain, task, kind, name, summary, content, path"
+            "SELECT env, service, task, kind, name, summary, content, path"
             " FROM assets WHERE id=%s", (asset_id,))
         old = await cur.fetchone()
         if old is None:
@@ -281,18 +281,18 @@ async def restore(asset_id: int) -> None:
 # ==================== 文件库（assets_dir 下的目录包） ====================
 
 
-def asset_dir(root: str, env: str, domain: str, task: str, kind: str,
+def asset_dir(root: str, env: str, service: str, task: str, kind: str,
               name: str) -> str:
     """资产目录：<root>/<env>/<域>/<任务或_shared>/<kind>__<name>。
     名字可做目录名（中文没问题），只压掉路径分隔符与点前缀。"""
     def safe(s: str) -> str:
         s = s.strip().replace("/", "_").replace("\\", "_").lstrip(".")
         return s or "_"
-    return os.path.join(root, safe(env), safe(domain), safe(task or "_shared"),
+    return os.path.join(root, safe(env), safe(service), safe(task or "_shared"),
                         f"{safe(kind)}__{safe(name)}")
 
 
-def collect_files(root: str, env: str, domain: str, task: str, kind: str,
+def collect_files(root: str, env: str, service: str, task: str, kind: str,
                   name: str, files: list[str], scratch_dir: str
                   ) -> tuple[str, int, int]:
     """把 scratch 里的文件/目录收编进资产库（整替换）。返回 (目录, 文件数, 字节数)。
@@ -303,7 +303,7 @@ def collect_files(root: str, env: str, domain: str, task: str, kind: str,
     文件数/总字节超上限直接报错——agent 收到错误可裁剪后重试。
     """
     scratch = os.path.realpath(scratch_dir)
-    dest = asset_dir(root, env, domain, task, kind, name)
+    dest = asset_dir(root, env, service, task, kind, name)
     staging = dest + ".staging"
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging, exist_ok=True)
@@ -476,7 +476,7 @@ def _row(r) -> dict:
 
 
 def _row_meta(r) -> dict:
-    return {"id": r[0], "domain": r[1], "task": r[2], "kind": r[3],
+    return {"id": r[0], "service": r[1], "task": r[2], "kind": r[3],
             "name": r[4], "summary": r[5], "use_count": r[6],
             "last_used_at": r[7].isoformat() if r[7] else None,
             "feedback_score": r[8], "expired": r[9],
@@ -491,7 +491,7 @@ async def by_ids(ids: list[int]) -> list[dict]:
         return []
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, task, kind, name, summary, use_count,"
+            "SELECT id, service, task, kind, name, summary, use_count,"
             " last_used_at, feedback_score,"
             " (valid_to IS NOT NULL) AS expired, superseded_by, source_run,"
             " created_at, path"
@@ -504,10 +504,43 @@ async def by_source_run(run_id: str) -> list[dict]:
     """反查：某次 run 沉淀了哪些资产（run 详情「本次沉淀」用）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT id, domain, task, kind, name, summary, use_count,"
+            "SELECT id, service, task, kind, name, summary, use_count,"
             " last_used_at, feedback_score,"
             " (valid_to IS NOT NULL) AS expired, superseded_by, source_run,"
             " created_at, path"
             " FROM assets WHERE source_run=%s ORDER BY id", (run_id,))
         rows = await cur.fetchall()
     return [_row_meta(r) for r in rows]
+
+
+async def list_entries(env: str | None = None, service: str | None = None, task: str | None = None,
+                       kind: str | None = None, status: str | None = None, entry_id: int | None = None,
+                       limit: int = 300) -> list[dict]:
+    """控制台方法页：跨环境可选，带文件清单（文件类资产）。task 含其子任务；status：active / superseded / all。"""
+    conds, params = [], []
+    for col, val in (("env", env), ("service", service), ("kind", kind), ("id", entry_id)):
+        if val:
+            conds.append(f"{col}=%s")
+            params.append(val)
+    if task:
+        conds.append("(task=%s OR task LIKE %s)")
+        params += [task, task + ":%"]
+    if status == "active":
+        conds.append("valid_to IS NULL")
+    elif status == "superseded":
+        conds.append("valid_to IS NOT NULL")
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, service, env, task, kind, name, summary, content, path, source_run, use_count, last_used_at,"
+            " feedback_score, valid_to IS NOT NULL, created_at FROM assets" + where +
+            " ORDER BY valid_to IS NOT NULL, use_count DESC, name LIMIT %s", (*params, limit))
+        rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        files = list_files(r[8]) if r[8] else []
+        out.append({"id": r[0], "service": r[1], "env": r[2], "task": r[3], "kind": r[4], "name": r[5],
+                    "summary": r[6], "content": r[7], "files": [{"name": f["name"], "size": f.get("size", 0)} for f in files],
+                    "source_run": r[9], "use_count": r[10], "last_used_at": r[11].isoformat() if r[11] else None,
+                    "feedback_score": r[12], "status": "superseded" if r[13] else "active", "updated_at": r[14].isoformat()})
+    return out

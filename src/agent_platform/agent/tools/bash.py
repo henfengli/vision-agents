@@ -39,11 +39,11 @@ def build_safe_env() -> dict[str, str]:
 
 def run_command(command: str, timeout: int = 60, cwd: str | None = None,
                 env: dict[str, str] | None = None,
-                allow_net: bool = False) -> BashResult:
+                allow_net: bool = False, hidden: tuple[str, ...] = ()) -> BashResult:
     """同步执行 shell 命令并截断输出。
     cwd 给定（=scratch 目录）时经 bwrap 沙箱执行；bwrap 缺失退化直接跑。"""
     from .sandbox import wrap_argv
-    argv = (wrap_argv(["bash", "-c", command], cwd, allow_net=allow_net)
+    argv = (wrap_argv(["bash", "-c", command], cwd, allow_net=allow_net, hidden=hidden)
             if cwd else ["bash", "-c", command])
     try:
         proc = subprocess.run(

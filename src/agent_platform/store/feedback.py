@@ -1,89 +1,141 @@
-"""反馈：Run Viewer 页面 👍👎 与纠正留痕，供评估闭环抽取 badcase。"""
+"""反馈的读写。规则见 domain/feedback.py：一人一步一条，改主意是覆盖、撤回是删除。
+
+整次运行的 👎 每变一次，就把"变化量"同步到这次运行沉淀的、召回的记忆与沉淀的方法上，
+所以重复点、改主意、撤回都不会把权重算重。👍 只留档，不改权重。
+"""
 
 from __future__ import annotations
 
+from ..domain import WHOLE_RUN, Feedback
 from .db import pool
 
-
-async def add(run_id: str, score: int, comment: str = "") -> None:
-    if score not in (1, -1):
-        raise ValueError("score 只能是 +1 或 -1")
-    async with pool().connection() as conn:
-        await conn.execute(
-            "INSERT INTO feedback (run_id, score, comment) VALUES (%s,%s,%s)",
-            (run_id, score, comment))
+_COLS = "f.id, f.run_id, f.step_seq, f.score, f.reasons, f.comment, f.created_by, f.created_at, f.updated_at"
 
 
-async def add_step(run_id: str, seq: int, score: int, comment: str = "") -> None:
-    """节点级反馈：时间线某一步的 👍👎（kind=step，step_seq 定位步骤）。
-
-    不传播记忆——单步好坏不直接改写 run 级知识/案例评分，只留痕供
-    badcase 抽取与 Langfuse 对照。"""
-    if score not in (1, -1):
-        raise ValueError("score 只能是 +1 或 -1")
-    async with pool().connection() as conn:
-        await conn.execute(
-            "INSERT INTO feedback (run_id, kind, score, step_seq, comment)"
-            " VALUES (%s,'step',%s,%s,%s)",
-            (run_id, score, seq, comment))
+def _row(r) -> dict:
+    return {"id": r[0], "run_id": r[1], "step_seq": r[2], "score": r[3], "reasons": list(r[4]), "comment": r[5],
+            "created_by": r[6], "created_at": r[7].isoformat(), "updated_at": r[8].isoformat()}
 
 
-async def propagate_to_memory(env: str, run_id: str, score: int) -> None:
-    """反馈闭环：run 的 👍👎 同步到它沉淀的知识条目、案例与任务资产，
-    影响后续召回排序。"""
-    delta = 1 if score == 1 else -1
-    async with pool().connection() as conn:
-        await conn.execute(
-            "UPDATE knowledge SET feedback_score=COALESCE(feedback_score,0)+%s"
-            " WHERE env=%s AND source_run=%s", (delta, env, run_id))
-        col = "thumbs_up" if score == 1 else "thumbs_down"
-        await conn.execute(
-            f"UPDATE cases SET {col}={col}+1 WHERE env=%s AND source_run=%s",
-            (env, run_id))
-        await conn.execute(
-            "UPDATE assets SET feedback_score=COALESCE(feedback_score,0)+%s"
-            " WHERE env=%s AND source_run=%s", (delta, env, run_id))
+async def put(run_id: str, step_seq: int, by: str, fb: Feedback) -> tuple[dict, int | None]:
+    """写入或覆盖 by 对这一步的反馈。返回 (新反馈, 之前的分数)。"""
+    async with pool().connection() as conn, conn.transaction():
+        cur = await conn.execute(
+            "SELECT score FROM feedback WHERE run_id=%s AND step_seq=%s AND created_by=%s FOR UPDATE",
+            (run_id, step_seq, by))
+        old = await cur.fetchone()
+        cur = await conn.execute(
+            "INSERT INTO feedback AS f (run_id, step_seq, score, reasons, comment, created_by)"
+            " VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (run_id, step_seq, created_by) DO UPDATE"
+            " SET score=EXCLUDED.score, reasons=EXCLUDED.reasons, comment=EXCLUDED.comment, updated_at=now()"
+            f" RETURNING {_COLS}",
+            (run_id, step_seq, fb.score, fb.reasons, fb.comment, by))
+        return _row(await cur.fetchone()), (old[0] if old else None)
 
 
-async def add_correction(session_id: str, correction: str, by: str = "") -> None:
-    """纠正式反馈留痕：kind=correction。"""
-    async with pool().connection() as conn:
-        await conn.execute(
-            "INSERT INTO feedback (session_id, kind, comment) VALUES (%s,'correction',%s)",
-            (session_id, correction if not by else f"[{by}] {correction}"))
-
-
-async def summary() -> dict:
+async def remove(run_id: str, step_seq: int, by: str) -> int | None:
+    """撤回 by 对这一步的反馈。返回被撤回的分数（本来就没有则 None）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT COUNT(*) FILTER (WHERE score=1),"
-            " COUNT(*) FILTER (WHERE score=-1) FROM feedback")
+            "DELETE FROM feedback WHERE run_id=%s AND step_seq=%s AND created_by=%s RETURNING score",
+            (run_id, step_seq, by))
         row = await cur.fetchone()
-    return {"thumbs_up": row[0], "thumbs_down": row[1]}
-
-
-async def correction_counts(min_count: int = 3) -> list[dict]:
-    """重复纠正信号：同 session 纠正达到阈值说明记忆层反复兜不住，
-    管理页提示人工升舱为角色 prompt（程序记忆升舱保持人工门）。"""
-    async with pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT session_id, COUNT(*) AS n, MAX(created_at) AS last_at"
-            " FROM feedback WHERE kind='correction'"
-            " GROUP BY session_id HAVING COUNT(*) >= %s"
-            " ORDER BY n DESC LIMIT 50", (min_count,))
-        rows = await cur.fetchall()
-    return [{"session_id": r[0], "count": r[1], "last_at": r[2].isoformat()}
-            for r in rows]
+    return row[0] if row else None
 
 
 async def for_run(run_id: str) -> list[dict]:
-    """某 run 的全部反馈留痕（记忆抽屉的来源反馈用）。"""
+    """一次运行收到的全部反馈（整次 + 各步），按时间排序。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(f"SELECT {_COLS} FROM feedback f WHERE f.run_id=%s ORDER BY f.updated_at", (run_id,))
+        return [_row(r) for r in await cur.fetchall()]
+
+
+async def mine(run_ids: list[str], by: str) -> dict[str, dict]:
+    """by 对这些运行的整次评价：{run_id: 反馈}（对话页每轮回答下面显示自己的评价）。"""
+    if not run_ids:
+        return {}
     async with pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT kind, score, step_seq, comment, created_at FROM feedback"
-            " WHERE run_id=%s ORDER BY created_at", (run_id,))
+            f"SELECT {_COLS} FROM feedback f WHERE f.run_id = ANY(%s) AND f.step_seq=%s AND f.created_by=%s",
+            (run_ids, WHOLE_RUN, by))
+        return {r[1]: _row(r) for r in await cur.fetchall()}
+
+
+async def listing(*, score: int | None = None, service: str | None = None, env: str | None = None,
+                  task: str | None = None, reason: str | None = None, hours: int | None = None,
+                  limit: int = 100) -> list[dict]:
+    """反馈收件箱：带上运行的服务、环境、任务、摘要，新的在前。task 含其子任务。"""
+    conds, params = [], []
+    for clause, val in (("f.score=%s", score), ("r.service=%s", service), ("r.env=%s", env),
+                        ("%s = ANY(f.reasons)", reason)):
+        if val is not None and val != "":
+            conds.append(clause)
+            params.append(val)
+    if task:
+        conds.append("(r.task=%s OR r.task LIKE %s)")
+        params += [task, task + ":%"]
+    if hours:
+        conds.append("f.updated_at > now() - make_interval(hours => %s)")
+        params.append(hours)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_COLS}, r.task, r.service, r.env, r.summary, r.status FROM feedback f"
+            f" JOIN runs r ON r.run_id = f.run_id{where} ORDER BY f.updated_at DESC LIMIT %s",
+            (*params, max(1, min(limit, 500))))
         rows = await cur.fetchall()
-    return [{"kind": r[0], "score": r[1], "step_seq": r[2],
-             "comment": r[3],
-             "created_at": r[4].isoformat() if r[4] else None}
+    return [{**_row(r), "task": r[9], "service": r[10], "env": r[11], "summary": r[12], "run_status": r[13]}
             for r in rows]
+
+
+async def shift_memory_weight(env: str, run_id: str, old: int | None, new: int | None) -> None:
+    """整次评价从 old 变成 new（None = 没有评价）：只看 👎（没人点 👍，正分没有信号）。
+
+    被 👎 的运行，两类记忆各扣 1 分：它沉淀出来的（结论可能就是错的），和它召回的（可能是被它带偏的）。
+    改主意、撤回按差值回补，重复点不会扣两次。
+    """
+    delta = int(old == -1) - int(new == -1)          # 新 👎 → -1；撤回 👎 → +1
+    if delta == 0:
+        return
+    async with pool().connection() as conn:
+        await conn.execute(
+            "UPDATE knowledge SET feedback_score = feedback_score + %s WHERE source_run=%s"
+            " OR id IN (SELECT entry_id FROM recall_hits WHERE run_id=%s AND source='recall')",
+            (delta, run_id, run_id))
+        await conn.execute("UPDATE assets SET feedback_score = feedback_score + %s WHERE env=%s AND source_run=%s",
+                           (delta, env, run_id))
+
+
+async def negative_runs(*, task: str | None = None, service: str | None = None, env: str | None = None,
+                        hours: int | None = None, limit: int = 30) -> list[str]:
+    """被 👎 过（整次或某一步）的 agent 运行，最近被评的在前。回归重放的默认样本。"""
+    conds, params = ["f.score < 0", "r.resolution = 'agent'", "r.trigger_type <> 'replay'"], []
+    for clause, val in (("r.service=%s", service), ("r.env=%s", env)):
+        if val:
+            conds.append(clause)
+            params.append(val)
+    if task:
+        conds.append("(r.task=%s OR r.task LIKE %s)")
+        params += [task, task + ":%"]
+    if hours:
+        conds.append("f.updated_at > now() - make_interval(hours => %s)")
+        params.append(hours)
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT f.run_id, max(f.updated_at) AS at FROM feedback f JOIN runs r ON r.run_id = f.run_id"
+            f" WHERE {' AND '.join(conds)} GROUP BY f.run_id ORDER BY at DESC LIMIT %s",
+            (*params, max(1, min(limit, 200))))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def negatives_of(run_id: str) -> list[dict]:
+    """一次运行收到的全部 👎（整次 + 各步），各步带上那一步的内容，给回归判定当"问题清单"。"""
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT f.step_seq, f.reasons, f.comment, f.created_by, e.kind, e.payload FROM feedback f"
+            " LEFT JOIN run_events e ON e.run_id = f.run_id AND e.seq = f.step_seq"
+            " WHERE f.run_id=%s AND f.score < 0 ORDER BY f.step_seq, f.updated_at", (run_id,))
+        rows = await cur.fetchall()
+    return [{"step_seq": s, "reasons": list(rs), "comment": c, "created_by": by, "step_kind": k, "step": p}
+            for s, rs, c, by, k, p in rows]

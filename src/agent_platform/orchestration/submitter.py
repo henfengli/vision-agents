@@ -1,405 +1,224 @@
-"""Temporal 提交端：api/triggers 的统一入口。
+"""提交端：一切"发起一次运行"的唯一入口（API、对话、控制台、定时、事件、重跑、续跑、纠正、回归重放）。
 
-- submit：建台账行 + start_workflow（id=run_id，重复 id 拒绝）
-- run_sync：start + 等待结果（超时转异步轮询）
-- resume_run：同 id 重新 start，ID 复用策略只允许顶替已失败/已终止的执行
-- rerun：详情页重跑——失败/终止走 resume_run 断点续；成功则同输入新开
-  run（跳过去重，trigger=rerun）
-- correct：纠正式反馈——从 session 最近 run 继承 task_type/role/domain，
-  不调用方传、不写死任务类型
+submit 的顺序就是它的全部逻辑：
 
-概念唯一：只有 session_id。run 无会话归属时 session_id=run_id（自会话）。
+    幂等键命中？→ 解析任务 → 解析服务 → 解析环境 → 调用方权限 → 校验输入 → 闸门链 → 任务去重
+    → （点名的子任务不存在就按父任务建）→ 建台账行（queued，叫醒 worker）
+
+建行之后的事都由 worker 从台账行出发（pipeline.build_spec）：新提交、续跑、重跑、重放走的是同一段代码。
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
+from dataclasses import asdict, dataclass
 
-from temporalio.client import Client
-from temporalio.common import WorkflowIDReusePolicy
+import psycopg
 
-from ..config import resolve_target_env
-from ..domains import Switches
-from ..store import runs
-from ..store.definitions import DefinitionStore
-from . import policies
-from .spec import RunSpec
-from .tasks import TaskDef, TaskRegistry, question_text
-from .workflows import (AgentRunWorkflow, ArtifactRunWorkflow,
-                        BuiltinTaskWorkflow)
+from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef
+from ..domain.tasks import check_task_name
+from ..registry import Registry
+from ..store import approvals as approvals_store
+from ..store import db, runs
+from . import gates
 
-
-class TaskRejected(ValueError):
-    """提交被拒：code 是机器可读原因码（闸门链的 Verdict.code 原样带出），
-    对外 400 响应的 error_code 即它。"""
-
-    def __init__(self, message: str, code: str = "task_rejected"):
-        super().__init__(message)
-        self.code = code or "task_rejected"
+log = logging.getLogger(__name__)
 
 
-class OverloadedError(RuntimeError):
-    """同步入口超载：调用方收到 429 后重试。"""
+@dataclass
+class Accepted:
+    """提交回执。wait>0 时 status 可能已是终态，output 随之带回。"""
+
+    run_id: str
+    session_id: str
+    status: str
+    output: dict | None = None
+    dedup: bool = False                    # 命中幂等键或任务去重，返回的是已有运行
+    subtask_created: str | None = None     # 这次顺带建了哪个子任务
+
+    def dump(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def of(cls, run: dict, dedup: bool = False) -> "Accepted":
+        return cls(run["run_id"], run["session_id"], run["status"], run.get("output"), dedup=dedup)
 
 
 class Submitter:
-    def __init__(self, client: Client, tasks: TaskRegistry, task_queue: str,
-                 env: str, max_inflight_sync: int = 50,
-                 defs: DefinitionStore | None = None,
-                 approval_notifier=None,
-                 target_envs: list[str] | None = None,
-                 default_target_env: str | None = None,
-                 domain_provider=None, env_gate=None):
-        self._client = client
-        self._tasks = tasks
-        self._tq = task_queue
-        self._env = env                          # 实例标签（定义按它存取）
-        self._max_inflight = max_inflight_sync
-        self._inflight = 0
-        self._defs = defs                       # 策略链（policies.py）的定义源
-        self._approval_notifier = approval_notifier  # 任务级闸门钉钉通知
-        self._target_envs = target_envs or []    # 可操作的业务环境（空=单环境）
-        self._default_target = default_target_env
-        # 启停三级的读取面；判断只在 policies.check_switches 一处
-        self._switches = Switches(domain_provider, env_gate)
+    def __init__(self, registry: Registry):
+        self._reg = registry
 
-    # —— 内部 ——
+    # ———————— 新提交 ————————
 
-    def _resolve_target_env(self, env: str | None) -> str:
-        """目标业务环境解析；实现在 config.resolve_target_env（唯一出处）。
+    async def submit(self, req: RunRequest, *, trigger: RunTrigger, caller: Caller = SYSTEM,
+                     idempotency_key: str | None = None, rule: dict | None = None) -> Accepted:
+        """rule：事件触发时规则先行命中的结论——照样过闸门、留台账，只是不调模型。"""
+        if idempotency_key and (hit := await runs.find_idempotent(idempotency_key)):
+            return Accepted.of(hit, dedup=True)
 
-        这里只做异常翻译：config 层抛 ValueError，提交入口统一对外
-        TaskRejected（Submitter 从构造参数取值，不依赖 Settings）。
-        """
-        try:
-            return resolve_target_env(env, self._target_envs,
-                                      self._default_target, self._env)
-        except ValueError as e:
-            raise TaskRejected(str(e)) from e
+        # 点名的子任务还不存在时，先按父任务的生效定义过闸门，受理之后才落库（被拒的请求不留子任务）
+        task_name, base, to_create = await self._resolve_task(req)
+        task = (await self._reg.task(base if to_create else task_name)).spec
+        service = await self._resolve_service(task_name, task, req.service)
+        env = (await self._reg.env(req.env)).name
+        if (why := caller.may_run(service, env)) is not None:
+            raise Rejected("forbidden", why, 403)
+        input_data = task.with_defaults(req.input)
+        if errors := task.validate_input(input_data):
+            raise Rejected("invalid_input", "输入不合法：" + "；".join(f"{k} {v}" for k, v in errors.items()),
+                           detail={"fields": errors})
 
-    async def _resolve_task(self, task_name: str, role: str | None,
-                            target_env: str, domain: str | None) -> TaskDef:
-        """已有 run 的再启动（续跑/重跑/纠正/审批放行）：解析任务 + 过开关。
+        await gates.admit(self._reg, task_name=task_name, task=task, service=service, env=env,
+                          trigger_type=trigger.declared_type())
 
-        这些路径不重过输入策略（不是新需求），但服务/环境/任务停用了
-        照样拦——开关判断与新提交同一处（policies.check_switches）。
-        """
-        task = await self._tasks.resolve(task_name)  # 子任务合并父任务后生效
-        if task is None:
-            raise TaskRejected(f"未知任务类型：{task_name}", "unknown_task")
-        verdict = await policies.check_switches(task, target_env, domain,
-                                                self._switches)
-        if verdict is not None:
-            raise TaskRejected(verdict.message, verdict.code)
-        if role:
-            task = task.model_copy(update={"role": role})
-        return task
+        dedup_key = None
+        if task.dedup and (key := task.dedup.key_of(input_data)):
+            dedup_key = f"{task_name}|{service or ''}|{env}|{key}"
+            if hit := await runs.find_dedup(dedup_key, task.dedup.window_s):
+                return Accepted.of(hit, dedup=True)
 
-    async def check_switches(self, domain: str | None,
-                             target_env: str | None) -> None:
-        """不建 run 的入口（规则先行 webhook）问"环境/服务还开着吗"。"""
-        target_env = self._resolve_target_env(target_env)
-        verdict = await policies.check_switches(None, target_env, domain,
-                                                self._switches)
-        if verdict is not None:
-            raise TaskRejected(verdict.message, verdict.code)
+        created = await self._create_subtask(task_name, base, caller) if to_create else None
 
-    async def _start(self, task: TaskDef, input_data: dict, trigger_source: str,
-                     caller: str | None, session_id: str | None,
-                     correction: bool, run_id: str | None = None,
-                     resume: bool = False, row_exists: bool = False,
-                     skip_dedup: bool = False,
-                     domain: str | None = None, target_env: str = "",
-                     idempotency_key: str | None = None) -> dict:
-        run_id = run_id or uuid.uuid4().hex[:16]
-        session_id = session_id or run_id
-        if not resume and not row_exists:
-            # 幂等键优先于任务声明的 dedup：调用方显式要"同键不重跑"时，
-            # 排队/运行中的 run 也命中（任务级 dedup 只对成功 run 生效）
-            if idempotency_key:
-                existing = await runs.find_by_idempotency(idempotency_key)
-                if existing:
-                    return {"run_id": existing["run_id"], "status": "dedup_hit",
-                            "dedup_hit": True}
-                dedup_key = runs.idempotency_dedup_key(idempotency_key)
-            else:
-                dedup_key = task.compute_dedup_key(input_data)
-            if dedup_key and not skip_dedup and not idempotency_key:
-                existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
-                if existing:
-                    return {"run_id": existing["run_id"], "status": "dedup_hit",
-                            "dedup_hit": True}
-            await self._create_row(run_id, task, input_data, trigger_source,
-                                   caller, session_id, domain, dedup_key,
-                                   target_env)
-        domain = domain or _domain_of(input_data)
-        spec = RunSpec(run_id=run_id, task_type=task.name, role=task.role,
-                       question=_to_question(task, input_data),
-                       input=input_data, error_text=input_data.get("error"),
-                       session_id=session_id, timeout_s=task.timeout_s,
-                       target_env=target_env,
-                       domain=domain,
-                       trigger=trigger_source, correction=correction,
-                       resume=resume,
-                       artifacts=({k: v.model_dump() for k, v in
-                                   task.artifacts.items()}
-                                  if task.artifacts else None),
-                       handler=task.handler,
-                       output_channel=task.output_channel,
-                       output_callback=task.output_callback).to_dict()
-        # 任务形态分发：资产图 / 内建处理器 / 单 agent（默认）
-        wf = (BuiltinTaskWorkflow.run if task.handler else
-              ArtifactRunWorkflow.run if task.artifacts else
-              AgentRunWorkflow.run)
-        kw = {}
-        if resume:
-            kw["id_reuse_policy"] = (
-                WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY)
-        await self._client.start_workflow(
-            wf, spec, id=run_id, task_queue=self._tq, **kw)
-        return {"run_id": run_id, "session_id": session_id,
-                "status": "queued", "dedup_hit": False,
-                "target_env": target_env}
-
-    @staticmethod
-    async def _create_row(run_id: str, task: TaskDef, input_data: dict,
-                          trigger_source: str, caller: str | None,
-                          session_id: str, domain: str | None,
-                          dedup_key: str, target_env: str = "") -> None:
-        await runs.create(
-            run_id, task.name, task.role,
-            domain=domain or _domain_of(input_data),
-            trigger_source=trigger_source, caller=caller or "",
-            input_data=input_data, dedup_key=dedup_key,
-            session_id=session_id, target_env=target_env)
-
-    async def _gate(self, task: TaskDef, input_data: dict, trigger_source: str,
-                    caller: str | None, session_id: str | None,
-                    verdict: policies.Verdict, target_env: str = "") -> dict:
-        """任务级闸门：建行 + 审批单 + 钉钉通知，workflow 等放行后才启动。"""
-        from ..agent import approvals as approval_store
-
-        dedup_key = task.compute_dedup_key(input_data)
-        if dedup_key:
-            existing = await runs.find_by_dedup(dedup_key, task.dedup_window_s)
-            if existing:
-                return {"run_id": existing["run_id"], "status": "dedup_hit",
-                        "dedup_hit": True}
         run_id = uuid.uuid4().hex[:16]
-        session_id = session_id or run_id
-        await self._create_row(run_id, task, input_data, trigger_source,
-                               caller, session_id, None, dedup_key, target_env)
-        summary = policies.gate_summary(task.name, verdict)
-        if target_env:
-            summary = f"[{target_env}] {summary}"
-        approval_id = await approval_store.request_approval(run_id, summary)
-        await runs.log_event(run_id, "note",
-                             {"stage": "submit_gate", "policy": verdict.policy,
-                              "approval_id": approval_id})
-        if self._approval_notifier is not None:
-            await self._approval_notifier(run_id, summary)
-        return {"run_id": run_id, "session_id": session_id,
-                "status": "awaiting_approval", "approval_id": approval_id,
-                "dedup_hit": False, "target_env": target_env}
-
-    async def approve_start(self, run_id: str) -> dict:
-        """提交闸门放行后的启动：workflow 此刻才第一次 start。"""
-        run = await runs.get(run_id)
-        if run is None:
-            raise TaskRejected(f"run {run_id} 不存在")
-        task = await self._resolve_task(run["task_type"], run["role"] or None,
-                                        run.get("target_env") or self._env,
-                                        run.get("domain"))
-        # 闸门挂起的 run 从未启动过 workflow：不是 resume（没有可续的
-        # LangGraph thread），而是首次启动——只跳过建行/去重
-        return await self._start(task, run.get("input") or {},
-                                 run["trigger_source"], run.get("caller"),
-                                 run.get("session_id"), correction=False,
-                                 run_id=run_id, row_exists=True,
-                                 domain=run.get("domain"),
-                                 target_env=run.get("target_env") or "")
-
-    # —— 对外 ——
-
-    async def submit(self, task_name: str, input_data: dict,
-                     trigger_source: str, caller: str | None = None,
-                     session_id: str | None = None, role: str | None = None,
-                     correction: bool = False,
-                     target_env: str | None = None,
-                     idempotency_key: str | None = None,
-                     subtask: str | None = None) -> dict:
-        """新提交的唯一入口。
-
-        子任务选择是显式的：subtask=对象名（或 task_name 直接写成
-        "父任务:对象名"）；点名的子任务不存在时自动建桩（继承父任务全部
-        字段，档案待补），平台不从输入里猜。之后过闸门链：开关 →
-        输入策略，任一环拒绝都带原因码。
-        """
-        target_env = self._resolve_target_env(target_env)
         try:
-            task, stub = await self._tasks.resolve_for_submit(task_name,
-                                                              subtask)
+            await runs.create(
+                run_id=run_id, session_id=req.session_id or run_id, task=task_name, role=task.role, service=service,
+                env=env, trigger_type=trigger.type, trigger_id=trigger.id, trigger_source=trigger.source,
+                caller=trigger.caller or caller.name, summary=_summary(input_data, task.title or task_name),
+                input_data=input_data, memory=req.memory.model_dump(exclude_none=True),
+                dedup_key=dedup_key, idempotency_key=idempotency_key,
+                output={"answer": rule["conclusion"], **rule} if rule else None, resolution="rule" if rule else None)
+        except psycopg.errors.UniqueViolation:
+            # 同一个幂等键的并发提交（多个 worker 同时触发同一次定时、调用方重试）：返回先到的那条
+            if idempotency_key and (hit := await runs.find_idempotent(idempotency_key)):
+                return Accepted.of(hit, dedup=True)
+            raise
+        return Accepted(run_id, req.session_id or run_id, "queued", subtask_created=created)
+
+    async def _resolve_task(self, req: RunRequest) -> tuple[str, str, bool]:
+        """→ (生效任务名, 父任务名, 是否需要新建子任务)。子任务可以写成 task="父:对象"，也可以 task + subtask。"""
+        base, _, obj = req.task.partition(":")
+        obj = req.subtask or obj
+        parent = await self._reg.task_raw(base)
+        if parent is None:
+            raise Rejected("unknown_task", f"任务 {base} 不存在", 404)
+        if not obj:
+            return base, base, False
+        if parent.spec.extends:
+            raise Rejected("invalid_subtask", f"{base} 本身是子任务，不能再派生", 400)
+        name = f"{base}:{obj}"
+        try:
+            check_task_name(name)
         except ValueError as e:
-            raise TaskRejected(str(e), "bad_subtask") from e
-        if task is None:
-            raise TaskRejected(f"未知任务类型：{task_name}", "unknown_task")
-        if role:
-            task = task.model_copy(update={"role": role})
-        domain = _domain_of(input_data)
-        verdict = await policies.evaluate_submit(
-            task, target_env, self._env, input_data,
-            _to_question(task, input_data),
-            None if correction else self._defs,  # 纠正不重过输入策略
-            switches=self._switches, domain=domain)
-        if verdict.action == "deny":
-            raise TaskRejected(verdict.message, verdict.code)
-        # 受理了（放行或挂审批）才落子任务桩：被拒的提交不留垃圾定义
-        if stub is not None:
-            await self._tasks.create_stub(stub,
-                                          created_by=f"auto:{trigger_source}")
-        if verdict.action == "require_approval":
-            result = await self._gate(task, input_data, trigger_source,
-                                      caller, session_id, verdict, target_env)
-        else:
-            result = await self._start(task, input_data, trigger_source,
-                                       caller, session_id, correction,
-                                       target_env=target_env,
-                                       idempotency_key=idempotency_key)
-        if stub is not None:
-            result["subtask_created"] = stub.name
-        return result
+            raise Rejected("invalid_subtask", str(e)) from e
+        return name, base, await self._reg.task_raw(name) is None
 
-    async def correct(self, session_id: str, correction_text: str,
-                      by: str = "") -> dict:
-        """纠正式反馈：从 session 最近一次 run 继承任务上下文重判。"""
-        last = await runs.latest_of_session(session_id)
-        if last is None:
-            raise TaskRejected(f"session {session_id} 不存在或无历史 run")
-        target_env = self._resolve_target_env(last.get("target_env") or None)
-        task = await self._resolve_task(last["task_type"], last["role"],
-                                        target_env, last.get("domain"))
-        input_data = dict(last.get("input") or {})
-        input_data["correction"] = correction_text
-        input_data["corrected_by"] = by
-        return await self._start(task, input_data, "feedback", by,
-                                 session_id, correction=True,
-                                 domain=last["domain"], target_env=target_env)
-
-    async def run_sync(self, task_name: str, input_data: dict,
-                       trigger_source: str, session_id: str | None = None,
-                       role: str | None = None,
-                       target_env: str | None = None,
-                       subtask: str | None = None) -> dict:
-        """同步路径：提交后等结果，超时转异步。"""
-        if self._inflight >= self._max_inflight:
-            raise OverloadedError("服务繁忙，请稍后重试")
-        self._inflight += 1
+    async def _create_subtask(self, name: str, base: str, caller: Caller) -> str | None:
+        """新建的子任务只有 extends，生效定义与父任务相同，所以闸门用父任务判断即可。"""
         try:
-            submitted = await self.submit(task_name, input_data,
-                                          trigger_source,
-                                          session_id=session_id, role=role,
-                                          target_env=target_env,
-                                          subtask=subtask)
-            if submitted["dedup_hit"]:
-                run = await runs.get(submitted["run_id"])
-                return {"run_id": submitted["run_id"],
-                        "output": (run or {}).get("output")}
-            if submitted.get("status") == "awaiting_approval":
-                # 提交闸门挂起：workflow 尚未启动，没有可等的 handle
-                return {"run_id": submitted["run_id"], "output": None,
-                        "note": "任务待提交审批，批准后自动开始执行",
-                        "approval_id": submitted.get("approval_id")}
-            run_id = submitted["run_id"]
+            await self._reg.create("task", name, {"extends": base, "auto_created": True}, f"auto:{caller.name}")
+        except Rejected as e:
+            if e.code == "conflict":          # 并发请求已经建好了
+                return None
+            raise
+        log.info("按父任务 %s 自动建子任务 %s（%s）", base, name, caller.name)
+        return name
+
+    async def _resolve_service(self, task_name: str, task: TaskDef, requested: str | None) -> str | None:
+        """专属任务：服务就是任务的服务（请求里写了别的 → 拒绝）；通用任务：请求必须给；平台任务：没有服务。"""
+        if task.service == "*":
+            if not requested:
+                raise Rejected("service_required", f"{task_name} 是通用任务，需要指定 service")
+            if await self._reg.service(requested) is None:
+                raise Rejected("unknown_service", f"服务 {requested} 不存在", 404)
+            return requested
+        if requested and requested != task.service:
+            raise Rejected("service_not_allowed",
+                           f"任务 {task_name} 属于{('服务 ' + task.service) if task.service else '平台'}，不能用于 {requested}")
+        return task.service
+
+    # ———————— 已有运行上的动作 ————————
+
+    async def rerun(self, run_id: str, caller: Caller) -> Accepted:
+        """同样的任务、服务、环境、输入，开一个新运行（新会话）。过开关，不再过触发声明。"""
+        old = await self._existing(run_id)
+        req = RunRequest(task=old["task"], service=old["service"], env=old["env"], input=old["input"],
+                         memory=old.get("memory") or {})
+        return await self._relaunch(req, old, RunTrigger(type="rerun", caller=caller.name), caller)
+
+    async def correct(self, run_id: str, correction: str, caller: Caller) -> Accepted:
+        """纠正：在同一会话里开新一轮，带上纠正内容；成功后取代上一轮沉淀的记忆。"""
+        old = await self._existing(run_id)
+        req = RunRequest(task=old["task"], service=old["service"], env=old["env"], session_id=old["session_id"],
+                         input={**old["input"], "question": f"[纠正] {correction}"}, memory=old.get("memory") or {})
+        return await self._relaunch(req, old, RunTrigger(type="correction", caller=caller.name), caller)
+
+    async def replay(self, run_id: str, caller: Caller) -> Accepted:
+        """回归重放：同样的输入用当前定义重跑一次（新会话、不沉淀、不投递），供并排对比。"""
+        old = await self._existing(run_id)
+        req = RunRequest(task=old["task"], service=old["service"], env=old["env"], input=old["input"])
+        return await self._relaunch(req, old, RunTrigger(type="replay", id=run_id, caller=caller.name), caller)
+
+    async def _relaunch(self, req: RunRequest, old: dict, trigger: RunTrigger, caller: Caller) -> Accepted:
+        entry = await self._reg.task(old["task"])
+        if entry is None:
+            raise Rejected("unknown_task", f"任务 {old['task']} 已不存在")
+        if (why := caller.may_run(old["service"], old["env"])) is not None:
+            raise Rejected("forbidden", why, 403)
+        await gates.check_switches(self._reg, task_name=old["task"], task=entry.spec, service=old["service"], env=old["env"])
+        run_id = uuid.uuid4().hex[:16]
+        session_id = req.session_id or run_id
+        await runs.create(run_id=run_id, session_id=session_id, task=old["task"], role=entry.spec.role,
+                          service=old["service"], env=old["env"], trigger_type=trigger.type, trigger_id=trigger.id,
+                          trigger_source=None, caller=trigger.caller, summary=_summary(req.input, old["summary"]),
+                          input_data=req.input, memory=req.memory.model_dump(exclude_none=True))
+        return Accepted(run_id, session_id, "queued")
+
+    async def resume(self, run_id: str, caller: Caller) -> Accepted:
+        """失败的运行从断点接着跑（同一个 run_id、同一个会话 thread）。"""
+        run = await self._existing(run_id)
+        if run["status"] != "failed":
+            raise Rejected("conflict", f"只有失败的运行能续跑（当前 {run['status']}）", 409)
+        entry = await self._reg.task(run["task"])
+        if entry is None or entry.spec.form != "agent":
+            raise Rejected("conflict", "只有单角色任务支持续跑；内建任务请用重跑", 409)
+        await gates.check_switches(self._reg, task_name=run["task"], task=entry.spec, service=run["service"], env=run["env"])
+        await runs.log_event(run_id, "stage", {"stage": "resume", "title": f"续跑（{caller.name}）"})
+        await runs.enqueue(run_id, resume=True)
+        return Accepted(run_id, run["session_id"], "queued")
+
+    async def cancel(self, run_id: str, caller: Caller) -> dict:
+        """先把台账标成 cancelled（事实源），再通知持有它的 worker 停下。"""
+        run = await self._existing(run_id)
+        if run["status"] in TERMINAL:
+            raise Rejected("already_finished", f"运行已结束（{run['status']}）", 409)
+        await runs.set_status(run_id, "cancelled", output={"error": f"被 {caller.name} 取消"}, error_code="cancelled")
+        await runs.log_event(run_id, "error", {"title": "cancelled", "content": f"被 {caller.name} 取消"})
+        await approvals_store.reject_pending_of_run(run_id, caller.name)
+        await db.notify("run_cancel", run_id)
+        return await runs.get(run_id)
+
+    async def wait(self, run_id: str, timeout_s: float) -> dict:
+        """等到终态或超时，返回当前台账行。"""
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        delay = 0.3
+        while True:
             run = await runs.get(run_id)
-            task = await self._tasks.resolve(
-                (run or {}).get("task_type") or task_name)
-            timeout = min(task.timeout_s if task else 300, 300)
-            try:
-                handle = self._client.get_workflow_handle(run_id)
-                output = await asyncio.wait_for(handle.result(), timeout)
-                return {"run_id": run_id, "output": output}
-            except asyncio.TimeoutError:
-                return {"run_id": run_id, "output": None,
-                        "note": f"超过 {timeout}s 未完成，可轮询 /v1/tasks/{run_id}"}
-        finally:
-            self._inflight -= 1
+            if run["status"] in TERMINAL or asyncio.get_running_loop().time() >= deadline:
+                return run
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 2.0)
 
-    async def resume_run(self, run_id: str) -> dict:
-        """续跑失败/中断的 run：同 id 重新 start（只允许顶替终态执行）。"""
+    async def _existing(self, run_id: str) -> dict:
         run = await runs.get(run_id)
         if run is None:
-            raise TaskRejected(f"run {run_id} 不存在")
-        if run["status"] == "success":
-            raise TaskRejected("run 已完成，无需续跑")
-        task = await self._resolve_task(run["task_type"], run["role"],
-                                        run.get("target_env") or self._env,
-                                        run.get("domain"))
-        return await self._start(task, run.get("input") or {}, "resume",
-                                 run.get("caller"), run.get("session_id"),
-                                 correction=False, run_id=run_id, resume=True,
-                                 domain=run.get("domain"),
-                                 target_env=run.get("target_env") or "")
-
-    async def rerun(self, run_id: str) -> dict:
-        """详情页"重跑"：失败/终止 → 同 id 断点续跑；成功 → 同输入新开 run。
-
-        新开 run 跳过去重（人工点击重跑就是明确要再跑一次），沿用原 run 的
-        task/role/target_env/session，trigger_source=rerun 留痕。"""
-        run = await runs.get(run_id)
-        if run is None:
-            raise TaskRejected(f"run {run_id} 不存在")
-        if run["status"] in ("queued", "running"):
-            raise TaskRejected("run 还在执行中，等它结束")
-        if run["status"] != "success":
-            return await self.resume_run(run_id)
-        target_env = self._resolve_target_env(run.get("target_env") or None)
-        task = await self._resolve_task(run["task_type"], run["role"] or None,
-                                        target_env, run.get("domain"))
-        return await self._start(task, run.get("input") or {}, "rerun",
-                                 run.get("caller"), run.get("session_id"),
-                                 correction=False, skip_dedup=True,
-                                 domain=run.get("domain"),
-                                 target_env=target_env)
-
-    async def cancel_run(self, run_id: str, by: str = "") -> dict:
-        """取消 run：终止 workflow + 落 cancelled 终态。
-
-        三种形态：闸门挂起（queued、从未 start workflow）直接落终态；
-        运行中 terminate（terminate 不会给 workflow 抛异常，mark_failed
-        不会执行，终态必须在这里落）；终态幂等报错（重复取消是调用方的
-        信号，不该静默成功）。挂起的工具级审批一并拒掉，否则它永远 pending。
-        """
-        from ..agent import approvals
-        from temporalio.service import RPCError, RPCStatusCode
-
-        run = await runs.get(run_id)
-        if run is None:
-            raise TaskRejected(f"run {run_id} 不存在")
-        if run["status"] in ("success", "failed", "cancelled"):
-            raise TaskRejected(f"run 已终态（{run['status']}），无需取消")
-        pending = await approvals.find_pending(run_id)
-        if pending is not None:
-            await approvals.decide(pending["id"], False, by or "cancel")
-        try:
-            handle = self._client.get_workflow_handle(run_id)
-            await handle.terminate(reason=f"人工取消（{by or 'api'}）")
-        except RPCError as e:
-            # 闸门挂起的 run 从未 start workflow：NOT_FOUND 属预期
-            if e.status != RPCStatusCode.NOT_FOUND:
-                raise
-        await runs.log_event(run_id, "note",
-                             {"stage": "cancelled", "by": by or "api"})
-        await runs.set_status(run_id, "cancelled",
-                              output={"error": "已取消，未产出结果"})
-        return {"run_id": run_id, "status": "cancelled"}
+            raise Rejected.not_found(f"运行 {run_id}")
+        return run
 
 
-def _to_question(task: TaskDef, input_data: dict) -> str:
-    return question_text(task, input_data)  # 实现唯一出处：tasks.question_text
-
-
-def _domain_of(input_data: dict) -> str | None:
-    """run 的 home domain 取自输入的 server/domain 字段（唯一出处）。"""
-    return str(input_data.get("server") or input_data.get("domain")
-               or "") or None
+def _summary(input_data: dict, fallback: str) -> str:
+    """列表里那一行显示什么：问题优先，其次第一个字段的值。"""
+    value = input_data.get("question") or next((v for v in input_data.values() if isinstance(v, str) and v), None)
+    return str(value or fallback)[:300]

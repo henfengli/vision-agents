@@ -1,0 +1,441 @@
+/**
+ * 运行详情：主视图是步骤时间线——思考 / 工具调用（参数 + 结果）/ 审批 / 最终答案，逐步 👍👎；
+ * 右栏是上下文（输入、执行谱系、注入的档案、召回与沉淀、反馈、同会话运行）。
+ * 进行中的运行 1.5 秒增量刷新；被 👎 过的 agent 运行可以用当前定义重放（回归）。
+ */
+import { useMemo, useState } from "react";
+import {
+  LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
+  LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuWrench,
+} from "react-icons/lu";
+
+import { api, useMeta, useRun, useRunEvents } from "@/api/hooks";
+import type { KnowledgeKind, Run, RunEvent } from "@/api/types";
+import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
+import { Page, PageHeader } from "@/components/layout/shell";
+import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TriggerBadge } from "@/components/status";
+import { Button } from "@/components/ui/button";
+import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
+import { Field, Textarea } from "@/components/ui/form";
+import { Dialog, confirm, toast } from "@/components/ui/overlay";
+import { Badge, Card, CardHeader, DescList, ErrorState, SectionTitle, Skeleton } from "@/components/ui/primitives";
+import { cn } from "@/lib/cn";
+import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
+import { invalidate, useMutation } from "@/lib/query";
+import { Link, navigate, useParams } from "@/lib/router";
+import { KindBadge } from "../memory/memory";
+import { StartReplayDialog } from "./replays";
+
+const LIVE = new Set(["queued", "running", "awaiting_approval"]);
+
+/** 当前用户对整次（step=0）或某一步的评价 */
+function useMine(run: Run) {
+  const { data: meta } = useMeta();
+  return (step: number) => run.feedback.find((f) => f.step_seq === step && f.created_by === meta?.me.name) ?? null;
+}
+
+export function RunDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  const { data: run, error, refetch } = useRun(id, true);
+  const live = run ? LIVE.has(run.status) : true;
+  const { data: events } = useRunEvents(id, live);
+
+  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  if (!run) return <Page><Skeleton className="mb-4 h-20" /><Skeleton className="h-96" /></Page>;
+
+  return (
+    <Page wide>
+      <Header run={run} />
+      <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
+        <div className="min-w-0 space-y-4">
+          {run.pending_approval && <ApprovalBanner run={run} />}
+          <Timeline run={run} events={events} live={live} />
+        </div>
+        <Sidebar run={run} />
+      </div>
+    </Page>
+  );
+}
+
+function Header({ run }: { run: Run }) {
+  const live = LIVE.has(run.status);
+  const mine = useMine(run)(0);
+  /** 👎 面板里勾了"按意见重答"：直接提交纠正，跳到新一轮 */
+  const correctWith = async (text: string) => {
+    try {
+      const r = await api.correct(run.run_id, text);
+      invalidate("runs");
+      navigate(`/runs/${r.run_id}`);
+    } catch (e) { toast.error("纠正失败", (e as Error).message); }
+  };
+  const cancel = async () => {
+    if (!(await confirm({ title: "取消这次运行？", description: "终止执行并落 cancelled 终态；挂起的审批一并拒绝。", danger: true, confirmText: "取消运行" }))) return;
+    try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); }
+  };
+  const [correcting, setCorrecting] = useState(false);
+  const [replaying, setReplaying] = useState(false);
+  /** 回归重放只收被 👎 过的 agent 运行 */
+  const replayable = !live && run.resolution === "agent" && run.feedback.some((f) => f.score < 0);
+  const failed = run.status === "failed";
+  /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run，跳过去重） */
+  const again = async () => {
+    const ok = await confirm(failed
+      ? { title: "断点续跑？", description: "沿用同一个 run id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
+      : { title: "用同样的输入再跑一次？", description: "新开一个 run，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
+    if (!ok) return;
+    try {
+      const r = failed ? await api.resume(run.run_id) : await api.rerun(run.run_id);
+      invalidate("runs");
+      navigate(`/runs/${r.run_id}`);
+    } catch (e) { toast.error("提交失败", (e as Error).message); }
+  };
+  return (
+    <PageHeader
+      crumbs={[{ label: "运行", to: "/runs" }, { label: <span className="font-mono">{shortId(run.run_id)}</span> }]}
+      title={<span className="flex items-center gap-2.5"><RunStatusBadge status={run.status} className="h-6 px-2 text-[12.5px]" /><span className="truncate">{run.summary || run.task_title}</span></span>}
+      meta={<>
+        <Link to={`/tasks/${encodeURIComponent(run.task)}`} className="text-fg-2 hover:text-accent">{run.task_title || run.task}{run.task.includes(":") && <span className="font-mono text-fg-3"> :{run.task.split(":")[1]}</span>}</Link>
+        {run.service ? <Link to={`/services/${run.service}?env=${run.env}`} className="text-fg-2 hover:text-accent">{run.service}</Link> : <span>平台任务</span>}
+        <EnvBadge env={run.env} />
+        <TriggerBadge type={run.trigger.type} source={run.trigger.source} />
+        <ResolutionTag resolution={run.resolution} />
+        {run.replay_of && (
+          <span className="flex items-center gap-1 text-fg-2"><LuFlaskConical className="size-3.5 text-fg-3" />回归重放自
+            <Link to={`/runs/${run.replay_of}`} className="font-mono text-accent hover:underline">{shortId(run.replay_of)}</Link>
+          </span>
+        )}
+        <span title={datetime(run.created_at, true)}>{ago(run.created_at)}</span>
+        <span>耗时 {live ? "进行中" : duration(run.duration_ms)}</span>
+        {!!run.tokens && <span>{num(run.tokens)} tokens</span>}
+        <span className="flex items-center font-mono">{run.run_id}<CopyButton text={run.run_id} /></span>
+      </>}
+      actions={<>
+        {!live && (
+          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctWith}
+            onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
+        )}
+        {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
+        {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
+        {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)} title="改完提示词 / 任务定义 / 档案后，用当前定义重跑这条，看 👎 指出的问题改好没有">重放</Button>}
+        {live ? <Button variant="danger-ghost" icon={<LuBan />} onClick={cancel}>取消</Button>
+          : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
+        <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
+        {replayable && <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={{ run_ids: [run.run_id] }} />}
+      </>}
+    />
+  );
+}
+
+/** 纠正：告诉 agent 哪里错了，在同一会话里带着原结论与纠正重答；纠正内容会记成高优先级的人工记忆 */
+function CorrectDialog({ run, open, onClose }: { run: Run; open: boolean; onClose: () => void }) {
+  const [text, setText] = useState("");
+  const submit = useMutation(async () => {
+    try {
+      const r = await api.correct(run.run_id, text);
+      invalidate("runs");
+      onClose();
+      setText("");
+      navigate(`/runs/${r.run_id}`);
+    } catch (e) { toast.error("提交失败", (e as Error).message); }
+  });
+  return (
+    <Dialog open={open} onClose={onClose} size="lg" title="纠正这次结论" description="在同一会话里新开一次运行：agent 看到原结论和你的纠正后重答。纠正本身会记成人工记忆。"
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!text.trim()} loading={submit.pending} onClick={() => submit.mutate(undefined)}>提交纠正</Button></>}>
+      {run.output?.answer && <div className="mb-3 max-h-40 overflow-auto rounded-md border border-line bg-sunken/50 p-3 text-[12.5px] text-fg-2"><Markdown text={run.output.answer} /></div>}
+      <Field label="哪里不对" required help="说清楚正确的口径或事实，例如：GMV 不扣退款，退款看 refund_amount">
+        <Textarea autoFocus rows={4} value={text} onChange={(e) => setText(e.target.value)} />
+      </Field>
+    </Dialog>
+  );
+}
+
+function ApprovalBanner({ run }: { run: Run }) {
+  const a = run.pending_approval!;
+  const [busy, setBusy] = useState<string | null>(null);
+  const decide = async (approve: boolean) => {
+    setBusy(approve ? "a" : "r");
+    try {
+      await (approve ? api.approve(a.id) : api.reject(a.id));
+      toast(approve ? "已放行" : "已拒绝");
+      invalidate("runs"); invalidate("approvals");
+    } catch (e) { toast.error("处理失败", (e as Error).message); } finally { setBusy(null); }
+  };
+  return (
+    <div className="rounded-lg border border-warn/40 bg-warn-soft p-4">
+      <div className="flex items-start gap-3">
+        <LuShieldCheck className="mt-0.5 size-5 shrink-0 text-warn" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-semibold text-fg">等待审批：{a.title}</div>
+          <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-panel/70 p-2.5 font-mono text-[12px] text-fg">{a.detail}</pre>
+          <div className="mt-2 text-xs text-fg-3">发起 {ago(a.created_at)} · {a.requested_by}{a.expires_at && ` · ${ago(a.expires_at).replace("内", "")}后超时视同拒绝`}</div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="danger-ghost" loading={busy === "r"} onClick={() => decide(false)}>拒绝</Button>
+          <Button variant="primary" loading={busy === "a"} onClick={() => decide(true)}>放行</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ———————— 时间线（主视图） ————————
+
+/** 一步：工具调用与它的结果合成一步（参数 + 结果），其余事件各占一步 */
+interface Step {
+  key: string;
+  kind: "stage" | "thought" | "tool" | "approval" | "final" | "error";
+  at: string;
+  seq: number;                 // 0 = 由运行输出补出来的一步（事件里没有），不能单独评价
+  call?: RunEvent;
+  result?: RunEvent;
+  ev: RunEvent;
+}
+
+function buildSteps(run: Run, events: RunEvent[]): Step[] {
+  const steps: Step[] = [];
+  const open: Step[] = [];
+  for (const ev of events) {
+    if (ev.kind === "tool_call") {
+      const s: Step = { key: "t" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, call: ev, ev };
+      steps.push(s); open.push(s);
+    } else if (ev.kind === "tool_result") {
+      const i = open.findIndex((s) => s.call?.payload.tool === ev.payload.tool);
+      if (i >= 0) { open[i].result = ev; open.splice(i, 1); } else steps.push({ key: "r" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, result: ev, ev });
+    } else {
+      steps.push({ key: ev.kind + ev.seq, kind: ev.kind, at: ev.at, seq: ev.seq, ev });
+    }
+  }
+  // 运行已结束但事件里没有最终答案 / 出错（比如出错在执行之前）：用运行输出补上，时间线总以结果收尾
+  if (!LIVE.has(run.status)) {
+    const at = run.finished_at ?? events[events.length - 1]?.at ?? run.created_at;
+    const synth = (kind: "final" | "error", content: string): Step =>
+      ({ key: kind + "-out", kind, at, seq: 0, ev: { seq: 0, kind, at, payload: { content } } });
+    if (run.output?.error && !steps.some((s) => s.kind === "error")) steps.push(synth("error", run.output.error));
+    else if (run.output?.answer && !steps.some((s) => s.kind === "final")) steps.push(synth("final", run.output.answer));
+  }
+  return steps;
+}
+
+function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefined; live: boolean }) {
+  const steps = useMemo(() => buildSteps(run, events ?? []), [run, events]);
+  const [expandAll, setExpandAll] = useState(false);
+  const t0 = run.created_at ? new Date(run.created_at).getTime() : 0;
+  const tools = steps.filter((s) => s.kind === "tool").length;
+  const thoughts = steps.filter((s) => s.kind === "thought").length;
+  const final = steps.find((s) => s.kind === "final" || s.kind === "error");
+  return (
+    <Card>
+      <CardHeader title="执行过程" icon={<LuSparkles />}
+        description={events ? `${thoughts} 次思考 · ${tools} 次工具调用${live ? " · 实时" : ""}` : "加载中"}
+        actions={<>
+          {final && steps.length > 6 && (
+            <Button size="xs" variant="ghost" icon={<LuArrowDown />} onClick={() => document.getElementById("step-final")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              {final.kind === "final" ? "最终答案" : "出错处"}
+            </Button>
+          )}
+          <Button size="xs" variant="ghost" onClick={() => setExpandAll((v) => !v)}>{expandAll ? "全部收起" : "全部展开"}</Button>
+        </>} />
+      {!events ? <div className="p-4"><Skeleton className="h-40" /></div> : (
+        <ol className="relative px-4 py-3">
+          {steps.length === 0 && !live && <li className="py-6 text-center text-[12.5px] text-fg-3">这次运行没有记录步骤</li>}
+          {steps.map((s, i) => (
+            <StepRow key={s.key} step={s} run={run} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} />
+          ))}
+          {live && (
+            <li className="flex items-center gap-3 py-2 pl-[3px]">
+              <span className="relative flex size-[18px] items-center justify-center"><span className="absolute size-2.5 animate-ping rounded-full bg-info/50" /><span className="size-2 rounded-full bg-info" /></span>
+              <span className="text-[12.5px] text-fg-3">{run.status === "awaiting_approval" ? "挂起中：有人放行后继续" : run.status === "queued" ? "排队中…" : "执行中…下一步会实时出现在这里"}</span>
+            </li>
+          )}
+        </ol>
+      )}
+    </Card>
+  );
+}
+
+const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
+  stage: { icon: <LuFlag />, cls: "bg-sunken text-fg-3", label: "阶段" },
+  thought: { icon: <LuSparkles />, cls: "bg-accent-soft text-accent", label: "思考" },
+  tool: { icon: <LuWrench />, cls: "bg-info-soft text-info", label: "工具调用" },
+  approval: { icon: <LuShieldCheck />, cls: "bg-warn-soft text-warn", label: "审批" },
+  final: { icon: <LuCircleCheck />, cls: "bg-ok-soft text-ok", label: "最终答案" },
+  error: { icon: <LuCircleAlert />, cls: "bg-bad-soft text-bad", label: "出错" },
+};
+
+function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean }) {
+  const [open, setOpen] = useState<boolean | null>(null);
+  const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval" || step.kind === "final");
+  const mine = useMine(run)(step.seq);
+  const others = step.seq ? run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0) : [];
+  const rateable = step.seq > 0 && (step.kind === "tool" || step.kind === "thought" || step.kind === "final");
+  const p = step.ev.payload;
+  const meta = STEP_META[step.kind];
+  const tool = step.call?.payload.tool ?? step.result?.payload.tool;
+  const title = step.kind === "tool"
+    ? <span className="flex items-center gap-2"><span className="shrink-0 text-fg-3">{step.call ? "工具调用" : "工具结果"}</span><code className="shrink-0 font-mono text-[12.5px] font-medium text-fg">{tool}</code><span className="truncate font-normal text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
+    : step.kind === "approval" ? (p.title ?? meta.label)
+      : step.kind === "stage" ? (p.title ?? p.stage)
+        : step.kind === "error" && run.error_code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{run.error_code}</code></span>
+          : meta.label;
+  const right = step.kind === "tool" && step.result?.payload.duration_ms !== undefined ? duration(step.result.payload.duration_ms as number)
+    : step.kind === "tool" && !step.result && LIVE.has(run.status) ? "进行中" : p.tokens ? `${num(p.tokens as number)} tok` : null;
+  const collapsible = step.kind !== "stage";
+  const outcome = step.kind === "final" || step.kind === "error";
+  return (
+    <li id={outcome ? "step-final" : undefined} className="group relative flex scroll-mt-4 gap-3 pb-1">
+      {!last && <span className="absolute left-[11px] top-7 bottom-0 w-px bg-line" />}
+      <span className={cn("relative z-10 mt-1 flex size-[22px] shrink-0 items-center justify-center rounded-full [&_svg]:size-3", meta.cls)}>{meta.icon}</span>
+      <div className="min-w-0 flex-1 pb-2">
+        <div className={cn("flex min-h-7 items-center gap-2 rounded-md px-1.5 text-[13px]", collapsible && "cursor-pointer hover:bg-hover/60")} onClick={() => collapsible && setOpen(!expanded)}>
+          {collapsible && <span className="text-fg-3">{expanded ? <LuChevronDown className="size-3.5" /> : <LuChevronRight className="size-3.5" />}</span>}
+          <span className={cn("min-w-0 flex-1 truncate", step.kind === "stage" ? "text-fg-2" : "font-medium text-fg")}>{title}</span>
+          {step.kind === "stage" && p.content && <span className="truncate text-[12px] text-fg-3">{String(p.content)}</span>}
+          {right && <span className="shrink-0 text-[11.5px] tabular-nums text-fg-3">{right}</span>}
+          {step.kind === "final" && <span className="shrink-0" onClick={(e) => e.stopPropagation()}><CopyButton text={String(p.content ?? "")} label="复制" /></span>}
+          <span className="w-14 shrink-0 text-right font-mono text-[11px] text-fg-3" title={clock(step.at)}>+{duration(Math.max(0, offset))}</span>
+          {rateable && (
+            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+              <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} step={step.seq} mine={mine} size="sm"
+                onSaved={() => invalidate("runs")} className={cn("shrink-0", !mine && "opacity-0 group-hover:opacity-100 focus-within:opacity-100")} />
+            </span>
+          )}
+        </div>
+        {others.length > 0 && (
+          <div className="ml-6 mt-1 space-y-2 rounded-md border border-bad/20 bg-bad-soft/40 px-2.5 py-2">
+            {others.map((f) => <FeedbackItem key={f.id} entry={f} showStep={false} />)}
+          </div>
+        )}
+        {expanded && collapsible && (
+          <div className="mt-1.5 space-y-2 pl-6">
+            {step.kind === "thought" && <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-fg-2">{String(p.content)}</div>}
+            {step.kind === "final" && (
+              <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
+            )}
+            {step.kind === "error" && <CodeBlock code={String(p.content)} wrap />}
+            {step.kind === "approval" && <CodeBlock code={String(p.content)} wrap />}
+            {step.kind === "tool" && <>
+              {step.call && <ToolArgs args={step.call.payload.args} />}
+              {step.result ? <CodeBlock title="工具结果" code={String(step.result.payload.output ?? "")} maxHeight={260} /> : <div className="text-xs text-fg-3">等待返回…</div>}
+            </>}
+          </div>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function summarizeArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return args ? String(args) : "";
+  const a = args as Record<string, unknown>;
+  const v = a.command ?? a.sql ?? a.what ?? Object.values(a)[0];
+  return v ? String(v).replace(/\s+/g, " ").slice(0, 90) : "";
+}
+
+function ToolArgs({ args }: { args: unknown }) {
+  if (args && typeof args === "object") {
+    const a = args as Record<string, unknown>;
+    const main = a.command ?? a.sql ?? a.code;
+    if (typeof main === "string") return <CodeBlock title={a.command ? "命令" : a.sql ? "SQL" : "代码"} code={main} maxHeight={220} />;
+  }
+  return <JsonView value={args} maxHeight={200} />;
+}
+
+// ———————— 右栏 ————————
+
+function Sidebar({ run }: { run: Run }) {
+  const c = run.context;
+  return (
+    <div className="min-w-0 space-y-4">
+      <Card>
+        <CardHeader title="输入" />
+        <div className="p-3"><JsonView value={run.input} maxHeight={260} /></div>
+      </Card>
+      <Card>
+        <CardHeader title="执行谱系" description="run 钉死了当时生效的定义版本" />
+        <div className="p-4">
+          <DescList items={[
+            ["任务", <Link to={`/tasks/${encodeURIComponent(run.task)}?tab=versions`} className="hover:text-accent">{run.task} <span className="text-fg-3">v{run.task_version ?? "—"}</span></Link>],
+            ["角色", run.role ? <Link to={`/settings/roles/${run.role}`} className="flex items-center gap-1 hover:text-accent"><LuBot className="size-3.5 text-fg-3" />{run.role} <span className="text-fg-3">v{run.role_version ?? "—"}</span></Link> : "—"],
+            ["触发", run.replay_of
+              ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
+              : <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""}</span>],
+            ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
+            ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
+            ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
+            ["开始", datetime(run.created_at, true)],
+            ["结束", run.finished_at ? datetime(run.finished_at, true) : "—"],
+          ]} />
+        </div>
+      </Card>
+      {c.profile && (
+        <Card>
+          <CardHeader title="注入的档案" icon={<LuScrollText />} description="原文（服务档案 + 任务档案），置顶于提示词" />
+          <div className="p-3"><CodeBlock code={c.profile} wrap maxHeight={300} /></div>
+        </Card>
+      )}
+      <Card>
+        <CardHeader title="记忆" icon={<LuBrain />} description="本次召回了什么、沉淀了什么" />
+        <div className="space-y-4 p-4">
+          <MemList title="召回的记忆" empty="无" items={c.recalled_knowledge.map((k) => ({ key: String(k.id), label: memLabel(k.key), kind: k.kind, hint: `#${k.rank}`, href: `/memory?id=${k.id}` }))} />
+          <MemList title="召回的方法" empty="无" items={c.recalled_assets.map((a) => ({ key: String(a.id), label: `${a.kind}:${a.name}`, href: `/memory?tab=assets&id=${a.id}` }))} />
+          <MemList title="本次沉淀" empty={run.trigger.type === "replay" ? "回归重放不沉淀记忆" : run.status === "success" ? "没有可沉淀的结论" : "运行结束后沉淀"} items={[
+            ...c.saved_knowledge.map((k) => ({ key: "k" + k.id, label: memLabel(k.key), kind: k.kind, href: `/memory?id=${k.id}` })),
+            ...c.saved_assets.map((a) => ({ key: "a" + a.id, label: `${a.kind}:${a.name}`, hint: "方法", href: `/memory?tab=assets&id=${a.id}` })),
+          ]} />
+        </div>
+      </Card>
+      {run.feedback.length > 0 && (
+        <Card>
+          <CardHeader title="反馈" icon={<LuMessageSquareWarning />} description="整次运行与各步收到的评价；👎 同时推送到通知规则里的渠道" />
+          <ul className="divide-y divide-line">
+            {run.feedback.map((f) => <li key={f.id} className="px-4 py-2.5"><FeedbackItem entry={f} /></li>)}
+          </ul>
+        </Card>
+      )}
+      {c.session_runs.length > 0 && (
+        <Card>
+          <CardHeader title="同会话的其他运行" description="故障周期 / 对话链" />
+          <ul className="divide-y divide-line">
+            {c.session_runs.map((r) => (
+              <li key={r.run_id}>
+                <Link to={`/runs/${r.run_id}`} className="flex items-center gap-2 px-4 py-2 text-[12.5px] hover:bg-hover/70">
+                  <RunStatusDot status={r.status} />
+                  <span className="font-mono text-fg-2">{shortId(r.run_id)}</span>
+                  <span className="truncate text-fg-3">{r.task}</span>
+                  <span className="ml-auto shrink-0 text-fg-3">{ago(r.created_at)}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+const onOff = (v: boolean | null | undefined) => (v === false ? "关" : v === true ? "开" : "默认");
+
+/** 教训的键是 lesson:<指纹>，只显示指纹前 8 位 */
+const memLabel = (key: string) => key.replace(/^lesson:([0-9a-f]{8})[0-9a-f]*$/, "lesson:$1");
+
+/** kind：记忆条目的类型（事实 / 教训），用小标签区分 */
+function MemList({ title, items, empty }: { title: string; items: { key: string; label: string; kind?: KnowledgeKind; hint?: string; href: string }[]; empty: string }) {
+  return (
+    <div>
+      <SectionTitle>{title}</SectionTitle>
+      {items.length === 0 ? <div className="text-[12.5px] text-fg-3">{empty}</div> : (
+        <ul className="space-y-1">
+          {items.map((i) => (
+            <li key={i.key}>
+              <Link to={i.href} className="flex items-center gap-2 rounded px-1 py-0.5 text-[12.5px] hover:bg-hover">
+                {i.kind && <KindBadge kind={i.kind} className="shrink-0" />}
+                <span className="truncate font-mono text-fg-2">{i.label}</span>
+                {i.hint && <Badge className="ml-auto">{i.hint}</Badge>}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}

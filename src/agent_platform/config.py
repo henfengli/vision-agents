@@ -1,7 +1,9 @@
-"""配置：环境 YAML → Settings。三环境（prod/test/dev）同代码不同配置。
+"""平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），${VAR} 从环境变量插值。
 
-优先级：env/{ENV}.yaml 深合并覆盖 base/common.yaml（dict 递归，其余整体替换）；
-${VAR} 从环境变量插值。
+这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、外部系统地址。
+服务/角色/任务与平台配置（环境、审批、通知、记忆、进程）都是数据，存库、在控制台编辑；
+conf/seeds/ 只在库里还没有对应对象时播种一次。
+AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test/dev）无关。
 """
 
 from __future__ import annotations
@@ -9,36 +11,24 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
 
+
 def _default_conf_root() -> Path:
-    """配置根默认值：仓库内 conf（源码部署，任意 cwd 均可启动）→ cwd/conf（兼容）。
-
-    老行为是恒取 cwd 下的 "conf"，从仓库根以外目录启动即失败；源码 checkout
-    场景下包位置与 conf 目录的相对关系固定（src/agent_platform/config.py
-    → ../../conf），优先按 __file__ 定位，找不到再退回 cwd（pip 安装到
-    venv 的旧部署方式不受影响——那时本来也只能靠 cwd 或 AGENT_CONF）。
-    """
+    """源码部署：包旁边的 conf（任意 cwd 可启动）；否则 cwd/conf。"""
     repo_conf = Path(__file__).resolve().parents[2] / "conf"
-    if (repo_conf / "base/common.yaml").is_file():
-        return repo_conf
-    return Path("conf")
+    return repo_conf if (repo_conf / "base/common.yaml").is_file() else Path("conf")
 
 
-_CONF_ROOT = Path(os.environ.get("AGENT_CONF") or _default_conf_root())
+CONF_ROOT = Path(os.environ.get("AGENT_CONF") or _default_conf_root())
 
 
 def _default_data_dir() -> str:
-    """数据目录（scratch/assets）默认值：AGENT_DATA_DIR > /var/lib（可写）> ~/.local/share。
-
-    老默认值硬编码 /var/lib/agent-platform——生产 systemd 部署（root 安装 +
-    低权限用户 + 目录预建）没问题，但开发机/容器/无 root 环境里启动即
-    PermissionError。探测顺序保持生产行为优先，无权限时退到用户目录。
-    """
-    env = os.environ.get("AGENT_DATA_DIR")
-    if env:
+    """数据目录：AGENT_DATA_DIR > /var/lib/agent-platform（可写时）> ~/.local/share/agent-platform。"""
+    if env := os.environ.get("AGENT_DATA_DIR"):
         return env
     var_lib = Path("/var/lib/agent-platform")
     try:
@@ -49,142 +39,104 @@ def _default_data_dir() -> str:
     return str(Path.home() / ".local" / "share" / "agent-platform")
 
 
-class DomainConfig(BaseModel):
-    """业务域（服务）：与 agent 同机部署的一个项目——代码目录（读口径/
-    排障用）+ 可选只读库 + 主机 + 服务档案。
-
-    事实源是定义库（definitions kind="domain"：版本化、服务页编辑、热
-    生效、可回滚）。conf/domains/<name>/ 域包只在库里还没有该服务时播种
-    一次（domain.yaml / rules.yaml / session.yaml / tasks.yaml），之后文件
-    改动不再生效——启动时文件与库内不一致会打日志提示。
-    """
-
-    code_paths: list[str] = []
-    readonly_dsn: str | None = None
-    enabled: bool = True                      # 停用：拒新任务/webhook + 暂停调度
-    hosts: list[str] = []                     # 该域服务实际部署的机器（IP/主机名，供 host_metrics 查监控）
-    rules: list[dict] = []                    # [{pattern, category, conclusion}]
-    session_template: str | None = None       # 含 {asset}/{error_class}/{date}
-    seed_tasks: list[dict] = []               # 域自带种子任务定义
-    # 服务档案：自由键（口径与术语/禁区/环境差异/常见坑…），该服务下
-    # 所有 run 置顶逐字注入，跨任务共享的事实放这里，任务特有的放任务
-    # 档案。只记代码和配置里读不出来的东西；没有负责人这类归属字段。
-    profile: dict = Field(default_factory=dict)
-    # 按目标环境覆盖连接信息：{env: {readonly_dsn/code_paths/...}}——
-    # 一套 agent 部署操作多套业务环境时，差异只在这里
-    envs: dict[str, dict] = Field(default_factory=dict)
-
-    def for_env(self, target_env: str) -> "DomainConfig":
-        """基座 + 目标环境覆盖（深合并）；无覆盖时原样返回。"""
-        overlay = self.envs.get(target_env)
-        if not overlay:
-            return self
-        return DomainConfig.model_validate(
-            _merge(self.model_dump(exclude={"envs"}), overlay))
-
-
 class ModelConfig(BaseModel):
-    """内部统一模型 API（OpenAI 兼容）。"""
-
     url: str
     name: str
-    tokens: list[str]                     # 多 token 轮询
+    tokens: list[str]
     max_concurrency: int = 10
-    embedding_name: str | None = None     # 空 = 关闭向量检索（退化 trgm）
+    embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
 
 
-class TemporalConfig(BaseModel):
-    address: str = "127.0.0.1:7233"
-    namespace: str = "default"
-    task_queue: str = "agent-platform"
+class WorkerConfig(BaseModel):
+    """执行队列（runs 表）的消费端：同时执行几个运行。"""
+
+    max_concurrent_runs: int = 10
+
+
+class KernelConfig(BaseModel):
+    """项目内核（py 工具）：每个 会话×服务×环境 一个常驻 Python 进程。"""
+
+    idle_minutes: float = 30          # 空闲多久回收
+    max_kernels: int = 8              # 同时最多几个（超了回收最久没用的）
 
 
 class LangfuseConfig(BaseModel):
-    """提示词源头 + 观测。enabled=false 时角色直读 PG。
-
-    run 详情页的 trace 视图由 viewer 自绘（observations API 取数，
-    LangSmith 式瀑布）；官方 UI 只作外链深操作入口，不再 iframe 内嵌，
-    网关无需剥 X-Frame-Options/CSP。"""
-
     enabled: bool = False
     host: str = "http://127.0.0.1:3000"
     public_key: str = ""
     secret_key: str = ""
-    prompt_label: str = "production"
-    prompt_cache_ttl_s: float = 10.0
-
-
-class ApprovalsConfig(BaseModel):
-    """危险命令人工审批。danger_patterns 命中即挂起等人放行。"""
-
-    enabled: bool = False
-    danger_patterns: list[str] = Field(default_factory=list)
 
 
 class GrafanaConfig(BaseModel):
-    """Grafana 监控接入：host_metrics 工具经 datasource proxy 查 Prometheus。
-
-    datasource_uid 指向 Prometheus 类型的 datasource（node_exporter 指标）；
-    token 用 service account（只读权限即可），内网匿名读可留空。
-    """
-
     url: str
     datasource_uid: str
     token: str = ""
 
 
+class ProcessControlConfig(BaseModel):
+    """服务进程启停的执行方式。systemd：模板单元 agent-svc@.service（生产）；local：本机子进程（开发）。
+    scope=user：平台跑在某个普通用户的 systemd --user 里（deploy/install-user.sh），没有 root 也能装。
+    租约时长是平台配置（设置 → 进程），不在这里。"""
+
+    backend: Literal["systemd", "local", "off"] = "local"
+    scope: Literal["system", "user"] = "system"
+    unit: str = "agent-svc"                    # 模板单元名前缀（agent-svc@<实例>.service）
+
+
+def _default_hidden() -> list[str]:
+    """agent 沙箱与业务进程里都看不到的路径：平台密钥，以及运行用户的凭据（用户级部署时就是同一个用户）。"""
+    home = Path.home()
+    return ["/etc/agent-platform", str(home / ".config/agent-platform"), str(home / ".ssh"),
+            str(home / ".git-credentials"), str(home / ".netrc"), str(home / ".pgpass")]
+
+
 class Settings(BaseModel):
-    env: str                               # 实例标签：本套部署自己是谁（定义/种子按它存取）
-    target_envs: list[str] = Field(default_factory=list)  # 可操作的业务环境；空=单环境(=env)
-    default_target_env: str | None = None  # 缺省目标环境（缺省=target_envs[0] 或 env）
+    profile: str                               # AGENT_ENV：读的哪份部署配置（日志/健康检查用）
     db_dsn: str
     model: ModelConfig
-    dingtalk_relay_url: str
-    dingtalk_token: str
-    bearer_token: str                      # 固定 token 鉴权（内网无用户体系）
-    viewer_base_url: str
-    scratch_dir: str = Field(default_factory=lambda: _default_data_dir() + "/scratch")
-    assets_dir: str = Field(default_factory=lambda: _default_data_dir() + "/assets")  # 任务资产库（文件载体；元数据在 PG）
-    domains: dict[str, DomainConfig] = Field(default_factory=dict)
-    temporal: TemporalConfig = TemporalConfig()
+    root_token: str                            # 引导密钥：首次登录与创建 API 密钥用，权限最高
+    public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用
+    data_dir: str = Field(default_factory=_default_data_dir)
+    worker: WorkerConfig = WorkerConfig()
+    kernel: KernelConfig = KernelConfig()
     langfuse: LangfuseConfig = LangfuseConfig()
-    approvals: ApprovalsConfig = ApprovalsConfig()
-    grafana: GrafanaConfig | None = None     # 不配则 host_metrics 工具不注册
-    # 内部 MCP 服务器：{名字: langchain-mcp-adapters 连接配置}
+    grafana: GrafanaConfig | None = None
+    process_control: ProcessControlConfig = ProcessControlConfig()
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
+    hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
 
-    def resolve_target_env(self, env: str | None) -> str:
-        """请求级目标环境解析；实现见模块级 resolve_target_env（唯一出处）。"""
-        return resolve_target_env(env, self.target_envs,
-                                  self.default_target_env, self.env)
+    @property
+    def scratch_dir(self) -> str:
+        return os.path.join(self.data_dir, "scratch")
 
+    @property
+    def assets_dir(self) -> str:
+        return os.path.join(self.data_dir, "assets")
 
-def resolve_target_env(env: str | None, target_envs: list[str],
-                       default_target: str | None, instance_env: str) -> str:
-    """目标业务环境解析（唯一实现）：缺省给默认；配了列表则必须在列表里。
+    @property
+    def instances_dir(self) -> str:
+        """进程实例的启动规格（svcrun 读它）与本地后端的日志。"""
+        return os.path.join(self.data_dir, "instances")
 
-    一套 agent 部署服务多套业务环境（prod/test/dev 的 Dagster/board…），
-    run/记忆/闸门都按这个维度区分；不配 target_envs 时退化为实例标签本身。
-    Settings.resolve_target_env 与 Submitter._resolve_target_env 共用本函数。
-    """
-    if not env:
-        return default_target or (target_envs[0] if target_envs else instance_env)
-    if target_envs and env not in target_envs:
-        raise ValueError(f"未知目标环境 {env}（本实例可操作：{target_envs}）")
-    return env
+    @property
+    def seeds_dir(self) -> Path:
+        return CONF_ROOT / "seeds"
+
+    @property
+    def webui_dist(self) -> Path:
+        """控制台前端构建产物（web/ 下 node scripts/build.mjs build 产出）。"""
+        return Path(__file__).resolve().parent / "webui" / "dist"
 
 
 _ENV_VAR = re.compile(r"\$\{(\w+)\}")
 
 
 def _interpolate(node):
-    """${VAR} 从环境变量取值，未设置即报错（启动期暴露配置问题）。"""
     if isinstance(node, str):
         def sub(m):
-            var = m.group(1)
-            if var not in os.environ:
-                raise KeyError(f"配置引用了未设置的环境变量 {var}")
-            return os.environ[var]
+            if m.group(1) not in os.environ:
+                raise KeyError(f"配置引用了未设置的环境变量 {m.group(1)}")
+            return os.environ[m.group(1)]
         return _ENV_VAR.sub(sub, node)
     if isinstance(node, dict):
         return {k: _interpolate(v) for k, v in node.items()}
@@ -193,58 +145,27 @@ def _interpolate(node):
     return node
 
 
-def _merge(base: dict, overlay: dict) -> dict:
-    """深合并：两边都是 dict 则递归，否则 overlay 整体替换。
-
-    环境文件只写差异（如 approvals.enabled: true），共享默认（如
-    danger_patterns）留在 common.yaml，避免三环境各抄一份后漂移。
-    """
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """两边都是 dict 则递归，否则 overlay 整体替换。"""
     merged = dict(base)
-    for key, value in overlay.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = _merge(merged[key], value)
-        else:
-            merged[key] = value
+    for k, v in overlay.items():
+        merged[k] = deep_merge(merged[k], v) if isinstance(merged.get(k), dict) and isinstance(v, dict) else v
     return merged
 
 
-def _load_domain_packs(root: Path) -> dict[str, dict]:
-    """读取 conf/domains/<name>/ 域包，返回 {域名: DomainConfig 片段}。"""
-    packs_dir = root / "domains"
-    packs: dict[str, dict] = {}
-    if not packs_dir.is_dir():
-        return packs
-    for pack in sorted(packs_dir.iterdir()):
-        if not pack.is_dir():
-            continue
-        cfg: dict = {}
-        domain_yaml = pack / "domain.yaml"
-        if domain_yaml.exists():
-            cfg = yaml.safe_load(domain_yaml.read_text()) or {}
-        rules_yaml = pack / "rules.yaml"
-        if rules_yaml.exists():
-            cfg["rules"] = (yaml.safe_load(rules_yaml.read_text())
-                            or {}).get("rules", [])
-        session_yaml = pack / "session.yaml"
-        if session_yaml.exists():
-            cfg["session_template"] = (yaml.safe_load(
-                session_yaml.read_text()) or {}).get("template")
-        tasks_yaml = pack / "tasks.yaml"
-        if tasks_yaml.exists():
-            cfg["seed_tasks"] = (yaml.safe_load(tasks_yaml.read_text())
-                                 or {}).get("tasks", [])
-        packs[pack.name] = cfg
-    return packs
+def _env_overlay(profile: str, seen: tuple[str, ...] = ()) -> dict:
+    """conf/env/{profile}.yaml；文件里写 extends: <另一份> 时先合并那一份（只写差异）。"""
+    if profile in seen:
+        raise ValueError(f"部署配置 extends 成环：{' → '.join((*seen, profile))}")
+    env_file = CONF_ROOT / f"env/{profile}.yaml"
+    overlay = (yaml.safe_load(env_file.read_text(encoding="utf-8")) or {}) if env_file.exists() else {}
+    parent = overlay.pop("extends", None)
+    return deep_merge(_env_overlay(parent, (*seen, profile)), overlay) if parent else overlay
 
 
-def load_settings(env: str | None = None) -> Settings:
-    env = env or os.environ.get("AGENT_ENV", "dev")
-    base = yaml.safe_load((_CONF_ROOT / "base/common.yaml").read_text()) or {}
-    overlay = yaml.safe_load((_CONF_ROOT / f"env/{env}.yaml").read_text()) or {}
-    merged = _merge(base, overlay)
-    # 域包深合并进 domains：common.yaml < 域包 < env 覆盖 之外的补充来源
-    packs = _load_domain_packs(_CONF_ROOT)
-    if packs:
-        merged["domains"] = _merge(packs, merged.get("domains") or {})
-    merged["env"] = env
+def load_settings(profile: str | None = None) -> Settings:
+    profile = profile or os.environ.get("AGENT_ENV", "dev")
+    base = yaml.safe_load((CONF_ROOT / "base/common.yaml").read_text(encoding="utf-8")) or {}
+    merged = deep_merge(base, _env_overlay(profile))
+    merged["profile"] = profile
     return Settings.model_validate(_interpolate(merged))

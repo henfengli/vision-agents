@@ -1,53 +1,50 @@
-"""RunSpec：一次 run 的完整规格——编排层唯一的数据结构。
+"""RunSpec：一次运行的完整规格。worker 认领运行时从台账行建出来，各步骤之间传的就是它。
 
-Temporal 线上传输用 dict（JSON 可序列化），边界处 RunSpec.from_dict/to_dict
-转换；activities 内部只碰 RunSpec，字段一目了然。
+prepare 阶段补齐的字段（prompt、代码目录…）也在这里，一份结构走到底。
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from ..domain import RunTrigger
 
 
-@dataclass
-class RunSpec:
-    run_id: str = ""                # 空 = 由 prepare_run 生成（调度触发）
-    task_type: str = ""
-    role: str = ""
+class RunSpec(BaseModel):
+    # —— 从台账行确定 ——
+    run_id: str
+    session_id: str
+    task: str                                  # 生效任务名（子任务含冒号）
+    form: str                                  # agent / builtin / rule（规则先行命中，结论已定）
+    role: str | None = None
+    service: str | None = None
+    env: str
+    input: dict[str, Any] = Field(default_factory=dict)
     question: str = ""
-    input: dict = field(default_factory=dict)
-    error_text: str | None = None
-    session_id: str | None = None   # 会话标识；无会话时 = run_id
-    target_env: str = ""            # 目标业务环境：本 run 操作哪套环境的服务
+    trigger: RunTrigger = Field(default_factory=RunTrigger)
     timeout_s: int = 300
-    trigger: str = "sdk"
-    correction: bool = False        # 纠正式反馈触发的重判
-    resume: bool = False            # 断点续跑（空输入从 checkpoint 继续）
-    # —— 任务形态（三选一，空 = 单 agent 问答） ——
-    artifacts: dict | None = None   # 资产化任务图快照（提交时从任务定义固化）
-    handler: str | None = None      # 内建任务处理器（如 memory-gardener）
-    # —— 结果投递（提交时从任务定义固化；caller = 不投递，调用方轮询） ——
-    output_channel: str = "caller"
-    output_callback: str | None = None  # output_channel=http 时的回调地址
-    # —— prepare_run 回填 ——
-    prompt: str = ""                # 召回块 + question 拼好的最终 prompt
-    domain: str | None = None
-    code_paths: list[str] = field(default_factory=list)
-    # —— 提交时固化 ——
-    profile: str = ""               # 档案注入块（服务档案 + 任务档案，prepare 现拼，置顶）
+    approval_budget_s: int = 0                 # 等人工审批的时间不算进 timeout_s（按一次审批的超时预留）
+    deliver: dict[str, str] | None = None      # {"channel": 名} 或 {"url": 地址}；空 = 只等调用方来取
+    recall: bool = True                        # 记忆开关（请求 > 任务 > 平台默认）
+    save: bool = True
+    handler: str | None = None                 # form=builtin
+    rule_output: dict[str, Any] | None = None  # form=rule：命中规则给出的结论
+    resume: bool = False                       # 断点续跑：沿用 thread，不重新拼提示
+    correction: bool = False                   # 纠正：成功后取代本会话上一轮的沉淀
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "RunSpec":
-        known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in d.items() if k in known})
+    # —— prepare 补齐 ——
+    prompt: str = ""
+    code_paths: list[str] = Field(default_factory=list)
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+    @property
+    def error_text(self) -> str:
+        """事件类任务约定把报错放在 input.error：案例召回与沉淀都按它的指纹。"""
+        return str(self.input.get("error") or "")
 
-    def effective_env(self, instance_env: str) -> str:
-        """本 run 实际生效的目标环境；未指定时退化为实例标签（单环境部署）。
-
-        执行期所有按环境取值的点（记忆分区/域连接/产物复用/trace 属性）
-        统一走这里，不各自写 target_env or settings.env。
-        """
-        return self.target_env or instance_env
+    @property
+    def thread_id(self) -> str:
+        """会话的 LangGraph thread 按 服务×环境 分开：同一个会话键（比如事件模板 dagster:{asset_key}:…）
+        在 prod 和 test 各有各的上下文，一次运行只看得到自己服务×环境的对话历史。项目内核也用这个键。"""
+        return f"{self.session_id}@{self.service or '-'}:{self.env}"

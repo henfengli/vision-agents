@@ -1,59 +1,53 @@
 # SDK 开发指南
 
-`sdk/` 是平台 HTTP API 的 Python 薄封装（包名 `agent-client`）：纯转发、
-零业务逻辑，**HTTP API 才是唯一契约**。其他语言/不想引依赖时，照
-`agent_client/client.py`（一个文件、仅依赖 httpx）抄一份即可，接口细节见
-`docs/外部接口文档.md`。
+`sdk/agent_client` 是 `/v1` 接口的 Python 薄封装（包名 `agent-client`，版本 2.x，对应服务端 v8）。
+它只做转发，不含业务逻辑，**HTTP 接口才是唯一契约**。
+
+其他语言的项目、或不想多一个依赖的项目，照着 `agent_client/client.py` 抄一份即可：一个文件，
+只依赖 httpx。接口细节见 `docs/外部接口文档.md`。
 
 ## 安装
 
 ```bash
-# 仓库内
-pip install ./sdk
-
-# 已部署的机器上
-pip install /opt/agent-platform/sdk
-
-# 零安装：把 sdk/agent_client/client.py 拷进自己项目改名 agent_client.py
-#（唯一依赖 httpx）
+pip install ./sdk                        # 仓库里
+pip install /opt/agent-platform/sdk      # 已部署的机器上
+# 零安装：把 sdk/agent_client/client.py 拷进自己的项目
 ```
 
-Python ≥ 3.11。当前版本 1.4.0（SDK 版本独立于服务端演进；
-服务端 5.x 全部适用）。
+需要 Python ≥ 3.11。
 
 ## 配置
 
 ```bash
-export AGENT_BASE_URL=http://127.0.0.1:8100   # 或反代地址
-export AGENT_TOKEN=<AGENT_BEARER_TOKEN>
+export AGENT_URL=https://agent.internal      # 或 http://127.0.0.1:8100
+export AGENT_KEY=ak_xxx                      # 设置 → API 密钥 里给这个项目建的那把
 ```
 
-也可构造时显式传 `base_url=` / `token=`（显式参数优先于环境变量）。
+也可以在构造时显式传 `url=`、`key=`，显式参数优先于环境变量。
+
+建议每个项目一把密钥，名字用项目名（如 `board-backend`）。这样运行记录里的「发起方」一眼能看出是谁调的；
+需要时，还可以把这把密钥限定在自己的服务和环境上。
 
 ## 快速开始
 
 ```python
-from agent_client import AgentClient
+from agent_client import AgentClient, AgentError
 
-agent = AgentClient(server="board", role="data_searcher")
+agent = AgentClient(service="board", env="test")
 
-# 1) 同步问答：拿到最终回答字符串
-print(agent.ask("3月以来 total_fee 是多少"))
+# 1) 对话：用服务的对话任务（没有专属的就用通用入口 ask）；同一个 client 自动续会话
+print(agent.ask("3 月以来 total_fee 是多少"))
+print(agent.ask("环比 2 月呢"))             # 记得上一问
+agent.ask("换个话题", new_session=True)     # 另起一段
 
-# 2) 会话延续：同 session_id 自动续上下文（服务端持久化，跨天/跨机器可续）
-agent.set_session("board-fee-202610")
-agent.ask("环比 2 月呢？")          # 记得上一问
-
-# 3) 流式问答：工具调用进度实时回调
-answer = agent.ask_stream(
-    "巡检今天的增量分区",
-    on_event=lambda ev: print(ev["tool"]) if ev["type"] == "tool_call" else None)
-
-# 4) 异步任务：提交 → 等终态 → 拿 run 视图
-run = agent.submit_and_wait(
-    "data-qa", {"server": "board", "question": "今日 GMV"},
-    idempotency_key="gmv-20261016")   # 24h 内同键重提返回首个 run
+# 2) 任务：等到结束，返回运行详情
+run = agent.run("frontend-smoke", {"version": "1.2.0"})
 print(run["status"], run["output"])
+
+# 3) 针对某个对象跑（子任务不存在会自动建，档案在控制台补）
+run = agent.run("failure-analysis", {"run_id": "8f2c", "asset_key": "dwd_trade_order", "error": "…"},
+                subtask="dwd_trade_order", env="prod", wait=False)
+print(run["run_id"], run["subtask_created"])
 ```
 
 ## API 参考
@@ -61,120 +55,122 @@ print(run["status"], run["output"])
 ### 构造
 
 ```python
-AgentClient(server, role, base_url=None, token=None, env=None, timeout=300.0)
+AgentClient(service=None, env=None, *, url=None, key=None, timeout=330.0)
 ```
 
 | 参数 | 说明 |
 |---|---|
-| `server` | 业务域（如 `board`/`dagster`），必填 |
-| `role` | 角色名（如 `data_searcher`），必填 |
-| `env` | 目标业务环境；`None` = 服务端 `default_target_env`。服务端配了 `target_envs` 时取值必须在列表内，否则 400 |
-| `timeout` | 单次 HTTP 超时（秒），默认 300 |
+| `service` | 默认操作的服务。专属任务可以不传；通用任务和对话需要传 |
+| `env` | 默认环境；`None` 表示用平台默认环境（出厂是 `test`，所以生产必须显式写） |
+| `url` / `key` | 不传就读 `AGENT_URL` / `AGENT_KEY` |
+| `timeout` | 单次 HTTP 超时（秒） |
 
-### 问答（对话任务）
+`ask` 和 `run` 都能按次传 `service` / `env`，覆盖构造时的默认值。
 
-| 方法 | 语义 | 返回 |
-|---|---|---|
-| `ask(question) -> str` | 同步问答，等服务端跑完 | 回答文本；超时未完成返回提示（可用返回的 run 续等） |
-| `ask_stream(question, on_event=None) -> str` | SSE 流式；`on_event(ev)` 逐事件回调 | 最终回答文本 |
-
-`ask_stream` 事件类型（dict，`ev["type"]`）：
-
-| type | 含义 | 关键字段 |
-|---|---|---|
-| `run` | run 已创建 | `run_id`、`session_id` |
-| `thought` | 模型思考 | `node`、`content` |
-| `tool_call` | 工具调用开始 | `node`、`tool`、`args`（截断） |
-| `tool_result` | 工具返回 | `node`、`tool`、`output`（截断） |
-| `note` | 平台注记（闸门/资产/阶段） | `stage`、`content` |
-| `final` | 终态 | `status`、`output` |
-| `timeout` | 300s 未完成（run 仍在跑） | `run_id`——SDK 会抛 `AgentError`，可拿 run_id 用 `wait()` 继续等 |
-
-另有 `llm`/`trace`/`graph`/`policy` 等平台内部事件也会出现在事件流里，
-消费方按 `type` 白名单取自己关心的即可。
-
-### 会话
+### 对话
 
 ```python
-agent.set_session("my-session")   # 链式；同 id 续上下文
-agent.session_id                  # 当前会话 id（ask/ask_stream 后自动回填）
+agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_session=False,
+          recall=None, save=None, on_event=None, **input_fields) -> str
 ```
 
-session_id 是会话唯一标识：不指定则服务端生成并在首次应答回填；
-纠正反馈（`POST /v1/sessions/{sid}/feedback`）也按它定位。
+- 返回回答文本。运行没有成功结束时抛 `AgentError`，`code` 为 `run_failed` / `run_cancelled`。
+- 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。
+- `task` 不传时，该服务专属的对话任务（声明了 `chat` 触发）优先，没有就用通用入口 `ask`；`subtask` 选用子任务（不存在会按父任务自动建）。
+- `recall` / `save` 按次覆盖记忆开关，`None` 表示跟随任务与平台默认。
+- `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`thought`、`tool_call`、`tool_result`、`approval`。
+- `**input_fields` 是对话任务的其他输入字段。
 
-### 异步任务
+### 任务
 
-| 方法 | 语义 |
+```python
+agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
+          idempotency_key=None, recall=None, save=None) -> dict
+```
+
+| 参数 | 说明 |
 |---|---|
-| `submit(task_type, input: dict, idempotency_key=None, subtask=None) -> dict` | 立即返回 `{"run_id", "status", ...}`；命中幂等/去重时 `status="dedup_hit"` |
-| `wait(run_id, timeout=300.0, interval=2.0) -> dict` | 轮询至终态，返回 run 视图；超时抛 `AgentError` |
-| `submit_and_wait(task_type, input, timeout=300.0, idempotency_key=None, subtask=None) -> dict` | 提交 + 等待一体；**待审批立即返回**（`status="awaiting_approval"`，不等审批） |
-| `get_task(run_id) -> dict` | 单次查询 run 视图 |
-| `events(run_id, after_seq=-1) -> list[dict]` | 事件流增量拉取（观测进度用；每条 `{"seq","kind","payload","created_at"}`） |
-| `cancel(run_id, by="") -> dict` | 取消运行中/排队中的 run；已终态抛错（HTTP 409） |
+| `wait` | `True` 等到结束；传数字表示最多等这么多秒；`False` 立即返回回执 |
+| `subtask` | 对象名；不存在时按父任务自动创建 |
+| `idempotency_key` | 网络重试安全：同一个键只受理一次 |
+| `recall` / `save` | 这一次的记忆开关；`None` 表示跟随任务和平台默认 |
 
-run 视图的 `status`：`queued` / `running` / `awaiting_approval` /
-`success` / `failed` / `cancelled`。终态三值是 `success/failed/cancelled`。
+SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask", {"question": "…"})`（HTTP 接口不写 `task` 就是 `ask`）。
 
-run 视图字段：`run_id, session_id, task_type, task_version, role,
-role_version, domain, target_env, trigger_source, caller, input, output,
-status, tokens, duration_ms, created_at`。
+`run` 的返回值有两种形状：
 
-### 幂等与重试
+- 等到了结束：返回运行详情，包含 `status`、`output`、`context` 等，字段见接口文档 §2。
+- `wait=False`，或服务端等待结束时运行正停在审批上（设置里打开了审批才会有）：立即返回回执 `{run_id, session_id, status, output, dedup, subtask_created}`。
 
-网络重试安全靠 `Idempotency-Key`（24h 窗口）：
+| 方法 | 说明 |
+|---|---|
+| `get(run_id)` | 运行详情 |
+| `wait(run_id, timeout=None)` | 轮询到终态或超时，返回运行详情 |
+| `events(run_id, after=0)` | 过程事件增量拉取 |
+| `cancel(run_id)` | 取消 |
+| `rerun(run_id)` | 同样的输入新开一次运行 |
+| `resume(run_id)` | 失败的运行从断点续跑 |
+| `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代上一轮沉淀的记忆 |
+| `feedback(run_id, score, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
+
+### 事件
 
 ```python
-run = agent.submit("data-qa", {...}, idempotency_key="fee-20261016-01")
-# 同键重提 → 返回首个 run（排队/运行中/成功都命中）；首个失败才允许同键重提
+agent.emit("webhook", {"service": "board", "env": "test", "version": "1.2.0"}, event="release")
 ```
 
-任务自身还可配 `dedup_key`/`dedup_window_s`（任务定义里），那是
-**业务去重**（同输入不重跑），与调用方幂等键是两层。
+把事件推给平台（`POST /v1/events/{source}`），返回匹配到的任务及其运行。
+声明了这个 `source + event` 触发器的任务才会被触发。
+
+## 幂等与去重
+
+- **幂等键**由调用方提供，解决网络重试的问题：同一个键只受理一次，重复提交返回同一个运行（`dedup: true`）。
+  键不限时间；只有失败的运行会释放这个键。
+- **任务去重**写在任务定义里（`dedup: {key, window_s}`），解决业务重复：时间窗内同键、还在排队 / 运行中或已成功的运行直接返回它。
+
+两者是独立的两层。
 
 ## 错误处理
 
-所有失败统一抛 `AgentError`（`RuntimeError` 子类），消息带 HTTP 状态码与
-服务端 `detail`：
+所有失败都抛 `AgentError`。按 `e.code` 判断原因，不要解析 `e.message`：
 
 ```python
-from agent_client import AgentClient, AgentError
-
 try:
-    agent.ask("...")
+    agent.run("frontend-smoke", {"version": "1.2.0"}, env="prod")
 except AgentError as e:
-    ...   # "…返回 429: 服务繁忙，请稍后重试" / "…400: 未知任务 xxx" / 超时提示
+    if e.code == "service_env_disabled":
+        ...                      # 服务在 prod 停用了
+    elif e.code == "env_not_allowed":
+        ...                      # 任务不能在 prod 跑
+    else:
+        raise
 ```
 
-| 场景 | HTTP | 说明 |
+| e.code | 含义 | 该怎么办 |
 |---|---|---|
-| 并发打满 | 429 `overloaded` | 稍候重试 |
-| 未知任务/闸门拒绝/终态冲突 | 400 `task_rejected` | 客户端错误，重试无用 |
-| 目标环境不在白名单 | 400 | 换 `env` 值 |
-| 鉴权失败 | 401 | 检查 `AGENT_TOKEN` |
-| 参数不合法 | 422 | 按 `detail` 修请求 |
-| 流式 300s 未完成 | （异常消息含 run_id） | run 没死，`wait(run_id)` 续等 |
+| `unauthorized` | 密钥无效 / 吊销 / 过期 | 检查 `AGENT_KEY` |
+| `forbidden` | 密钥不允许这个服务或环境 | 换密钥，或让管理员放宽范围 |
+| `service_required` | 通用任务没指定服务 | 传 `service` |
+| `invalid_input` | 输入不合法 | 看 `e.detail["fields"]` |
+| `service_disabled` / `service_env_disabled` / `task_disabled` | 停用 | 控制台启用，或换环境 |
+| `env_not_allowed` | 任务不能在这个环境跑 | 换环境 |
+| `trigger_not_allowed` | 任务没开放 API 调用 | 在任务定义里加 `api` 触发 |
+| `unknown_task` / `unknown_service` / `unknown_env` | 名字写错 | — |
+| `run_failed` / `run_cancelled` | `ask` 的运行没有成功结束 | 去控制台看运行详情 |
 
-## CLI：agent-chat
+## 命令行：agent-chat
 
-装 SDK 即得交互式对话命令（走 SSE，工具调用实时可见）：
+装好 SDK 就有这个命令。过程实时可见，会话存在服务端，跨天、跨机器都能续：
 
 ```bash
-agent-chat --server board --role data_searcher
-agent-chat --server board --role data_searcher --env prod        # 指定目标环境
-agent-chat --server board --role data_searcher --resume board-fee-a1b2  # 续会话
+agent-chat board                        # 默认环境
+agent-chat board --env prod
+agent-chat board --task data-qa
+agent-chat board --resume <会话 id>
 ```
-
-输出里 `[session: xxx]` 是会话 id，记下来可 `--resume` 续聊。
 
 ## 常见问题
 
-- **ask 返回"超时"提示但没报错**：同步路径等的时间有限，run 还在跑；
-  用 `submit_and_wait`（可控 timeout）或拿 run_id `wait()` 续等。
-- **多线程/多并发**：`AgentClient` 无共享状态（每请求新建 httpx.Client），
-  可安全并发使用；但同 session 的问答请串行（会话上下文有顺序）。
-- **想看中间过程**：`ask_stream(on_event=...)`，或事后
-  `events(run_id)` 拉全量事件流。
-- **嵌入自己服务**：直接把 `client.py` vendor 进去即可，类名/方法随意改——
-  只要不破坏 HTTP 契约。
+- **想看中间过程**：`ask(on_event=...)`，或者事后 `events(run_id)` 拉全量事件。
+- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。
+- **嵌入自己的服务**：直接把 `client.py` 拷进去，类名和方法名随意改，只要不破坏 HTTP 契约。

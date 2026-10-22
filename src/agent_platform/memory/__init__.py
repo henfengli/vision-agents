@@ -1,13 +1,13 @@
-"""记忆层：run 前后的记忆读写。
+"""记忆层：运行前召回、运行后沉淀、定期整理。
 
-- recall   运行前召回（档案 → 交接摘要 → 历史知识 → 同类案例）
-- distill  运行后沉淀（知识/案例入库 + session 交接摘要）
+- recall    运行前：交接摘要 → 历史知识 → 同类案例
+- distill   运行后：一次轻量模型调用提炼知识与案例；有会话时写交接摘要
+- gardener  定期：code_ref 漂移巡检
 
-连续性由记忆层承载，不靠无限拉长的对话 thread：
-session 是 episode（一次一个问题），跨 episode 靠召回接起来。
+全部按 服务×环境 分区；连续性由记忆承载，不靠无限拉长的对话 thread。
 """
 
 from .distill import distill
-from .recall import recall_block
+from .recall import Recalled, recall
 
-__all__ = ["distill", "recall_block"]
+__all__ = ["Recalled", "distill", "recall"]

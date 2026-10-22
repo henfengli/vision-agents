@@ -2,7 +2,7 @@
 name = "agent-platform"
 # 版本唯一出处是 src/agent_platform/__init__.py 的 __version__（发版只改那一处）
 dynamic = ["version"]
-description = "平台级 Agent 服务：多业务角色、事件触发、对话与自动化流程"
+description = "给同机部署的业务项目提供 agent 能力：API 调用、对话、定时与事件触发、按环境启停服务"
 requires-python = ">=3.11"
 dependencies = [
     "deepagents==0.6.*",          # 锁版本：pre-1.0，角色定义收在自有配置层隔离 API 变更
@@ -16,8 +16,6 @@ dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.6",
     "httpx>=0.27",
-    "jinja2>=3.1",               # viewer 服务端模板渲染
-    "temporalio>=1.27",           # durable execution：编排/调度/恢复
 ]
 
 [project.optional-dependencies]
@@ -34,6 +32,9 @@ mcp = ["langchain-mcp-adapters>=0.1"]
 # mcp_servers/dagster_mcp.py 的 server 端依赖（独立进程，不随主服务装）
 dagster-mcp = ["fastmcp>=2.0", "httpx>=0.27"]
 
+[project.scripts]
+agent-platform = "agent_platform.main:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -44,8 +45,6 @@ version = {attr = "agent_platform.__version__"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# viewer 的模板/静态资源不是 .py，必须显式声明才进 wheel——
-# 否则 pip install 后页面全 404（base.py 按 __file__ 相对路径读）
+# 控制台前端构建产物（web/ 下 npm run build 生成）与种子不是 .py，要显式声明才进 wheel
 [tool.setuptools.package-data]
-agent_platform = ["viewer/templates/*.html", "viewer/static/*",
-                  "viewer/static/fonts/*"]
+agent_platform = ["webui/dist/*", "webui/dist/assets/*"]

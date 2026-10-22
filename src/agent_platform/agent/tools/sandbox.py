@@ -5,6 +5,8 @@ bwrap 的 namespace 隔离足够；bwrap 不可用时退化直接执行并记警
 
 策略：全盘只读、仅 scratch 可写、默认断网（--unshare-net）；
 内网 API 访问由调用方显式选择放网。
+遮蔽（hidden）：所有服务所有环境声明过的配置文件、平台密钥、运行用户的凭据、进程启动规格目录——
+"全盘只读"不等于"全盘可读"：配置内容只能经 service_info 读本环境、且密钥打码。
 
 进程生命期（关键，别删这两个 flag）：
 --unshare-pid + --as-pid-1 让命令本身做 pid namespace 的 init——
@@ -22,6 +24,8 @@ from __future__ import annotations
 import logging
 import shutil
 
+from ...services.svcrun import mask_args
+
 log = logging.getLogger(__name__)
 
 _HAS_BWRAP: bool | None = None
@@ -36,7 +40,7 @@ def has_bwrap() -> bool:
     return _HAS_BWRAP
 
 
-def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False) -> list[str]:
+def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False, hidden: tuple[str, ...] = ()) -> list[str]:
     """给命令行套 bwrap 沙箱；不可用时原样返回（退化不失效，但进程
     清理与隔离保证全部消失——生产必须装 bwrap，install.sh 会检查告警）。"""
     if not has_bwrap():
@@ -44,6 +48,7 @@ def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False) -> lis
     args = [
         "bwrap",
         "--ro-bind", "/", "/",              # 全盘只读
+        *mask_args(hidden),                 # 配置文件与密钥遮蔽（在 scratch 挂载之前，不会盖住工作区）
         "--bind", scratch_dir, scratch_dir,  # 仅 scratch 可写
         "--dev", "/dev",
         "--proc", "/proc",

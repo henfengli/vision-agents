@@ -1,7 +1,8 @@
-"""版本化定义存储：角色与任务共用。
+"""版本化定义存储：服务 / 角色 / 任务 / 平台配置共用一张表。
 
-最新版本即生效版本（max(version)），历史全留可回滚；
-读取走进程内短 TTL 缓存 + 写时主动失效——业务方自助加角色/任务，服务不重启。
+- 最新版本即生效版本；每次写入都是新版本，历史只增不改
+- 删除 = 写一个 deleted 版本（名字随即可复用）；恢复任一旧版本 = 把它的内容写成新版本
+- 读走进程内 5 秒缓存 + 写时失效：多进程部署下最迟 5 秒对齐，改完不用重启
 """
 
 from __future__ import annotations
@@ -10,151 +11,116 @@ import json
 import time
 from typing import Literal
 
+import psycopg
+
 from .db import pool
 
-# domain = 业务域配置（服务部署信息），env = 目标环境启停开关
-Kind = Literal["role", "task", "policy", "rules", "domain", "env"]
+Kind = Literal["service", "role", "task", "config"]
 
-_CACHE_TTL_S = 5.0  # 缓存短 TTL + 写时主动失效，双保险
-
-
-class DefinitionStore:
-    """(kind, env, name) 维度的存取；写一次产生一个新版本。"""
-
-    def __init__(self) -> None:
-        self._cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
-
-    async def put(self, kind: Kind, env: str, name: str, definition: dict,
-                  updated_by: str = "") -> int:
-        """写入新版本，返回版本号。
-
-        版本号 = MAX+1：并发写同一定义时后手的 INSERT 撞 PK
-        (kind,env,name,version)，捕获唯一冲突重试一次（重取 MAX）——
-        撞库不会让数据出错，但没有重试会把并发保存变成用户的 500。
-        """
-        import psycopg
-
-        for attempt in (1, 2):
-            try:
-                async with pool().connection() as conn:
-                    cur = await conn.execute(
-                        "SELECT COALESCE(MAX(version), 0) + 1 FROM definitions"
-                        " WHERE kind=%s AND env=%s AND name=%s",
-                        (kind, env, name))
-                    version = (await cur.fetchone())[0]
-                    await conn.execute(
-                        "INSERT INTO definitions (kind, env, name, version,"
-                        " definition, updated_by)"
-                        " VALUES (%s,%s,%s,%s,%s,%s)",
-                        (kind, env, name, version, json.dumps(definition),
-                         updated_by))
-                break
-            except psycopg.errors.UniqueViolation:
-                if attempt == 2:
-                    raise
-        self._cache.pop((kind, env, name), None)
-        return version
-
-    async def get_active(self, kind: Kind, env: str, name: str) -> dict | None:
-        """生效版本 = 最新版本。"""
-        key = (kind, env, name)
-        hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
-            return hit[1]
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT definition FROM definitions"
-                " WHERE kind=%s AND env=%s AND name=%s"
-                " ORDER BY version DESC LIMIT 1", (kind, env, name))
-            row = await cur.fetchone()
-        definition = _as_dict(row[0]) if row else None
-        if definition is not None:
-            self._cache[key] = (time.monotonic(), definition)
-        return definition
-
-    async def get_version(self, kind: Kind, env: str, name: str,
-                          version: int) -> dict | None:
-        """指定版本的定义内容（谱系回读：查 run 当时用的是哪一版）。"""
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT definition FROM definitions"
-                " WHERE kind=%s AND env=%s AND name=%s AND version=%s",
-                (kind, env, name, version))
-            row = await cur.fetchone()
-        return _as_dict(row[0]) if row else None
-
-    async def list_active(self, kind: Kind, env: str) -> list[dict]:
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT DISTINCT ON (name) name, version, definition,"
-                " updated_by, created_at FROM definitions"
-                " WHERE kind=%s AND env=%s ORDER BY name, version DESC", (kind, env))
-            rows = await cur.fetchall()
-        # name/version 等台账列放展开之后，压住 definition 里的同名键
-        return [{**_as_dict(d), "name": name, "version": v,
-                 "updated_by": u, "created_at": t.isoformat()}
-                for name, v, d, u, t in rows]
-
-    async def history(self, kind: Kind, env: str, name: str) -> list[dict]:
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT version, definition, updated_by, created_at FROM definitions"
-                " WHERE kind=%s AND env=%s AND name=%s ORDER BY version DESC",
-                (kind, env, name))
-            rows = await cur.fetchall()
-        return [{"version": v, "definition": _as_dict(d), "updated_by": u,
-                 "created_at": t.isoformat()} for v, d, u, t in rows]
-
-    async def rollback(self, kind: Kind, env: str, name: str, version: int) -> None:
-        """回滚 = 把旧版本内容重新 put 为新版本（历史只增不改）。"""
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT definition FROM definitions"
-                " WHERE kind=%s AND env=%s AND name=%s AND version=%s",
-                (kind, env, name, version))
-            row = await cur.fetchone()
-        if not row:
-            raise KeyError(f"{kind}:{name} 不存在版本 {version}")
-        await self.put(kind, env, name, _as_dict(row[0]),
-                       updated_by=f"rollback-to-v{version}")
-
-    # ---- Langfuse 降级缓存（提示词源头不可用时直读 PG） ----
-
-    async def cache_get(self, kind: Kind, env: str, name: str) -> dict | None:
-        return await self.get_active(kind, env, name)
-
-    async def cache_put(self, kind: Kind, env: str, name: str,
-                        definition: dict) -> None:
-        """与当前生效版本一致则不动（幂等），否则写新版本。"""
-        if await self.get_active(kind, env, name) == definition:
-            return
-        await self.put(kind, env, name, definition, updated_by="langfuse-sync")
+_TTL_S = 5.0
 
 
 def _as_dict(raw) -> dict:
     return json.loads(raw) if isinstance(raw, str) else raw
 
 
-async def active_version(kind: Kind, env: str, name: str) -> int | None:
-    """生效版本号（= 最新版本号）；定义不存在返回 None。
+class DefinitionStore:
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, str | None], tuple[float, object]] = {}
 
-    run 谱系固定用：不走缓存、直读库，保证记录的就是执行那一刻的真实版本。
-    """
-    async with pool().connection() as conn:
-        cur = await conn.execute(
-            "SELECT MAX(version) FROM definitions"
-            " WHERE kind=%s AND env=%s AND name=%s", (kind, env, name))
-        row = await cur.fetchone()
-    return row[0] if row and row[0] is not None else None
+    def _cached(self, key: tuple[str, str | None]):
+        hit = self._cache.get(key)
+        return hit[1] if hit and time.monotonic() - hit[0] < _TTL_S else None
 
+    def _remember(self, key: tuple[str, str | None], value: object) -> None:
+        self._cache[key] = (time.monotonic(), value)
 
-async def seed_drifted(store: "DefinitionStore", kind: Kind, env: str,
-                       name: str, file_def: dict) -> bool:
-    """文件种子自播种以来是否改过：与 updated_by="seed" 的那版比对。
+    def _forget(self, kind: str, name: str) -> None:
+        self._cache.pop((kind, name), None)
+        self._cache.pop((kind, None), None)
 
-    定义库是事实源，文件只播种一次——之后有人改了文件，改动不会生效。
-    这里不判断谁对谁错，只让启动日志把"文件改了但没生效"说出来。
-    """
-    seeded = next((h for h in reversed(await store.history(kind, env, name))
-                   if h["updated_by"] == "seed"), None)
-    return seeded is not None and seeded["definition"] != file_def
+    # —— 读 ——
+
+    async def get(self, kind: Kind, name: str) -> dict | None:
+        """生效版本：{name, version, definition, updated_by, updated_at}；不存在或已删除返回 None。"""
+        hit = self._cached((kind, name))
+        if hit is not None:
+            return hit or None
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT version, definition, deleted, updated_by, created_at FROM definitions"
+                " WHERE kind=%s AND name=%s ORDER BY version DESC LIMIT 1", (kind, name))
+            row = await cur.fetchone()
+        item = None
+        if row and not row[2]:
+            item = {"name": name, "version": row[0], "definition": _as_dict(row[1]),
+                    "updated_by": row[3], "updated_at": row[4].isoformat()}
+        self._remember((kind, name), item or {})
+        return item
+
+    async def list(self, kind: Kind) -> list[dict]:
+        """全部生效定义，按名字排序。"""
+        hit = self._cached((kind, None))
+        if hit is not None:
+            return hit  # type: ignore[return-value]
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT * FROM (SELECT DISTINCT ON (name) name, version, definition, deleted, updated_by, created_at"
+                " FROM definitions WHERE kind=%s ORDER BY name, version DESC) t WHERE NOT deleted ORDER BY name", (kind,))
+            rows = await cur.fetchall()
+        items = [{"name": n, "version": v, "definition": _as_dict(d), "updated_by": u, "updated_at": t.isoformat()}
+                 for n, v, d, _, u, t in rows]
+        self._remember((kind, None), items)
+        return items
+
+    async def history(self, kind: Kind, name: str) -> list[dict]:
+        """全部版本，新的在前：[{version, definition, deleted, updated_by, created_at}]。"""
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT version, definition, deleted, updated_by, created_at FROM definitions"
+                " WHERE kind=%s AND name=%s ORDER BY version DESC", (kind, name))
+            rows = await cur.fetchall()
+        return [{"version": v, "definition": _as_dict(d), "deleted": x, "updated_by": u, "created_at": t.isoformat()}
+                for v, d, x, u, t in rows]
+
+    async def version(self, kind: Kind, name: str, version: int) -> dict | None:
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT definition FROM definitions WHERE kind=%s AND name=%s AND version=%s", (kind, name, version))
+            row = await cur.fetchone()
+        return _as_dict(row[0]) if row else None
+
+    # —— 写 ——
+
+    async def put(self, kind: Kind, name: str, definition: dict, by: str, *, deleted: bool = False) -> int:
+        """写新版本，返回版本号。并发写撞主键时重取一次版本号。"""
+        for attempt in (1, 2):
+            try:
+                async with pool().connection() as conn:
+                    cur = await conn.execute(
+                        "INSERT INTO definitions (kind, name, version, definition, deleted, updated_by)"
+                        " SELECT %s, %s, COALESCE(MAX(version), 0) + 1, %s, %s, %s FROM definitions"
+                        " WHERE kind=%s AND name=%s RETURNING version",
+                        (kind, name, json.dumps(definition, ensure_ascii=False), deleted, by, kind, name))
+                    version = (await cur.fetchone())[0]
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
+        self._forget(kind, name)
+        return version
+
+    async def delete(self, kind: Kind, name: str, by: str) -> int:
+        current = await self.get(kind, name)
+        return await self.put(kind, name, current["definition"] if current else {}, by, deleted=True)
+
+    async def seeded_version(self, kind: Kind, name: str) -> dict | None:
+        """这个名字是否出现过（含已删除）。播种只在从未出现过的名字上进行——删掉的种子不会复活。
+        出现过则返回 {"seed": 当初播种的内容或 None}；从未出现返回 None。"""
+        async with pool().connection() as conn:
+            cur = await conn.execute(
+                "SELECT definition, updated_by FROM definitions WHERE kind=%s AND name=%s ORDER BY version", (kind, name))
+            rows = await cur.fetchall()
+        if not rows:
+            return None
+        return {"seed": next((_as_dict(d) for d, u in rows if u == "seed"), None)}

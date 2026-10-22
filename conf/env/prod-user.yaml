@@ -1,0 +1,6 @@
+# 生产主机的用户级部署（deploy/install-user.sh）：平台跑在一个普通用户的 systemd --user 里，不需要 root。
+# 其余和 prod 一样；业务进程用同一个用户的 agent-svc@.service 用户单元启停。
+extends: prod
+
+process_control:
+  scope: user

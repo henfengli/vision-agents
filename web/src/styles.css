@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+/* 暗色由 <html class="dark"> 控制（主题切换写 localStorage，见 index.html 首帧脚本） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * 设计令牌：所有颜色走语义名，组件里不写具体色值。
+ * 亮色为默认，.dark 覆盖。中性色偏冷灰，主色靛蓝；状态色固定语义。
+ */
+@theme {
+  --font-sans: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, "PingFang SC", monospace;
+
+  --color-bg: var(--c-bg);
+  --color-panel: var(--c-panel);
+  --color-raised: var(--c-raised);
+  --color-sunken: var(--c-sunken);
+  --color-hover: var(--c-hover);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-fg: var(--c-fg);
+  --color-fg-2: var(--c-fg-2);
+  --color-fg-3: var(--c-fg-3);
+  --color-accent: var(--c-accent);
+  --color-accent-fg: var(--c-accent-fg);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-ok: var(--c-ok);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-bad: var(--c-bad);
+  --color-bad-soft: var(--c-bad-soft);
+  --color-warn: var(--c-warn);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-info: var(--c-info);
+  --color-info-soft: var(--c-info-soft);
+  --color-idle: var(--c-idle);
+  --color-idle-soft: var(--c-idle-soft);
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px -4px rgb(15 23 42 / 0.16);
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04);
+
+  --animate-in: fade-in 120ms ease-out;
+  --animate-pop: pop-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-slide: slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(4px) scale(0.98) } to { opacity: 1; transform: none } }
+@keyframes slide-in { from { opacity: 0; transform: translateX(16px) } to { opacity: 1; transform: none } }
+@keyframes pulse-dot { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+
+:root { --row-h: 44px; }
+:root[data-density="compact"] { --row-h: 34px; }
+
+:root {
+  --c-bg: #f7f7f8;
+  --c-panel: #ffffff;
+  --c-raised: #ffffff;
+  --c-sunken: #f1f2f4;
+  --c-hover: #eef0f3;
+  --c-line: #e4e6ea;
+  --c-line-strong: #d3d6dc;
+  --c-fg: #16181d;
+  --c-fg-2: #4d5360;
+  --c-fg-3: #868c98;
+  --c-accent: #4f46e5;
+  --c-accent-fg: #ffffff;
+  --c-accent-soft: #eef0ff;
+  --c-ok: #16a34a;
+  --c-ok-soft: #e9f8ef;
+  --c-bad: #dc2626;
+  --c-bad-soft: #fdeeee;
+  --c-warn: #d97706;
+  --c-warn-soft: #fdf4e3;
+  --c-info: #2563eb;
+  --c-info-soft: #eaf1fe;
+  --c-idle: #6b7280;
+  --c-idle-soft: #f0f1f3;
+  color-scheme: light;
+}
+
+.dark {
+  --c-bg: #0d0e11;
+  --c-panel: #131418;
+  --c-raised: #1a1b20;
+  --c-sunken: #0f1013;
+  --c-hover: #1f2127;
+  --c-line: #25272e;
+  --c-line-strong: #33363f;
+  --c-fg: #ecedf0;
+  --c-fg-2: #a6abb6;
+  --c-fg-3: #6c717d;
+  --c-accent: #7c74ff;
+  --c-accent-fg: #ffffff;
+  --c-accent-soft: #1e1c3a;
+  --c-ok: #3fcf73;
+  --c-ok-soft: #12261a;
+  --c-bad: #f26464;
+  --c-bad-soft: #2c1517;
+  --c-warn: #f0a23b;
+  --c-warn-soft: #2b2010;
+  --c-info: #5b9bff;
+  --c-info-soft: #13213a;
+  --c-idle: #8b909b;
+  --c-idle-soft: #1d1f24;
+  --shadow-pop: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -6px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection { background: color-mix(in oklab, var(--color-accent) 25%, transparent); }
+  * { border-color: var(--color-line); }
+  :focus-visible { outline: 2px solid color-mix(in oklab, var(--color-accent) 65%, transparent); outline-offset: 1px; }
+  code, kbd, pre, .font-mono { font-family: var(--font-mono); font-size: 0.92em; }
+  input, textarea, select, button { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  /* 细滚动条 */
+  * { scrollbar-width: thin; scrollbar-color: var(--color-line-strong) transparent; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: var(--color-line-strong); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+}
+
+@layer components {
+  /* Markdown 渲染（回答/档案/说明） */
+  .prose-ap { color: var(--color-fg); line-height: 1.65; overflow-wrap: anywhere; }
+  .prose-ap > * + * { margin-top: 0.6em; }
+  .prose-ap h1, .prose-ap h2, .prose-ap h3 { font-weight: 600; line-height: 1.35; margin-top: 1em; }
+  .prose-ap h1 { font-size: 1.25em; } .prose-ap h2 { font-size: 1.12em; } .prose-ap h3 { font-size: 1.02em; }
+  .prose-ap ul { list-style: disc; padding-left: 1.3em; } .prose-ap ol { list-style: decimal; padding-left: 1.3em; }
+  .prose-ap li + li { margin-top: 0.2em; }
+  .prose-ap a { color: var(--color-accent); text-decoration: underline; text-underline-offset: 2px; }
+  .prose-ap code { background: var(--color-sunken); border: 1px solid var(--color-line); border-radius: 4px; padding: 0 4px; }
+  .prose-ap pre { background: var(--color-sunken); border: 1px solid var(--color-line); border-radius: 6px; padding: 10px 12px; overflow-x: auto; }
+  .prose-ap pre code { background: none; border: 0; padding: 0; }
+  .prose-ap table { border-collapse: collapse; font-size: 0.95em; display: block; overflow-x: auto; }
+  .prose-ap th, .prose-ap td { border: 1px solid var(--color-line); padding: 4px 8px; text-align: left; }
+  .prose-ap th { background: var(--color-sunken); font-weight: 600; }
+  .prose-ap blockquote { border-left: 3px solid var(--color-line-strong); padding-left: 10px; color: var(--color-fg-2); }
+  .prose-ap hr { border-color: var(--color-line); }
+
+  /* diff 行 */
+  .diff-add { background: color-mix(in oklab, var(--color-ok) 14%, transparent); }
+  .diff-del { background: color-mix(in oklab, var(--color-bad) 14%, transparent); }
+}
