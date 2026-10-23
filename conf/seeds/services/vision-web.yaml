@@ -1,10 +1,10 @@
 title: Vision Web
 description: Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）
-root: /srv/svc/vision-web/code/{env}
+root: ~/svc/vision-web/code/{env}
 repo: git@gitlab.ipa.zs:vision/vision-web.git
 ref: master
-# 项目同名 conda 环境（python 3.12），三个环境共用
-python: /opt/conda/envs/vision-web/bin/python
+# 项目同名 conda 环境（python 3.12），三个环境共用；~ 是平台用户的 home
+python: ~/miniforge3/envs/vision-web/bin/python
 env_vars: {DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}"}
 urls:
   local: "http://127.0.0.1:{port:server}"
@@ -12,8 +12,8 @@ urls:
 # databases:
 #   main: "mysql://${VISION_WEB_RO_USER}:${VISION_WEB_RO_PASSWORD}@<地址>:3306/<库>"
 configs:
-  - canonical: "/srv/svc/vision-web/code/{env}/vision_web/settings-{env}.py"
-    template: "/srv/svc/vision-web/conf/{env}/settings.py"
+  - canonical: "~/svc/vision-web/code/{env}/vision_web/settings-{env}.py"
+    template: "~/svc/vision-web/conf/{env}/settings.py"
     upstream: vision_web/settings.py
 processes:
   server:

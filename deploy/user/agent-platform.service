@@ -9,9 +9,12 @@ After=network-online.target
 Environment=AGENT_ENV=prod
 Environment=AGENT_CONF=%h/agent-platform/conf
 Environment=AGENT_DATA_DIR=%h/.local/share/agent-platform
+# 自己放的 bwrap / git（没有系统包时）放 ~/.local/bin，这里排在最前
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 EnvironmentFile=%h/.config/agent-platform/secrets.env
 WorkingDirectory=%h/agent-platform
-ExecStart=%h/agent-platform/venv/bin/agent-platform serve --host 127.0.0.1 --port 8100
+# 监听地址与 HTTPS 在部署配置的 listen 里（默认 127.0.0.1:8100）
+ExecStart=%h/agent-platform/venv/bin/agent-platform serve
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

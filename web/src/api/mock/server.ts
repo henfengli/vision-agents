@@ -116,7 +116,8 @@ on("GET", "/v1/meta", () => ({
 // ———————— 服务 ————————
 
 const envEnabled = (s: (typeof db.services)[number], env: string) => s.enabled && s.envs[env]?.enabled !== false;
-const render = (path: string, env: string) => path.replaceAll("{env}", env);
+/** 渲染 {env}；~ 开头展开成平台用户的 home（与后端 domain/services.render 一致） */
+const render = (path: string, env: string) => path.replaceAll("{env}", env).replace(/^~(?=\/|$)/, db.HOME);
 /** 该环境的解释器：环境覆盖 > 服务的 python > python3，渲染 {env} */
 const pythonOf = (s: (typeof db.services)[number], env: string) => render(s.envs[env]?.python || s.python || "python3", env);
 /** 该环境的地址：基座 + 环境覆盖（按键），渲染 {env} 与 {port:进程名} */

@@ -5,10 +5,11 @@
 
 启动规格（<数据目录>/instances/<实例名>.json）由 ProcessController 在启动前写好：
 
-    {"instance": "board:test:web", "service": "board", "env": "test", "process": "web",
-     "argv": [...], "workdir": "/srv/svc/board/code/test", "port": 8081,
-     "binds": [["/srv/svc/board/conf/test/.env", "/srv/svc/board/code/test/.env"]],
-     "masks": ["/srv/svc/board/conf/prod/.env", "/srv/svc/board/conf/dev/.env", "/home/agent/.config/agent-platform"],
+    {"instance": "vision-board:test:server", "service": "vision-board", "env": "test", "process": "server",
+     "argv": [...], "workdir": "/home/agent/svc/vision-board/code/test", "port": 8181,
+     "binds": [["/home/agent/svc/vision-board/conf/test/settings.py",
+                "/home/agent/svc/vision-board/code/test/vision_board/settings-test.py"]],
+     "masks": ["/home/agent/svc/vision-board/conf/prod/settings.py", "/home/agent/.config/agent-platform"],
      "env_vars": {"PORT": "8081"}}
 
 隔离语义：

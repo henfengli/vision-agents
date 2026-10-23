@@ -1,12 +1,13 @@
 title: Vision Dagster
 description: Vision 的数据编排（Dagster）：资产、调度、传感器；线上 docker 部署，国内生产 / 测试各一套
-# 本机副本：每个环境一份代码（都跟踪 master，代码跟踪每小时同步），共用项目同名 conda 环境
-root: /srv/svc/vision-dagster/code/{env}
+# 本机副本：每个环境一份代码（都跟踪 master，代码跟踪每小时同步），共用项目同名 conda 环境。
+# ~ 是平台用户的 home：代码、配置、conda（Miniforge）都在它下面，不需要 root；conda 装在别处就改 python 和 cmd
+root: ~/svc/vision-dagster/code/{env}
 repo: git@gitlab.ipa.zs:vision/vision-dagster.git
 ref: master
-python: /opt/conda/envs/vision-dagster/bin/python
+python: ~/miniforge3/envs/vision-dagster/bin/python
 # dagster.yaml 从 DAGSTER_HOME 读：指到代码目录，bind 进去的本环境 dagster.yaml 才生效
-env_vars: {DAGSTER_HOME: "/srv/svc/vision-dagster/code/{env}"}
+env_vars: {DAGSTER_HOME: "~/svc/vision-dagster/code/{env}"}
 urls:
   local: "http://127.0.0.1:{port:webserver}"
 hosts: [172.24.24.136]
@@ -17,12 +18,12 @@ databases:
 # 本环境的真实配置在 conf/{env}/，进程 / 内核 / 同步步骤启动时 bind 到代码目录里的固定路径；
 # upstream 是仓库里对应的模板，变了就提示"配置待更新"
 configs:
-  - {canonical: "/srv/svc/vision-dagster/code/{env}/.env", template: "/srv/svc/vision-dagster/conf/{env}/.env", upstream: .env.template}
-  - {canonical: "/srv/svc/vision-dagster/code/{env}/dagster.yaml", template: "/srv/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: dagster.template.yaml}
+  - {canonical: "~/svc/vision-dagster/code/{env}/.env", template: "~/svc/vision-dagster/conf/{env}/.env", upstream: .env.template}
+  - {canonical: "~/svc/vision-dagster/code/{env}/dagster.yaml", template: "~/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: dagster.template.yaml}
 processes:
   # 只起 webserver 看资产与运行；不起 daemon（会按该环境的配置真的跑调度和传感器）
   webserver:
-    cmd: ["/opt/conda/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"]
+    cmd: ["~/miniforge3/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"]
     ports: {prod: 3900, test: 3901, dev: 3902}
     lease_hours: 2
 sync:

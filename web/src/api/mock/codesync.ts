@@ -19,7 +19,7 @@ type StepLast = NonNullable<SyncStatus["steps"][number]["last"]>;
 
 const { HOUR, MIN, DAY, NOW } = db;
 const isoAt = (ms: number) => new Date(ms).toISOString();
-const render = (path: string, env: string) => path.replaceAll("{env}", env);
+const render = (path: string, env: string) => path.replaceAll("{env}", env).replace(/^~(?=\/|$)/, db.HOME);
 const pythonOf = (s: Service, env: string) => render(s.envs[env]?.python || s.python || "python3", env);
 const rootOf = (s: Service, env: string) => render(s.root, env);
 const branchOf = (s: Service, env: string) => s.envs[env]?.ref || s.ref || "（远端默认分支）";
@@ -234,13 +234,13 @@ function stepRun(st: SyncStep, s: Service, env: string, ok: boolean, quick: bool
   ].join("\n") };
   if (argv.includes("pip") && argv.includes("-e")) return { ms: pick(21_600), output: `Obtaining file://${rootOf(s, env)}\n  Installing build dependencies ... done\n  Getting requirements to build editable ... done\nRequirement already satisfied: dagster==1.8.12 in ${site} (1.8.12)\nSuccessfully installed ${s.name.replace("-", "_")}-0.4.2` };
   if (argv.includes("collectstatic")) return ok
-    ? { ms: pick(4_200), output: `14 static files copied to '/srv/svc/${s.name}/static/${env}', 203 unmodified.` }
+    ? { ms: pick(4_200), output: `14 static files copied to '/home/agent/svc/${s.name}/static/${env}', 203 unmodified.` }
     : { ms: pick(2_900), output: [
       "Traceback (most recent call last):",
       `  File "${rootOf(s, env)}/manage.py", line 22, in <module>`,
       "    main()",
       "  …",
-      `PermissionError: [Errno 13] Permission denied: '/srv/svc/${s.name}/static/${env}/report/css/report.css'`,
+      `PermissionError: [Errno 13] Permission denied: '/home/agent/svc/${s.name}/static/${env}/report/css/report.css'`,
     ].join("\n") };
   return { ms: pick(1_500), output: ok ? "完成" : "失败" };
 }
@@ -402,7 +402,7 @@ CLICKHOUSE = {
     "database": "default",
 }
 
-STATIC_ROOT = "/srv/svc/vision-board/static/${env}"
+STATIC_ROOT = "/home/agent/svc/vision-board/static/${env}"
 CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${env}"
 
 AUTH_SERVER = "https://auth.ipa.zs"
@@ -540,7 +540,7 @@ function replay(s: Service, env: string, at: number, o: { target?: string; fail?
     baseline(web, env, W[1], NOW - 6 * DAY + 2 * HOUR);
   }
   // 9 天前 liyd 改过 test 的 settings（ClickHouse 账号换成只读的 board_ro）
-  const testBoard = "/srv/svc/vision-board/conf/test/settings.py";
+  const testBoard = "/home/agent/svc/vision-board/conf/test/settings.py";
   const v0 = fileOf(board, "test", testBoard).content!;
   writeConfig(board, "test", testBoard, v0.replace('"user": "board_ro"', '"user": "board_ro"  # 只读账号'), undefined, "liyd", NOW - 9 * DAY);
 
@@ -551,7 +551,7 @@ function replay(s: Service, env: string, at: number, o: { target?: string; fail?
   const t3 = NOW - 20 * HOUR + 10 * MIN;
   envNames.forEach((env, i) => replay(dagster, env, t3 + i * 40_000));
   // 18 小时前 gaodl 按上游给 test 的 .env 补了 doris（保存即核对）；prod / dev 的还没处理
-  const testEnv = "/srv/svc/vision-dagster/conf/test/.env";
+  const testEnv = "/home/agent/svc/vision-dagster/conf/test/.env";
   const cur = fileOf(dagster, "test", testEnv).content!;
   writeConfig(dagster, "test", testEnv, cur + "DORIS_HOST=172.24.24.88\nDORIS_PORT=9030\nDORIS_USER=dagster_ro\nDORIS_PASSWORD=mock-test-Dr19\n", undefined, "gaodl", NOW - 18 * HOUR);
 

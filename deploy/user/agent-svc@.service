@@ -7,6 +7,7 @@ Description=agent-platform managed service %i
 [Service]
 Type=exec
 Environment=AGENT_INSTANCES_DIR=%h/.local/share/agent-platform/instances
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=%h/agent-platform/venv/bin/python -m agent_platform.services.svcrun %i
 KillMode=control-group
 TimeoutStopSec=20

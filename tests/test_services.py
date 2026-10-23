@@ -79,7 +79,9 @@ class RegistryTest(unittest.TestCase):
         self.assertIn("172.168.0.125", view.databases["ck"])
         self.assertIn("172.24.17.66", run(self.reg.service_view("vision-board", "dev")).databases["ck"])
         self.assertEqual(view.env_vars["DJANGO_SETTINGS_MODULE"], "vision_board.settings-prod")
-        self.assertEqual(view.config_files[0]["canonical"], "/srv/svc/vision-board/code/prod/vision_board/settings-prod.py")
+        self.assertEqual(board["root"], "~/svc/vision-board/code/{env}")          # 库里存原样，用时才展开 ~
+        self.assertEqual(view.config_files[0]["canonical"],
+                         os.path.expanduser("~/svc/vision-board/code/prod/vision_board/settings-prod.py"))
         channels = run(self.reg.store.get("config", "notifications"))["definition"]["channels"]
         self.assertEqual(channels["default"]["token"], "${DINGTALK_ACCESS_TOKEN}")
 

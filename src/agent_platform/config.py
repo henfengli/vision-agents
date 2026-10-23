@@ -43,6 +43,16 @@ class ModelConfig(BaseModel):
     stream_usage: bool = True             # 流式响应里要 token 用量（stream_options.include_usage）；网关不支持就关掉
 
 
+class ListenConfig(BaseModel):
+    """serve 监听在哪。默认只听本机、由反向代理对外；没有反代时 host 写 0.0.0.0，
+    证书与私钥（PEM，路径可写 ~）都填了就直接用 HTTPS。端口要 ≥ 1024（普通用户绑不了 443）。"""
+
+    host: str = "127.0.0.1"
+    port: int = 8100
+    tls_cert: str = ""
+    tls_key: str = ""
+
+
 class WorkerConfig(BaseModel):
     """执行队列（runs 表）的消费端：同时执行几个运行。"""
 
@@ -105,7 +115,8 @@ class Settings(BaseModel):
     db_dsn: str
     model: ModelConfig
     root_token: str                            # 引导密钥：首次登录与创建 API 密钥用
-    public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用
+    public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用；必须是用户实际访问的地址
+    listen: ListenConfig = ListenConfig()
     data_dir: str = Field(default_factory=_default_data_dir)
     worker: WorkerConfig = WorkerConfig()
     kernel: KernelConfig = KernelConfig()

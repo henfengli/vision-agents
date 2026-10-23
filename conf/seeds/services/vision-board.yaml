@@ -1,10 +1,11 @@
 title: Vision Board
 description: Vision 报表展示系统（Django）：报表页面与离线 HTML 导出；线上 nginx + 源码服务
-root: /srv/svc/vision-board/code/{env}
+root: ~/svc/vision-board/code/{env}
 repo: git@gitlab.ipa.zs:vision/vision-board.git
 ref: master
-# 项目同名 conda 环境（python 3.12），三个环境共用；py 工具、进程、同步步骤都用它
-python: /opt/conda/envs/vision-board/bin/python
+# 项目同名 conda 环境（python 3.12），三个环境共用；py 工具、进程、同步步骤都用它。
+# ~ 是平台用户的 home（Miniforge 装在 ~/miniforge3）；conda 装在别处就改这里
+python: ~/miniforge3/envs/vision-board/bin/python
 # 项目约定：每个环境一份 vision_board/settings-{后缀}.py，DJANGO_SETTINGS_MODULE 指过去
 env_vars: {DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}"}
 urls:
@@ -15,8 +16,8 @@ databases:
 # settings-{env}.py 不进仓库（.gitignore）：真实文件放 conf/{env}/settings.py，bind 到 vision_board/settings-{env}.py；
 # 上游是仓库里的 vision_board/settings.py（项目的做法是复制它再改 STATIC_ROOT、CRONTAB_COMMAND_PREFIX、库口令、认证授权）
 configs:
-  - canonical: "/srv/svc/vision-board/code/{env}/vision_board/settings-{env}.py"
-    template: "/srv/svc/vision-board/conf/{env}/settings.py"
+  - canonical: "~/svc/vision-board/code/{env}/vision_board/settings-{env}.py"
+    template: "~/svc/vision-board/conf/{env}/settings.py"
     upstream: vision_board/settings.py
 processes:
   server:

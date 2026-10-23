@@ -37,8 +37,10 @@ const PLATFORM = "9.0.0";
 const PROMPTS_VERSION = 3;
 /** 更早的运行是升级到 9.0 之前的：没有配方（详情页退回任务 / 角色版本），查库工具还叫 sql_query、思考是 thought 事件 */
 const RECIPE_SINCE = 66 * HOUR;
+/** 平台用户的 home：服务定义里 ~ 开头的路径展开成它 */
+export const HOME = "/home/agent";
 /** agent 的工作目录（db_query 的大结果写在它下面的 queries/<run_id>/） */
-const SCRATCH = "/home/agent/.local/share/agent-platform/scratch";
+const SCRATCH = `${HOME}/.local/share/agent-platform/scratch`;
 
 /** 最近 n 个交易日（跳过周末），新的在前；第一个是今天之前最近的一个 */
 function tradingDays(n: number): string[] {
@@ -78,18 +80,18 @@ export const services: Service[] = [
   {
     name: "vision-dagster", title: "Vision Dagster",
     description: "Vision 的数据编排（Dagster）：资产、调度、传感器；线上 docker 部署，国内生产 / 测试各一套",
-    root: "/srv/svc/vision-dagster/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-dagster.git", ref: "master",
-    python: "/opt/conda/envs/vision-dagster/bin/python",
-    env_vars: { DAGSTER_HOME: "/srv/svc/vision-dagster/code/{env}" },
+    root: "~/svc/vision-dagster/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-dagster.git", ref: "master",
+    python: "~/miniforge3/envs/vision-dagster/bin/python",
+    env_vars: { DAGSTER_HOME: "~/svc/vision-dagster/code/{env}" },
     urls: { local: "http://127.0.0.1:{port:webserver}" },
     hosts: ["172.24.24.136"],
     databases: { ck: CK_TEST },
     configs: [
-      { canonical: "/srv/svc/vision-dagster/code/{env}/.env", template: "/srv/svc/vision-dagster/conf/{env}/.env", upstream: ".env.template" },
-      { canonical: "/srv/svc/vision-dagster/code/{env}/dagster.yaml", template: "/srv/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: "dagster.template.yaml" },
+      { canonical: "~/svc/vision-dagster/code/{env}/.env", template: "~/svc/vision-dagster/conf/{env}/.env", upstream: ".env.template" },
+      { canonical: "~/svc/vision-dagster/code/{env}/dagster.yaml", template: "~/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: "dagster.template.yaml" },
     ],
     processes: {
-      webserver: { cmd: ["/opt/conda/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"], ports: { prod: 3900, test: 3901, dev: 3902 }, lease_hours: 2 },
+      webserver: { cmd: ["~/miniforge3/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"], ports: { prod: 3900, test: 3901, dev: 3902 }, lease_hours: 2 },
     },
     sync: { auto: true, steps: [{ title: "安装项目", when: ["pyproject.toml", "setup.py", "setup.cfg"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-e", "."] }] },
     mcp: {
@@ -114,14 +116,14 @@ export const services: Service[] = [
   {
     name: "vision-board", title: "Vision Board",
     description: "Vision 报表展示系统（Django）：报表页面与离线 HTML 导出；线上 nginx + 源码服务",
-    root: "/srv/svc/vision-board/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-board.git", ref: "master",
-    python: "/opt/conda/envs/vision-board/bin/python",
+    root: "~/svc/vision-board/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-board.git", ref: "master",
+    python: "~/miniforge3/envs/vision-board/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}" },
     urls: { local: "http://127.0.0.1:{port:server}" },
     hosts: ["172.21.0.45"],
     databases: { ck: CK_TEST },
     configs: [
-      { canonical: "/srv/svc/vision-board/code/{env}/vision_board/settings-{env}.py", template: "/srv/svc/vision-board/conf/{env}/settings.py", upstream: "vision_board/settings.py" },
+      { canonical: "~/svc/vision-board/code/{env}/vision_board/settings-{env}.py", template: "~/svc/vision-board/conf/{env}/settings.py", upstream: "vision_board/settings.py" },
     ],
     processes: {
       server: { cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"], ports: { prod: 8180, test: 8181, dev: 8182 }, lease_hours: 4 },
@@ -151,14 +153,14 @@ export const services: Service[] = [
   {
     name: "vision-web", title: "Vision Web",
     description: "Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）",
-    root: "/srv/svc/vision-web/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-web.git", ref: "master",
-    python: "/opt/conda/envs/vision-web/bin/python",
+    root: "~/svc/vision-web/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-web.git", ref: "master",
+    python: "~/miniforge3/envs/vision-web/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}" },
     urls: { local: "http://127.0.0.1:{port:server}" },
     hosts: [],
     databases: {},
     configs: [
-      { canonical: "/srv/svc/vision-web/code/{env}/vision_web/settings-{env}.py", template: "/srv/svc/vision-web/conf/{env}/settings.py", upstream: "vision_web/settings.py" },
+      { canonical: "~/svc/vision-web/code/{env}/vision_web/settings-{env}.py", template: "~/svc/vision-web/conf/{env}/settings.py", upstream: "vision_web/settings.py" },
     ],
     processes: {
       server: { cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"], ports: { prod: 8280, test: 8281, dev: 8282 }, lease_hours: 4 },
@@ -373,7 +375,7 @@ env_specific：结论只在 {env} 环境成立（比如这个环境特有的配�
 口径、代码逻辑、表结构这类各环境都一样的写 false。拿不准写 false。
 
 严格输出 JSON：
-[{{"kind": "fact", "key": "metric:account_pnl", "content": "...", "code_path": "/srv/svc/vision-board/code/{env}/...", "env_specific": false}},
+[{{"kind": "fact", "key": "metric:account_pnl", "content": "...", "code_path": "/home/agent/svc/vision-board/code/{env}/...", "env_specific": false}},
  {{"kind": "lesson", "category": "code|data|infra|upstream", "conclusion": "...", "env_specific": false}}]`,
   handoff_summary: `把以下这次任务记录整理成"交接摘要"，供下次同类问题的新会话直接续用。
 严格按四节输出，没有内容的节写"无"，不要加其他内容：
@@ -482,7 +484,7 @@ function ckOut(o: { rows: number; cols: string[]; preview: (string | number)[][]
   return lines.join("\n");
 }
 const csvOf = (r: Run, n = 0) => `${SCRATCH}/queries/${r.run_id}/${r.created_at.slice(11, 19).replace(/:/g, "")}-ck-${r.run_id.slice(n, n + 6)}.csv`;
-const codeDir = (r: Run) => `/srv/svc/${r.service}/code/${r.env}`;
+const codeDir = (r: Run) => `${HOME}/svc/${r.service}/code/${r.env}`;
 
 const ACCOUNTS = ["A001", "A002", "A003", "A005", "A007", "A008", "A011", "A012", "A015", "A016", "A019", "A021"];
 /** 某账户某交易日的收益（元）：确定性的假数据，预览、文件、汇总三处一致 */
@@ -581,10 +583,10 @@ const ASK: Record<string, Scenario[]> = {
       q: "本环境 settings 里 STATIC_ROOT 和 CRONTAB_COMMAND_PREFIX 配的是什么？",
       plans: (r) => [
         { think: "配置文件在 bash 里读不到，用 service_info(what=config) 读本环境的 settings（密钥打码）。",
-          calls: [{ tool: "service_info", args: { what: "config", path: `/srv/svc/vision-board/conf/${r.env}/settings.py` }, ms: 30,
-            output: `STATIC_URL = "/static/"\nSTATIC_ROOT = "/srv/svc/vision-board/static/${r.env}"\nCRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\nCLICKHOUSE = {"host": "${r.env === "prod" ? "172.168.0.125" : "172.24.17.66"}", "port": 8123, "user": "board_ro", "password": "***"}` }] },
+          calls: [{ tool: "service_info", args: { what: "config", path: `${HOME}/svc/vision-board/conf/${r.env}/settings.py` }, ms: 30,
+            output: `STATIC_URL = "/static/"\nSTATIC_ROOT = "${HOME}/svc/vision-board/static/${r.env}"\nCRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\nCLICKHOUSE = {"host": "${r.env === "prod" ? "172.168.0.125" : "172.24.17.66"}", "port": 8123, "user": "board_ro", "password": "***"}` }] },
       ],
-      answer: (r) => `${r.env} 环境的 settings（\`vision_board/settings-${r.env}.py\`）：\n\n- \`STATIC_ROOT = "/srv/svc/vision-board/static/${r.env}"\`：collectstatic 收集到这里；\n- \`CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\`：定时任务按本环境的配置跑。\n\n按档案，本机副本不要执行 \`manage.py crontab add\`，否则会真的按这个前缀跑定时任务。`,
+      answer: (r) => `${r.env} 环境的 settings（\`vision_board/settings-${r.env}.py\`）：\n\n- \`STATIC_ROOT = "${HOME}/svc/vision-board/static/${r.env}"\`：collectstatic 收集到这里；\n- \`CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\`：定时任务按本环境的配置跑。\n\n按档案，本机副本不要执行 \`manage.py crontab add\`，否则会真的按这个前缀跑定时任务。`,
     },
     {
       q: "server 在 test 起得来吗？起来以后看一眼账户收益日报页",

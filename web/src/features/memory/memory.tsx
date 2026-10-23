@@ -314,7 +314,7 @@ function KnowledgeDialog({ open, scope, defaultKind, onClose }: { open: boolean;
           </Field>
         </> : <>
           <Field label="报错原文" required help="按它算指纹（抹掉数字、路径、引号里的内容后取末两行），不用自己删敏感的可变部分">
-            <Textarea mono rows={4} autoFocus value={error} onChange={(e) => setError(e.target.value)} placeholder={"KeyError: 'account_id'\n  File \"/srv/svc/vision-dagster/code/prod/vision_dagster/assets/pnl.py\", line 88, in account_pnl_daily"} />
+            <Textarea mono rows={4} autoFocus value={error} onChange={(e) => setError(e.target.value)} placeholder={"KeyError: 'account_id'\n  File \"/home/agent/svc/vision-dagster/code/prod/vision_dagster/assets/pnl.py\", line 88, in account_pnl_daily"} />
           </Field>
           <Field label="类别">
             <Segmented value={category} onChange={setCategory} options={LESSON_CATEGORIES.map((c) => ({ value: c, label: `${CATEGORY_LABEL[c]} ${c}` }))} />

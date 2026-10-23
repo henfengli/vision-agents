@@ -9,14 +9,15 @@
 提示词、工具、页面用的都是这一份。
 
 路径（root / code_paths / 配置文件两端 / python / workdir / cmd）都可以写 {env}：每个环境一份
-git 工作目录（/srv/svc/board/code/{env}）时，一份定义就描述了三套代码。进程的 cmd 里还可以写
-{python}（该环境的解释器）与 {port}。
+git 工作目录（~/svc/vision-board/code/{env}）时，一份定义就描述了三套代码。进程的 cmd 里还可以写
+{python}（该环境的解释器）与 {port}。以 ~ 开头的值展开成平台用户的 home（平台、内核、进程都是这个用户）。
 
 envs[env].enabled 决定这个服务在该环境接不接收运行（闸门第 2 环），也决定能不能在该环境起进程和内核。
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -34,7 +35,9 @@ def instance_name(service: str, env: str, process: str) -> str:
 
 def render(template: str, env: str, port: int | None = None, python: str | None = None) -> str:
     out = template.replace("{env}", env).replace("{port}", "" if port is None else str(port))
-    return out.replace("{python}", python) if python is not None else out
+    if python is not None:
+        out = out.replace("{python}", python)
+    return os.path.expanduser(out) if out.startswith("~") else out
 
 
 DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
@@ -222,7 +225,7 @@ class ServiceDef(BaseModel):
     code_paths: list[str] = Field(default_factory=list)
     repo: str = ""                            # git 远端：代码同步（内建任务 code-sync）从这里拉到 root
     ref: str = ""                             # 跟踪的分支（如 master）；各环境可在 envs[env].ref 覆盖；空 = 远端默认分支
-    python: str = ""                          # 项目解释器（可写 {env}，如 /srv/svc/board/venv/{env}/bin/python）；空 = python3
+    python: str = ""                          # 项目解释器（可写 {env}、~，如 ~/miniforge3/envs/vision-board/bin/python）；空 = python3
     env_vars: dict[str, str] = Field(default_factory=dict)   # 服务级环境变量（可写 {env}）：内核与进程都带上
     # 有名字的地址（可写 {env}）：线上部署的页面 / API、本机副本的端口……给 agent 看，也可在 mcp 配置里用 {url:名字} 引用
     urls: dict[str, str] = Field(default_factory=dict)

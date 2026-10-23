@@ -173,17 +173,17 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
         ))}
       </nav>
       <div className="min-w-0 space-y-4 pb-20">
-        <Section id="basic" icon={<LuSettings />} title="基本信息" description="路径与解释器里可以写 {env}：每个环境一份代码（如 /srv/svc/vision-board/code/{env}），各环境可以停在不同的提交上。代码目录用于读代码、校验记忆新鲜度（引用的文件改过即过期）">
+        <Section id="basic" icon={<LuSettings />} title="基本信息" description="路径与解释器里可以写 {env}：每个环境一份代码（如 ~/svc/vision-board/code/{env}，~ 是平台用户的 home），各环境可以停在不同的提交上。代码目录用于读代码、校验记忆新鲜度（引用的文件改过即过期）">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="显示名"><Input value={draft.title} onChange={(e) => set("title", e.target.value)} /></Field>
-            <Field label="部署目录" help="agent 只读访问；可含 {env}"><Input mono value={draft.root} placeholder="/srv/svc/xxx/code/{env}" onChange={(e) => set("root", e.target.value)} /></Field>
+            <Field label="部署目录" help="agent 只读访问；可含 {env}"><Input mono value={draft.root} placeholder="~/svc/xxx/code/{env}" onChange={(e) => set("root", e.target.value)} /></Field>
             <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={draft.description} onChange={(e) => set("description", e.target.value)} /></Field>
             <Field label="代码仓库" help="git 远端；配了才能同步代码（服务页「代码同步」，开着代码跟踪时定时自动看远端）"><Input mono value={draft.repo} onChange={(e) => set("repo", e.target.value)} placeholder="git@gitlab.ipa.zs:vision/xxx.git" /></Field>
             <Field label="跟踪分支" help="代码同步对齐到它的最新提交（如 master）；各环境可在「环境」里覆盖"><Input mono value={draft.ref} onChange={(e) => set("ref", e.target.value)} placeholder="远端默认分支" /></Field>
-            <Field label="代码目录" help="回车添加；缺省 = 部署目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="/srv/svc/xxx/code/{env}" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
+            <Field label="代码目录" help="回车添加；缺省 = 部署目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="~/svc/xxx/code/{env}" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
             <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="172.24.16.100" /></Field>
             <Field label="项目 Python" help={`${PYTHON_HELP}；可按环境覆盖`}>
-              <Input mono value={draft.python} onChange={(e) => set("python", e.target.value.trim())} placeholder="/opt/conda/envs/xxx/bin/python" />
+              <Input mono value={draft.python} onChange={(e) => set("python", e.target.value.trim())} placeholder="~/miniforge3/envs/xxx/bin/python" />
             </Field>
             <Field label="环境变量" className="md:col-span-2" error={varsError}
               help="服务级，项目内核与所有进程都带上（进程自己的变量叠加在上面）；值里可以写 {env}。不支持 ${VAR}：口令写进该环境的配置文件">
@@ -203,9 +203,9 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           <div className="space-y-2">
             {draft.configs.map((c, i) => (
               <div key={i} className="grid grid-cols-[1fr_auto_1fr_170px_auto] items-center gap-2">
-                <Input mono value={c.template} placeholder="/srv/svc/x/conf/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, template: e.target.value } : x)))} />
+                <Input mono value={c.template} placeholder="~/svc/x/conf/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, template: e.target.value } : x)))} />
                 <span className="text-fg-3">→</span>
-                <Input mono value={c.canonical} placeholder="/srv/svc/x/code/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, canonical: e.target.value } : x)))} />
+                <Input mono value={c.canonical} placeholder="~/svc/x/code/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, canonical: e.target.value } : x)))} />
                 <Input mono value={c.upstream ?? ""} placeholder="上游，如 .env.template" aria-label="上游（仓库内路径）"
                   onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, upstream: e.target.value.trim() || null } : x)))} />
                 <Button variant="ghost" size="icon-sm" aria-label="删除这个配置文件" onClick={() => set("configs", draft.configs.filter((_, j) => j !== i))}><LuTrash2 /></Button>

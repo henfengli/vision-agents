@@ -235,7 +235,7 @@ export interface Service extends Ledger {
   code_paths: string[];
   repo: string;          // git 远端：代码同步从这里拉
   ref: string;           // 默认跟踪的分支
-  python: string;        // 项目解释器，可含 {env}（如 /opt/conda/envs/vision-board/bin/python）；空 = python3
+  python: string;        // 项目解释器，可含 {env}，~ 开头 = 平台用户的 home（如 ~/miniforge3/envs/vision-board/bin/python）；空 = python3
   env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核与进程都带上；不支持 ${VAR}
   /** 有名字的地址：可写 {env} 与 {port:进程名}（如 local: "http://127.0.0.1:{port:server}"）；mcp 配置里用 {url:名字} 引用 */
   urls: Record<string, string>;

@@ -64,7 +64,7 @@ env_specific：结论只在 {env} 环境成立（比如这个环境特有的配�
 口径、代码逻辑、表结构这类各环境都一样的写 false。拿不准写 false。
 
 严格输出 JSON：
-[{{"kind": "fact", "key": "metric:total_fee", "content": "...", "code_path": "/srv/svc/board/code/{env}/...", "env_specific": false}},
+[{{"kind": "fact", "key": "metric:total_fee", "content": "...", "code_path": "/home/agent/svc/vision-board/code/{env}/...", "env_specific": false}},
  {{"kind": "lesson", "category": "code|data|infra|upstream", "conclusion": "...", "env_specific": false}}]"""
 
 HANDOFF_SUMMARY = """把以下这次任务记录整理成"交接摘要"，供下次同类问题的新会话直接续用。

@@ -1,6 +1,6 @@
 """命令行入口。
 
-    agent-platform serve [--host 127.0.0.1] [--port 8100] [--no-worker]   接口 + 控制台（默认同进程跑 worker）
+    agent-platform serve [--host H] [--port P] [--no-worker]   接口 + 控制台（默认同进程跑 worker；监听默认取部署配置 listen）
     agent-platform worker                                                  只跑 worker：执行队列、定时、维护循环
     agent-platform check                                                   读配置、连库、播种，然后退出
 
@@ -24,11 +24,18 @@ def app():
 
 
 def _serve(args) -> None:
+    import os
+
     import uvicorn
 
     from .api import create_app
-    uvicorn.run(create_app(load_settings(), worker=not args.no_worker), host=args.host, port=args.port,
-                log_level="info", proxy_headers=True)
+    settings = load_settings()
+    listen = settings.listen
+    tls = {}
+    if listen.tls_cert and listen.tls_key:      # 没有反代时直接 HTTPS
+        tls = {"ssl_certfile": os.path.expanduser(listen.tls_cert), "ssl_keyfile": os.path.expanduser(listen.tls_key)}
+    uvicorn.run(create_app(settings, worker=not args.no_worker), host=args.host or listen.host,
+                port=args.port or listen.port, log_level="info", proxy_headers=True, **tls)
 
 
 def _worker(_args) -> None:
@@ -73,8 +80,8 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="agent-platform")
     sub = ap.add_subparsers(dest="cmd", required=True)
     serve = sub.add_parser("serve", help="接口 + 控制台")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8100)
+    serve.add_argument("--host", help="默认取部署配置 listen.host（127.0.0.1）")
+    serve.add_argument("--port", type=int, help="默认取部署配置 listen.port（8100）")
     serve.add_argument("--no-worker", action="store_true", help="worker 单独部署时用")
     serve.set_defaults(fn=_serve)
     sub.add_parser("worker", help="只跑 worker").set_defaults(fn=_worker)

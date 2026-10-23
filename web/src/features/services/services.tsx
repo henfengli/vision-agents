@@ -131,7 +131,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
           <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Vision Report" /></Field>
         </div>
         <Field label="部署目录" help="agent 只读访问；读代码、配置、日志都从这里出发。每个环境一份代码时写 {env}">
-          <Input mono value={root} onChange={(e) => setRoot(e.target.value)} placeholder="/srv/svc/vision-report/code/{env}" />
+          <Input mono value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/svc/vision-report/code/{env}" />
         </Field>
         <Field label="说明"><Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="一句话说明这个项目做什么" /></Field>
         <button type="submit" hidden />
