@@ -2,7 +2,7 @@
  * 运行页三个标签：
  * - 运行：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上；环境默认跟随顶栏，每页条数取个人偏好。
  * - 反馈：大家点的 👍👎（默认只看 👎），见 feedback-inbox.tsx。
- * - 回归：拿被 👎 的运行用当前定义重放、看问题改好没有，见 replays.tsx。
+ * - 回归重放：拿被 👎 的运行用当前定义重跑、看问题改好没有，见 replays.tsx。
  */
 import { LuActivity, LuChevronLeft, LuChevronRight, LuFlaskConical, LuMessageSquareWarning, LuRefreshCw } from "react-icons/lu";
 
@@ -23,11 +23,11 @@ import { ReplayList } from "./replays";
 import { RunsTable } from "./runs-table";
 
 const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
-  { value: "", label: "全部" }, { value: "running", label: "运行中" }, { value: "failed", label: "失败" },
-  { value: "awaiting_approval", label: "待审批" }, { value: "success", label: "成功" }, { value: "cancelled", label: "已取消" },
+  { value: "", label: "全部" }, { value: "running", label: "运行中" }, { value: "queued", label: "排队中" }, { value: "failed", label: "失败" },
+  { value: "success", label: "成功" }, { value: "cancelled", label: "已取消" },
 ];
 
-const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"];
+const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay", "watch"];
 
 type View = "runs" | "feedback" | "replays";
 
@@ -38,11 +38,11 @@ export function RunsPage() {
   const view: View = s.view === "feedback" || s.view === "replays" ? s.view : "runs";
   return (
     <Page wide>
-      <PageHeader title="运行" description="每一次执行的事实记录：钉死任务 / 角色版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义后在「回归」里拿 👎 过的运行重放验证" />
+      <PageHeader title="运行" description="每一次执行的事实记录：配方钉死用到的每样定义的版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义后在「回归重放」里拿 👎 过的运行重跑验证" />
       <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
-        { value: "replays", label: "回归", icon: <LuFlaskConical /> },
+        { value: "replays", label: "回归重放", icon: <LuFlaskConical /> },
       ]} />
       {view === "runs" ? <RunList /> : view === "feedback" ? <FeedbackInbox s={s} set={(patch) => setS(patch)} /> : <ReplayList />}
     </Page>
@@ -81,7 +81,7 @@ function RunList() {
           <Segmented size="sm" value={s.hours ?? ""} onChange={(v) => set({ hours: v || undefined })} options={[
             { value: "1", label: "1h" }, { value: "24", label: "24h" }, { value: "72", label: "3d" }, { value: "168", label: "7d" }, { value: "", label: "全部" },
           ]} />
-          <SearchInput value={s.q ?? ""} onChange={(v) => set({ q: v || undefined })} placeholder="run id 或问题关键词" className="w-60" />
+          <SearchInput value={s.q ?? ""} onChange={(v) => set({ q: v || undefined })} placeholder="运行 id 或问题关键词" className="w-60" />
           <div className="ml-auto flex items-center gap-2 text-xs text-fg-3">
             {ui.autoRefresh && <><Dot tone="ok" pulse /> 实时</>}
             {data && <span>共 {data.total} 条</span>}
@@ -117,10 +117,10 @@ function RunList() {
   );
 }
 
-/** 发起方 = API 密钥名（事件也是推事件那把密钥）/ 控制台用户 / schedule。管理员能列出全部密钥 */
+/** 发起方 = API 密钥名（事件也是推事件那把密钥）/ 控制台用户 / schedule / code-watch（代码跟踪） */
 function CallerFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { data: meta } = useMeta();
   const { data: keys } = useApiKeys();
-  const names = new Set([...(keys ?? []).map((k) => k.name), meta?.me.name ?? "", "schedule", value].filter(Boolean));
+  const names = new Set([meta?.me.name ?? "", ...(keys ?? []).filter((k) => !k.revoked_at).map((k) => k.name), "schedule", "code-watch", value].filter(Boolean));
   return <FilterSelect label="发起方" allLabel="全部" value={value} onChange={onChange} options={[...names].map((n) => ({ value: n, label: n }))} />;
 }

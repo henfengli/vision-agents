@@ -1,20 +1,22 @@
 """工具目录：每个工具只定义一次，两个出口——
 - langchain_tools(names)：给模型的 LangChain 工具（角色白名单之内）
-- host_tools(names)：给 run_code 桩函数的原生 async callable（同一实现）
+- host_tools(names)：同一批实现的原生 async callable，在 py 项目内核里以同名函数出现（内核 → 宿主 RPC）
 
 所有工具从 RunScope 取"当前服务×环境"，签名里没有 service/env：
-py 在本服务本环境的项目内核里执行，sql_query 只能查本服务本环境的只读库，
-service_ctl 只能启停本服务本环境的进程。危险操作统一过 Gatekeeper（设置里打开审批才生效）。
+py 在本服务本环境的项目内核里执行，db_query 只能查本服务本环境登记的只读库，
+service_ctl 只能启停本服务本环境声明过的进程。
 
-deepagents 的文件工具（read_file/write_file/edit_file/ls/grep/glob）由框架中间件注入，
-根目录是 scratch（与 bash 的工作目录同一块），不在本目录里登记、不受白名单控制。
+工具集刻意收敛：读写文件用 bash（工作目录可写，服务代码只读），编排多个工具用 py（内核里直接调），
+不另设文件工具和代码编排工具。
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -26,16 +28,14 @@ from ...services import inspect as svc_inspect
 from ...services.kernel import KernelError, KernelManager, kernel_key
 from ...store import assets as assets_store
 from .. import scope as run_scope
-from ..approvals import ApprovalRejected, Gatekeeper
 from . import bash as bash_mod
+from . import db as db_mod
 from . import hostinfo
-from . import run_code as run_code_mod
-from . import sql as sql_mod
 
 log = logging.getLogger(__name__)
 
-FILE_TOOLS = ("read_file", "write_file", "edit_file", "ls", "grep", "glob")
 ASSET_KINDS = ("procedure", "script", "query", "baseline")
+ALIASES = {"sql_query": "db_query"}       # 旧角色定义里的写法
 
 Fn = Callable[..., Awaitable[str]]
 
@@ -54,10 +54,9 @@ class ToolInfo:
 
 
 class Toolbox:
-    def __init__(self, settings: Settings, gate: Gatekeeper, notifier: Notifier, controller: Any = None,
+    def __init__(self, settings: Settings, notifier: Notifier | None, controller: Any = None,
                  mcp_tools: list | None = None, kernels: KernelManager | None = None):
         self._s = settings
-        self._gate = gate
         self._ctl = controller
         self._notifier = notifier
         self._kernels = kernels
@@ -69,7 +68,18 @@ class Toolbox:
     # —— 目录 ——
 
     def _add(self, fn: Fn, title: str, group: str, dangerous: bool = False, summary: str = "") -> None:
-        self._fns[fn.__name__] = fn
+        @functools.wraps(fn)
+        async def guarded(*args: Any, **kwargs: Any) -> str:
+            # 工具里没料到的异常不能炸掉整次运行：如实告诉模型，让它换个做法
+            try:
+                return await fn(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.exception("工具 %s 出错", fn.__name__)
+                return f"[工具出错] {fn.__name__}：{type(e).__name__}: {str(e)[:500]}"
+
+        self._fns[fn.__name__] = guarded
         doc = (fn.__doc__ or "").strip().splitlines()
         self._info[fn.__name__] = ToolInfo(fn.__name__, title, summary or (doc[0] if doc else ""), group, dangerous)
 
@@ -95,17 +105,18 @@ class Toolbox:
             elif n.startswith("mcp:"):
                 items = [k for k, t in self._mcp.items() if (t.metadata or {}).get("mcp_server") == n[4:]]
             else:
-                items = [n]
+                items = [ALIASES.get(n, n)]
             out += [x for x in items if x not in out]
         return out
 
     def unknown(self, names: list[str]) -> list[str]:
         servers = set(self.mcp_servers())
-        return [n for n in names if n not in self.names and n not in FILE_TOOLS and n != "*"
+        return [n for n in names if ALIASES.get(n, n) not in self.names and n != "*"
                 and not (n.startswith("mcp:") and n[4:] in servers)]
 
     def langchain_tools(self, names: list[str], extra: list | None = None) -> list:
-        """角色白名单里的工具，加上 extra（运行所在服务的 MCP 工具；和白名单重名的以白名单为准）。"""
+        """角色白名单里的工具，加上 extra（运行所在服务的 MCP 工具；和白名单重名的以白名单为准）。
+        未登记的名字（比如旧定义里的 run_code、read_file）忽略。"""
         from langchain_core.tools import tool
 
         out = []
@@ -114,35 +125,33 @@ class Toolbox:
                 out.append(tool(self._fns[n]))
             elif n in self._mcp:
                 out.append(self._mcp[n])
-            elif n not in FILE_TOOLS:
-                log.warning("角色声明了未登记的工具 %s，已忽略", n)
         taken = {t.name for t in out}
         return out + [t for t in (extra or []) if t.name not in taken]
 
-    def host_tools(self, names: list[str] | tuple[str, ...]) -> dict[str, Fn]:
+    def host_tools(self, names: list[str] | tuple[str, ...], extra: list | tuple = ()) -> dict[str, Fn]:
+        """内核里可调用的平台工具：角色白名单（py 自己除外）+ 运行所在服务的 MCP 工具。"""
         names = self.expand(names)
-        out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n != "run_code"}
+        out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n != "py"}
         out.update({n: self._mcp[n].coroutine for n in names if n in self._mcp})   # MCP 工具按关键字参数调用
+        out.update({t.name: t.coroutine for t in extra if t.name not in out and t.coroutine is not None})
         return out
 
     # —— 实现 ——
 
     def _register(self) -> None:
-        s, gate, ctl, toolbox, kernels = self._s, self._gate, self._ctl, self, self._kernels
+        s, ctl, toolbox, kernels = self._s, self._ctl, self, self._kernels
 
         async def py(code: str, timeout: int = 120, restart: bool = False) -> str:
             """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是该环境的，工作目录是部署目录，
             本环境的配置文件已在项目读的路径上，可以直接 import 项目模块、调用项目自己的函数和数据访问层
             （口径函数、ORM、dagster 资产……），用项目的方式连只读库。变量在本会话内保留，最后一个表达式的值会显示。
+            你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
+            要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
             文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）。restart=true 清空变量重新开始。"""
             sc = run_scope.current()
             if kernels is None or ctl is None or sc.view is None:
                 return "[不可用] 本运行没有关联业务服务，没有项目内核"
-            try:
-                await gate.review("py", code)
-            except ApprovalRejected as e:
-                return f"[未执行] {e}"
             key = kernel_key(sc.session_id, sc.service, sc.env)
             try:
                 spec = await ctl.runtime_spec(sc.service, sc.env)
@@ -151,33 +160,18 @@ class Toolbox:
                     methods = await assets_store.search_active(sc.env, sc.service, sc.task.split(":")[0], limit=20)
                     spec["method_paths"] = [m["path"] for m in methods if m.get("path")]
                 return await kernels.execute(key, spec, code, timeout=max(1, min(timeout, 1800)), hidden=sc.hidden,
-                                             restart=restart)
+                                             restart=restart, tools=toolbox.host_tools(sc.tools, sc.extra_tools))
             except (Rejected, KernelError) as e:
                 return f"[失败] {getattr(e, 'message', None) or e}"
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件与密钥被遮蔽，配置用 service_info 读）、
             只有工作目录可写、调用结束后台进程全灭。默认断网；需要访问本机服务端口或内网接口时传 network=true。
-            受保护环境里命中危险模式（rm -rf、drop、kill、systemctl…）会挂起等人工审批。"""
-            try:
-                await gate.review("bash", command)
-            except ApprovalRejected as e:
-                return f"[未执行] {e}"
+            输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
             r = await asyncio.to_thread(bash_mod.run_command, command, max(1, min(timeout, 600)),
                                         s.scratch_dir, None, network, sc.hidden)
             return bash_mod.format_result(r)
-
-        async def run_code(code: str, timeout: int = 120) -> str:
-            """写一段 Python 一次编排多个工具：角色可用的工具都以同名函数提供（如 sql_query(sql)），
-            可循环/分支；中间数据不进上下文，只有 print 的内容返回。代码在沙箱内执行。"""
-            try:
-                await gate.review("run_code", code)
-            except ApprovalRejected as e:
-                return f"[未执行] {e}"
-            sc = run_scope.current()
-            return await run_code_mod.execute_code(code, toolbox.host_tools(sc.tools), s.scratch_dir,
-                                                   timeout=max(1, min(timeout, 600)), hidden=sc.hidden)
 
         async def service_info(what: str = "overview", path: str = "") -> str:
             """查看本次运行所在服务×环境。what：overview（目录/配置文件/进程总览）、
@@ -228,11 +222,6 @@ class Toolbox:
                     return "[参数] action 须为 status/start/stop/restart/logs"
                 if action in ("start", "restart"):
                     await ctl.ensure_startable(sc.service, sc.env)
-                if await gate.required(sc.protected):
-                    await gate.hold(kind="process", title=f"进程{action} · {sc.service}/{process}@{sc.env}",
-                                    detail=f"运行 {sc.run_id} 请求 {action} {sc.service}/{process}（环境 {sc.env}）",
-                                    payload={"service": sc.service, "env": sc.env, "process": process,
-                                             "action": action, "executor": "run"})
                 by = f"run:{sc.run_id}"
                 if action in ("stop", "restart"):
                     await ctl.stop(sc.service, sc.env, process, by=by)
@@ -241,22 +230,30 @@ class Toolbox:
                 i = await ctl.get(sc.service, sc.env, process)
                 return f"{action} 完成：{i['state']}" + (f"，端口 {i['port']}" if i["port"] else "") \
                     + (f"，租约到 {i['lease_until']}" if i["lease_until"] else "")
-            except ApprovalRejected as e:
-                return f"[未执行] {e}"
             except Rejected as e:
                 return f"[失败] {e.message}"
 
-        async def sql_query(sql: str) -> str:
-            """在本服务本环境的只读库执行 SELECT / WITH / EXPLAIN（自动限时、限 200 行，报错结构化返回）。"""
+        async def db_query(query: str, db: str = "") -> str:
+            """查本服务本环境登记的只读库（库名与类型见 [运行环境]）。query：一条 SQL（PostgreSQL / MySQL / MariaDB /
+            Doris / ClickHouse，用该库自己的方言）；MongoDB 写 JSON：{"collection": "c", "filter": {...}, "sort": {...},
+            "limit": 100}、{"collection": "c", "pipeline": [...]}、{"collection": "c", "count": {...}}、{"collections": true}。
+            db：库名，只登记了一个库时可省略。只读、单条语句、限时 30 秒。
+            结果超过 20 行时全部写进工作目录下的文件（CSV / JSONL），这里只返回行数、列与前 20 行；
+            要细看就用 bash（head / grep / awk）或 py（pandas.read_csv）读那个文件，别把整份打印出来。
+            看表结构：PG 查 information_schema，MySQL / Doris / ClickHouse 用 SHOW TABLES / DESCRIBE 表名。"""
             sc = run_scope.current()
-            dsn = sc.view.readonly_dsn if sc.view else None
-            if not dsn:
-                return f"[未配置] 服务 {sc.service or '—'} 在 {sc.env} 没有只读库"
+            dbs = sc.view.databases if sc.view else {}
+            if not dbs:
+                return f"[未配置] 服务 {sc.service or '—'} 在 {sc.env} 没有登记只读库"
+            name = db or (next(iter(dbs)) if len(dbs) == 1 else "")
+            if name not in dbs:
+                return f"[参数] db 须为 {'、'.join(dbs)} 之一"
             try:
-                dsn = credentials.expand(dsn)
+                url = credentials.expand(dbs[name])
             except credentials.MissingSecret as e:
-                return f"[未配置] 只读库口令取不到：{e}"
-            return await sql_mod.run_query(dsn, sql)
+                return f"[未配置] 库 {name} 的口令取不到：{e}"
+            out_dir = os.path.join(s.scratch_dir, "queries", sc.run_id)
+            return await db_mod.run_query(name, url, query, out_dir)
 
         async def host_metrics() -> str:
             """本服务本环境部署主机的实时资源：内存使用率、系统负载、根盘使用率（Grafana / node_exporter）。"""
@@ -326,13 +323,14 @@ class Toolbox:
             return f"已发送到渠道 {channel}"
 
         if kernels is not None and ctl is not None:
-            self._add(py, "项目内核", "service", summary="在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数，变量会话内保留")
-        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、工作目录可写、默认断网")
-        self._add(run_code, "代码编排", "core", dangerous=True, summary="CodeAct：一段 Python 编排多个工具调用")
+            self._add(py, "项目内核", "service",
+                      summary="在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数、直接调其他工具，变量会话内保留")
+        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、工作目录可写、默认断网；读写文件也用它")
         self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置文件内容、git 状态")
         if ctl is not None and ctl.backend != "off":
-            self._add(service_ctl, "进程启停", "service", dangerous=True, summary="启停本服务本环境的进程（受保护环境需审批）")
-        self._add(sql_query, "只读 SQL", "service", summary="本服务本环境的只读库，自动限时限量")
+            self._add(service_ctl, "进程启停", "service", dangerous=True, summary="启停本服务本环境声明过的进程（带租约）")
+        self._add(db_query, "只读查库", "service",
+                  summary="本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件")
         if s.grafana is not None:
             self._add(host_metrics, "主机指标", "service", summary="部署主机内存/负载/根盘（Grafana）")
         self._add(save_asset, "沉淀方法", "memory", summary="把可复用的方法/脚本/查询/基线存入记忆")

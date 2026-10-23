@@ -43,7 +43,7 @@ async def submit(body: RunBody, idempotency_key: str | None = Header(None), rt: 
     req = RunRequest(**body.model_dump(exclude={"wait"}))
     trigger = RunTrigger(type="web" if who.kind == "user" else "api", caller=who.name)
     accepted = await rt.submitter.submit(req, trigger=trigger, caller=who, idempotency_key=idempotency_key)
-    if body.wait and accepted.status not in ("awaiting_approval",):
+    if body.wait:
         run = await rt.submitter.wait(accepted.run_id, body.wait)
         accepted.status, accepted.output = run["status"], run.get("output")
     return accepted.dump()

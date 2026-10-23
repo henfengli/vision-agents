@@ -61,15 +61,19 @@ class Registry:
 
     async def config(self, section: str) -> Any:
         """某节平台配置；从没保存过就是默认值。"""
+        return (await self.config_versioned(section))[0]
+
+    async def config_versioned(self, section: str) -> tuple[Any, int]:
+        """某节平台配置 + 它的版本号（从没保存过是 0）。运行的配方记平台提示词用的是第几版。"""
         model = CONFIG_SECTIONS[section]
         row = await self.store.get("config", section)
         if row is None:
-            return model()
+            return model(), 0
         try:
-            return model.model_validate(row["definition"])
+            return model.model_validate(row["definition"]), row["version"]
         except ValidationError:
             log.exception("平台配置 %s v%s 不合法，按默认值处理", section, row["version"])
-            return model()
+            return model(), row["version"]
 
     async def config_entry(self, section: str) -> dict:
         row = await self.store.get("config", section)

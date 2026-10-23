@@ -1,7 +1,7 @@
 """通知路由：平台里发生了什么 → 按设置里的规则 → 发到哪些渠道。
 
 两个入口：
-- emit(event, …)   平台事件（运行失败/成功、等待审批、进程退出），按规则匹配渠道，可能一个都不发
+- emit(event, …)   平台事件（运行失败/成功、进程退出、负反馈、配置待更新），按规则匹配渠道，可能一个都不发
 - send(channel, …) 指名发到某个渠道（任务的结果投递、agent 的 notify 工具）
 
 通知是旁路：发送失败只记日志，不影响运行本身。
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 class Message:
     title: str
     text: str                  # markdown
-    link: str | None = None    # 控制台链接（"去审批" / "查看运行"）
+    link: str | None = None    # 控制台链接（如 "查看运行"）
     link_title: str = "查看详情"
 
 

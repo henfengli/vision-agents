@@ -27,7 +27,7 @@ export function Dialog({ open, onClose, title, description, children, footer, si
       {/* 面板限高：内容长时只滚动中间，标题与底部按钮始终可见 */}
       <div className="fixed inset-0 flex items-start justify-center p-4 pt-[8vh]">
         <DialogPanel transition className={cn("flex max-h-[calc(92dvh-2rem)] w-full flex-col rounded-xl border border-line bg-raised shadow-[var(--shadow-pop)] transition duration-150 data-[closed]:scale-[0.98] data-[closed]:opacity-0", w, className)}>
-          <div className="flex items-start gap-3 px-5 pt-4">
+          <div className={cn("flex items-start gap-3 px-5 pt-4", !children && "pb-4")}>
             <div className="min-w-0 flex-1">
               <DialogTitle className="text-[15px] font-semibold text-fg">{title}</DialogTitle>
               {description && <div className="mt-1 text-[12.5px] text-fg-3">{description}</div>}

@@ -5,7 +5,6 @@ from __future__ import annotations
 from .. import credentials
 from ..domain import EnvDef
 from ..registry import Entry
-from ..store import approvals as approvals_store
 from ..store import assets as assets_store
 from ..store import feedback as feedback_store
 from ..store import knowledge as knowledge_store
@@ -46,7 +45,7 @@ def list_item(run: dict, titles: dict[str, str]) -> dict:
 
 
 async def run_detail(run: dict, titles: dict[str, str]) -> dict:
-    """Run：列表字段 + 输入输出 + 待审批 + 上下文（注入了什么、沉淀了什么、同会话的其他轮）。
+    """Run：列表字段 + 输入输出 + 上下文（注入了什么、沉淀了什么、同会话的其他轮）。
     replay_of：回归重放出来的运行，指向被重放的原运行。"""
     run_id = run["run_id"]
     events = await runs.events(run_id)
@@ -56,10 +55,10 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
     return {
         **list_item(run, titles),
         "task_version": run.get("task_version"), "role_version": run.get("role_version"),
+        "recipe": run.get("recipe"),
         "replay_of": run["trigger"]["id"] if run["trigger"]["type"] == "replay" else None,
         "input": run["input"], "output": run.get("output"), "error_code": run.get("error_code"),
         "memory": run.get("memory") or {},
-        "pending_approval": await approvals_store.pending_of_run(run_id),
         "feedback": await feedback_store.for_run(run_id),        # 所有人对整次与各步的评价
         "context": {
             "profile": (stage.get("profile") or {}).get("content", ""),
@@ -79,5 +78,6 @@ def chat_turn(run: dict, events: list[dict], feedback: dict | None) -> dict:
     output = run.get("output") or {}
     return {"run_id": run["run_id"], "question": run["input"].get("question", run["summary"]),
             "answer": output.get("answer") or output.get("error"), "status": run["status"],
-            "events": [e for e in events if e["kind"] in ("stage", "thought", "tool_call", "tool_result", "approval")],
+            "events": [e for e in events
+                       if e["kind"] in ("stage", "thought", "model_call", "tool_call", "tool_result")],
             "feedback": feedback, "created_at": run["created_at"]}

@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
 import { Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea } from "@/components/ui/form";
 import { Dialog, Tooltip, toast } from "@/components/ui/overlay";
-import { Badge, Card, Empty, SkeletonRows } from "@/components/ui/primitives";
+import { Badge, Card, Empty, ErrorState, SkeletonRows } from "@/components/ui/primitives";
 import { describeCron } from "@/lib/cron";
 import { cn } from "@/lib/cn";
 import { ago, pct, until } from "@/lib/format";
@@ -27,7 +27,7 @@ const objectOf = (name: string) => name.split(":")[1] ?? name;
 
 export function TasksPage() {
   const [search, setSearch] = useSearch<{ service: string; trigger: string; q: string; run: string; subs: string }>();
-  const { data: tasks, loading } = useTasks();
+  const { data: tasks, loading, error, refetch } = useTasks();
   const { data: services } = useServices();
   const [creating, setCreating] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
@@ -85,8 +85,10 @@ export function TasksPage() {
         <span className="ml-auto text-xs text-fg-3">{tasks ? `${rows.length} 个任务 · ${subCount} 个子任务` : ""}</span>
       </div>
       <Card>
-        {loading ? <SkeletonRows rows={8} /> : groups.length === 0 ? (
-          <Empty icon={<LuListTodo />} title="没有匹配的任务" action={<Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建任务</Button>} />
+        {error && !tasks ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={8} /> : groups.length === 0 ? (
+          <Empty icon={<LuListTodo />} title={q || search.service || search.trigger ? "没有匹配的任务" : "还没有任务"}
+            description={q || search.service || search.trigger ? "换个关键词或放宽筛选" : undefined}
+            action={<Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建任务</Button>} />
         ) : (
           <TasksTable groups={groups} expandAll={expandAll || !!q} />
         )}
@@ -302,10 +304,10 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
     <Dialog open={open} onClose={onClose} title="新建任务" size="lg"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid || (form === "agent" && !role)} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="任务名" required help="小写字母、数字、连字符；子任务请在父任务页里建" error={name && !valid ? "格式不对" : null}>
-          <Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="daily-inspection" />
+        <Field label="任务名" required help="小写字母、数字、连字符；子任务请在父任务页里建" error={name && !valid ? "格式不对：小写字母开头，可含数字与连字符" : null}>
+          <Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="web-inspection" />
         </Field>
-        <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="日常巡检" /></Field>
+        <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Web 日常巡检" /></Field>
         <Field label="归属" help="专属任务只在该服务上跑；通用任务调用时指定服务；平台任务不涉及业务服务">
           <Select value={service} onChange={setService} options={[
             ...(services ?? []).map((s) => ({ value: s.name, label: s.title, hint: "专属 · " + s.name })),

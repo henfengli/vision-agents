@@ -9,7 +9,7 @@ import { LuArrowDown, LuArrowUp, LuCheck, LuCopy, LuPlus, LuTrash2 } from "react
 
 import { cn } from "@/lib/cn";
 import { Button } from "./button";
-import { Tooltip, toast } from "./overlay";
+import { Tooltip } from "./overlay";
 
 // ———————— Tabs（受控；页面用 URL 参数驱动） ————————
 
@@ -18,6 +18,8 @@ export interface TabDef<T extends string = string> {
   label: ReactNode;
   count?: number | null;
   icon?: ReactNode;
+  /** 悬停提示，说明 count 数的是什么 */
+  hint?: string;
 }
 
 export function Tabs<T extends string>({ value, onChange, tabs, className, size = "md" }: {
@@ -28,7 +30,7 @@ export function Tabs<T extends string>({ value, onChange, tabs, className, size 
       {tabs.map((t) => {
         const active = t.value === value;
         return (
-          <button key={t.value} role="tab" aria-selected={active} type="button" onClick={() => onChange(t.value)}
+          <button key={t.value} role="tab" aria-selected={active} type="button" onClick={() => onChange(t.value)} title={t.hint}
             className={cn("relative -mb-px inline-flex items-center gap-1.5 border-b-2 font-medium transition-colors [&_svg]:size-3.5",
               size === "sm" ? "h-8 px-2 text-[12.5px]" : "h-9 px-2.5 text-[13px]",
               active ? "border-accent text-fg" : "border-transparent text-fg-3 hover:text-fg")}>
@@ -94,7 +96,7 @@ export function CopyButton({ text, className, label }: { text: string; className
   };
   return (
     <Tooltip content={done ? "已复制" : label ?? "复制"}>
-      <button type="button" onClick={copy} className={cn("inline-flex size-6 items-center justify-center rounded text-fg-3 hover:bg-hover hover:text-fg", className)}>
+      <button type="button" onClick={copy} aria-label={label ?? "复制"} className={cn("inline-flex size-6 items-center justify-center rounded text-fg-3 hover:bg-hover hover:text-fg", className)}>
         {done ? <LuCheck className="size-3.5 text-ok" /> : <LuCopy className="size-3.5" />}
       </button>
     </Tooltip>
@@ -124,8 +126,16 @@ export function CodeBlock({ code, className, maxHeight = 360, wrap, title }: { c
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// GFM 的裸网址识别会一路吃进紧跟的全角标点和中文（“https://x/），测试”整段成了链接）。
+// 网址紧贴中文/全角字符时改写成 <网址>，让链接在边界处结束；代码块与行内代码不动。
+const CJK = "\\u3000-\\u303f\\u3400-\\u9fff\\uf900-\\ufaff\\uff00-\\uffef";
+const BARE_URL_BEFORE_CJK = new RegExp(`(^|[^<(\\[\\w/])(https?:\\/\\/[^\\s<>${CJK}]+)(?=[${CJK}])`, "g");
+function fenceCjkUrls(text: string) {
+  return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, i) => (i % 2 ? part : part.replace(BARE_URL_BEFORE_CJK, "$1<$2>"))).join("");
+}
+
 export function Markdown({ text, className }: { text: string; className?: string }) {
-  const html = useMemo(() => DOMPurify.sanitize(marked.parse(text, { async: false }) as string), [text]);
+  const html = useMemo(() => DOMPurify.sanitize(marked.parse(fenceCjkUrls(text), { async: false }) as string), [text]);
   return <div className={cn("prose-ap", className)} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
@@ -230,8 +240,4 @@ export function stableYaml(v: unknown, indent = 0): string {
   }
   if (typeof v === "string") return v.includes("\n") ? "|\n" + v.split("\n").map((l) => pad + "  " + l).join("\n") : JSON.stringify(v);
   return String(v);
-}
-
-export function copyText(text: string) {
-  navigator.clipboard?.writeText(text).then(() => toast("已复制"), () => toast.error("复制失败"));
 }

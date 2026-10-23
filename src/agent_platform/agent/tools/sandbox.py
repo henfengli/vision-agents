@@ -42,7 +42,7 @@ def has_bwrap() -> bool:
 
 def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False, hidden: tuple[str, ...] = ()) -> list[str]:
     """给命令行套 bwrap 沙箱；不可用时原样返回（退化不失效，但进程
-    清理与隔离保证全部消失——生产必须装 bwrap，install.sh 会检查告警）。"""
+    清理与隔离保证全部消失——生产必须装 bwrap，install-user.sh 会检查告警）。"""
     if not has_bwrap():
         return argv
     args = [

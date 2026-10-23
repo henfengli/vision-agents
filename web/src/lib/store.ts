@@ -11,13 +11,16 @@ export interface UiState {
   theme: Theme;
   env: string;
   sidebarCollapsed: boolean;
-  landing: "/" | "/runs" | "/chat" | "/approvals" | "/services";
+  landing: (typeof LANDINGS)[number];
   timeFormat: "relative" | "absolute";
   density: "comfortable" | "compact";
   autoRefresh: boolean;          // 关掉后列表不再定时刷新（运行中的详情页与对话仍实时）
   pageSize: 30 | 50 | 100;
   chat: { service: string; env: string; task: string; recall: boolean; save: boolean };
 }
+
+/** "打开控制台时进入"可选的页面 */
+export const LANDINGS = ["/", "/runs", "/chat", "/services", "/tasks"] as const;
 
 const KEY = "ap.ui";
 export const UI_DEFAULTS: UiState = {
@@ -28,6 +31,8 @@ export const UI_DEFAULTS: UiState = {
 function read(): UiState {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    // 旧版本存过的首页可能已经不存在（比如审批页）：回到概览
+    if (!LANDINGS.includes(saved.landing)) delete saved.landing;
     return { ...UI_DEFAULTS, ...saved, chat: { ...UI_DEFAULTS.chat, ...(saved.chat ?? {}) } };
   } catch {
     return UI_DEFAULTS;

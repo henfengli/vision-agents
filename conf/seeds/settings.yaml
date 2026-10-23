@@ -4,13 +4,9 @@
 envs:
   default: test                       # 请求不带 env 时打到测试环境：生产必须显式指定
   items:
-    - {name: prod, title: 生产, protected: true, color: red, description: 线上环境（配置里是只读账户）}
-    - {name: test, title: 测试, color: amber, description: 集成测试环境，数据每周从生产脱敏同步}
-    - {name: dev, title: 开发, color: blue, description: 开发自测}
-
-approvals:
-  required_in: "off"                  # 关闭；以后让 agent 执行变更类任务时改成 protected（受保护环境审批）或 all
-  timeout_minutes: 30
+    - {name: prod, title: 国内生产, protected: true, color: red, description: 对应线上生产部署；本机副本的配置用只读账户}
+    - {name: test, title: 国内测试, color: amber, description: 对应线上测试部署}
+    - {name: dev, title: 开发, color: blue, description: 只有本机副本，没有线上部署；开发自测用}
 
 notifications:
   channels:
@@ -19,10 +15,10 @@ notifications:
       url: "https://alert-notification.ipa.zs/robot/send"
       token: "${DINGTALK_ACCESS_TOKEN}"
   rules:
-    - {name: 审批提醒, events: [approval_requested], channel: default}
-    - {name: 自动运行失败, events: [run_failed], triggers: [schedule, event], channel: default}
+    - {name: 自动运行失败, events: [run_failed], triggers: [schedule, event, watch], channel: default}
     - {name: 进程停止, events: [process_stopped], envs: [prod], channel: default}
     - {name: 负反馈, events: [feedback_negative], channel: default}
+    - {name: 配置待更新, events: [config_outdated], channel: default}
 
 memory:
   recall: true
@@ -34,3 +30,7 @@ memory:
 processes:
   default_lease_hours: 2
   max_lease_hours: 24
+
+# 平台提示词（基础约定、子代理约定、上下文压缩、记忆沉淀、交接摘要、回归判定）：
+# 留空 = 把内置默认文本（domain/prompts.py）写成第一版，之后在 设置 → 提示词 里改，每次运行的配方记着用的第几版
+prompts: {}

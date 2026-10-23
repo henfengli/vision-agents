@@ -1,10 +1,10 @@
 /**
- * 任务定义编辑器：基本 / 输入 / 触发 / 结果与去重 / 记忆 / 环境 / 处理器（内建任务）。
+ * 任务定义编辑器：基本 / 输入 / 触发 / 结果与去重 / 结构化输出 / 记忆 / 环境 / 处理器（内建任务）。
  * 分节表单 + 本地草稿 + 未保存提示条。档案不在这里——它是内容不是结构，在「档案」标签里就地编辑。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  LuBrain, LuCalendarClock, LuCode, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuSend, LuSettings, LuTrash2,
+  LuBraces, LuBrain, LuCalendarClock, LuCode, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuSend, LuSettings, LuTrash2,
   LuWebhook, LuZap,
 } from "react-icons/lu";
 
@@ -19,15 +19,38 @@ import { Menu, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader } from "@/components/ui/primitives";
 import { describeCron, nextRuns, validateCron } from "@/lib/cron";
 import { cn } from "@/lib/cn";
-import { dayjs } from "@/lib/format";
+import { dayjs, seconds } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 
-type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s" | "handler">;
+type Draft = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s" | "handler" | "output_schema">;
 
 const toDraft = (t: TaskSummary): Draft => structuredClone({
   title: t.title, description: t.description, service: t.service, role: t.role, form: t.form, input: t.input, envs: t.envs,
   triggers: t.triggers, deliver: t.deliver, dedup: t.dedup, memory: t.memory ?? {}, timeout_s: t.timeout_s, handler: t.handler ?? null,
+  output_schema: t.output_schema ?? null,
 });
+
+/** 结构化输出的 JSON 文本：空 = 不要求（null）；顶层 type 等 schema 规则由服务端校验（422） */
+const schemaText = (t: TaskSummary) => (t.output_schema ? JSON.stringify(t.output_schema, null, 2) : "");
+function parseSchema(text: string): { value: Record<string, unknown> | null; error: string | null } {
+  if (!text.trim()) return { value: null, error: null };
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { value: null, error: "须是一个 JSON 对象" };
+    return { value: v as Record<string, unknown>, error: null };
+  } catch (e) {
+    return { value: null, error: `不是合法的 JSON：${(e as Error).message}` };
+  }
+}
+
+const SCHEMA_PLACEHOLDER = `{
+  "type": "object",
+  "properties": {
+    "category": { "enum": ["code", "data", "infra", "upstream"] },
+    "root_cause": { "type": "string" }
+  },
+  "required": ["category", "root_cause"]
+}`;
 
 function Section({ id, icon, title, description, children, actions }: { id: string; icon: ReactNode; title: string; description: ReactNode; children: ReactNode; actions?: ReactNode }) {
   return (
@@ -40,14 +63,21 @@ function Section({ id, icon, title, description, children, actions }: { id: stri
 
 export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onSaved: () => void }) {
   const [d, setD] = useState<Draft>(() => toDraft(task));
-  useEffect(() => setD(toDraft(task)), [task.version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [schema, setSchema] = useState(() => schemaText(task));
+  useEffect(() => { setD(toDraft(task)); setSchema(schemaText(task)); }, [task.version]); // eslint-disable-line react-hooks/exhaustive-deps
   const { data: roles } = useRoles();
   const { data: services } = useServices();
   const { data: envs } = useEnvs();
   const { data: meta } = useMeta();
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((s) => ({ ...s, [k]: v }));
-  const dirty = useMemo(() => JSON.stringify(d) !== JSON.stringify(toDraft(task)), [d, task]);
+  const schemaError = parseSchema(schema).error;
+  const dirty = useMemo(() => JSON.stringify(d) !== JSON.stringify(toDraft(task)) || schema !== schemaText(task), [d, task, schema]);
   const triggerErrors = d.triggers.some((t) => t.type === "schedule" && (validateCron(t.cron) || !t.envs.length || (d.service === "*" && !t.service)));
+  const editSchema = (text: string) => {
+    setSchema(text);
+    const r = parseSchema(text);
+    if (!r.error) set("output_schema", r.value);
+  };
 
   const save = useMutation(async () => {
     try {
@@ -62,7 +92,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
   const envNames = (envs ?? []).map((e) => e.name);
   const generic = d.service === "*";
-  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["deliver", "结果与去重"], ["memory", "记忆"], ["envs", "环境"], ...(d.form === "builtin" ? [["advanced", "处理器"]] : [])];
+  const nav = [["basic", "基本"], ["input", "输入"], ["triggers", "触发"], ["deliver", "结果与去重"], ...(d.form !== "builtin" ? [["output", "结构化输出"]] : []), ["memory", "记忆"], ["envs", "环境"], ...(d.form === "builtin" ? [["advanced", "处理器"]] : [])];
 
   return (
     <div className="grid gap-5 lg:grid-cols-[160px_1fr]">
@@ -115,7 +145,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
             <Field label="结果投递" className="md:col-span-2">
               <DeliverEditor value={d.deliver} channels={meta?.channels ?? []} onChange={(v) => set("deliver", v)} />
             </Field>
-            <Field label="超时（秒）" help="单次执行上限，最长 7200"><Input inputMode="numeric" value={d.timeout_s} onChange={(e) => set("timeout_s", Math.min(7200, Number(e.target.value.replace(/\D/g, "")) || 0))} /></Field>
+            <Field label="超时（秒）" help={`单次执行上限，最长 7200${d.timeout_s ? `；当前 ${seconds(d.timeout_s)}` : ""}`}><Input inputMode="numeric" value={d.timeout_s} onChange={(e) => set("timeout_s", Math.min(7200, Number(e.target.value.replace(/\D/g, "")) || 0))} /></Field>
             <Field label="去重" help="时间窗内同键的成功运行直接复用结果；a+b 拼接多个字段" className="md:col-span-2">
               <div className="flex flex-wrap items-center gap-3">
                 <Switch checked={!!d.dedup} onChange={(v) => set("dedup", v ? { key: Object.keys(d.input)[0] ?? "", window_s: 600 } : null)} />
@@ -129,6 +159,15 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
             </Field>
           </div>
         </Section>
+
+        {d.form !== "builtin" && (
+          <Section id="output" icon={<LuBraces />} title="结构化输出" description="给服务 / 自动化调用方用：声明了就要求 agent 最后按这份 schema 交回结果（当场校验），放在运行输出的 output.data；answer 照旧是文字结论">
+            <Field label="结构化输出（JSON Schema）" error={schemaError} help={'留空 = 不要求。顶层须是 {"type": "object", …}，保存时服务端校验'}>
+              <Textarea mono rows={Math.min(18, Math.max(6, schema.split("\n").length + 1))} value={schema} onChange={(e) => editSchema(e.target.value)}
+                placeholder={SCHEMA_PLACEHOLDER} aria-invalid={!!schemaError} />
+            </Field>
+          </Section>
+        )}
 
         <Section id="memory" icon={<LuBrain />} title="记忆" description="优先级：请求 > 任务 > 平台默认（设置 → 记忆）。跟随 = 不在任务上写死。">
           <MemoryEditor value={d.memory} onChange={(v) => set("memory", v)} />
@@ -151,8 +190,12 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
       </div>
 
       <SaveBar visible={dirty} saving={save.pending} label={`保存为 v${task.version + 1}`}
-        onSave={() => { if (triggerErrors) toast.error("还有错误没改", "检查触发器：cron、环境、通用任务的服务"); else save.mutate(undefined); }}
-        onDiscard={() => setD(toDraft(task))} />
+        onSave={() => {
+          if (triggerErrors) toast.error("还有错误没改", "检查触发器：cron、环境、通用任务的服务");
+          else if (schemaError) toast.error("还有错误没改", `结构化输出：${schemaError}`);
+          else save.mutate(undefined);
+        }}
+        onDiscard={() => { setD(toDraft(task)); setSchema(schemaText(task)); }} />
     </div>
   );
 }
@@ -174,7 +217,7 @@ function DeliverEditor({ value, channels, onChange }: { value: Deliver | null; c
         </div>
       )}
       {mode === "url" && (
-        <Input mono value={value?.url ?? ""} onChange={(e) => onChange({ url: e.target.value })} placeholder="https://board.internal/hooks/agent" />
+        <Input mono value={value?.url ?? ""} onChange={(e) => onChange({ url: e.target.value })} placeholder="https://vision-board.ipa.zs/hooks/agent" />
       )}
       {mode === "url" && <div className="text-xs text-fg-3">完成后 POST <code className="font-mono">{"{run_id, task, service, env, status, output}"}</code></div>}
     </div>
@@ -229,7 +272,7 @@ function InputSchemaEditor({ value, onChange }: { value: Record<string, InputFie
             <Input value={f.description ?? ""} onChange={(e) => update(i, k, { ...f, description: e.target.value })} placeholder="给调用方看的说明" />
             {f.type === "enum" && <Input mono value={(f.options ?? []).join(",")} onChange={(e) => update(i, k, { ...f, options: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} placeholder="选项，逗号分隔" />}
           </div>
-          <Button size="icon-sm" variant="ghost" onClick={() => onChange(Object.fromEntries(entries.filter((_, j) => j !== i)))}><LuTrash2 /></Button>
+          <Button size="icon-sm" variant="ghost" aria-label={`删除字段 ${k}`} onClick={() => onChange(Object.fromEntries(entries.filter((_, j) => j !== i)))}><LuTrash2 /></Button>
         </div>
       ))}
       <Button size="xs" icon={<LuPlus />} onClick={() => { let n = "field"; let j = 1; while (n in value) n = `field${++j}`; onChange({ ...value, [n]: { type: "str" } }); }}>添加字段</Button>
@@ -333,7 +376,7 @@ function EventEditor({ tr, input, generic, fields, onChange }: {
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="过滤" help="事件字段 → 正则，全部命中才触发（如 project ~ ^board$）">
+        <Field label="过滤" help="事件字段 → 正则，全部命中才触发（如 project ~ ^vision-board$）">
           <KeyValueEditor multiline={false} value={tr.filter ?? {}} onChange={(v) => onChange({ ...tr, filter: v })} keyPlaceholder="字段" valuePlaceholder="正则" />
         </Field>
         <Field label="字段映射" help={<>任务输入 ← 事件字段{fields.length > 0 && <>（可用：{fields.map((f) => <code key={f} className="mr-1 font-mono">{f}</code>)}）</>}</>}>
@@ -347,7 +390,7 @@ function EventEditor({ tr, input, generic, fields, onChange }: {
       </Field>
       <div>
         <div className="mb-1.5 flex items-center justify-between">
-          <div className="text-[12.5px] font-medium text-fg">规则先行 <span className="ml-1 font-normal text-fg-3">正则命中报错即直接给结论，不调模型；也会记一条 run（resolution=rule）</span></div>
+          <div className="text-[12.5px] font-medium text-fg">规则先行 <span className="ml-1 font-normal text-fg-3">正则命中报错即直接给结论，不调模型；也会记一条运行（resolution=rule）</span></div>
           <Button size="xs" icon={<LuPlus />} onClick={() => onChange({ ...tr, rules: [...rules, { pattern: "", category: "infra", conclusion: "" }] })}>添加规则</Button>
         </div>
         {rules.length === 0 ? <div className="rounded-md border border-dashed border-line px-3 py-3 text-center text-xs text-fg-3">没有规则：所有事件都交给 agent</div> : (
@@ -358,7 +401,7 @@ function EventEditor({ tr, input, generic, fields, onChange }: {
                 <Select value={r.category} onChange={(v) => setRule(i, { ...r, category: v })} options={["infra", "data", "code", "upstream"].map((c) => ({ value: c, label: c }))} />
                 <Input value={r.conclusion} onChange={(e) => setRule(i, { ...r, conclusion: e.target.value })} placeholder="结论" />
                 <Switch size="sm" checked={r.enabled !== false} onChange={(v) => setRule(i, { ...r, enabled: v })} />
-                <Button size="icon-xs" variant="ghost" onClick={() => setRule(i, null)}><LuTrash2 /></Button>
+                <Button size="icon-xs" variant="ghost" aria-label="删除这条规则" onClick={() => setRule(i, null)}><LuTrash2 /></Button>
               </div>
             ))}
           </div>

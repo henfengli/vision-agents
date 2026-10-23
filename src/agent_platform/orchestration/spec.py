@@ -25,7 +25,6 @@ class RunSpec(BaseModel):
     question: str = ""
     trigger: RunTrigger = Field(default_factory=RunTrigger)
     timeout_s: int = 300
-    approval_budget_s: int = 0                 # 等人工审批的时间不算进 timeout_s（按一次审批的超时预留）
     deliver: dict[str, str] | None = None      # {"channel": 名} 或 {"url": 地址}；空 = 只等调用方来取
     recall: bool = True                        # 记忆开关（请求 > 任务 > 平台默认）
     save: bool = True
@@ -33,6 +32,7 @@ class RunSpec(BaseModel):
     rule_output: dict[str, Any] | None = None  # form=rule：命中规则给出的结论
     resume: bool = False                       # 断点续跑：沿用 thread，不重新拼提示
     correction: bool = False                   # 纠正：成功后取代本会话上一轮的沉淀
+    output_schema: dict[str, Any] | None = None  # 任务声明的结构化输出（JSON Schema）
 
     # —— prepare 补齐 ——
     prompt: str = ""

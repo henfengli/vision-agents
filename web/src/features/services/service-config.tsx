@@ -3,35 +3,61 @@
  * 本地草稿 + 未保存提示条；保存 = 新版本，5 秒内热生效。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { LuFileText, LuGlobe, LuPlug, LuPlus, LuScrollText, LuServer, LuSettings, LuTrash2, LuLayers } from "react-icons/lu";
+import {
+  LuDatabase, LuFileText, LuGitPullRequestArrow, LuGlobe, LuPlug, LuPlus, LuRotateCcw, LuScrollText, LuServer, LuSettings, LuTrash2, LuLayers,
+} from "react-icons/lu";
 
 import { api, useEnvs } from "@/api/hooks";
-import type { McpConnection, ProcessDef, Service, ServiceEnvOverride, ServiceSummary } from "@/api/types";
+import type { McpConnection, ProcessDef, Service, ServiceEnvOverride, ServiceSummary, SyncDef, SyncStep } from "@/api/types";
+import { DatabasesEditor, DatabasesHint } from "@/components/databases";
 import { SaveBar } from "@/components/save-bar";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor, type KvSuggestion } from "@/components/ui/data";
-import { Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
+import { Checkbox, Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
 import { toast } from "@/components/ui/overlay";
 import { Card, CardHeader } from "@/components/ui/primitives";
+import { databasesError } from "@/lib/db";
 import { invalidate, useMutation } from "@/lib/query";
 
 export const PROFILE_SUGGESTIONS: KvSuggestion[] = [
-  { key: "conventions", label: "口径与术语", placeholder: "如：GMV 不含退款；total_fee 单位是分" },
-  { key: "no_go", label: "禁区", placeholder: "如：prod 不手工触发 backfill" },
-  { key: "env_notes", label: "环境差异", placeholder: "如：test 数据是脱敏快照，金额乘了随机系数" },
-  { key: "pitfalls", label: "常见坑", placeholder: "如：上游 03:00 后完成会级联失败" },
+  { key: "conventions", label: "口径与术语", placeholder: "如：每个环境一份 settings-{环境}.py；收益按交易日统计" },
+  { key: "no_go", label: "禁区", placeholder: "如：本机副本不起 dagster-daemon、不手工物化生产资产" },
+  { key: "env_notes", label: "环境差异", placeholder: "如：国内生产 172.24.16.100 是 docker 部署；本机副本直接用 conda 环境跑" },
+  { key: "pitfalls", label: "常见坑", placeholder: "如：上游资产没完成会级联失败，先看上游" },
 ];
 
 /** mcp 单独编辑（每个 server 一段 JSON 文本，保存时才解析），不放进草稿 */
-type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "repo" | "ref" | "python" | "env_vars" | "urls" | "hosts" | "readonly_dsn" | "configs" | "processes" | "envs" | "profile">;
+type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "repo" | "ref" | "python" | "env_vars" | "urls" | "hosts" | "databases" | "configs" | "processes" | "sync" | "envs" | "profile">;
+
+/** 与后端 SyncDef 的默认一致：不写 sync = 自动跟踪 + 装依赖两步 */
+export const defaultSync = (): SyncDef => ({
+  auto: true,
+  steps: [
+    { title: "安装依赖（requirements.txt）", when: ["requirements.txt"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"] },
+    { title: "安装项目（pyproject.toml）", when: ["pyproject.toml"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-e", "."] },
+  ],
+});
 
 function toDraft(s: ServiceSummary): Draft {
   return structuredClone({
     title: s.title, description: s.description, root: s.root, code_paths: s.code_paths, repo: s.repo, ref: s.ref,
-    python: s.python ?? "", env_vars: s.env_vars ?? {}, urls: s.urls ?? {}, hosts: s.hosts, readonly_dsn: s.readonly_dsn, configs: s.configs,
-    processes: s.processes, envs: s.envs, profile: s.profile,
+    python: s.python ?? "", env_vars: s.env_vars ?? {}, urls: s.urls ?? {}, hosts: s.hosts, databases: s.databases ?? {}, configs: s.configs,
+    processes: s.processes, sync: s.sync ?? defaultSync(), envs: s.envs, profile: s.profile,
   });
+}
+
+// ———————— 代码同步：触发文件与命令每行一项（编辑时保留空行，保存时去掉） ————————
+
+const cleanSync = (s: SyncDef): SyncDef => ({
+  ...s, steps: s.steps.map((x) => ({ ...x, title: x.title.trim(), when: x.when.map((w) => w.trim()).filter(Boolean), run: x.run.map((a) => a.trim()).filter(Boolean) })),
+});
+
+function syncError(s: SyncDef): string | null {
+  const i = s.steps.findIndex((x) => !x.when.some((w) => w.trim()) || !x.run.some((a) => a.trim()));
+  if (i >= 0) return `同步步骤 ${i + 1}：触发文件和命令都不能为空`;
+  const j = s.steps.findIndex((x) => !(x.timeout_s > 0));
+  return j >= 0 ? `同步步骤 ${j + 1}：超时要大于 0 秒` : null;
 }
 
 // ———————— MCP：每个 server 一块，名字 + 连接配置（JSON） ————————
@@ -66,7 +92,6 @@ function mcpErrors(rows: McpRow[]): Record<number, string> {
   return out;
 }
 
-const DSN_HELP = "口令写成 ${VAR}，真实值放 secrets.env；直接写的口令回显为 ***，原样保存表示不改";
 const URL_SUGGESTIONS: KvSuggestion[] = [
   { key: "site", label: "site 线上页面" }, { key: "local", label: "local 本机副本" }, { key: "deployed", label: "deployed 线上服务" },
 ];
@@ -101,6 +126,12 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(toDraft(svc)) || !sameRows(mcpRows, mcpBase), [draft, svc, mcpRows, mcpBase]);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const varsError = envVarsError(draft.env_vars);
+  const stepsError = syncError(draft.sync);
+  const dbError = databasesError(draft.databases)
+    ?? Object.entries(draft.envs).map(([env, o]) => { const e = databasesError(o.databases, true); return e && `环境 ${env}：${e}`; }).find(Boolean) ?? null;
+  const setStep = (i: number, patch: Partial<SyncStep> | null) =>
+    set("sync", { ...draft.sync, steps: patch ? draft.sync.steps.map((x, j) => (j === i ? { ...x, ...patch } : x)) : draft.sync.steps.filter((_, j) => j !== i) });
+  const isDefaultSteps = JSON.stringify(draft.sync.steps) === JSON.stringify(defaultSync().steps);
   const mcpErr = mcpErrors(mcpRows);
   const setRow = (id: number, patch: Partial<McpRow>) => setMcpRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const addRow = (kind: "stdio" | "http") => {
@@ -113,7 +144,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
   const save = useMutation(async () => {
     try {
       const mcp = Object.fromEntries(mcpRows.map((r) => [r.name, JSON.parse(r.text) as McpConnection]));
-      const res = await api.update<ServiceSummary>("services", svc.name, { ...draft, mcp });
+      const res = await api.update<ServiceSummary>("services", svc.name, { ...draft, sync: cleanSync(draft.sync), mcp });
       toast(`已保存为 v${res.version}`, { description: "5 秒内对新运行生效" });
       invalidate("services");
       onSaved();
@@ -136,26 +167,23 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
   return (
     <div className="grid gap-5 lg:grid-cols-[180px_1fr]">
       <nav className="sticky top-4 hidden h-fit space-y-0.5 text-[12.5px] lg:block">
-        {[["basic", "基本信息"], ["configs", "配置文件"], ["processes", "进程"], ["urls", "地址"], ["mcp", "MCP"], ["envs", "环境覆盖"], ["profile", "服务档案"]].map(([id, label]) => (
+        {[["basic", "基本信息"], ["databases", "只读库"], ["configs", "配置文件"], ["sync", "代码同步"], ["processes", "进程"], ["urls", "地址"], ["mcp", "MCP"], ["envs", "环境"], ["profile", "服务档案"]].map(([id, label]) => (
           <a key={id} href={`#${id}`} onClick={(e) => { e.preventDefault(); document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); }}
             className="block rounded-md px-2.5 py-1.5 text-fg-2 hover:bg-hover hover:text-fg">{label}</a>
         ))}
       </nav>
       <div className="min-w-0 space-y-4 pb-20">
-        <Section id="basic" icon={<LuSettings />} title="基本信息" description="路径与解释器里可以写 {env}：每个环境一份代码（如 /srv/svc/board/code/{env}）、一份 venv，各环境停在不同的提交上。代码目录用于读代码、校验记忆新鲜度（引用的文件改过即过期）">
+        <Section id="basic" icon={<LuSettings />} title="基本信息" description="路径与解释器里可以写 {env}：每个环境一份代码（如 /srv/svc/vision-board/code/{env}），各环境可以停在不同的提交上。代码目录用于读代码、校验记忆新鲜度（引用的文件改过即过期）">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="显示名"><Input value={draft.title} onChange={(e) => set("title", e.target.value)} /></Field>
             <Field label="部署目录" help="agent 只读访问；可含 {env}"><Input mono value={draft.root} placeholder="/srv/svc/xxx/code/{env}" onChange={(e) => set("root", e.target.value)} /></Field>
             <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={draft.description} onChange={(e) => set("description", e.target.value)} /></Field>
-            <Field label="代码仓库" help="git 远端；配了才能在服务页「同步代码」，GitLab 部署事件也会自动同步"><Input mono value={draft.repo} onChange={(e) => set("repo", e.target.value)} placeholder="git@gitlab.internal:group/xxx.git" /></Field>
-            <Field label="跟踪分支" help="代码同步的默认目标；各环境可在「环境」里覆盖"><Input mono value={draft.ref} onChange={(e) => set("ref", e.target.value)} placeholder="远端默认分支" /></Field>
-            <Field label="代码目录" help="回车添加；缺省 = 部署目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="/srv/xxx" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
-            <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="10.0.0.11" /></Field>
+            <Field label="代码仓库" help="git 远端；配了才能同步代码（服务页「代码同步」，开着代码跟踪时定时自动看远端）"><Input mono value={draft.repo} onChange={(e) => set("repo", e.target.value)} placeholder="git@gitlab.ipa.zs:vision/xxx.git" /></Field>
+            <Field label="跟踪分支" help="代码同步对齐到它的最新提交（如 master）；各环境可在「环境」里覆盖"><Input mono value={draft.ref} onChange={(e) => set("ref", e.target.value)} placeholder="远端默认分支" /></Field>
+            <Field label="代码目录" help="回车添加；缺省 = 部署目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="/srv/svc/xxx/code/{env}" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
+            <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="172.24.16.100" /></Field>
             <Field label="项目 Python" help={`${PYTHON_HELP}；可按环境覆盖`}>
-              <Input mono value={draft.python} onChange={(e) => set("python", e.target.value.trim())} placeholder="/srv/svc/xxx/venv/{env}/bin/python" />
-            </Field>
-            <Field label="只读库 DSN" help={`sql_query 的数据源，只给只读账号；可按环境覆盖。${DSN_HELP}`} className="md:col-span-2">
-              <Input mono value={draft.readonly_dsn ?? ""} onChange={(e) => set("readonly_dsn", e.target.value || null)} placeholder="postgresql://ro:${RO_PASSWORD}@host:5432/db" />
+              <Input mono value={draft.python} onChange={(e) => set("python", e.target.value.trim())} placeholder="/opt/conda/envs/xxx/bin/python" />
             </Field>
             <Field label="环境变量" className="md:col-span-2" error={varsError}
               help="服务级，项目内核与所有进程都带上（进程自己的变量叠加在上面）；值里可以写 {env}。不支持 ${VAR}：口令写进该环境的配置文件">
@@ -164,18 +192,62 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="configs" icon={<LuFileText />} title="配置文件" description="固定路径 ← 每环境一份的模板（{env} 占位）。启动进程时选中环境的文件 bind 到固定路径，其余环境的文件遮蔽，进程不可能读错环境；agent 的 bash 里所有配置文件都被遮蔽，只能经 service_info 读本环境（密钥打码）。">
+        <Section id="databases" icon={<LuDatabase />} title="只读库" description="db_query 能查的库：{库名: 连接串}，agent 调用时 db 填库名（只登记了一个时可省略）。各环境在下面「环境」里按库名覆盖，比如生产换成生产库的地址与口令。">
+          <div className="space-y-2">
+            <DatabasesEditor value={draft.databases} onChange={(v) => set("databases", v)} />
+            <DatabasesHint />
+          </div>
+        </Section>
+
+        <Section id="configs" icon={<LuFileText />} title="配置文件" description="固定路径 ← 每环境一份的模板（{env} 占位）。启动进程时选中环境的文件 bind 到固定路径，其余环境的文件遮蔽，进程不可能读错环境；agent 的 bash 里所有配置文件都被遮蔽，只能经 service_info 读本环境（密钥打码）。上游：仓库里和它对应的文件（相对代码目录，如 .env.template），代码同步发现它变了就提示「配置待更新」；不填时固定路径在代码目录里就是它自己。">
           <div className="space-y-2">
             {draft.configs.map((c, i) => (
-              <div key={i} className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2">
+              <div key={i} className="grid grid-cols-[1fr_auto_1fr_170px_auto] items-center gap-2">
                 <Input mono value={c.template} placeholder="/srv/svc/x/conf/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, template: e.target.value } : x)))} />
                 <span className="text-fg-3">→</span>
                 <Input mono value={c.canonical} placeholder="/srv/svc/x/code/{env}/app.yaml" onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, canonical: e.target.value } : x)))} />
-                <Button variant="ghost" size="icon-sm" onClick={() => set("configs", draft.configs.filter((_, j) => j !== i))}><LuTrash2 /></Button>
+                <Input mono value={c.upstream ?? ""} placeholder="上游，如 .env.template" aria-label="上游（仓库内路径）"
+                  onChange={(e) => set("configs", draft.configs.map((x, j) => (j === i ? { ...x, upstream: e.target.value.trim() || null } : x)))} />
+                <Button variant="ghost" size="icon-sm" aria-label="删除这个配置文件" onClick={() => set("configs", draft.configs.filter((_, j) => j !== i))}><LuTrash2 /></Button>
               </div>
             ))}
             {draft.configs.some((c) => c.template && !c.template.includes("{env}")) && <div className="text-xs text-warn">模板路径里没有 {"{env}"}：所有环境会读同一个文件</div>}
             <Button size="xs" icon={<LuPlus />} onClick={() => set("configs", [...draft.configs, { canonical: "", template: "" }])}>添加配置文件</Button>
+          </div>
+        </Section>
+
+        <Section id="sync" icon={<LuGitPullRequestArrow />} title="代码同步" description="各环境的代码目录对齐到跟踪分支之后要做的步骤：触发文件自这一步上次成功以来变了才跑，失败了下次同步再跑。工作目录是代码目录，和进程跑在同一套隔离里（本环境的配置文件就位）；跑过步骤或代码变了，项目内核与在跑的进程会重启。">
+          <div className="space-y-3">
+            <Switch checked={draft.sync.auto} onChange={(auto) => set("sync", { ...draft.sync, auto })}
+              label={<span>代码跟踪 <span className="text-xs text-fg-3">每小时看一眼远端，有新提交就自动同步；关掉后只在服务页手动同步</span></span>} />
+            {draft.sync.steps.length === 0 && <div className="rounded-md border border-dashed border-line px-3 py-4 text-center text-xs text-fg-3">没有步骤：同步只拉代码</div>}
+            {draft.sync.steps.map((st, i) => (
+              <div key={i} className="rounded-lg border border-line bg-sunken/40 p-3.5">
+                <div className="grid gap-3 md:grid-cols-[1fr_140px_auto]">
+                  <Field label="名称"><Input value={st.title} placeholder={st.run.join(" ").slice(0, 60) || "如：收集静态资源"} onChange={(e) => setStep(i, { title: e.target.value })} /></Field>
+                  <Field label="超时（秒）"><Input inputMode="numeric" value={st.timeout_s || ""} placeholder="900" onChange={(e) => setStep(i, { timeout_s: Number(e.target.value.replace(/\D/g, "")) || 0 })} /></Field>
+                  <div className="flex items-end pb-0.5"><Button variant="ghost" size="icon-sm" aria-label="删除" onClick={() => setStep(i, null)}><LuTrash2 /></Button></div>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <Field label="触发文件" help="每行一个，仓库内路径，支持 ** 通配（如 **/static/**）">
+                    <Textarea mono rows={Math.min(8, Math.max(2, st.when.length))} value={st.when.join("\n")} spellCheck={false} placeholder="requirements.txt"
+                      onChange={(e) => setStep(i, { when: e.target.value.split("\n") })} />
+                  </Field>
+                  <Field label="命令" help="每行一个参数（不经 shell）；{python} = 该环境的解释器，{env} = 环境名">
+                    <Textarea mono rows={Math.min(8, Math.max(2, st.run.length))} value={st.run.join("\n")} spellCheck={false} placeholder={"{python}\nmanage.py\ncollectstatic\n--noinput"}
+                      onChange={(e) => setStep(i, { run: e.target.value.split("\n") })} />
+                  </Field>
+                </div>
+                <div className="mt-2">
+                  <Checkbox checked={st.shared} onChange={(shared) => setStep(i, { shared })} label="共享"
+                    hint="用同一个解释器的环境只做一次（装依赖）：别的环境已对同样的文件内容做过就跳过" />
+                </div>
+              </div>
+            ))}
+            <div className="flex flex-wrap gap-1.5">
+              <Button size="xs" icon={<LuPlus />} onClick={() => set("sync", { ...draft.sync, steps: [...draft.sync.steps, { title: "", when: [], run: [], shared: false, timeout_s: 900 }] })}>添加步骤</Button>
+              {!isDefaultSteps && <Button size="xs" variant="ghost" icon={<LuRotateCcw />} onClick={() => set("sync", { ...draft.sync, steps: defaultSync().steps })}>恢复默认步骤</Button>}
+            </div>
           </div>
         </Section>
 
@@ -190,7 +262,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                     <Input mono value={p.cmd.map((x) => (/\s/.test(x) ? JSON.stringify(x) : x)).join(" ")}
                       onChange={(e) => setProc(name, { ...p, cmd: (e.target.value.match(/"[^"]*"|\S+/g) ?? []).map((x) => x.replace(/^"|"$/g, "")) })} />
                   </Field>
-                  <div className="flex items-end pb-0.5"><Button variant="ghost" size="icon-sm" onClick={() => setProc(name, null)}><LuTrash2 /></Button></div>
+                  <div className="flex items-end pb-0.5"><Button variant="ghost" size="icon-sm" aria-label={`删除进程 ${name}`} onClick={() => setProc(name, null)}><LuTrash2 /></Button></div>
                 </div>
                 <div className="mt-3 grid gap-3 md:grid-cols-[180px_1fr_140px]">
                   <Field label="工作目录"><Input mono value={p.workdir ?? ""} onChange={(e) => setProc(name, { ...p, workdir: e.target.value || null })} placeholder={draft.root} /></Field>
@@ -279,14 +351,16 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                   </div>
                   {o.enabled !== false && <div className="grid gap-3 md:grid-cols-2">
                     <Field label="主机"><TagInput mono value={o.hosts ?? []} onChange={(v) => setO({ hosts: v })} placeholder={draft.hosts.join(", ") || "继承基座"} /></Field>
-                    <Field label="只读库 DSN" help={DSN_HELP}><Input mono value={o.readonly_dsn ?? ""} onChange={(ev) => setO({ readonly_dsn: ev.target.value || undefined })} placeholder={draft.readonly_dsn ?? "继承基座"} /></Field>
                     <Field label="跟踪分支"><Input mono value={o.ref ?? ""} onChange={(ev) => setO({ ref: ev.target.value || undefined })} placeholder={draft.ref || "继承基座"} /></Field>
+                    <Field label="只读库覆盖" className="md:col-span-2" help="按库名覆盖上面「只读库」里的同名项；连接串留空 = 这个环境没有这个库">
+                      <DatabasesEditor value={o.databases ?? {}} onChange={(v) => setO({ databases: v })} base={draft.databases} />
+                    </Field>
                     <Field label="解释器" help="该环境单独的 Python；空 = 用基本信息里的项目 Python">
                       <Input mono value={o.python ?? ""} onChange={(ev) => setO({ python: ev.target.value.trim() || undefined })} placeholder={draft.python || "python3（继承基座）"} />
                     </Field>
                     <Field label="地址覆盖" className="md:col-span-2" help="按名字覆盖上面「地址」里的同名项，也可以加只有这个环境才有的（如 deployed）">
                       <KeyValueEditor value={o.urls ?? {}} onChange={(v) => setO({ urls: v })} multiline={false} keyPlaceholder="名字"
-                        valuePlaceholder={`http://10.0.0.11:3000`} suggestions={Object.keys(draft.urls).filter((k) => !(k in (o.urls ?? {}))).map((k) => ({ key: k, label: k }))} />
+                        valuePlaceholder="https://xxx-test.ipa.zs/" suggestions={Object.keys(draft.urls).filter((k) => !(k in (o.urls ?? {}))).map((k) => ({ key: k, label: k }))} />
                     </Field>
                     <Field label="档案补充（只对该环境）" className="md:col-span-2">
                       <KeyValueEditor value={o.profile ?? {}} onChange={(v) => setO({ profile: v })} suggestions={PROFILE_SUGGESTIONS.slice(1, 3)} />
@@ -298,7 +372,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="profile" icon={<LuScrollText />} title="服务档案" description="置顶逐字注入该服务的所有 run，不走召回。只记代码和配置里读不出来的事实——能读出来的写进来只会过时。">
+        <Section id="profile" icon={<LuScrollText />} title="服务档案" description="置顶逐字注入该服务的所有运行，不走召回。只记代码和配置里读不出来的事实——能读出来的写进来只会过时。">
           <KeyValueEditor value={draft.profile} onChange={(v) => set("profile", v)} suggestions={PROFILE_SUGGESTIONS} />
         </Section>
       </div>
@@ -306,7 +380,8 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
       <SaveBar visible={dirty} saving={save.pending} onDiscard={discard} label={`保存为 v${svc.version + 1}`}
         onSave={() => {
           const mcpError = Object.entries(mcpErr).map(([id, msg]) => `MCP ${mcpRows.find((r) => r.id === Number(id))?.name || "?"}：${msg}`)[0];
-          if (varsError || mcpError) toast.error("还有错误没改", varsError ?? mcpError);
+          const first = varsError ?? dbError ?? stepsError ?? mcpError;
+          if (first) toast.error("还有错误没改", first);
           else save.mutate(undefined);
         }} />
     </div>

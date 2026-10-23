@@ -3,7 +3,6 @@
 安全边界由 systemd 物理保证（低权限用户、代码目录只读、仅 scratch 可写），
 本层只负责：工作目录收口、环境变量白名单（密钥不进模型上下文）、超时、输出截断。
 
-危险命令识别与人工审批的挂接在 agent/approvals.py。
 """
 
 from __future__ import annotations

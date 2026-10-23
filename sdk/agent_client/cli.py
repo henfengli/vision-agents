@@ -19,8 +19,6 @@ from .client import AgentClient, AgentError
 def _progress(ev: dict) -> None:
     if ev["type"] == "tool_call":
         print(f"  ⚙ {ev.get('tool', '?')}", flush=True)
-    elif ev["type"] == "approval" and not ev.get("decision"):
-        print(f"  ⏸ 等待审批：{ev.get('title')}", flush=True)
 
 
 def main() -> None:

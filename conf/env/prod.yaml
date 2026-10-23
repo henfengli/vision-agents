@@ -1,16 +1,17 @@
-# 生产主机：业务项目与平台同机部署，进程用 systemd 模板单元启停（deploy/agent-svc@.service）。
+# 生产主机（用户级部署，deploy/install-user.sh）：平台跑在一个普通用户的 systemd --user 里，不需要 root；
+# 业务项目与平台同机，业务进程用同一个用户的 agent-svc@.service 用户单元启停。
 db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
 root_token: "${AGENT_ROOT_TOKEN}"
 public_url: "https://agent.internal"
 
 model:
-  tokens: ["${MODEL_TOKEN_A}", "${MODEL_TOKEN_B}"]
+  tokens: ["${MODEL_TOKEN_A}"]        # 多把 key 就都列上，按请求轮换
 
 process_control:
   backend: systemd
 
-langfuse:
-  enabled: true
-  host: http://langfuse.internal:3000
-  public_key: "${LANGFUSE_PUBLIC_KEY}"
-  secret_key: "${LANGFUSE_SECRET_KEY}"
+# 有 OTLP 后端（Jaeger / Tempo / APM）时打开；口令写 secrets.env，这里用 ${VAR} 引用
+# otel:
+#   enabled: true
+#   endpoint: http://otel-collector.internal:4318/v1/traces
+#   headers: {Authorization: "Bearer ${OTEL_TOKEN}"}

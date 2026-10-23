@@ -1,5 +1,5 @@
 /**
- * 平台配置五节：环境、审批、通知、记忆、进程。对所有人生效，每次保存是一个新版本，可对比、可恢复。
+ * 平台配置五节：环境、通知、记忆、进程、提示词。对所有人生效，每次保存是一个新版本，可对比、可恢复。
  * 每页同一个套路：读当前配置 → 本地草稿 → 底部保存条 → PUT 整节。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -7,18 +7,18 @@ import { LuHistory, LuPlus, LuSend, LuTrash2 } from "react-icons/lu";
 
 import { api, useMeta, useServices, useSettings, useTasks } from "@/api/hooks";
 import type {
-  Channel, ConfigSection, ConfigSections, EnvColor, NotifyEvent, NotifyRule,
+  Channel, ConfigSection, ConfigSections, EnvColor, NotifyEvent, NotifyRule, PromptsConfig,
 } from "@/api/types";
 import { SaveBar } from "@/components/save-bar";
 import { EnvBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
-import { Checkbox, Field, Input, Segmented, Select, Switch, TagInput, Textarea } from "@/components/ui/form";
+import { Checkbox, Field, Input, Select, Switch, TagInput, Textarea } from "@/components/ui/form";
 import { Tooltip, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, Empty, Skeleton } from "@/components/ui/primitives";
+import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago } from "@/lib/format";
+import { ago, datetime } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link } from "@/lib/router";
 import { SettingRow, SettingsLayout } from "./layout";
@@ -28,7 +28,7 @@ import { SettingRow, SettingsLayout } from "./layout";
 const LEDGER = ["section", "version", "updated_by", "updated_at"];
 
 function useSection<S extends ConfigSection>(section: S) {
-  const { data } = useSettings();
+  const { data, error, refetch } = useSettings();
   const entry = data?.[section];
   const [draft, setDraft] = useState<ConfigSections[S] | null>(null);
   const pristine = useMemo(() => (entry ? Object.fromEntries(Object.entries(entry).filter(([k]) => !LEDGER.includes(k))) as ConfigSections[S] : null), [entry]);
@@ -43,7 +43,7 @@ function useSection<S extends ConfigSection>(section: S) {
       if (section === "envs" || section === "notifications") invalidate("meta");
     } catch (e) { toast.error("保存失败", (e as Error).message); }
   });
-  return { entry, draft, setDraft, dirty, save, reset: () => pristine && setDraft(structuredClone(pristine)) };
+  return { entry, draft, setDraft, dirty, save, error: data ? undefined : error, refetch, reset: () => pristine && setDraft(structuredClone(pristine)) };
 }
 
 function SectionPage<S extends ConfigSection>({ section, title, description, children }: {
@@ -55,10 +55,11 @@ function SectionPage<S extends ConfigSection>({ section, title, description, chi
   return (
     <SettingsLayout title={title} description={description}
       actions={<>
-        {s.entry && <span className="text-[12px] text-fg-3">v{s.entry.version} · {s.entry.updated_by || "默认"} · {ago(s.entry.updated_at)}</span>}
+        {s.entry && <span className="text-[12px] text-fg-3" title={s.entry.updated_at ? datetime(s.entry.updated_at, true) : undefined}>v{s.entry.version} · {s.entry.updated_by || "默认"}{s.entry.updated_at ? ` · ${ago(s.entry.updated_at)}` : ""}</span>}
         <Button icon={<LuHistory />} variant={history ? "secondary" : "ghost"} onClick={() => setHistory(!history)}>{history ? "返回编辑" : "版本"}</Button>
       </>}>
-      {history ? <VersionHistory kind={`settings/${section}`} /> : !s.draft ? <Skeleton className="h-80" /> : (
+      {history ? <VersionHistory kind={`settings/${section}`} stats={section === "prompts"} />
+        : s.error ? <Card><ErrorState error={s.error} onRetry={s.refetch} /></Card> : !s.draft ? <Skeleton className="h-80" /> : (
         <div className="space-y-4 pb-20">{children(s.draft, s.setDraft)}</div>
       )}
       <SaveBar visible={s.dirty && !history} saving={s.save.pending} onDiscard={s.reset} onSave={() => s.save.mutate(undefined)} label={`保存为 v${(s.entry?.version ?? 0) + 1}`} />
@@ -96,7 +97,7 @@ export function EnvsSettingsPage() {
                             className={cn("size-5 rounded-full ring-offset-2 ring-offset-panel", COLOR_DOT[c], e.color === c && "ring-2 ring-accent")} />
                         ))}
                       </div>
-                      <Tooltip content="审批开在「只在受保护环境」时，这里的危险命令与进程启停要人放行（设置 → 审批）">
+                      <Tooltip content="只是标记：控制台上醒目显示（环境徽标带盾牌、运行前提示），不拦任何操作">
                         <span><Switch checked={e.protected} onChange={(v) => patch({ protected: v })} label={<span className="text-[12.5px]">受保护</span>} /></span>
                       </Tooltip>
                       <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-fg-2">
@@ -112,7 +113,7 @@ export function EnvsSettingsPage() {
                 );
               })}
             </div>
-            <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">受保护：审批开在「只在受保护环境」时，这里的危险命令与进程启停要人放行（见 <Link to="/settings/approvals" className="text-accent hover:underline">审批</Link>，默认关闭）。</div>
+            <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">受保护只是标记：环境徽标带盾牌、运行任务时提醒一句，不拦任何操作。请求不带环境时用「默认」的那个。</div>
           </Card>
           <Card>
             <CardHeader title="各服务的启用情况" description="点服务名去服务页修改（服务 → 环境 → 启用）" />
@@ -137,56 +138,16 @@ export function EnvsSettingsPage() {
   );
 }
 
-// ———————— 审批 ————————
-
-export function ApprovalsSettingsPage() {
-  const [sample, setSample] = useState("rm -rf /srv/board/logs/2026-09-*");
-  return (
-    <SectionPage section="approvals" title="审批" description="运行中途的人工门：agent 要执行危险命令、启停进程（含服务页上的手动启停）时挂起等人放行，超时视同拒绝。默认关闭——配置是只读账户、文件系统只读，agent 目前做不了真正危险的事；让它执行变更类任务时再打开。">
-      {(d, set) => {
-        const hit = d.danger_patterns.find((p) => { try { return new RegExp(p, "i").test(sample); } catch { return false; } });
-        const off = d.required_in === "off";
-        return (
-          <>
-            <Card>
-              <div className="divide-y divide-line">
-                <SettingRow title="哪些环境要审批" hint="只在受保护环境：prod 这类（设置 → 环境 → 受保护）；所有环境：test/dev 里的危险命令与进程启停也要审批">
-                  <Segmented value={d.required_in} onChange={(v) => set({ ...d, required_in: v })} options={[
-                    { value: "off", label: "关闭（默认）" }, { value: "protected", label: "只在受保护环境" }, { value: "all", label: "所有环境" },
-                  ]} />
-                </SettingRow>
-                <SettingRow title="等待时长" hint="超过这个时间没人处理，视同拒绝">
-                  <div className={cn("flex items-center gap-2", off && "opacity-60")}><Input className="w-20" inputMode="numeric" disabled={off} value={d.timeout_minutes} onChange={(e) => set({ ...d, timeout_minutes: Number(e.target.value) || 1 })} /><span className="text-[12.5px] text-fg-3">分钟</span></div>
-                </SettingRow>
-              </div>
-            </Card>
-            <Card>
-              <CardHeader title="危险命令模式" description={off ? "审批关闭时不生效；打开后 bash、run_code / py 的代码、service_ctl 都按它判断" : "正则，不区分大小写；bash、run_code / py 的代码、service_ctl 都按它判断"} />
-              <div className="space-y-4 p-4">
-                <Textarea mono rows={Math.max(5, d.danger_patterns.length + 1)} value={d.danger_patterns.join("\n")}
-                  onChange={(e) => set({ ...d, danger_patterns: e.target.value.split("\n").filter((x, i, a) => x.trim() || i < a.length - 1) })} />
-                <Field label="试一下" help={hit ? <span className="text-warn">命中 <code className="font-mono">{hit}</code> → {off ? "审批关闭，仍直接执行" : "挂起等审批"}</span> : <span className="text-ok">未命中 → 直接执行</span>}>
-                  <Input mono value={sample} onChange={(e) => setSample(e.target.value)} />
-                </Field>
-              </div>
-            </Card>
-          </>
-        );
-      }}
-    </SectionPage>
-  );
-}
-
 // ———————— 通知 ————————
 
 const EVENTS: { value: NotifyEvent; label: string; hint: string }[] = [
   { value: "run_failed", label: "运行失败", hint: "" },
   { value: "run_succeeded", label: "运行成功", hint: "量大，建议加范围" },
-  { value: "approval_requested", label: "等待审批", hint: "" },
   { value: "process_stopped", label: "进程停止", hint: "租约到期或异常退出" },
   { value: "feedback_negative", label: "收到负反馈", hint: "有人对运行或某一步点了 👎，带问题类型与说明" },
+  { value: "config_outdated", label: "配置待更新", hint: "代码同步发现配置文件的上游（如 settings.py）变了，带 diff；每次上游变化只发一条" },
 ];
-const TRIGGERS = ["api", "chat", "schedule", "event", "web"];
+const TRIGGERS = ["api", "chat", "schedule", "event", "web", "watch"];
 
 export function NotificationsSettingsPage() {
   const { data: services } = useServices();
@@ -241,8 +202,8 @@ export function NotificationsSettingsPage() {
                         <span className="text-[12.5px] text-fg-3">发到</span>
                         <Select className="w-40" value={r.channel} onChange={(channel) => setRule(i, { ...r, channel })} options={channels.map(([n, c]) => ({ value: n, label: n, hint: c.type === "dingtalk" ? "钉钉" : "Webhook" }))} />
                         <div className="ml-auto flex items-center gap-2">
-                          <Switch checked={r.enabled} onChange={(enabled) => setRule(i, { ...r, enabled })} size="sm" />
-                          <Button size="icon-sm" variant="ghost" onClick={() => setRule(i, null)}><LuTrash2 /></Button>
+                          <Switch checked={r.enabled} onChange={(enabled) => setRule(i, { ...r, enabled })} size="sm" label={<span className="text-[12px] text-fg-3">{r.enabled ? "启用" : "已关闭"}</span>} />
+                          <Button size="icon-sm" variant="ghost" aria-label={`删除规则 ${r.name}`} onClick={() => setRule(i, null)}><LuTrash2 /></Button>
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-x-5 gap-y-1">
@@ -273,15 +234,15 @@ export function NotificationsSettingsPage() {
 
 export function MemorySettingsPage() {
   return (
-    <SectionPage section="memory" title="记忆" description="运行前召回什么、运行后沉淀什么的平台默认。任务可以单独覆盖（任务 → 设置），单次请求也可以再覆盖（请求 > 任务 > 这里）。">
+    <SectionPage section="memory" title="记忆" description="运行前召回什么、运行后沉淀什么的平台默认。任务可以单独覆盖（任务 → 定义 → 记忆），单次请求也可以再覆盖（请求 > 任务 > 这里）。">
       {(d, set) => (
         <Card>
           <div className="divide-y divide-line">
             <SettingRow title="召回" hint="运行前按问题检索记忆（事实、同类报错的教训）与方法，拼进提示"><Switch checked={d.recall} onChange={(recall) => set({ ...d, recall })} /></SettingRow>
             <SettingRow title="沉淀" hint="运行结束后用一次轻量模型调用提炼可复用的事实与报错教训"><Switch checked={d.save} onChange={(save) => set({ ...d, save })} /></SettingRow>
             <SettingRow title="会话交接摘要" hint="同一会话里，每轮结束写「结论 / 被否方案 / 当前约束 / 未决问题」，下一个同类会话召回置顶"><Switch checked={d.handoff_summary} onChange={(handoff_summary) => set({ ...d, handoff_summary })} /></SettingRow>
-            <SettingRow title="每次最多召回知识" hint="条"><Input className="w-20" inputMode="numeric" value={d.knowledge_limit} onChange={(e) => set({ ...d, knowledge_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>
-            <SettingRow title="每次最多注入方法" hint="条；本任务的方法优先，其次服务通用"><Input className="w-20" inputMode="numeric" value={d.asset_limit} onChange={(e) => set({ ...d, asset_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>
+            <SettingRow title="每次最多召回记忆" hint="条（0~20）；事实与教训合计"><Input className="w-20" inputMode="numeric" value={d.knowledge_limit} onChange={(e) => set({ ...d, knowledge_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>
+            <SettingRow title="每次最多注入方法" hint="条（0~20）；本任务的方法优先，其次服务通用"><Input className="w-20" inputMode="numeric" value={d.asset_limit} onChange={(e) => set({ ...d, asset_limit: Math.min(20, Number(e.target.value) || 0) })} /></SettingRow>
           </div>
         </Card>
       )}
@@ -307,12 +268,49 @@ export function ProcessesSettingsPage() {
           <Card>
             <CardHeader title="执行方式" description="部署配置决定（conf/env/*.yaml 的 process_control.backend），这里只读" />
             <div className="px-4 py-3.5 text-[13px] text-fg-2">
-              当前：<Badge tone={backend === "off" ? "idle" : "accent"}>{backend === "systemd" ? "systemd 模板单元 agent-svc@<服务:环境:进程>" : backend === "local" ? "本机子进程（开发）" : "关闭"}</Badge>
+              当前：<Badge tone={backend === "off" ? "idle" : "accent"}>{backend === "systemd" ? "systemd --user 模板单元 agent-svc@<服务:环境:进程>" : backend === "local" ? "本机子进程（开发）" : "关闭"}</Badge>
               <p className="mt-2 text-[12.5px] leading-relaxed text-fg-3">启动时平台写好启动规格，svcrun 在 bwrap 里把该环境的配置文件绑定到服务读的固定路径、遮蔽其他环境的配置，再拉起业务进程——一套部署，按环境起。</p>
             </div>
           </Card>
         </>
       )}
+    </SectionPage>
+  );
+}
+
+// ———————— 提示词 ————————
+
+const PROMPTS: { key: keyof PromptsConfig; label: string; hint: string; rows: number }[] = [
+  { key: "base", label: "平台基础约定", hint: "每个主 agent 的系统提示开头，后面接角色提示词", rows: 14 },
+  { key: "subagent", label: "子代理约定", hint: "每个子代理的系统提示开头，后面接子代理角色的提示词", rows: 6 },
+  { key: "compaction", label: "上下文压缩", hint: "对话历史太长时压缩成摘要。占位：{messages}（必须有）", rows: 12 },
+  { key: "distill", label: "记忆沉淀", hint: "运行后提炼事实与教训。占位：{service} {env} {task} {input} {output}", rows: 14 },
+  { key: "handoff_summary", label: "交接摘要", hint: "会话每轮结束写交接摘要。占位：{task} {input} {output}", rows: 12 },
+  { key: "replay_judge", label: "回归判定", hint: "回归重放判定新答案改好没有。占位：{task} {where} {input} {old} {issues} {new}", rows: 14 },
+];
+
+export function PromptsSettingsPage() {
+  return (
+    <SectionPage section="prompts" title="提示词" description={<>所有角色共用的系统提示开头，以及平台自己发起的辅助模型调用。改了下一次运行就用新的；每次运行的配方里记着用的是第几版，「版本」里能看每版跑出来的效果。带占位的几段是模板，字面花括号写成 <code className="font-mono">{"{{ }}"}</code>，保存时校验。</>}>
+      {(d, set) => {
+        const field = (p: (typeof PROMPTS)[number]) => (
+          <Field key={p.key} label={p.label} help={p.hint}>
+            <Textarea mono rows={p.rows} value={d[p.key]} onChange={(e) => set({ ...d, [p.key]: e.target.value })} />
+          </Field>
+        );
+        return (
+          <>
+            <Card>
+              <CardHeader title="系统提示" description="接在角色提示词之前的平台约定" />
+              <div className="space-y-4 p-4">{PROMPTS.slice(0, 2).map(field)}</div>
+            </Card>
+            <Card>
+              <CardHeader title="辅助模型调用" description="平台自己发起的模型调用；沉淀、交接、判定在运行的时间线里标着用途" />
+              <div className="space-y-4 p-4">{PROMPTS.slice(2).map(field)}</div>
+            </Card>
+          </>
+        );
+      }}
     </SectionPage>
   );
 }

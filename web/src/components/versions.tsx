@@ -4,10 +4,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { LuGitCompare, LuHistory, LuRotateCcw } from "react-icons/lu";
 
-import { api, useVersions, type DefinitionPath } from "@/api/hooks";
-import type { ConfigSection, Version } from "@/api/types";
+import { api, useVersions, useVersionStats, type DefinitionPath, type StatsPath } from "@/api/hooks";
+import type { ConfigSection, Version, VersionStat } from "@/api/types";
 import { cn } from "@/lib/cn";
-import { ago, datetime } from "@/lib/format";
+import { ago, datetime, duration, pct } from "@/lib/format";
 import { invalidate } from "@/lib/query";
 import { Button } from "./ui/button";
 import { DiffView, stableYaml } from "./ui/data";
@@ -20,8 +20,29 @@ function clean(def: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(def).filter(([k]) => !STRIP.has(k)));
 }
 
-export function VersionHistory({ kind, name, onRestored }: { kind: DefinitionPath | `settings/${ConfigSection}`; name?: string; onRestored?: () => void }) {
+const kTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** "12 次 · 成功 92% · 👎 1 · 均 8.4k tokens · 21s" */
+function StatLine({ s }: { s: VersionStat }) {
+  const parts = [`${s.runs} 次`, `成功 ${pct(s.success, s.success + s.failed)}`];
+  if (s.negative) parts.push(`👎 ${s.negative}`);
+  if (s.avg_tokens) parts.push(`均 ${kTokens(s.avg_tokens)} tokens`);
+  if (s.avg_ms !== null) parts.push(duration(s.avg_ms));
+  return (
+    <div className="mt-0.5 text-[11px] tabular-nums text-fg-3" title={`失败 ${s.failed} 次 · ${datetime(s.first_at)} ~ ${datetime(s.last_at)}（回归重放不算）`}>
+      {parts.join(" · ")}
+    </div>
+  );
+}
+
+/** stats：每个版本下附一行运行效果（任务、角色、平台提示词有） */
+export function VersionHistory({ kind, name, onRestored, stats }: {
+  kind: DefinitionPath | `settings/${ConfigSection}`; name?: string; onRestored?: () => void; stats?: boolean;
+}) {
   const { data, loading, refetch } = useVersions(kind, name);
+  const statsKind: StatsPath | null = stats && (kind === "tasks" || kind === "roles" || kind === "settings/prompts") ? kind : null;
+  const { data: statList } = useVersionStats(statsKind ?? "tasks", name, !!statsKind);
+  const statOf = useMemo(() => new Map((statsKind ? statList ?? [] : []).map((s) => [s.version, s])), [statsKind, statList]);
   const [a, setA] = useState<number | null>(null);
   const [b, setB] = useState<number | null>(null);
 
@@ -63,7 +84,7 @@ export function VersionHistory({ kind, name, onRestored }: { kind: DefinitionPat
   return (
     <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
       <Card className="h-fit">
-        <CardHeader title="版本" description="点击任一版本与当前选中的新版对比" icon={<LuHistory />} />
+        <CardHeader title="版本" description={statsKind ? "点击任一版本与当前选中的新版对比；版本下是它跑出来的效果" : "点击任一版本与当前选中的新版对比"} icon={<LuHistory />} />
         <ol className="relative py-2">
           {data.map((v, i) => (
             <li key={v.version} className="group relative flex items-start gap-3 px-4 py-2">
@@ -81,6 +102,7 @@ export function VersionHistory({ kind, name, onRestored }: { kind: DefinitionPat
                   {v.version === a && <Badge tone="warn">对比基准</Badge>}
                 </div>
                 <div className="mt-0.5 text-[11.5px] text-fg-3" title={datetime(v.created_at, true)}>{v.updated_by} · {ago(v.created_at)}</div>
+                {statOf.has(v.version) && <StatLine s={statOf.get(v.version)!} />}
               </button>
               {i > 0 && (
                 <Button size="icon-xs" variant="ghost" className="opacity-0 group-hover:opacity-100" title="恢复到此版本" onClick={() => restore(v)}><LuRotateCcw /></Button>

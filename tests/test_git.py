@@ -60,8 +60,8 @@ class CodeSyncTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def sync(self, env, ref=None):
-        return asyncio.run(codesync.sync(self.svc.view("b", env), ref))
+    def sync(self, env, ref=None, svc=None):
+        return asyncio.run(codesync.pull((svc or self.svc).view("b", env), ref, str(self.root / "backups")))
 
     def test_each_env_follows_its_own_ref(self):
         prod, test = self.sync("prod"), self.sync("test")
@@ -76,11 +76,40 @@ class CodeSyncTest(unittest.TestCase):
         self.assertEqual(out["after"], self.old)
         self.assertFalse(self.sync("test", self.old)["changed"])
 
-    def test_refuses_to_discard_local_changes(self):
+    def test_follows_branch_after_new_commits(self):
+        self.sync("test")
+        newer = commit(self.origin, {"app.py": "v = 3\n", "requirements.txt": "x\n"})
+        out = self.sync("test")
+        self.assertEqual((out["before"], out["after"]), (self.new, newer))
+        self.assertEqual(sorted(out["files"]), ["app.py", "requirements.txt"])
+        self.assertEqual(git(self.root / "code" / "test", "rev-parse", "--abbrev-ref", "HEAD"), "main")
+
+    def test_local_changes_are_backed_up_then_discarded(self):
         self.sync("test")
         (self.root / "code" / "test" / "app.py").write_text("hacked\n")
-        with self.assertRaises(codesync.SyncError):
-            self.sync("test", self.old)
+        out = self.sync("test")
+        self.assertEqual(out["discarded"], ["app.py"])
+        self.assertIn("hacked", Path(out["backup"]).read_text())
+        self.assertEqual((self.root / "code" / "test" / "app.py").read_text(), "v = 2\n")
+
+    def test_config_edited_in_place_is_adopted(self):
+        svc = ServiceDef.model_validate({**self.svc.model_dump(), "configs": [
+            {"canonical": f"{self.root}/code/{{env}}/app.py", "template": f"{self.root}/conf/{{env}}/app.py"}]})
+        self.sync("test", svc=svc)
+        (self.root / "code" / "test" / "app.py").write_text("v = 'test'\n")
+        out = self.sync("test", svc=svc)
+        self.assertEqual(out["adopted"], [f"{self.root}/conf/test/app.py"])
+        self.assertEqual((self.root / "conf" / "test" / "app.py").read_text(), "v = 'test'\n")
+        self.assertEqual(svc.view("b", "test").config_files[0]["upstream"], "app.py")   # 上游默认是它自己
+
+    def test_files_digest_tracks_content(self):
+        self.sync("test")
+        path = str(self.root / "code" / "test")
+        before = asyncio.run(codesync.files_digest(path, ["app.py"]))
+        self.assertIsNone(asyncio.run(codesync.files_digest(path, ["requirements.txt"])))
+        commit(self.origin, {"app.py": "v = 9\n"})
+        self.sync("test")
+        self.assertNotEqual(before, asyncio.run(codesync.files_digest(path, ["**/app.py"])))
 
     def test_refuses_non_git_dir_and_missing_repo(self):
         (self.root / "code" / "dev").mkdir(parents=True)
@@ -88,7 +117,7 @@ class CodeSyncTest(unittest.TestCase):
         with self.assertRaises(codesync.SyncError):
             self.sync("dev")
         with self.assertRaises(codesync.SyncError):
-            asyncio.run(codesync.sync(ServiceDef(root="/x").view("b", "test")))
+            asyncio.run(codesync.pull(ServiceDef(root="/x").view("b", "test"), None, str(self.root / "backups")))
 
 
 if __name__ == "__main__":

@@ -16,17 +16,30 @@ from agent_platform import config
 sys.path.insert(0, str(REPO / "sdk"))
 from agent_client import client as sdk  # noqa: E402
 
-SECRETS = {k: "x" for k in ("AGENT_DB_PASSWORD", "AGENT_ROOT_TOKEN", "MODEL_TOKEN_A", "MODEL_TOKEN_B",
-                            "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")}
+SECRETS = {k: "x" for k in ("AGENT_DB_PASSWORD", "AGENT_ROOT_TOKEN", "MODEL_TOKEN_A")}
 
 
 class ConfigTest(unittest.TestCase):
-    def test_user_profile_extends_prod(self):
+    def test_prod_profile(self):
         with mock.patch.dict(os.environ, SECRETS):
-            s = config.load_settings("prod-user")
-        self.assertEqual((s.process_control.backend, s.process_control.scope), ("systemd", "user"))
-        self.assertTrue(s.langfuse.enabled)
-        self.assertEqual(s.profile, "prod-user")
+            s = config.load_settings("prod")
+        self.assertEqual(s.process_control.backend, "systemd")
+        self.assertEqual(s.model.tokens, ["x"])                 # prod 的差异合并进 common 了
+        self.assertFalse(s.otel.enabled)
+        self.assertEqual(s.retention.checkpoints_days, 30)
+        self.assertEqual(s.profile, "prod")
+
+    def test_extends_merges_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base").mkdir()
+            (root / "env").mkdir()
+            (root / "base/common.yaml").write_text("model: {url: u, name: n, tokens: [t]}\n")
+            (root / "env/a.yaml").write_text("db_dsn: d\nroot_token: r\nmodel: {name: a}\n")
+            (root / "env/b.yaml").write_text("extends: a\nmodel: {tokens: [b]}\n")
+            with mock.patch.object(config, "CONF_ROOT", root):
+                s = config.load_settings("b")
+        self.assertEqual((s.model.url, s.model.name, s.model.tokens), ("u", "a", ["b"]))
 
     def test_extends_cycle_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:

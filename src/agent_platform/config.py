@@ -1,7 +1,7 @@
 """平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），${VAR} 从环境变量插值。
 
 这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、外部系统地址。
-服务/角色/任务与平台配置（环境、审批、通知、记忆、进程）都是数据，存库、在控制台编辑；
+服务/角色/任务与平台配置（环境、通知、记忆、进程、提示词）都是数据，存库、在控制台编辑；
 conf/seeds/ 只在库里还没有对应对象时播种一次。
 AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test/dev）无关。
 """
@@ -27,24 +27,20 @@ CONF_ROOT = Path(os.environ.get("AGENT_CONF") or _default_conf_root())
 
 
 def _default_data_dir() -> str:
-    """数据目录：AGENT_DATA_DIR > /var/lib/agent-platform（可写时）> ~/.local/share/agent-platform。"""
-    if env := os.environ.get("AGENT_DATA_DIR"):
-        return env
-    var_lib = Path("/var/lib/agent-platform")
-    try:
-        if var_lib.is_dir() or os.access("/var/lib", os.W_OK):
-            return str(var_lib)
-    except OSError:
-        pass
-    return str(Path.home() / ".local" / "share" / "agent-platform")
+    """数据目录：AGENT_DATA_DIR > ~/.local/share/agent-platform。"""
+    return os.environ.get("AGENT_DATA_DIR") or str(Path.home() / ".local" / "share" / "agent-platform")
 
 
 class ModelConfig(BaseModel):
     url: str
     name: str
     tokens: list[str]
-    max_concurrency: int = 10
+    max_concurrency: int = 10             # 同时在途的模型请求上限（账号并发；所有调用合计，流式读完才算结束）；0 = 不限
     embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
+    context_tokens: int = 400_000         # 模型上下文长度：对话历史到它的 75% 时压缩成摘要
+    rpm: int = 0                          # 每分钟最多发几次请求（所有调用合计，平台侧排队）；0 = 不限
+    max_retries: int = 6                  # 限流 / 网关错误的重试次数（指数退避）
+    stream_usage: bool = True             # 流式响应里要 token 用量（stream_options.include_usage）；网关不支持就关掉
 
 
 class WorkerConfig(BaseModel):
@@ -60,11 +56,26 @@ class KernelConfig(BaseModel):
     max_kernels: int = 8              # 同时最多几个（超了回收最久没用的）
 
 
-class LangfuseConfig(BaseModel):
+class OtelConfig(BaseModel):
+    """可选的链路追踪：OTLP/HTTP 导出到任意兼容后端（Jaeger、Tempo、各家 APM）。页面不依赖它。"""
+
     enabled: bool = False
-    host: str = "http://127.0.0.1:3000"
-    public_key: str = ""
-    secret_key: str = ""
+    endpoint: str = "http://127.0.0.1:4318/v1/traces"
+    headers: dict[str, str] = Field(default_factory=dict)   # 鉴权头等，值可写 ${VAR}
+
+
+class CodeSyncConfig(BaseModel):
+    """代码跟踪：每隔多久看一眼各服务的远端分支，有新提交就同步（服务定义 sync.auto=false 的不跟）。"""
+
+    interval_minutes: float = 60      # 0 = 不自动跟踪，只在控制台 / 接口手动同步
+
+
+class RetentionConfig(BaseModel):
+    """数据保留（天）：维护循环每 6 小时清一次。运行台账（runs，含输入、输出、配方）一直保留。"""
+
+    run_events_days: int = 90       # 运行的过程事件；被 👎 过的运行不清（回归重放要用）
+    checkpoints_days: int = 30      # 会话的 LangGraph checkpoint：最后一轮结束这么久后清掉，之后不能再续跑
+    recall_hits_days: int = 90      # 召回埋点
 
 
 class GrafanaConfig(BaseModel):
@@ -74,32 +85,33 @@ class GrafanaConfig(BaseModel):
 
 
 class ProcessControlConfig(BaseModel):
-    """服务进程启停的执行方式。systemd：模板单元 agent-svc@.service（生产）；local：本机子进程（开发）。
-    scope=user：平台跑在某个普通用户的 systemd --user 里（deploy/install-user.sh），没有 root 也能装。
-    租约时长是平台配置（设置 → 进程），不在这里。"""
+    """服务进程启停的执行方式。systemd：平台用户自己的 systemd --user 模板单元 agent-svc@.service
+    （生产，deploy/install-user.sh）；local：本机子进程（开发）。租约时长是平台配置（设置 → 进程），不在这里。"""
 
     backend: Literal["systemd", "local", "off"] = "local"
-    scope: Literal["system", "user"] = "system"
     unit: str = "agent-svc"                    # 模板单元名前缀（agent-svc@<实例>.service）
 
 
 def _default_hidden() -> list[str]:
-    """agent 沙箱与业务进程里都看不到的路径：平台密钥，以及运行用户的凭据（用户级部署时就是同一个用户）。"""
+    """agent 沙箱与业务进程里都看不到的路径：平台密钥（~/.config/agent-platform）与运行用户的凭据。
+    平台和它起的业务进程是同一个用户，所以这些都得遮。"""
     home = Path.home()
-    return ["/etc/agent-platform", str(home / ".config/agent-platform"), str(home / ".ssh"),
-            str(home / ".git-credentials"), str(home / ".netrc"), str(home / ".pgpass")]
+    return [str(home / ".config/agent-platform"), str(home / ".ssh"), str(home / ".git-credentials"),
+            str(home / ".netrc"), str(home / ".pgpass")]
 
 
 class Settings(BaseModel):
     profile: str                               # AGENT_ENV：读的哪份部署配置（日志/健康检查用）
     db_dsn: str
     model: ModelConfig
-    root_token: str                            # 引导密钥：首次登录与创建 API 密钥用，权限最高
+    root_token: str                            # 引导密钥：首次登录与创建 API 密钥用
     public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用
     data_dir: str = Field(default_factory=_default_data_dir)
     worker: WorkerConfig = WorkerConfig()
     kernel: KernelConfig = KernelConfig()
-    langfuse: LangfuseConfig = LangfuseConfig()
+    otel: OtelConfig = OtelConfig()
+    retention: RetentionConfig = RetentionConfig()
+    code_sync: CodeSyncConfig = CodeSyncConfig()
     grafana: GrafanaConfig | None = None
     process_control: ProcessControlConfig = ProcessControlConfig()
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
@@ -117,6 +129,16 @@ class Settings(BaseModel):
     def instances_dir(self) -> str:
         """进程实例的启动规格（svcrun 读它）与本地后端的日志。"""
         return os.path.join(self.data_dir, "instances")
+
+    @property
+    def config_history_dir(self) -> str:
+        """控制台改配置文件前的旧内容备份（含口令：agent 沙箱里遮蔽）。"""
+        return os.path.join(self.data_dir, "config-history")
+
+    @property
+    def sync_backups_dir(self) -> str:
+        """代码同步丢弃本地改动前留的补丁（可能含口令：agent 沙箱里遮蔽）。"""
+        return os.path.join(self.data_dir, "sync-backups")
 
     @property
     def seeds_dir(self) -> Path:

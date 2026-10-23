@@ -37,6 +37,30 @@ def render(template: str, env: str, port: int | None = None, python: str | None 
     return out.replace("{python}", python) if python is not None else out
 
 
+DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
+_DB_LABELS = {"postgres": "PostgreSQL", "mysql": "MySQL/MariaDB", "doris": "Doris", "clickhouse": "ClickHouse",
+              "mongo": "MongoDB"}
+# 连接串的 scheme → 库的类型（agent/tools/db.py 按类型选驱动与只读手段）
+DB_SCHEMES = {"postgresql": "postgres", "postgres": "postgres", "mysql": "mysql", "mariadb": "mysql",
+              "doris": "doris", "clickhouse": "clickhouse", "clickhouses": "clickhouse",
+              "mongodb": "mongo", "mongodb+srv": "mongo"}
+
+
+def db_kind(url: str) -> str | None:
+    """postgres / mysql / doris / clickhouse / mongo；不认识返回 None。"""
+    return DB_SCHEMES.get(url.split("://", 1)[0].lower()) if "://" in url else None
+
+
+def _check_databases(v: dict[str, str] | None) -> dict[str, str] | None:
+    for name, url in (v or {}).items():
+        if not DB_NAME_RE.match(name):
+            raise ValueError(f"库名不合法：{name!r}（小写字母开头，可含数字 _ -）")
+        if url and db_kind(url) is None:
+            raise ValueError(f"库 {name} 的连接串类型不认识：{url.split('://')[0]}://"
+                             f"（可用：{'、'.join(s + '://' for s in DB_SCHEMES)}）")
+    return v
+
+
 def _no_placeholders(v: dict[str, str]) -> dict[str, str]:
     # 启动规格是落盘的明文 JSON：口令放进该环境的配置文件（按环境隔离、bind 进进程），不走环境变量
     bad = [k for k, x in v.items() if "${" in str(x)]
@@ -46,16 +70,60 @@ def _no_placeholders(v: dict[str, str]) -> dict[str, str]:
 
 
 class ConfigFile(BaseModel):
-    """固定路径 ← 每环境一份的模板。进程和内核启动时选中环境的文件 bind 到 canonical。"""
+    """固定路径 ← 每环境一份的真实文件。进程、内核、同步步骤启动时选中环境的文件 bind 到 canonical。
+
+    upstream：仓库里和它对应的文件（相对代码目录），比如 .env 对应 .env.template。代码同步发现它变了，
+    就把这个配置标成"待更新"并通知，在控制台对照上游的 diff 改。不写时：canonical 本身在仓库里有
+    （比如盖在仓库那份上的 settings.py），上游就是它自己。"""
 
     canonical: str
     template: str
+    upstream: str | None = None
 
     def path_for(self, env: str) -> str:
         return render(self.template, env)
 
     def canonical_for(self, env: str) -> str:
         return render(self.canonical, env)
+
+
+class SyncStep(BaseModel):
+    """同步后的一步：when 里的文件（仓库内路径，支持 ** 通配）自这一步上次成功以来变了才跑。
+    命令里可写 {python}（该环境的解释器）与 {env}；工作目录是代码目录，跑在和业务进程同一套隔离里
+    （本环境的配置文件就位、平台密钥遮蔽），能联网、能写代码目录和解释器所在的环境。"""
+
+    title: str = ""
+    when: list[str]
+    run: list[str]
+    shared: bool = False      # 效果由用同一个解释器的环境共享（装依赖）：别的环境已对同样的文件内容做过就跳过
+    timeout_s: int = 900
+
+    @field_validator("when", "run")
+    @classmethod
+    def _non_empty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("不能为空")
+        return v
+
+    @property
+    def label(self) -> str:
+        return self.title or " ".join(self.run)[:60]
+
+
+def _default_steps() -> list[SyncStep]:
+    return [
+        SyncStep(title="安装依赖（requirements.txt）", when=["requirements.txt"], shared=True,
+                 run=["{python}", "-m", "pip", "install", "-r", "requirements.txt"]),
+        SyncStep(title="安装项目（pyproject.toml）", when=["pyproject.toml"], shared=True,
+                 run=["{python}", "-m", "pip", "install", "-e", "."]),
+    ]
+
+
+class SyncDef(BaseModel):
+    """代码同步：跟踪的分支是服务的 ref（各环境可覆盖；空 = 远端默认分支）。"""
+
+    auto: bool = True         # 定时检查远端（部署配置 code_sync.interval_minutes），有新提交就同步
+    steps: list[SyncStep] = Field(default_factory=_default_steps)   # 不写 = 装依赖两步
 
 
 class ProcessDef(BaseModel):
@@ -83,8 +151,13 @@ class EnvOverride(BaseModel):
 
     enabled: bool = True
     hosts: list[str] | None = None
-    readonly_dsn: str | None = None
+    databases: dict[str, str] = Field(default_factory=dict)   # 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
     code_paths: list[str] | None = None
+
+    @field_validator("databases")
+    @classmethod
+    def _dbs(cls, v: dict[str, str]) -> dict[str, str]:
+        return _check_databases(v) or {}
     ref: str | None = None                    # 这个环境跟踪的分支 / tag（代码同步的默认目标）
     python: str | None = None                 # 这个环境的解释器（不写跟随服务的 python）
     urls: dict[str, str] = Field(default_factory=dict)   # 按键覆盖服务的 urls
@@ -106,8 +179,8 @@ class ServiceView(BaseModel):
     env_vars: dict[str, str]
     urls: dict[str, str]
     hosts: list[str]
-    readonly_dsn: str | None
-    config_files: list[dict[str, str]]       # [{canonical, path}]
+    databases: dict[str, str]                # 本环境的只读库：{库名: 连接串}（口令是 ${VAR} 占位，用到时才展开）
+    config_files: list[dict[str, str]]       # [{canonical, path, upstream}]，upstream 是仓库内路径（可能为空）
     processes: dict[str, ProcessDef]
     mcp_servers: list[str]                   # 服务自己声明的 MCP server（工具在运行里自动出现）
     profile: dict[str, str]
@@ -123,7 +196,16 @@ class ServiceView(BaseModel):
         if self.config_files:
             lines.append("配置文件（本环境）：" + "；".join(f"{c['path']}（进程读到的路径 {c['canonical']}）" for c in self.config_files))
             lines.append("配置文件内容用 service_info(what=config) 读（密钥已打码）；bash 里读不到配置文件原文")
-        lines.append("只读库：" + ("已配置，用 sql_query 查询" if self.readonly_dsn else "未配置"))
+        if self.databases:
+            from urllib.parse import urlsplit
+            names = []
+            for name, url in self.databases.items():
+                u = urlsplit(url)
+                where = f"{u.hostname or ''}{'/' + u.path.lstrip('/') if u.path.strip('/') else ''}"
+                names.append(f"{name}（{_DB_LABELS.get(db_kind(url) or '', '?')}，{where}）")
+            lines.append("只读库（db_query 查询，db 填库名）：" + "；".join(names))
+        else:
+            lines.append("只读库：未配置")
         if self.urls:
             lines.append("地址（本环境）：" + "；".join(f"{k} = {v}" for k, v in self.urls.items()))
         if self.mcp_servers:
@@ -139,15 +221,18 @@ class ServiceDef(BaseModel):
     root: str = ""
     code_paths: list[str] = Field(default_factory=list)
     repo: str = ""                            # git 远端：代码同步（内建任务 code-sync）从这里拉到 root
-    ref: str = ""                             # 默认跟踪的分支；各环境可在 envs[env].ref 覆盖
+    ref: str = ""                             # 跟踪的分支（如 master）；各环境可在 envs[env].ref 覆盖；空 = 远端默认分支
     python: str = ""                          # 项目解释器（可写 {env}，如 /srv/svc/board/venv/{env}/bin/python）；空 = python3
     env_vars: dict[str, str] = Field(default_factory=dict)   # 服务级环境变量（可写 {env}）：内核与进程都带上
     # 有名字的地址（可写 {env}）：线上部署的页面 / API、本机副本的端口……给 agent 看，也可在 mcp 配置里用 {url:名字} 引用
     urls: dict[str, str] = Field(default_factory=dict)
     hosts: list[str] = Field(default_factory=list)
-    readonly_dsn: str | None = None
+    # 只读库：{库名: 连接串}，scheme 决定类型（postgresql / mysql / mariadb / doris / clickhouse(s) / mongodb）。
+    # 口令写 ${VAR}，真实值放 secrets.env；各环境在 envs[env].databases 里按库名覆盖
+    databases: dict[str, str] = Field(default_factory=dict)
     configs: list[ConfigFile] = Field(default_factory=list)
     processes: dict[str, ProcessDef] = Field(default_factory=dict)
+    sync: SyncDef = Field(default_factory=SyncDef)   # 代码同步：自动跟踪 + 同步后的步骤（装依赖、collectstatic…）
     # 服务自己的 MCP server：{名字: langchain-mcp-adapters 连接配置}，另可写 envs: {环境: 深合并的覆盖}。
     # 字符串里可写 {env}、{url:名字}、${VAR}（连接时才取值）。运行在本服务上时工具自动出现，调用按运行的环境路由
     mcp: dict[str, dict] = Field(default_factory=dict)
@@ -168,6 +253,11 @@ class ServiceDef(BaseModel):
     def _no_secrets(cls, v: dict[str, str]) -> dict[str, str]:
         return _no_placeholders(v)
 
+    @field_validator("databases")
+    @classmethod
+    def _dbs(cls, v: dict[str, str]) -> dict[str, str]:
+        return _check_databases(v) or {}
+
     @field_validator("profile", mode="before")
     @classmethod
     def _profile_str(cls, v: Any) -> dict[str, str]:
@@ -186,8 +276,9 @@ class ServiceDef(BaseModel):
             repo=self.repo, ref=o.ref if o.ref is not None else self.ref,
             python=python, env_vars={k: render(v, env, python=python) for k, v in self.env_vars.items()},
             urls=self.urls_for(env), hosts=o.hosts if o.hosts is not None else self.hosts,
-            readonly_dsn=o.readonly_dsn if o.readonly_dsn is not None else self.readonly_dsn,
-            config_files=[{"canonical": c.canonical_for(env), "path": c.path_for(env)} for c in self.configs],
+            databases={k: v for k, v in {**self.databases, **o.databases}.items() if v},
+            config_files=[{"canonical": c.canonical_for(env), "path": c.path_for(env),
+                           "upstream": c.upstream or _inside(c.canonical_for(env), root) or ""} for c in self.configs],
             processes=self.processes, mcp_servers=list(self.mcp), profile={**self.profile, **o.profile},
         )
 
@@ -231,6 +322,14 @@ class ServiceDef(BaseModel):
     def secret_paths(self, envs: list[str]) -> set[str]:
         """所有环境的配置文件（两端）：bash 沙箱里一律遮蔽，内容只能经 service_info 打码后读。"""
         return {p for c in self.configs for env in envs for p in (c.path_for(env), c.canonical_for(env))}
+
+
+def _inside(path: str, root: str) -> str | None:
+    """path 在 root 下时的相对路径（/ 分隔），否则 None。"""
+    if not root:
+        return None
+    base = root.rstrip("/") + "/"
+    return path[len(base):] if path.startswith(base) else None
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:

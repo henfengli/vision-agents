@@ -13,7 +13,7 @@ import {
   LuThumbsDown, LuWrench,
 } from "react-icons/lu";
 
-import { api, useAssets, useEnvs, useKnowledge, useMeta, usePromotable, useServices, useTasks } from "@/api/hooks";
+import { api, useAssets, useEnvs, useKnowledge, usePromotable, useServices, useTasks } from "@/api/hooks";
 import type { Asset, AssetKind, Knowledge, KnowledgeKind, KnowledgePromote, LessonCategory, MemoryFilters, MemoryHealth } from "@/api/types";
 import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
@@ -129,7 +129,7 @@ function Penalty({ score }: { score: number }) {
   return score < 0 ? <span className="tabular-nums text-bad">{score}</span> : null;
 }
 
-/** superseded_by = "profile:service:board:conventions" / "profile:service:board@prod:pitfalls" / "profile:task:data-qa:gmv:conventions" */
+/** superseded_by = "profile:service:vision-board:conventions" / "profile:service:vision-board@prod:pitfalls" / "profile:task:failure-analysis:dws_account_pnl_daily:pitfalls" */
 function promotedTo(by: string | null): { label: string; href: string; key: string } | null {
   if (!by?.startsWith("profile:")) return null;
   const rest = by.slice("profile:".length);
@@ -139,12 +139,12 @@ function promotedTo(by: string | null): { label: string; href: string; key: stri
   const name = nameParts.join(":");
   if (type === "service") {
     const [svc, env] = name.split("@");
-    return { label: `服务 ${svc}${env ? `（${env}）` : ""}`, href: `/services/${svc}?tab=config${env ? `&env=${env}` : ""}`, key };
+    return { label: `服务 ${svc}${env ? `（${env}）` : ""}`, href: `/services/${svc}?tab=config&part=definition${env ? `&env=${env}` : ""}`, key };
   }
   return { label: `任务 ${name}`, href: `/tasks/${encodeURIComponent(name)}?tab=profile`, key };
 }
 
-/** 升格回执里的 target（service:board / service:board@prod / task:data-qa）→ 人话 */
+/** 升格回执里的 target（service:vision-board / service:vision-board@prod / task:data-qa）→ 人话 */
 function targetLabel(target: string): string {
   const [type, ...rest] = target.split(":");
   const name = rest.join(":");
@@ -306,21 +306,21 @@ function KnowledgeDialog({ open, scope, defaultKind, onClose }: { open: boolean;
         </Field>
         <WhereFields value={where} onChange={setWhere} locked={scope} sharedEnv />
         {kind === "fact" ? <>
-          <Field label="键" required help="同一服务、同一环境范围内唯一，用点或冒号分层：metric:gmv、table.dwd_trade_order.grain">
-            <Input mono autoFocus value={key} onChange={(e) => setKey(e.target.value.trim())} placeholder="metric:gmv" />
+          <Field label="键" required help="同一服务、同一环境范围内唯一，用点或冒号分层：metric:account_pnl、table.dws_account_pnl_daily.grain">
+            <Input mono autoFocus value={key} onChange={(e) => setKey(e.target.value.trim())} placeholder="metric:account_pnl" />
           </Field>
           <Field label="内容" required>
-            <Textarea rows={6} value={content} onChange={(e) => setContent(e.target.value)} placeholder="GMV 口径：已支付订单金额，不扣退款；退款单独看 refund_amount。" />
+            <Textarea rows={6} value={content} onChange={(e) => setContent(e.target.value)} placeholder="账户收益口径：按交易日汇总已实现 + 浮动盈亏，单位元；数据在 ClickHouse 的 dws_account_pnl_daily。" />
           </Field>
         </> : <>
           <Field label="报错原文" required help="按它算指纹（抹掉数字、路径、引号里的内容后取末两行），不用自己删敏感的可变部分">
-            <Textarea mono rows={4} autoFocus value={error} onChange={(e) => setError(e.target.value)} placeholder={"KeyError: 'pay_channel'\n  File \"/srv/dagster/assets/dwd/trade_order.py\", line 88, in transform_payment"} />
+            <Textarea mono rows={4} autoFocus value={error} onChange={(e) => setError(e.target.value)} placeholder={"KeyError: 'account_id'\n  File \"/srv/svc/vision-dagster/code/prod/vision_dagster/assets/pnl.py\", line 88, in account_pnl_daily"} />
           </Field>
           <Field label="类别">
             <Segmented value={category} onChange={setCategory} options={LESSON_CATEGORIES.map((c) => ({ value: c, label: `${CATEGORY_LABEL[c]} ${c}` }))} />
           </Field>
           <Field label="结论" required help="下次遇到同类报错时 agent 看到的话：根因 + 怎么处理">
-            <Textarea rows={4} value={content} onChange={(e) => setContent(e.target.value)} placeholder="旧版支付回调没有 pay_channel 字段：transform_payment() 里改用 .get 兜底。" />
+            <Textarea rows={4} value={content} onChange={(e) => setContent(e.target.value)} placeholder="上游成交表新加的子账户没有 account_id：account_pnl_daily() 里先按 sub_account 映射再汇总。" />
           </Field>
         </>}
       </div>
@@ -329,22 +329,22 @@ function KnowledgeDialog({ open, scope, defaultKind, onClose }: { open: boolean;
 }
 
 function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | null; onClose: () => void; onPromote: (k: Knowledge) => void }) {
-  const { data: meta } = useMeta();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   useEffect(() => { setEditing(false); setText(entry?.content ?? ""); }, [entry?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const { data: history } = useQuery(["memory", "history", entry?.id], () => api.knowledgeHistory(entry!.id), { enabled: !!entry });
   const promoted = promotedTo(entry?.superseded_by ?? null);
-  const admin = meta?.me.admin !== false;
+  const [busy, setBusy] = useState(false);
 
   const update = async (body: { content?: string; status?: "active" | "expired" }, message: string) => {
     if (!entry) return;
+    setBusy(true);
     try {
       await api.patchKnowledge(entry.id, body);
       toast(message);
       invalidate("memory");
       setEditing(false);
-    } catch (e) { toast.error("保存失败", (e as Error).message); }
+    } catch (e) { toast.error("保存失败", (e as Error).message); } finally { setBusy(false); }
   };
   const save = useMutation(() => update({ content: text, status: "active" }, "已保存，旧内容进历史"));
   const expire = async () => {
@@ -358,15 +358,15 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
   return (
     <Drawer open={!!entry} onClose={onClose} title={title} subtitle={entry && `${entry.service} · ${entry.env || "所有环境"} · ${entry.task || "服务通用"}`}
       actions={entry && !editing && <>
-        <Button size="sm" onClick={() => setEditing(true)}>编辑</Button>
+        <Button size="sm" disabled={busy} onClick={() => setEditing(true)}>编辑</Button>
         {entry.status === "active" && entry.kind !== "handoff" && (
-          <Tooltip content={admin ? "写进服务或任务的档案：逐字置顶注入、不会过期" : "需要管理员"}>
-            <span><Button size="sm" icon={<LuArrowUpFromLine />} disabled={!admin} onClick={() => onPromote(entry)}>升格进档案</Button></span>
+          <Tooltip content="写进服务或任务的档案：逐字置顶注入、不会过期">
+            <span><Button size="sm" icon={<LuArrowUpFromLine />} disabled={busy} onClick={() => onPromote(entry)}>升格进档案</Button></span>
           </Tooltip>
         )}
         {entry.status === "active"
-          ? <Button size="sm" variant="danger-ghost" onClick={expire}>过期</Button>
-          : <Button size="sm" onClick={() => update({ status: "active" }, "已恢复生效")}>恢复生效</Button>}
+          ? <Button size="sm" variant="danger-ghost" loading={busy} onClick={expire}>过期</Button>
+          : <Button size="sm" loading={busy} onClick={() => update({ status: "active" }, "已恢复生效")}>恢复生效</Button>}
       </>}>
       {entry && (
         <div className="space-y-5 p-5">
@@ -435,7 +435,7 @@ const PROFILE_KEYS: { key: string; label: string }[] = [
 
 /**
  * 记忆 → 档案：写进服务档案（条目只在某环境成立时写进该环境的档案覆盖）或任务档案；同一个键已有内容就接在后面。
- * 原条目变成"被取代"，召回时不再重复注入。需要管理员。
+ * 原条目变成"被取代"，召回时不再重复注入。
  */
 export function PromoteDialog({ entry, onClose }: { entry: Knowledge | null; onClose: () => void }) {
   const open = !!entry;
@@ -529,8 +529,6 @@ export function PromoteDialog({ entry, onClose }: { entry: Knowledge | null; onC
 
 function PromotableList({ service, env }: { service?: string; env?: string }) {
   const { data, loading } = usePromotable({ service, env });
-  const { data: meta } = useMeta();
-  const admin = meta?.me.admin !== false;
   const [selected, setSelected] = useState<number | null>(null);
   const [promoting, setPromoting] = useState<Knowledge | null>(null);
   const entry = data?.find((k) => k.id === selected) ?? null;
@@ -555,9 +553,7 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
                 <Td className="text-right tabular-nums text-fg-2">{k.hits_30d}</Td>
                 <Td className="text-right text-[12px] text-fg-3">{k.last_hit_at ? ago(k.last_hit_at) : "—"}</Td>
                 <Td className="w-[1%] text-right" onClick={(e) => e.stopPropagation()}>
-                  <Tooltip content={admin ? "写进服务或任务的档案" : "需要管理员"}>
-                    <span><Button size="xs" icon={<LuArrowUpFromLine />} disabled={!admin} onClick={() => setPromoting(k)}>升格进档案</Button></span>
-                  </Tooltip>
+                  <Button size="xs" icon={<LuArrowUpFromLine />} onClick={() => setPromoting(k)}>升格进档案</Button>
                 </Td>
               </Tr>
             ))}
@@ -573,7 +569,8 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
 // ———————— 方法 ————————
 
 const ASSET_KINDS: AssetKind[] = ["procedure", "script", "query", "baseline"];
-const ASSET_KIND: Record<AssetKind, string> = { procedure: "方法", script: "脚本", query: "查询", baseline: "基线" };
+/** procedure 叫「做法」：「方法」是这一类东西的总称（做法 / 脚本 / 查询 / 基线） */
+const ASSET_KIND: Record<AssetKind, string> = { procedure: "做法", script: "脚本", query: "查询", baseline: "基线" };
 const isCode = (kind: AssetKind) => kind === "script" || kind === "query";
 
 export function AssetList({ filters, scope, openId }: { filters: MemoryFilters & { kind?: string }; scope: MemoryScope; openId?: number }) {
@@ -636,7 +633,7 @@ function AssetDialog({ open, scope, onClose }: { open: boolean; scope: MemorySco
         <WhereFields value={where} onChange={setWhere} locked={scope} />
         <div className="grid gap-3 sm:grid-cols-[auto_1fr]">
           <Field label="类型"><Segmented value={d.kind} onChange={(kind) => setD({ ...d, kind })} options={ASSET_KINDS.map((k) => ({ value: k, label: ASSET_KIND[k] }))} /></Field>
-          <Field label="名字" required><Input autoFocus value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="订单表数据量突降排查" /></Field>
+          <Field label="名字" required><Input autoFocus value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="成交表行数突降排查" /></Field>
         </div>
         <Field label="摘要" required help="一句话：什么时候用它"><Input value={d.summary} onChange={(e) => setD({ ...d, summary: e.target.value })} /></Field>
         <Field label="内容" required help={{ procedure: "步骤清单", baseline: "数字与口径", script: "脚本原文", query: "SQL 原文" }[d.kind]}>

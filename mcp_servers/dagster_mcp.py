@@ -3,7 +3,7 @@
 把 Dagster GraphQL 包成带 schema 的类型化工具，agent 不再靠 curl 猜接口。高频、固定的查询放这里；
 临时的、不常用的，agent 可以直接在 py 内核里用 dagster 自带的 GraphQL 客户端调。
 运行：DAGSTER_URL=http://... python mcp_servers/dagster_mcp.py
-接入：写在 dagster 服务定义的 mcp 里（见 conf/seeds/services/dagster.yaml），每个环境连该环境的线上部署。
+接入：写在服务定义的 mcp 里（见 conf/seeds/services/vision-dagster.yaml），每个环境连该环境的线上部署。
 """
 
 import os
@@ -12,12 +12,15 @@ import httpx
 from fastmcp import FastMCP
 
 DAGSTER_URL = os.environ.get("DAGSTER_URL", "http://127.0.0.1:3000")
+# HTTPS 证书校验：默认用系统信任；内网 CA 写 CA 文件路径（如 /etc/ipa/ca.crt），实在不行写 false
+_VERIFY_RAW = os.environ.get("DAGSTER_VERIFY", "true")
+VERIFY = False if _VERIFY_RAW.lower() in ("false", "0", "no") else (_VERIFY_RAW if os.path.exists(_VERIFY_RAW) else True)
 
 mcp = FastMCP("dagster")
 
 
 async def _gql(query: str, variables: dict | None = None) -> dict:
-    async with httpx.AsyncClient(base_url=DAGSTER_URL, timeout=15) as c:
+    async with httpx.AsyncClient(base_url=DAGSTER_URL, timeout=15, verify=VERIFY) as c:
         r = await c.post("/graphql",
                          json={"query": query, "variables": variables or {}})
         r.raise_for_status()

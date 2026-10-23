@@ -43,7 +43,7 @@ export function PreferencesPage() {
           <div className="divide-y divide-line">
             <SettingRow title="打开控制台时进入" hint="访问根路径时跳到这里">
               <Select className="w-44" value={ui.landing} onChange={(landing) => setUi({ landing })} options={[
-                { value: "/", label: "概览" }, { value: "/runs", label: "运行" }, { value: "/chat", label: "对话" }, { value: "/approvals", label: "审批" }, { value: "/services", label: "服务" },
+                { value: "/", label: "概览" }, { value: "/services", label: "服务" }, { value: "/tasks", label: "任务" }, { value: "/runs", label: "运行" }, { value: "/chat", label: "对话" },
               ]} />
             </SettingRow>
             <SettingRow title="默认环境视角" hint="顶栏的环境切换；列表与统计默认按它过滤">
@@ -77,7 +77,7 @@ export function PreferencesPage() {
             <SettingRow title="召回记忆" hint="提问前先查记忆（事实、报错教训）与方法">
               <Switch checked={ui.chat.recall} onChange={(recall) => setChat({ recall })} />
             </SettingRow>
-            <SettingRow title="沉淀记忆" hint="回答后把可复用的结论存进知识库">
+            <SettingRow title="沉淀记忆" hint="回答后把可复用的结论记成记忆">
               <Switch checked={ui.chat.save} onChange={(save) => setChat({ save })} />
             </SettingRow>
           </div>

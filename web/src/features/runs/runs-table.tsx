@@ -1,7 +1,7 @@
 /**
  * 运行表格：运行页、服务页、任务页、概览复用。列可按场景裁剪。
  */
-import { LuArrowUpRight, LuThumbsDown, LuThumbsUp } from "react-icons/lu";
+import { LuArrowUpRight } from "react-icons/lu";
 
 import type { RunListItem } from "@/api/types";
 import { EnvBadge, ResolutionTag, RunStatusBadge, TriggerBadge } from "@/components/status";
@@ -40,12 +40,13 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
         {runs.map((r) => (
           <Tr key={r.run_id} onClick={() => navigate(`/runs/${r.run_id}`)}>
             {has("status") && <Td><RunStatusBadge status={r.status} /></Td>}
-            <Td className="max-w-[420px]">
+            {/* 摘要列吃掉剩余宽度并截断，其余短列不换行：窄屏下行高不被挤成三四行 */}
+            <Td className="w-full min-w-[220px] max-w-0">
               <div className="flex items-center gap-2">
-                <Link to={`/runs/${r.run_id}`} onClick={(e) => e.stopPropagation()} className="min-w-0 truncate font-medium text-fg hover:text-accent">{r.summary || r.task_title}</Link>
+                <Link to={`/runs/${r.run_id}`} onClick={(e) => e.stopPropagation()} title={r.summary || r.task_title} className="min-w-0 truncate font-medium text-fg hover:text-accent">{r.summary || r.task_title}</Link>
                 <ResolutionTag resolution={r.resolution} />
               </div>
-              <div className="mt-0.5 font-mono text-[11px] text-fg-3">{shortId(r.run_id)}{r.trigger.caller && r.trigger.caller !== r.trigger.type ? ` · ${r.trigger.caller}` : ""}</div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-fg-3">{shortId(r.run_id)}{r.trigger.caller && r.trigger.caller !== r.trigger.type ? ` · ${r.trigger.caller}` : ""}</div>
             </Td>
             {has("task") && (
               <Td className="max-w-[220px]">
@@ -53,13 +54,13 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
                 {r.task.includes(":") && <div className="truncate font-mono text-[11px] text-fg-3">:{r.task.split(":")[1]}</div>}
               </Td>
             )}
-            {has("service") && <Td>{r.service ? <Link to={`/services/${r.service}`} onClick={(e) => e.stopPropagation()} className="text-fg-2 hover:text-accent">{r.service}</Link> : <span className="text-fg-3">平台</span>}</Td>}
+            {has("service") && <Td className="whitespace-nowrap">{r.service ? <Link to={`/services/${r.service}`} onClick={(e) => e.stopPropagation()} className="text-fg-2 hover:text-accent">{r.service}</Link> : <span className="text-fg-3">平台</span>}</Td>}
             {has("env") && <Td><EnvBadge env={r.env} /></Td>}
-            {has("trigger") && <Td><TriggerBadge type={r.trigger.type} source={r.trigger.source} /></Td>}
-            {has("duration") && <Td className="text-right tabular-nums text-fg-2">{duration(r.duration_ms)}</Td>}
-            {has("tokens") && <Td className="text-right tabular-nums text-fg-3">{r.tokens ? num(r.tokens) : "—"}</Td>}
+            {has("trigger") && <Td className="whitespace-nowrap"><TriggerBadge type={r.trigger.type} source={r.trigger.source} /></Td>}
+            {has("duration") && <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">{duration(r.duration_ms)}</Td>}
+            {has("tokens") && <Td className="whitespace-nowrap text-right tabular-nums text-fg-3">{r.tokens ? num(r.tokens) : "—"}</Td>}
             {has("time") && (
-              <Td className="text-right">
+              <Td className="whitespace-nowrap text-right">
                 <Tooltip content={datetime(r.created_at, true)}><span className="text-fg-3">{ago(r.created_at)}</span></Tooltip>
               </Td>
             )}
@@ -92,9 +93,4 @@ export function RunMiniList({ runs, limit = 6 }: { runs: RunListItem[] | undefin
       ))}
     </ul>
   );
-}
-
-export function FeedbackMark({ score }: { score: number | null | undefined }) {
-  if (!score) return null;
-  return score > 0 ? <LuThumbsUp className="size-3.5 text-ok" /> : <LuThumbsDown className="size-3.5 text-bad" />;
 }

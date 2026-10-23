@@ -1,6 +1,6 @@
 """运行的取值空间与提交请求。
 
-状态机：queued → running →（awaiting_approval ⇄ running）→ success | failed | cancelled。
+状态机：queued → running → success | failed | cancelled。
 """
 
 from __future__ import annotations
@@ -11,17 +11,17 @@ from pydantic import BaseModel, Field
 
 from .tasks import MemoryOverride
 
-RunStatus = Literal["queued", "awaiting_approval", "running", "success", "failed", "cancelled"]
-RUN_STATUSES: tuple[str, ...] = ("queued", "awaiting_approval", "running", "success", "failed", "cancelled")
+RunStatus = Literal["queued", "running", "success", "failed", "cancelled"]
+RUN_STATUSES: tuple[str, ...] = ("queued", "running", "success", "failed", "cancelled")
 TERMINAL = frozenset({"success", "failed", "cancelled"})
-ACTIVE = frozenset({"queued", "awaiting_approval", "running"})
+ACTIVE = frozenset({"queued", "running"})
 
 # 怎么结束的：agent 执行 / 内建处理器 / 规则先行命中
 Resolution = Literal["agent", "builtin", "rule"]
 RESOLUTIONS: tuple[str, ...] = ("agent", "builtin", "rule")
 
-# 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放）
-TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"]
+# 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放，watch = 代码跟踪发现远端有新提交）
+TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay", "watch"]
 DECLARABLE = frozenset({"api", "chat", "schedule", "event"})
 
 
@@ -39,24 +39,13 @@ class RunTrigger(BaseModel):
 
 
 class Caller(BaseModel):
-    """发起方身份。API 密钥、控制台用户、平台自身（定时 / 事件 / 维护）都是 Caller。"""
+    """发起方身份。API 密钥、控制台用户、平台自身（定时 / 事件 / 维护）都是 Caller。只标识是谁，不分权限。"""
 
     name: str                                   # 写进 runs.caller
     kind: Literal["key", "user", "root", "system"] = "system"
-    admin: bool = False                         # 能改定义、改设置、审批
-    services: list[str] = Field(default_factory=list)   # 空 = 不限
-    envs: list[str] = Field(default_factory=list)
-
-    def may_run(self, service: str | None, env: str) -> str | None:
-        """不允许时返回原因。"""
-        if self.services and (service or "") not in self.services:
-            return f"{self.name} 只能调用服务 {'、'.join(self.services)}"
-        if self.envs and env not in self.envs:
-            return f"{self.name} 只能调用环境 {'、'.join(self.envs)}"
-        return None
 
 
-SYSTEM = Caller(name="platform", kind="system", admin=True)
+SYSTEM = Caller(name="platform", kind="system")
 
 
 class RunRequest(BaseModel):

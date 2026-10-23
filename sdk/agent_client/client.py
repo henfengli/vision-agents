@@ -51,7 +51,7 @@ class AgentClient:
             on_event: Callable[[dict], None] | None = None, **input_fields: Any) -> str:
         """发一条消息，返回回答。默认续上一轮的会话；new_session=True 另起一个。
         service / env 不传用客户端的默认；recall / save 按次覆盖记忆开关（None = 跟随任务与平台）。
-        on_event 可订阅过程（stage / thought / tool_call / tool_result / approval）。"""
+        on_event 可订阅过程（stage / model_call / tool_call / tool_result）。"""
         if new_session:
             self.session_id = None
         body = {"message": message, "session_id": self.session_id, "service": service or self.service,
@@ -79,14 +79,15 @@ class AgentClient:
             idempotency_key: str | None = None, recall: bool | None = None, save: bool | None = None) -> dict:
         """发起一次任务运行。
         wait=True 等到结束；wait=秒数 最多等这么久；wait=False 立即返回回执 {run_id, status, …}。
-        等到了返回运行详情（status / output / 过程上下文）。"""
+        等到了返回运行详情（status / output / 配方 / 过程上下文）。任务声明了 output_schema 的，
+        校验过的结构化结果在 output["data"]。"""
         started = time.monotonic()
         server_wait = 0 if not wait else 300 if wait is True else min(float(wait), 300)
         body = {"task": task, "subtask": subtask, "service": service or self.service, "env": env or self.env,
                 "input": input or {}, "memory": {"recall": recall, "save": save}, "wait": server_wait}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         accepted = self._call("POST", "/v1/runs", json=body, headers=headers)
-        if not wait or accepted["status"] == "awaiting_approval":
+        if not wait:
             return accepted
         # 服务端已经等过一段：总时长从提交那一刻算，不重新起算
         left = None if wait is True else max(0.0, float(wait) - (time.monotonic() - started))

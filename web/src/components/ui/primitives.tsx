@@ -1,5 +1,5 @@
 /**
- * 基础展示件：卡片、徽标、分隔、空态、加载、骨架、键帽、指标块。
+ * 基础展示件：卡片、徽标、空态、加载、骨架、键帽、指标块。
  */
 import { type HTMLAttributes, type ReactNode } from "react";
 import { LuCircleAlert, LuLoaderCircle } from "react-icons/lu";
@@ -95,10 +95,6 @@ export function ErrorState({ error, onRetry, className }: { error: Error; onRetr
       action={onRetry && <Button size="sm" onClick={onRetry}>重试</Button>}
     />
   );
-}
-
-export function Separator({ vertical, className }: { vertical?: boolean; className?: string }) {
-  return <div className={cn(vertical ? "mx-1 h-4 w-px" : "h-px w-full", "shrink-0 bg-line", className)} />;
 }
 
 export function Stat({ label, value, hint, tone, className, icon }: {

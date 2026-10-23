@@ -1,5 +1,5 @@
 /**
- * 轻量图表（d3-scale 算坐标，React 画 SVG）：时间堆叠柱、迷你折线、比例条。
+ * 轻量图表（d3-scale 算坐标，React 画 SVG）：时间堆叠柱、比例条。
  * 颜色只用状态语义色；悬停给精确数值。
  */
 import { scaleBand, scaleLinear } from "d3-scale";
@@ -94,19 +94,6 @@ export function RatioBar({ ok, bad, total, className }: { ok: number; bad: numbe
     <div className={cn("flex h-1.5 w-full overflow-hidden rounded-full bg-sunken", className)}>
       <div className="bg-ok" style={{ width: `${pctOk}%` }} />
       <div className="bg-bad" style={{ width: `${pctBad}%` }} />
-    </div>
-  );
-}
-
-/** 迷你柱：一组数值的分布（任务列表里的近 24h 运行） */
-export function MiniBars({ values, className }: { values: { v: number; tone: "ok" | "bad" | "idle" }[]; className?: string }) {
-  const max = Math.max(1, ...values.map((x) => x.v));
-  return (
-    <div className={cn("flex h-5 items-end gap-[2px]", className)}>
-      {values.map((x, i) => (
-        <div key={i} className={cn("w-[3px] rounded-[1px]", { ok: "bg-ok/70", bad: "bg-bad/80", idle: "bg-line-strong" }[x.tone])}
-          style={{ height: `${Math.max(12, (x.v / max) * 100)}%` }} />
-      ))}
     </div>
   );
 }

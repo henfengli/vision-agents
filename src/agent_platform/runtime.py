@@ -1,7 +1,7 @@
 """装配：把各层组件接成一个可运行的整体。API 进程与 worker 进程用同一份装配。
 
-    数据库 → 定义 / 配置（播种）→ 通知 → 进程控制 → 项目内核 → 人工门 → 工具 → agent 工厂
-    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 维护循环）
+    数据库 → 定义 / 配置（播种）→ 通知 → 进程控制 → 项目内核 → 代码同步 → 工具 → agent 工厂
+    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 代码跟踪 + 维护循环）
 """
 
 from __future__ import annotations
@@ -12,13 +12,14 @@ import os
 from dataclasses import dataclass, field
 
 from . import observability
-from .agent.approvals import Gatekeeper
 from .agent.factory import AgentFactory
+from .agent.tools import mcp_bridge
 from .agent.tools.catalog import Toolbox
 from .agent.tools.mcp_bridge import ServiceMcp, load_mcp_tools
 from .config import Settings
 from .model import ModelPool
 from .notify import Notifier
+from .orchestration.codewatch import CodeWatcher
 from .orchestration.executor import Executor
 from .orchestration.maintenance import Maintenance
 from .orchestration.pipeline import Deps, Pipeline
@@ -26,9 +27,10 @@ from .orchestration.replay import Replayer
 from .orchestration.scheduler import Scheduler
 from .orchestration.submitter import Submitter
 from .registry import Registry
+from .services.codesync import CodeSync
 from .services.control import ProcessController
 from .services.kernel import KernelManager
-from .store import db
+from .store import db, runs
 from .store.definitions import DefinitionStore
 from .triggers.events import EventRouter
 
@@ -42,8 +44,8 @@ class Runtime:
     notifier: Notifier
     controller: ProcessController
     kernels: KernelManager
+    code_sync: CodeSync
     service_mcp: ServiceMcp
-    gate: Gatekeeper
     toolbox: Toolbox
     factory: AgentFactory
     model_pool: ModelPool
@@ -55,14 +57,16 @@ class Runtime:
     _background: list[asyncio.Task] = field(default_factory=list)
 
     async def start_worker(self) -> None:
-        """在本进程里跑执行队列、定时和维护循环（单机部署：API 与 worker 同进程）。"""
-        pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory, gate=self.gate,
+        """在本进程里跑执行队列、定时、代码跟踪和维护循环（单机部署：API 与 worker 同进程）。"""
+        pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,
-                                 on_finished=self.replayer.on_finished))
+                                 code_sync=self.code_sync, on_finished=self.replayer.on_finished))
         self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs)
         self.executor.start()
-        maintenance = Maintenance(self.controller, self.notifier)
+        maintenance = Maintenance(self.controller, self.notifier, self.settings.retention)
+        watcher = CodeWatcher(self.registry, self.submitter, self.settings.code_sync.interval_minutes)
         self._background += [asyncio.create_task(self.scheduler.run_forever()),
+                             asyncio.create_task(watcher.run_forever()),
                              asyncio.create_task(maintenance.run_forever())]
 
     async def close(self) -> None:
@@ -71,15 +75,27 @@ class Runtime:
         for t in self._background:
             t.cancel()
         await self.kernels.close()
+        await mcp_bridge.SESSIONS.close()
         await self.factory.close()
+        await self.model_pool.close()
         await db.close_db()
 
 
+async def _record_model_call(run_id: str, payload: dict) -> None:
+    """平台自己的辅助模型调用（记忆沉淀、交接摘要、回归判定）记进该运行的时间线，token 计入运行。"""
+    await runs.log_event(run_id, "model_call", payload)
+    await runs.add_tokens(run_id, int(payload.get("tokens") or 0))
+
+
 async def assemble(settings: Settings) -> Runtime:
-    observability.setup(settings.langfuse)
+    observability.setup(settings.otel)
     await db.open_db(settings.db_dsn)
-    for d in (settings.scratch_dir, settings.assets_dir, settings.instances_dir):
+    # 配置备份与同步补丁的目录先建好：存在的路径才会在沙箱里被遮蔽
+    for d in (settings.scratch_dir, settings.assets_dir, settings.instances_dir, settings.config_history_dir,
+              settings.sync_backups_dir):
         os.makedirs(d, exist_ok=True)
+    for d in (settings.config_history_dir, settings.sync_backups_dir):
+        os.chmod(d, 0o700)
 
     registry = Registry(DefinitionStore())
     await registry.seed(settings.seeds_dir)
@@ -87,14 +103,14 @@ async def assemble(settings: Settings) -> Runtime:
     notifier = Notifier(registry, settings.public_url)
     controller = ProcessController(settings, registry)
     kernels = KernelManager(settings.scratch_dir, settings.kernel.idle_minutes, settings.kernel.max_kernels)
-    gate = Gatekeeper(registry, notifier)
-    toolbox = Toolbox(settings, gate, notifier, controller=controller, kernels=kernels,
+    code_sync = CodeSync(settings, registry, controller, kernels, notifier)
+    toolbox = Toolbox(settings, notifier, controller=controller, kernels=kernels,
                       mcp_tools=await load_mcp_tools(settings.mcp_servers))
     factory = AgentFactory(settings, toolbox)
-    model_pool = ModelPool(settings.model.url, settings.model.name, settings.model.tokens,
-                           settings.model.max_concurrency, embedding_name=settings.model.embedding_name)
+    model_pool = ModelPool(settings.model)
+    model_pool.on_call = _record_model_call
     submitter = Submitter(registry)
     return Runtime(settings=settings, registry=registry, notifier=notifier, controller=controller, kernels=kernels,
-                   service_mcp=ServiceMcp(), gate=gate, toolbox=toolbox, factory=factory, model_pool=model_pool, submitter=submitter,
-                   scheduler=Scheduler(registry, submitter), replayer=Replayer(submitter, model_pool),
-                   events=EventRouter(registry, submitter))
+                   code_sync=code_sync, service_mcp=ServiceMcp(), toolbox=toolbox, factory=factory,
+                   model_pool=model_pool, submitter=submitter, scheduler=Scheduler(registry, submitter),
+                   replayer=Replayer(submitter, model_pool, registry), events=EventRouter(registry, submitter))

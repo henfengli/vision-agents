@@ -4,7 +4,7 @@
  * 查询参数是一等公民：列表页的筛选全部放 URL（可分享、可回退）。
  */
 import {
-  createContext, useCallback, useContext, useMemo, useSyncExternalStore,
+  createContext, useCallback, useContext, useEffect, useMemo, useSyncExternalStore,
   type AnchorHTMLAttributes, type ComponentType, type MouseEvent, type ReactNode,
 } from "react";
 
@@ -28,8 +28,38 @@ function subscribe(l: Listener) {
   return () => listeners.delete(l);
 }
 
-export function navigate(to: string, opts: { replace?: boolean } = {}) {
-  if (to === readLocation()) return;
+// ———————— 离开前提醒（编辑器有未保存的修改） ————————
+
+/** watch：这些查询参数变了也算离开（标签页切换会卸载编辑器）；路径变了总算离开 */
+interface LeaveGuard { watch: string[] }
+const guards = new Set<LeaveGuard>();
+
+function leaveBlocked(to: string): boolean {
+  if (!guards.size) return false;
+  const [curPath, curQs = ""] = readLocation().split("?");
+  const [nextPath, nextQs = ""] = to.split("?");
+  const a = new URLSearchParams(curQs), b = new URLSearchParams(nextQs);
+  const leaving = [...guards].some((g) => curPath !== nextPath || g.watch.some((k) => a.get(k) !== b.get(k)));
+  return leaving && !window.confirm("有未保存的修改，离开后会丢失。确定离开？");
+}
+
+/** 有未保存的修改时：站内跳转先确认，关闭 / 刷新页面时浏览器提示 */
+export function useLeaveGuard(active: boolean, watch: string[] = ["tab", "part"]) {
+  const key = watch.join(",");
+  useEffect(() => {
+    if (!active) return;
+    const g: LeaveGuard = { watch: key.split(",").filter(Boolean) };
+    guards.add(g);
+    const onUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", onUnload);
+    return () => { guards.delete(g); window.removeEventListener("beforeunload", onUnload); };
+  }, [active, key]);
+}
+
+/** 返回 false = 用户在"有未保存的修改"提示里选了留下 */
+export function navigate(to: string, opts: { replace?: boolean; force?: boolean } = {}): boolean {
+  if (to === readLocation()) return true;
+  if (!opts.force && leaveBlocked(to)) return false;
   if (HASH) {
     if (opts.replace) window.location.replace("#" + to);
     else window.location.hash = to;
@@ -39,6 +69,7 @@ export function navigate(to: string, opts: { replace?: boolean } = {}) {
     emit();
   }
   window.scrollTo({ top: 0 });
+  return true;
 }
 
 export function useLocation(): { path: string; search: URLSearchParams; href: string } {

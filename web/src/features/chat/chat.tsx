@@ -17,6 +17,7 @@ import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } fro
 import { EnvFilter, ServiceFilter } from "@/components/filters";
 import { FeedbackButtons } from "@/components/feedback";
 import { EnvBadge } from "@/components/status";
+import { ToolOutput, isDbTool, summarizeArgs } from "@/components/tool-call";
 import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
 import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea, objectNameError } from "@/components/ui/form";
@@ -44,6 +45,8 @@ export function ChatPage() {
   const { session } = useParams<{ session?: string }>();
   const [f, setF] = useSearch<{ service: string; env: string; task: string }>();
   const [q, setQ] = useState("");
+  /** 「新对话」：已经在 /chat 上聊着的新会话也要清空重来 */
+  const [fresh, setFresh] = useState(0);
   const { data: sessions } = useSessions({ service: f.service, env: f.env, task: f.task, q: q || undefined });
   const { data: tasks } = useTasks();
   const groups = useMemo(() => {
@@ -60,7 +63,7 @@ export function ChatPage() {
     <div className="flex h-full">
       <aside className="hidden w-[272px] shrink-0 flex-col border-r border-line bg-panel md:flex">
         <div className="space-y-2 p-3">
-          <Button className="w-full" icon={<LuPlus />} onClick={() => navigate("/chat")}>新对话</Button>
+          <Button className="w-full" icon={<LuPlus />} onClick={() => { navigate("/chat"); setFresh((n) => n + 1); }}>新对话</Button>
           <SearchInput value={q} onChange={setQ} placeholder="搜索会话内容" />
           <div className="flex flex-wrap gap-1.5">
             <ServiceFilter value={f.service ?? ""} onChange={(v) => setF({ service: v || undefined })} />
@@ -75,13 +78,13 @@ export function ChatPage() {
                 <div key={label} className="mb-2">
                   <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-fg-3">{label}</div>
                   {items.map((s) => (
-                    <Link key={s.session_id} to={`/chat/${s.session_id}`}
+                    <Link key={s.session_id} to={`/chat/${s.session_id}`} title={s.title} aria-current={session === s.session_id ? "page" : undefined}
                       className={cn("block rounded-md px-2.5 py-2 hover:bg-hover", session === s.session_id && "bg-accent-soft hover:bg-accent-soft")}>
                       <div className={cn("truncate text-[13px]", session === s.session_id ? "font-medium text-accent" : "text-fg")}>{s.title}</div>
                       <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-3">
-                        <span className="truncate">{s.service}</span><span className="font-mono uppercase">{s.env}</span>
+                        <span className="truncate">{s.service ?? "平台"}</span><span className="shrink-0 font-mono uppercase">{s.env}</span>
                         {s.task.includes(":") && <span className="truncate font-mono">{s.task.split(":")[1]}</span>}
-                        <span>· {s.runs} 轮</span><span className="ml-auto shrink-0">{ago(s.last_at)}</span>
+                        <span className="shrink-0">· {s.runs} 轮</span><span className="ml-auto shrink-0">{ago(s.last_at)}</span>
                       </div>
                     </Link>
                   ))}
@@ -89,7 +92,7 @@ export function ChatPage() {
               ))}
         </div>
       </aside>
-      <Conversation key={session ?? "new"} sessionId={session} />
+      <Conversation key={session ?? `new-${fresh}`} sessionId={session} />
     </div>
   );
 }
@@ -165,7 +168,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
       } else if (type === "final") {
         const out = (ev.output ?? {}) as { answer?: string; error?: string };
         patchLast((t) => ({ ...t, answer: out.answer ?? out.error ?? t.answer, status: (ev.status as LiveTurn["status"]) ?? "success", streaming: false }));
-      } else if (["stage", "thought", "tool_call", "tool_result", "approval"].includes(type)) {
+      } else if (["stage", "model_call", "thought", "tool_call", "tool_result"].includes(type)) {
         const { type: _t, ...payload } = ev;
         void _t;
         patchLast((t) => ({ ...t, events: [...t.events, { seq: ++seq, kind: type as RunEvent["kind"], at: new Date().toISOString(), payload } as RunEvent] }));
@@ -210,7 +213,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[820px] px-4 py-6 md:px-6">
           {sessionId && loading ? <div className="space-y-4"><Skeleton className="h-16" /><Skeleton className="h-40" /></div> : turns.length === 0 ? (
-            <Welcome service={svc?.title ?? service} onPick={(q) => setText(q)} />
+            <Welcome service={service} title={svc?.title ?? service} onPick={(q) => setText(q)} />
           ) : turns.map((t, i) => <Turn key={t.run_id || i} turn={t} onCorrect={(c) => correct(t.run_id, c)} />)}
           <div ref={bottom} />
         </div>
@@ -230,7 +233,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
               <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
                 placeholder="该服务没有对话任务" options={chatTasks.map(chatTaskOption)} />
             </Dim>
-            <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个指标、一张表）问。会带上这个对象的专属档案，沉淀的知识也记在它名下；输入新名字会自动建一个。`}>
+            <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个资产、一张表、一个报表）问。会带上这个对象的专属档案，沉淀的记忆也记在它名下；输入新名字会自动建一个子任务。`}>
               {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
             </Dim>
             {extraFields.length > 0 && (
@@ -262,7 +265,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
               </div>
             </Popover>
           </div>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder={envOff ? `${service} 在 ${env} 环境已停用` : `问 ${svc?.title ?? "agent"} 点什么…（Enter 发送，Shift+Enter 换行）`}
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} aria-label="消息" placeholder={envOff ? `${service} 在 ${env} 环境已停用` : `问 ${svc?.title ?? "agent"} 点什么…（Enter 发送，Shift+Enter 换行）`}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
             className="block max-h-48 w-full resize-none bg-transparent px-4 pt-3 text-[13.5px] leading-relaxed text-fg outline-none placeholder:text-fg-3" />
           <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
@@ -297,13 +300,21 @@ function SubtaskPicker({ task, value, onChange }: { task: string; value: string;
   );
 }
 
-function Welcome({ service, onPick }: { service: string; onPick: (q: string) => void }) {
-  const examples = ["上周 GMV 环比为什么下跌？", "退款率指标的口径是什么？", "近 7 天每天的订单量", "dwd_trade_order 昨天行数正常吗？"];
+/** 欢迎页的示例问题：按服务给几条像样的 */
+const EXAMPLES: Record<string, string[]> = {
+  "vision-dagster": ["昨天 dws_account_pnl_daily 为什么物化失败？", "dwd_position_daily 依赖哪些上游资产？", "ck 里 ods_trade_fills 昨天有多少行？", "在本环境跑一下 pnl 相关的测试"],
+  "vision-board": ["账户收益日报的数据来自哪张表？", "策略周报页面在 test 能正常打开吗？", "离线 HTML 导出为什么报 Chrome 找不到？", "本环境 settings 里 STATIC_ROOT 配的是哪？"],
+  "vision-web": ["策略 alpha_mm_03 挂在哪些账户上？", "vision_cfg 里组合（Portfolio）有哪些字段？", "本地应用授权码是怎么生成的？", "最近一次代码同步改了哪些文件？"],
+};
+const DEFAULT_EXAMPLES = ["这个服务的代码目录和配置文件在哪？", "最近一次代码同步改了哪些文件？", "本环境登记了哪些只读库？", "项目自带的测试怎么跑？"];
+
+function Welcome({ service, title, onPick }: { service: string; title: string; onPick: (q: string) => void }) {
+  const examples = EXAMPLES[service] ?? DEFAULT_EXAMPLES;
   return (
     <div className="pt-12 text-center">
       <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-accent-soft text-accent"><LuSparkles className="size-5" /></div>
-      <div className="mt-4 text-[17px] font-semibold text-fg">问 {service || "agent"}</div>
-      <div className="mt-1 text-[13px] text-fg-3">口径以档案为准，取数只走该环境的只读库；每一步都能在运行详情里回放</div>
+      <div className="mt-4 text-[17px] font-semibold text-fg">问 {title || "agent"}</div>
+      <div className="mt-1 text-[13px] text-fg-3">口径以档案为准，取数只走该环境登记的只读库；每一步都能在运行详情里回放</div>
       <div className="mx-auto mt-6 grid max-w-lg gap-2 sm:grid-cols-2">
         {examples.map((e) => (
           <button key={e} type="button" onClick={() => onPick(e)} className="rounded-lg border border-line bg-panel px-3 py-2.5 text-left text-[12.5px] text-fg-2 transition-colors hover:border-accent hover:text-fg">{e}</button>
@@ -317,8 +328,10 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
   const [open, setOpen] = useState(false);
   const [correcting, setCorrecting] = useState(false);
   const [correction, setCorrection] = useState("");
-  const steps = turn.events.filter((e) => e.kind === "thought" || e.kind === "tool_call");
-  const waiting = turn.events.some((e) => e.kind === "approval" && !e.payload.decision) && turn.streaming;
+  /** 思考 = 带内容的模型调用（模型的思考过程；旧运行是 thought）；不带内容的模型调用在这里不显示 */
+  const thought = (e: RunEvent) => e.kind === "thought" || (e.kind === "model_call" && !!e.payload.content);
+  const shown = turn.events.filter((e) => e.kind !== "model_call" || thought(e));
+  const steps = turn.events.filter((e) => thought(e) || e.kind === "tool_call");
   return (
     <div className="mb-7">
       <div className="mb-3 flex justify-end">
@@ -335,20 +348,25 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
           )}
           {open && (
             <div className="mb-3 space-y-1.5 border-l-2 border-line pl-3">
-              {turn.events.map((e) => (
-                <div key={e.seq} className="text-[12px]">
-                  {e.kind === "thought" && <div className="flex gap-1.5 text-fg-2"><LuSparkles className="mt-0.5 size-3 shrink-0 text-accent" />{String(e.payload.content)}</div>}
-                  {e.kind === "tool_call" && <div className="flex gap-1.5 font-mono text-fg-2"><LuWrench className="mt-0.5 size-3 shrink-0 text-info" />{String(e.payload.tool)} <span className="truncate text-fg-3">{JSON.stringify(e.payload.args).slice(0, 100)}</span></div>}
-                  {e.kind === "tool_result" && <pre className="ml-4 max-h-32 overflow-auto rounded bg-sunken px-2 py-1 font-mono text-[11px] text-fg-3">{String(e.payload.output)}</pre>}
-                  {e.kind === "stage" && <div className="text-fg-3">· {String(e.payload.title ?? e.payload.stage)}</div>}
-                  {e.kind === "approval" && <div className="text-warn">· {String(e.payload.title)}</div>}
+              {shown.map((e) => (
+                <div key={e.seq} className="min-w-0 text-[12px]">
+                  {thought(e) && <div className="flex gap-1.5 text-fg-2"><LuSparkles className="mt-0.5 size-3 shrink-0 text-accent" /><span className="min-w-0 whitespace-pre-wrap break-words">{String(e.payload.content)}</span></div>}
+                  {e.kind === "tool_call" && (
+                    <div className="flex min-w-0 gap-1.5 font-mono text-fg-2" title={summarizeArgs(e.payload.args, String(e.payload.tool))}>
+                      <LuWrench className="mt-0.5 size-3 shrink-0 text-info" /><span className="shrink-0">{String(e.payload.tool)}</span>
+                      <span className="truncate text-fg-3">{summarizeArgs(e.payload.args, String(e.payload.tool))}</span>
+                    </div>
+                  )}
+                  {e.kind === "tool_result" && (isDbTool(e.payload.tool)
+                    ? <ToolOutput tool={String(e.payload.tool)} output={String(e.payload.output ?? "")} className="ml-4" />
+                    : <pre className="ml-4 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-sunken px-2 py-1 font-mono text-[11px] text-fg-3">{String(e.payload.output ?? "")}</pre>)}
+                  {e.kind === "stage" && <div className="truncate text-fg-3" title={String(e.payload.title ?? e.payload.stage)}>· {String(e.payload.title ?? e.payload.stage)}</div>}
                 </div>
               ))}
             </div>
           )}
           {turn.answer ? <Markdown text={turn.answer} className={cn("text-[13.5px]", turn.status === "failed" && "text-bad")} />
-            : waiting || turn.status === "awaiting_approval" ? <div className="text-[12.5px] text-warn">等待审批，通过后继续（<Link to="/approvals" className="underline">去审批</Link>）</div>
-              : turn.streaming ? <div className="flex gap-1 py-2">{[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-fg-3" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
+              : turn.streaming ? <div className="flex gap-1 py-2" aria-label="正在回答">{[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-fg-3" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
                 : turn.status === "cancelled" ? <div className="text-[12.5px] text-fg-3">已停止</div>
                   : turn.status === "running" ? <div className="text-[12.5px] text-fg-3">执行中…</div> : null}
           {!turn.streaming && turn.answer && (
@@ -361,9 +379,12 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
           )}
           {correcting && (
             <div className="mt-2 space-y-2 rounded-lg border border-line bg-panel p-3">
-              <Textarea rows={2} autoFocus value={correction} onChange={(e) => setCorrection(e.target.value)} placeholder="哪里不对？例如：GMV 应该不含运费，按支付日而不是下单日" />
+              <Textarea rows={2} autoFocus value={correction} onChange={(e) => setCorrection(e.target.value)} placeholder="哪里不对？例如：收益要按交易日统计，不按自然日"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && correction.trim()) { e.preventDefault(); onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }
+                }} />
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11.5px] text-fg-3">会在本会话开新一轮；成功后上一轮沉淀的记忆被取代</span>
+                <span className="text-[11.5px] text-fg-3">会在本会话开新一轮（Ctrl+Enter 提交）；成功后上一轮沉淀的记忆被取代</span>
                 <div className="flex gap-2">
                   <Button size="sm" variant="ghost" onClick={() => setCorrecting(false)}>取消</Button>
                   <Button size="sm" variant="primary" disabled={!correction.trim()} onClick={() => { onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }}>提交纠正</Button>

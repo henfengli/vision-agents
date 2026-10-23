@@ -1,14 +1,20 @@
 # 部署配置（所有机器共享的默认值）。env/{AGENT_ENV}.yaml 只写差异（深合并）；${VAR} 从环境变量取。
 #
 # 这里只放"这台平台怎么跑起来"：数据库、模型、执行并发、引导密钥、外部系统地址。
-# 服务 / 角色 / 任务与平台配置（环境、审批、通知、记忆、进程）都在控制台里改，存库、带版本；
+# 服务 / 角色 / 任务与平台配置（环境、通知、记忆、进程、提示词）都在控制台里改，存库、带版本；
 # conf/seeds/ 只在库里还没有对应对象时播种一次。
 
+# 模型：OpenAI 兼容协议。Kimi（月之暗面）开放平台；token 放 secrets.env 的 MODEL_TOKEN_A
 model:
-  url: https://internal-llm/v1
-  name: internal-model-v3
-  max_concurrency: 10
-  # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索
+  url: https://api.moonshot.cn/v1
+  name: kimi-k2.7-code              # 这把 key 能用的：kimi-k2.7-code、kimi-k2.6（GET /v1/models 可查）
+  # 账号配额（Kimi 按组织限，充值档位决定）：这个账号同时只能有 1 个请求在途、每分钟 3 次。
+  # 平台侧排队（agent 与辅助调用合计），不撞 429；账号升档后按控制台显示的额度改
+  max_concurrency: 1
+  rpm: 3
+  context_tokens: 400000            # 模型上下文长度：对话历史到 75% 时自动压缩成摘要
+  max_retries: 6
+  # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索（Kimi 没有嵌入接口）
 
 # 执行队列就是 PG 里的 runs 表（不依赖别的编排服务）：同时执行几个运行
 worker:
@@ -20,19 +26,30 @@ kernel:
   max_kernels: 8                    # 同时最多几个（超了回收最久没用的）
 
 process_control:
-  backend: local                    # systemd（生产）/ local（开发机）/ off
-  scope: system                     # system：系统级单元 + polkit（deploy/install.sh）；user：systemd --user（deploy/install-user.sh）
+  backend: local                    # systemd（生产：systemd --user，deploy/install-user.sh）/ local（开发机）/ off
   unit: agent-svc                   # systemd 模板单元名：agent-svc@<服务:环境:进程>.service
 
 # agent 沙箱与业务进程里都遮蔽的路径（存在的才遮；目录换成空目录）。服务声明的配置文件总是遮蔽，不用写在这里。
-# 不写 = 平台密钥目录 + 运行用户的 ~/.ssh、~/.git-credentials、~/.netrc、~/.pgpass、~/.config/agent-platform
-# hidden_paths: [/etc/agent-platform, /home/agent/.ssh]
+# 不写 = 平台密钥目录 ~/.config/agent-platform + 运行用户的 ~/.ssh、~/.git-credentials、~/.netrc、~/.pgpass
+# hidden_paths: [/home/agent/.config/agent-platform, /home/agent/.ssh]
 
-langfuse:
-  enabled: false                    # 可选的后台链路追踪（OTEL → Langfuse），页面不依赖它
-  host: http://127.0.0.1:3000
-  public_key: ""
-  secret_key: ""
+# 可选的后台链路追踪：OTLP/HTTP 导出到任意兼容后端（Jaeger、Tempo、各家 APM）。
+# 运行详情的时间线（含每次模型调用的耗时与 token）来自平台自己的 run_events，不依赖它。需要装 obs 依赖。
+otel:
+  enabled: false
+  endpoint: http://127.0.0.1:4318/v1/traces
+  headers: {}                       # 鉴权头，如 {Authorization: "Bearer ${OTEL_TOKEN}"}
+
+# 代码跟踪：每隔多久看一眼各服务的远端分支（服务的 ref，比如 master），有新提交就同步（拉代码 → 装依赖等步骤 → 重启内核与进程）。
+# 0 = 不自动跟踪，只在控制台点同步。服务定义里 sync.auto: false 的不跟
+code_sync:
+  interval_minutes: 60
+
+# 数据保留（天），维护循环每 6 小时清一次；运行台账本身（输入、输出、配方）一直保留
+retention:
+  run_events_days: 90               # 运行过程事件（被 👎 过的运行不清，回归重放要用）
+  checkpoints_days: 30              # 会话的 checkpoint（最后一轮结束这么久后清，之后不能再续跑）
+  recall_hits_days: 90              # 召回埋点
 
 # Grafana（host_metrics 工具用）：datasource_uid 是 Prometheus 数据源的 uid，token 用只读账号。整段不配则工具不出现。
 # grafana:
@@ -47,4 +64,4 @@ langfuse:
 #   browser:                           # qa_engineer 角色用 "mcp:browser"；页面地址来自服务的 urls
 #     transport: stdio
 #     command: npx
-#     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--output-dir", "/var/lib/agent-platform/scratch"]
+#     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--output-dir", "/home/agent/.local/share/agent-platform/scratch"]

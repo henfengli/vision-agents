@@ -3,10 +3,10 @@
 分五节，每节一份文档（definitions 表 kind=config，name=节名）：
 
 - envs           有哪些环境、默认环境、哪些受保护
-- approvals      危险操作审批：哪些命令算危险、哪些环境必审、多久超时
 - notifications  通知：渠道（钉钉 / Webhook）+ 规则（什么事件、什么范围、发到哪个渠道）
 - memory         记忆默认行为：召回、沉淀、条数
 - processes      进程启停：默认租约与上限
+- prompts        平台提示词：基础约定、子代理约定、上下文压缩、记忆沉淀、交接摘要、回归判定（domain/prompts.py）
 
 "某服务在某环境是否启用"不在这里——那是服务自己的配置（ServiceDef.envs[env].enabled）。
 部署级参数（数据库、模型、执行并发…）仍在 conf/ 文件里，不进库。
@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .prompts import PromptsConfig
+
 # ———————— 环境 ————————
 
 EnvColor = Literal["red", "amber", "blue", "green", "violet", "gray"]
@@ -29,7 +31,7 @@ class EnvDef(BaseModel):
     name: str
     title: str = ""
     description: str = ""
-    protected: bool = False        # 受保护：审批开在"受保护环境"时，这里的危险命令与进程启停要人放行
+    protected: bool = False        # 受保护：只是标记（控制台上醒目显示），不拦任何操作
     color: EnvColor = "gray"
 
     @field_validator("name")
@@ -67,41 +69,14 @@ class EnvsConfig(BaseModel):
         return next((e for e in self.items if e.name == name), None)
 
 
-# ———————— 审批 ————————
-
-class ApprovalsConfig(BaseModel):
-    """运行中途的人工门（危险命令、进程启停）。默认关闭：配置是只读账户、文件系统只读，
-    agent 现在做不了真正危险的事；等以后让它执行变更类任务时再在设置里打开。"""
-
-    danger_patterns: list[str] = Field(default_factory=lambda: [
-        r"\brm\s+-[a-z]*[rf]", r"\bdrop\s+(table|database|schema)\b", r"\btruncate\b", r"\bdelete\s+from\b",
-        r"\bkill(all)?\b", r"\bsystemctl\s+(stop|restart|disable)\b", r"\bgit\s+push\b"])
-    required_in: Literal["off", "protected", "all"] = "off"  # 关闭 / 只在受保护环境 / 所有环境
-    timeout_minutes: int = 30                                # 超时未处理视同拒绝
-
-    def applies(self, protected: bool) -> bool:
-        """这个环境的危险操作要不要审批。"""
-        return self.required_in == "all" or (self.required_in == "protected" and protected)
-
-    @field_validator("danger_patterns")
-    @classmethod
-    def _compile(cls, v: list[str]) -> list[str]:
-        for p in v:
-            try:
-                re.compile(p)
-            except re.error as e:
-                raise ValueError(f"正则不合法 {p!r}：{e}") from e
-        return v
-
-
 # ———————— 通知 ————————
 
 NotifyEvent = Literal[
     "run_failed",            # 运行失败
     "run_succeeded",         # 运行成功
-    "approval_requested",    # 有人/运行在等审批
     "process_stopped",       # 进程退出（含租约到期、异常退出）
     "feedback_negative",     # 有人对一次运行（或其中一步）点了 👎
+    "config_outdated",       # 代码同步发现配置文件的上游（.env.template / settings.py…）变了，配置待更新
 ]
 
 
@@ -170,6 +145,6 @@ class ProcessesConfig(BaseModel):
 
 
 CONFIG_SECTIONS: dict[str, type[BaseModel]] = {
-    "envs": EnvsConfig, "approvals": ApprovalsConfig, "notifications": NotificationsConfig,
-    "memory": MemoryConfig, "processes": ProcessesConfig,
+    "envs": EnvsConfig, "notifications": NotificationsConfig,
+    "memory": MemoryConfig, "processes": ProcessesConfig, "prompts": PromptsConfig,
 }

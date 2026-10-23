@@ -4,10 +4,11 @@
  */
 import { del, get, patch, post, put } from "./client";
 import type {
-  ApiKey, Approval, ApprovalFilters, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigSection, ConfigSections, Instance, Knowledge,
-  KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters, MemoryHealth, Meta, Page, ReplayDetail,
-  ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary,
-  ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire, Version,
+  ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
+  ConfigVersion, Instance, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters, MemoryHealth, Meta,
+  Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary,
+  ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, SyncAccepted, SyncRequest, SyncStatus, TaskSummary, UpcomingFire, Version,
+  VersionStat,
 } from "./types";
 import { useQuery, type QueryOptions } from "../lib/query";
 
@@ -15,6 +16,9 @@ const enc = encodeURIComponent;
 
 /** 定义的复数资源名（路径用） */
 export type DefinitionPath = "services" | "roles" | "tasks";
+
+/** 有每版运行效果统计的：任务、角色（按名字）与平台提示词 */
+export type StatsPath = "tasks" | "roles" | "settings/prompts";
 
 export const api = {
   meta: () => get<Meta>("/v1/meta"),
@@ -27,18 +31,39 @@ export const api = {
     get<Version[]>(name ? `/v1/${kind}/${enc(name)}/versions` : `/v1/${kind}/versions`),
   restore: (kind: DefinitionPath | `settings/${ConfigSection}`, name: string | undefined, v: number) =>
     post<unknown>(name ? `/v1/${kind}/${enc(name)}/versions/${v}/restore` : `/v1/${kind}/versions/${v}/restore`),
+  /** 每个版本跑出来的效果：/v1/tasks/{name}、/v1/roles/{name}、/v1/settings/prompts 下的 version-stats */
+  versionStats: (kind: StatsPath, name?: string) =>
+    get<VersionStat[]>(name ? `/v1/${kind}/${enc(name)}/version-stats` : `/v1/${kind}/version-stats`),
 
   services: () => get<ServiceSummary[]>("/v1/services"),
   service: (name: string) => get<ServiceSummary>(`/v1/services/${enc(name)}`),
   serviceEnv: (name: string, env: string) => get<ServiceView>(`/v1/services/${enc(name)}/envs/${enc(env)}`),
   serviceConfig: (name: string, env: string, path: string) =>
     get<{ path: string; content: string }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),
+  // —— 配置文件编辑（原文不打码）：保存带回打开时的 sha，期间被改过返回 409 conflict ——
+  configRaw: (name: string, env: string, path: string) =>
+    get<ConfigRaw>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path, raw: true }),
+  saveConfig: (name: string, env: string, body: { path: string; content: string; sha: string }) =>
+    put<ConfigSaved>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, body),
+  /** 已按上游核对过，不用改 */
+  ackConfig: (name: string, env: string, path: string) =>
+    post<{ ok: true }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/ack`, { path }),
+  configHistory: (name: string, env: string, path: string) =>
+    get<ConfigVersion[]>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history`, { path }),
+  configVersion: (name: string, env: string, path: string, id: string) =>
+    get<{ id: string; content: string }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history/${enc(id)}`, { path }),
+  // —— 代码同步 ——
+  syncStatus: (name: string, env: string) => get<SyncStatus>(`/v1/services/${enc(name)}/envs/${enc(env)}/sync`),
+  /** 立即同步：每个环境提交一次 code-sync；envs 不给 = 服务启用的全部环境；force = 所有同步步骤都重跑 */
+  syncNow: (name: string, body: SyncRequest = {}) => post<SyncAccepted[]>(`/v1/services/${enc(name)}/sync`, {
+    ...(body.envs?.length ? { envs: body.envs } : {}), ...(body.force ? { force: true } : {}),
+  }),
   processes: (name: string) => get<Instance[]>(`/v1/services/${enc(name)}/processes`),
   /** 服务自己声明的 MCP 工具；reload=true 强制重连（改了 MCP 服务端之后） */
   serviceTools: (name: string, reload = false) => get<ServiceTools>(`/v1/services/${enc(name)}/tools`, { reload: reload || undefined }),
+  /** 返回动作执行后的实例状态 */
   processAction: (name: string, env: string, proc: string, action: "start" | "stop" | "renew", hours?: number) =>
-    post<{ instance: Instance; approval: Approval | null }>(
-      `/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/${action}`, hours ? { hours } : {}),
+    post<{ instance: Instance }>(`/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/${action}`, hours ? { hours } : {}),
   processLogs: (name: string, env: string, proc: string) =>
     get<{ lines: string[] }>(`/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/logs`),
 
@@ -79,11 +104,6 @@ export const api = {
   sessions: (f: { service?: string; env?: string; task?: string; q?: string } = {}) => get<SessionSummary[]>("/v1/sessions", f),
   session: (id: string) => get<SessionDetail>(`/v1/sessions/${enc(id)}`),
 
-  // —— 审批 ——
-  approvals: (f: ApprovalFilters = {}) => get<Approval[]>("/v1/approvals", { ...f }),
-  approve: (id: number, comment = "") => post<Approval>(`/v1/approvals/${id}/approve`, { comment }),
-  reject: (id: number, comment = "") => post<Approval>(`/v1/approvals/${id}/reject`, { comment }),
-
   // —— 记忆（agent 记下的：事实 / 教训）与方法；档案在服务 / 任务定义里 ——
   knowledge: (f: KnowledgeFilters) => get<Knowledge[]>("/v1/knowledge", { ...f }),
   knowledgeHealth: (f: { service?: string; env?: string }) => get<MemoryHealth>("/v1/knowledge/health", f),
@@ -105,9 +125,9 @@ export const api = {
   putSettings: <S extends ConfigSection>(section: S, body: ConfigSections[S]) => put<Settings[S]>(`/v1/settings/${section}`, body),
   testChannel: (channel: string) => post<{ ok: boolean }>("/v1/settings/notifications/test", { channel }),
   apiKeys: () => get<ApiKey[]>("/v1/api-keys"),
-  createApiKey: (body: Pick<ApiKey, "name" | "scope" | "services" | "envs" | "note" | "expires_at">) =>
-    post<ApiKey & { token: string }>("/v1/api-keys", body),
-  patchApiKey: (id: number, body: Partial<Pick<ApiKey, "services" | "envs" | "note" | "expires_at">>) => patch<ApiKey>(`/v1/api-keys/${id}`, body),
+  /** 返回里的 token 只出现这一次 */
+  createApiKey: (body: { name: string; note?: string; expires_at?: string | null }) => post<ApiKey & { token: string }>("/v1/api-keys", body),
+  patchApiKey: (id: number, body: { note?: string; expires_at?: string | null }) => patch<ApiKey>(`/v1/api-keys/${id}`, body),
   revokeApiKey: (id: number) => del<ApiKey>(`/v1/api-keys/${id}`),
 
   stats: (q: { hours?: number; env?: string; service?: string }) => get<Stats>("/v1/stats", q),
@@ -122,6 +142,12 @@ export const useServices = (o?: QueryOptions) => useQuery(["services"], api.serv
 export const useService = (name: string) => useQuery(["services", name], () => api.service(name));
 export const useServiceEnv = (name: string, env: string) => useQuery(["services", name, "env", env], () => api.serviceEnv(name, env), { enabled: !!env });
 export const useProcesses = (name: string) => useQuery(["services", name, "processes"], () => api.processes(name), { refetchInterval: 10_000 });
+export const useSyncStatus = (name: string, env: string) =>
+  useQuery(["services", name, "sync", env], () => api.syncStatus(name, env), { enabled: !!env, refetchInterval: 15_000 });
+export const useConfigRaw = (name: string, env: string, path: string) =>
+  useQuery(["services", name, "config", env, path], () => api.configRaw(name, env, path), { enabled: !!env && !!path });
+export const useConfigHistory = (name: string, env: string, path: string, enabled = true) =>
+  useQuery(["services", name, "config-history", env, path], () => api.configHistory(name, env, path), { enabled: enabled && !!env && !!path });
 export const useRoles = () => useQuery(["roles"], api.roles);
 export const useRole = (name: string) => useQuery(["roles", name], () => api.role(name));
 export const useTasks = (service?: string) => useQuery(["tasks", service ?? ""], () => api.tasks(service));
@@ -129,12 +155,13 @@ export const useTask = (name: string) => useQuery(["tasks", "one", name], () => 
 export const useSubtasks = (name: string) => useQuery(["tasks", "subtasks", name], () => api.subtasks(name), { enabled: !!name });
 export const useVersions = (kind: DefinitionPath | `settings/${ConfigSection}`, name?: string) =>
   useQuery(["versions", kind, name ?? ""], () => api.versions(kind, name));
+export const useVersionStats = (kind: StatsPath, name?: string, enabled = true) =>
+  useQuery(["versions", "stats", kind, name ?? ""], () => api.versionStats(kind, name), { enabled, staleTime: 30_000 });
 export const useRuns = (f: RunFilters, o?: QueryOptions) => useQuery(["runs", "list", f], () => api.runs(f), { refetchInterval: 8000, ...o });
 export const useRun = (id: string, live = false) => useQuery(["runs", "one", id], () => api.run(id), { refetchInterval: live ? 2000 : undefined, live });
 export const useRunEvents = (id: string, live = false) => useQuery(["runs", "events", id], () => api.runEvents(id), { refetchInterval: live ? 1500 : undefined, live });
 export const useSessions = (f: { service?: string; env?: string; task?: string; q?: string } = {}) => useQuery(["sessions", f], () => api.sessions(f));
 export const useSession = (id: string) => useQuery(["sessions", "one", id], () => api.session(id), { enabled: !!id });
-export const useApprovals = (f: ApprovalFilters = {}) => useQuery(["approvals", f], () => api.approvals(f), { refetchInterval: 10_000 });
 export const useServiceTools = (name: string) => useQuery(["services", name, "tools"], () => api.serviceTools(name), { staleTime: 30_000 });
 export const useKnowledge = (f: KnowledgeFilters) => useQuery(["memory", "knowledge", f], () => api.knowledge(f));
 export const usePromotable = (f: { service?: string; env?: string }) => useQuery(["memory", "promotable", f], () => api.knowledgePromotable(f));

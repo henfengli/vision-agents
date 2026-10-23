@@ -1,10 +1,14 @@
 /**
  * mock 数据：确定性随机（固定种子），时间相对"现在"生成，
  * 让预览里的列表、统计、时间线看起来像一个跑了几天的真实平台。
+ *
+ * 服务 / 角色 / 任务 / 平台配置与 conf/seeds/ 一致（vision-dagster、vision-board、vision-web）；
+ * 运行、记忆、方法、反馈、回归重放围绕这三个项目编：Dagster 资产（成交 → 持仓 → 账户收益 → 策略报表）、
+ * Django 报表（vision-board）、配置管理（vision-web 的 vision_cfg），数据在 ClickHouse（库名 ck）。
  */
 import type {
-  ApiKey, Approval, Asset, ChatTurn, Env, FeedbackReason, Instance, Knowledge, ReplayFilter, ReplayVerdict,
-  Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, Trigger,
+  ApiKey, Asset, ChatTurn, Env, FeedbackReason, Instance, Knowledge, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
+  Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, SyncDef, Task, Trigger,
 } from "../types";
 
 // ———————— 随机工具 ————————
@@ -25,32 +29,69 @@ const NOW = Date.now();
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 
-// ———————— 环境 ————————
+/** 版本时间线（与 server.ts 的 versionsOf 一致）：当前版 31 小时前生效，再往前每版 31 小时 */
+const VERSION_STEP = 31 * HOUR;
+const versionAt = (current: number, msAgo: number) => Math.max(1, current - Math.floor(Math.max(0, msAgo) / VERSION_STEP));
+const MODEL = "kimi-k2.7-code";
+const PLATFORM = "9.0.0";
+const PROMPTS_VERSION = 3;
+/** 更早的运行是升级到 9.0 之前的：没有配方（详情页退回任务 / 角色版本），查库工具还叫 sql_query、思考是 thought 事件 */
+const RECIPE_SINCE = 66 * HOUR;
+/** agent 的工作目录（db_query 的大结果写在它下面的 queries/<run_id>/） */
+const SCRATCH = "/home/agent/.local/share/agent-platform/scratch";
+
+/** 最近 n 个交易日（跳过周末），新的在前；第一个是今天之前最近的一个 */
+function tradingDays(n: number): string[] {
+  const out: string[] = [];
+  for (let t = NOW - DAY; out.length < n; t -= DAY) {
+    const d = new Date(t);
+    if (d.getDay() !== 0 && d.getDay() !== 6) out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+const TD = tradingDays(12);
+
+// ———————— 环境（conf/seeds/settings.yaml） ————————
 
 export const envs: Env[] = [
-  { name: "prod", title: "生产", description: "线上环境（受保护：审批打开时这里的危险命令与进程启停要人放行）", protected: true, color: "red" },
-  { name: "test", title: "测试", description: "集成测试环境，数据每周从生产脱敏同步", protected: false, color: "amber" },
-  { name: "dev", title: "开发", description: "开发自测，库每周一重置", protected: false, color: "blue" },
+  { name: "prod", title: "国内生产", description: "对应线上生产部署；本机副本的配置用只读账户", protected: true, color: "red" },
+  { name: "test", title: "国内测试", description: "对应线上测试部署", protected: false, color: "amber" },
+  { name: "dev", title: "开发", description: "只有本机副本，没有线上部署；开发自测用", protected: false, color: "blue" },
 ];
 
-// ———————— 服务 ————————
+// ———————— 服务（conf/seeds/services/*.yaml） ————————
 
 const by = (name: string, at: number) => ({ updated_by: name, updated_at: iso(at) });
+/** 与后端 SyncDef 的默认一致：自动跟踪 + 装依赖两步（服务定义里没写 sync 时） */
+export const defaultSync = (): SyncDef => ({
+  auto: true,
+  steps: [
+    { title: "安装依赖（requirements.txt）", when: ["requirements.txt"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"] },
+    { title: "安装项目（pyproject.toml）", when: ["pyproject.toml"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-e", "."] },
+  ],
+});
+
+const CK_TEST = "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default";
+const CK_PROD = "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default";
 
 export const services: Service[] = [
   {
-    name: "dagster", title: "Dagster 数据编排", description: "数仓 ETL 编排：ods → dwd → ads 三层资产，按天物化",
-    root: "/srv/svc/dagster/code/{env}", code_paths: [], repo: "git@gitlab.internal:data/dagster.git", ref: "main",
-    python: "/srv/svc/dagster/venv/{env}/bin/python", env_vars: { DAGSTER_HOME: "/srv/svc/dagster/home/{env}", TZ: "Asia/Shanghai" },
-    hosts: ["10.0.0.11"], readonly_dsn: null,
-    configs: [{ canonical: "/srv/svc/dagster/code/{env}/dagster.yaml", template: "/srv/svc/dagster/conf/{env}/dagster.yaml" },
-      { canonical: "/srv/svc/dagster/code/{env}/workspace.yaml", template: "/srv/svc/dagster/conf/{env}/workspace.yaml" }],
-    processes: {
-      webserver: { cmd: ["{python}", "-m", "dagster_webserver", "-w", "workspace.yaml", "-p", "{port}"], ports: { prod: 3000, test: 3001, dev: 3002 }, lease_hours: 2 },
-      daemon: { cmd: ["/srv/svc/dagster/venv/{env}/bin/dagster-daemon", "run", "-w", "workspace.yaml"], lease_hours: 2 },
-    },
+    name: "vision-dagster", title: "Vision Dagster",
+    description: "Vision 的数据编排（Dagster）：资产、调度、传感器；线上 docker 部署，国内生产 / 测试各一套",
+    root: "/srv/svc/vision-dagster/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-dagster.git", ref: "master",
+    python: "/opt/conda/envs/vision-dagster/bin/python",
+    env_vars: { DAGSTER_HOME: "/srv/svc/vision-dagster/code/{env}" },
     urls: { local: "http://127.0.0.1:{port:webserver}" },
-    // 服务自己的 MCP：写了 envs 就只在列出的环境可用（dev 没有线上 Dagster，不连）
+    hosts: ["172.24.24.136"],
+    databases: { ck: CK_TEST },
+    configs: [
+      { canonical: "/srv/svc/vision-dagster/code/{env}/.env", template: "/srv/svc/vision-dagster/conf/{env}/.env", upstream: ".env.template" },
+      { canonical: "/srv/svc/vision-dagster/code/{env}/dagster.yaml", template: "/srv/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: "dagster.template.yaml" },
+    ],
+    processes: {
+      webserver: { cmd: ["/opt/conda/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"], ports: { prod: 3900, test: 3901, dev: 3902 }, lease_hours: 2 },
+    },
+    sync: { auto: true, steps: [{ title: "安装项目", when: ["pyproject.toml", "setup.py", "setup.cfg"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-e", "."] }] },
     mcp: {
       dagster: {
         transport: "stdio", command: "{platform_python}", args: ["{platform}/mcp_servers/dagster_mcp.py"],
@@ -58,107 +99,136 @@ export const services: Service[] = [
       },
     },
     envs: {
-      prod: { ref: "release", hosts: ["10.0.0.11", "10.0.0.12"], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@prod-db:5432/dagster", urls: { deployed: "http://10.0.0.11:3000" } },
-      test: { ref: "test", hosts: ["10.0.1.11"], readonly_dsn: "postgresql://ro:${DAGSTER_RO_PASSWORD}@test-db:5432/dagster", urls: { deployed: "http://10.0.1.11:3001" } },
+      prod: { hosts: ["172.24.16.100"], urls: { deployed: "https://vision-dagster-prod.ipa.zs:9902" }, databases: { ck: CK_PROD } },
+      test: { urls: { deployed: "https://vision-dagster-test.ipa.zs:9901" } },
     },
     profile: {
-      conventions: "资产按 dt 分区（yyyy-mm-dd），T+1 物化；ads 层依赖 dwd 全部完成",
-      no_go: "prod 不手工触发 backfill，需走变更单",
-      env_notes: "test 的 ods 数据是生产前一周的脱敏快照，金额字段乘了随机系数",
-      pitfalls: "上游 ods_order 延迟到 03:00 后会导致 dwd_trade_order 级联失败，先看上游",
+      env_notes: "线上是 docker 部署（docker-compose.template.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。本机副本直接用 conda 环境跑，不用 docker。*.india 模板是印度部署的，本机副本只用国内的",
+      no_go: "本机副本不起 dagster-daemon、不手工物化生产资产；线上的运行记录、物化历史用 dagster 的 MCP 工具查",
+      code_refs: "vision_dagster/（资产与作业定义）、vision_dagster_tests/（测试，用 py 跑 pytest）、scripts/、notebooks/（探索用的 ipynb）",
+      upstream: "ClickHouse 国内生产 172.168.0.125、国内测试 172.24.17.66（HTTP 8123 / TCP 9000）",
+      runbook: "线上运维 @高殿磊",
     },
-    enabled: true, version: 7, ...by("lihf", 2 * DAY),
+    enabled: true, version: 3, ...by("gaodl", 2 * DAY),
   },
   {
-    name: "board", title: "经营看板", description: "面向业务的经营指标看板（Node.js），数据来自 ads 层",
-    root: "/srv/svc/board/code/{env}", code_paths: [], repo: "git@gitlab.internal:bi/board.git", ref: "main",
-    python: "/srv/svc/board/venv/{env}/bin/python", env_vars: { BOARD_ENV: "{env}", TZ: "Asia/Shanghai" },
-    hosts: ["10.0.0.21"], readonly_dsn: null,
-    configs: [{ canonical: "/srv/svc/board/code/{env}/.env", template: "/srv/svc/board/conf/{env}/.env" }],
-    processes: { server: { cmd: ["node", "server.js"], ports: { prod: 8080, test: 8081, dev: 8082 }, lease_hours: 4 } },
+    name: "vision-board", title: "Vision Board",
+    description: "Vision 报表展示系统（Django）：报表页面与离线 HTML 导出；线上 nginx + 源码服务",
+    root: "/srv/svc/vision-board/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-board.git", ref: "master",
+    python: "/opt/conda/envs/vision-board/bin/python",
+    env_vars: { DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}" },
     urls: { local: "http://127.0.0.1:{port:server}" },
+    hosts: ["172.21.0.45"],
+    databases: { ck: CK_TEST },
+    configs: [
+      { canonical: "/srv/svc/vision-board/code/{env}/vision_board/settings-{env}.py", template: "/srv/svc/vision-board/conf/{env}/settings.py", upstream: "vision_board/settings.py" },
+    ],
+    processes: {
+      server: { cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"], ports: { prod: 8180, test: 8181, dev: 8182 }, lease_hours: 4 },
+    },
+    sync: {
+      auto: true,
+      steps: [
+        { title: "安装依赖", when: ["requirements.txt"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"] },
+        { title: "收集静态资源", when: ["**/static/**", "templates/**", "vision_board/settings.py", "requirements.txt"], shared: false, timeout_s: 900, run: ["{python}", "manage.py", "collectstatic", "--noinput"] },
+      ],
+    },
     mcp: {},
     envs: {
-      prod: { ref: "release", readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@prod-db:5432/board", urls: { site: "https://board.internal" } },
-      test: { ref: "test", readonly_dsn: "postgresql://ro:${BOARD_RO_PASSWORD}@test-db:5432/board", hosts: ["10.0.1.21"], urls: { site: "https://board-test.internal" } },
-      dev: { ref: "dev", readonly_dsn: "postgresql://ro:***@dev-db:5432/board" },
+      prod: { hosts: ["172.24.16.100"], urls: { site: "https://vision-board.moon-prod.ipa.zs/" }, databases: { ck: CK_PROD } },
+      test: { urls: { site: "https://vision-board.ipa.zs/" } },
     },
     profile: {
-      conventions: "GMV 不含退款；total_fee 单位是分；“本月”按自然月，不是近 30 天",
-      pitfalls: "看板缓存 10 分钟，刚改的数据不会立刻出现",
+      conventions: "每个环境一份 settings：vision_board/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_board.settings-{环境}；manage.py 命令都按它的配置走",
+      no_go: "本机副本不执行 python manage.py crontab add（CRONTAB_COMMAND_PREFIX 会按该环境的配置真的跑定时任务）；不改线上 nginx",
+      env_notes: "线上是 nginx + 源码服务：生产 172.24.16.100（https://vision-board.moon-prod.ipa.zs/），测试 172.21.0.45（https://vision-board.ipa.zs/）。离线 HTML 导出接口需要本机装 Chrome",
+      code_refs: "report/（报表）、templates/、vision_board/（项目配置与 settings）、scripts/、check_deps.py（依赖检查脚本）",
+      upstream: "ClickHouse 国内生产 172.168.0.125、国内测试 172.24.17.66；登录走认证服务（settings 里配应用授权）",
+      runbook: "运维 @李艳东",
     },
-    enabled: true, version: 4, ...by("wangzh", 5 * DAY),
+    enabled: true, version: 4, ...by("liyd", 3 * DAY),
   },
   {
-    name: "config-center", title: "配置中心", description: "各服务运行时配置的发布与审计（Java）",
-    root: "/srv/svc/config-center/code/{env}", code_paths: [], repo: "git@gitlab.internal:infra/config-center.git", ref: "master",
-    python: "", env_vars: { SPRING_PROFILES_ACTIVE: "{env}" },
-    hosts: ["10.0.0.31"], readonly_dsn: "postgresql://ro:${CONFIG_RO_PASSWORD}@prod-db:5432/config",
-    configs: [{ canonical: "/srv/svc/config-center/code/{env}/application.yaml", template: "/srv/svc/config-center/conf/{env}/application.yaml" }],
-    processes: { app: { cmd: ["./bin/config-center", "--port", "{port}"], ports: { prod: 9080, test: 9081, dev: 9082 }, lease_hours: 2 } },
-    urls: {}, mcp: {},
-    envs: { dev: { enabled: false } },
-    profile: { no_go: "发布接口在 prod 只读调用，审计只看不改" },
-    enabled: true, version: 2, ...by("lihf", 9 * DAY),
-  },
-  {
-    name: "report-engine", title: "报表引擎", description: "定时报表渲染与邮件分发",
-    root: "/srv/report-engine", code_paths: ["/srv/report-engine"], repo: "", ref: "", hosts: ["10.0.0.41"], readonly_dsn: null,
-    python: "/srv/report-engine/.venv/bin/python", env_vars: {},
-    configs: [{ canonical: "/srv/report-engine/config.toml", template: "/srv/report-engine/conf/config.{env}.toml" }],
-    processes: { worker: { cmd: ["{python}", "-m", "report_engine.worker"], workdir: "/srv/report-engine", lease_hours: 2 } },
-    urls: {}, mcp: {},
-    envs: { test: { python: "/srv/report-engine/.venv-py312/bin/python" } }, profile: {}, enabled: false, version: 1, ...by("chenyu", 14 * DAY),
+    name: "vision-web", title: "Vision Web",
+    description: "Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）",
+    root: "/srv/svc/vision-web/code/{env}", code_paths: [], repo: "git@gitlab.ipa.zs:vision/vision-web.git", ref: "master",
+    python: "/opt/conda/envs/vision-web/bin/python",
+    env_vars: { DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}" },
+    urls: { local: "http://127.0.0.1:{port:server}" },
+    hosts: [],
+    databases: {},
+    configs: [
+      { canonical: "/srv/svc/vision-web/code/{env}/vision_web/settings-{env}.py", template: "/srv/svc/vision-web/conf/{env}/settings.py", upstream: "vision_web/settings.py" },
+    ],
+    processes: {
+      server: { cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"], ports: { prod: 8280, test: 8281, dev: 8282 }, lease_hours: 4 },
+    },
+    sync: {
+      auto: true,
+      steps: [
+        { title: "安装依赖", when: ["requirements.txt"], shared: true, timeout_s: 900, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"] },
+        { title: "收集静态资源", when: ["static/**", "**/static/**", "vision_web/settings.py", "requirements.txt"], shared: false, timeout_s: 900, run: ["{python}", "manage.py", "collectstatic", "--noinput"] },
+      ],
+    },
+    mcp: {},
+    envs: {},
+    profile: {
+      conventions: "每个环境一份 settings：vision_web/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_web.settings-{环境}",
+      no_go: "本机副本只读查看配置，不通过页面或 manage.py 改任何配置数据",
+      env_notes: "用户登录走 FreeIPA 认证；本地应用授权要手动生成授权码（写进该环境的 settings）",
+      code_refs: "vision_cfg/（配置模型与接口）、vision_web/（项目配置）、static/css/、docs/（接口文档）、scripts/",
+    },
+    enabled: true, version: 2, ...by("liyd", 6 * DAY),
   },
 ];
 
-// ———————— 角色 ————————
+// ———————— 角色（conf/seeds/roles.yaml） ————————
 
 // tools 可写 "*"（全部内置 + 全部平台 MCP）和 "mcp:<server>"（某个平台 MCP server 的全部工具）；
 // 继承：子角色写了 tools（非空）/ subagents（非 null）/ service_tools（非 null）就整体替换父角色的，没写就跟随
 export const roles: Role[] = [
   {
     name: "generalist", title: "通用", description: "什么都能做：读代码、跑项目代码、查库、看配置、按需起进程、用服务工具",
-    prompt: "你是这个服务的全能工程师，用户可能问口径、查数据、分析报错、看代码、验证改动，也可能交代一件具体的事。\n- 先弄清楚要什么；档案里的约定优先；\n- 跑项目代码用 py，查库用 sql_query，看配置用 service_info；需要长驻才用 service_ctl 起进程，用完停掉；\n- 子问题很深、需要独立排查（报错根因、复杂取数）时，委派给对应的子代理；\n- 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。",
-    tools: ["*"], subagents: ["ops_analyst", "data_searcher"], service_tools: true,
-    extends: null, prompt_append: "", version: 1, ...by("seed", 2 * DAY),
+    prompt: "你是这个服务的全能工程师，用户可能问口径、查数据、分析报错、看代码、验证改动，也可能交代一件具体的事。\n- 先弄清楚要什么；档案里的约定优先；\n- 跑项目代码用 py，查库用 db_query，看配置用 service_info；需要长驻才用 service_ctl 起进程，用完停掉；\n- 子问题很深、需要独立排查（报错根因、复杂取数）时，委派给对应的子代理；\n- 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。",
+    tools: ["*"], subagents: ["ops_analyst", "data_searcher"], service_tools: null,
+    extends: null, prompt_append: "", version: 2, ...by("liyd", 2 * DAY),
   },
   {
     name: "ops_analyst", title: "运维分析", description: "报错定位与根因分析：读日志、读代码、在项目环境里复现、查库",
-    prompt: "你是运维分析工程师。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 读相关代码和本环境的配置文件，定位出错的步骤；服务有自己的工具（如 dagster 的运行记录）时先用它看线上现场；\n3. 用 py 在本环境的项目里直接调用出错的函数 / 资产复现；数据假设要验证时可以委派给 data_searcher；\n4. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n\n不要猜测，没有证据的结论标注为推测。",
-    tools: ["py", "bash", "run_code", "service_info", "service_ctl", "sql_query", "host_metrics", "save_asset"],
-    subagents: ["data_searcher"], service_tools: true,
-    extends: null, prompt_append: "", version: 6, ...by("lihf", 3 * DAY),
+    prompt: "你是运维分析工程师。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 读相关代码和本环境的配置文件，定位出错的步骤；服务有自己的工具（如 dagster 的运行记录）时先用它看线上现场；\n3. 用 py 在本环境的项目里直接调用出错的函数 / 资产复现；数据假设要验证时可以委派给 data_searcher；\n   只有需要长驻进程（比如看 webserver 页面）时才用 service_ctl 起进程，用完停掉；\n4. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
+    tools: ["py", "bash", "service_info", "service_ctl", "db_query", "host_metrics", "save_asset", "notify"],
+    subagents: ["data_searcher"], service_tools: null,
+    extends: null, prompt_append: "", version: 5, ...by("gaodl", 3 * DAY),
   },
   {
     name: "data_searcher", title: "数据口径问答", description: "回答指标口径和取数问题，给出依据与结果",
-    prompt: "你是数据分析师，回答业务方关于指标口径与数据的问题。\n- 先确认口径（档案里的约定优先），其次读项目代码里的口径实现；\n- 项目里有现成的口径函数就用 py 直接调用，没有再用 sql_query 写 SQL；结果超过 20 行时给汇总；\n- 回答里附上用到的函数或 SQL。",
-    tools: ["py", "sql_query", "service_info", "run_code"], subagents: [], service_tools: true,
-    extends: null, prompt_append: "", version: 4, ...by("wangzh", 6 * DAY),
+    prompt: "你是数据分析师，回答业务方关于指标口径与数据的问题。\n- 先确认口径：档案里的约定优先，其次读项目代码里的口径实现（指标函数 / SQL 模板）；\n- 项目里有现成的口径函数或查询封装，就用 py 直接调用它取数，口径与线上一致；没有再用 db_query 写 SQL（用该库自己的方言）；\n- db_query 的大结果在文件里：用 py 的 pandas 读它做汇总，别把明细整份贴出来；回答里附上用到的函数或 SQL。",
+    tools: ["py", "bash", "db_query", "service_info"], subagents: null, service_tools: null,
+    extends: null, prompt_append: "", version: 4, ...by("wangzh", 2 * DAY),
   },
   {
     name: "qa_engineer", title: "冒烟测试", description: "部署后按沉淀的方法跑冒烟脚本和页面检查，失败时给出复现步骤",
-    prompt: "你是测试工程师。部署完成后执行冒烟测试：优先复用方法里的脚本，不要重写；要看页面时用浏览器工具打开运行环境里列出的地址；失败时给出复现步骤与证据，根因不明显就委派给 ops_analyst。",
-    tools: ["py", "bash", "service_info", "service_ctl", "save_asset", "mcp:browser"], subagents: ["ops_analyst"], service_tools: true,
-    extends: null, prompt_append: "", version: 3, ...by("chenyu", 8 * DAY),
+    prompt: "你是测试工程师。部署完成后执行冒烟测试：优先复用方法里的脚本，不要重写；\n本机副本跟踪 master、每小时同步一次：先用 service_info(what=git) 看代码目录的提交是不是待测版本，\n对不上就如实报告（可以请人在控制台点同步），不要拿旧代码下结论；项目自带的测试用 py 跑（如 pytest.main([...])）；\n要看页面时用浏览器工具打开运行环境里列出的地址（site 是线上部署，local 是本机副本、要先 service_ctl 起进程、测完停掉）；\n失败时给出复现步骤与证据，根因不明显就委派给 ops_analyst。",
+    tools: ["py", "bash", "service_info", "service_ctl", "save_asset", "mcp:browser"], subagents: ["ops_analyst"], service_tools: null,
+    extends: null, prompt_append: "", version: 2, ...by("liyd", 5 * DAY),
   },
   {
     name: "inspector", title: "巡检", description: "按沉淀的方法做日常巡检，异常才通知",
     prompt: "",
-    tools: ["py", "bash", "service_info", "sql_query", "host_metrics", "save_asset", "notify"], subagents: [], service_tools: null,
+    tools: ["py", "bash", "service_info", "db_query", "host_metrics", "save_asset", "notify"], subagents: [], service_tools: null,
     extends: "ops_analyst",
-    prompt_append: "你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。没有既定方法时先探索，结束后用 save_asset 沉淀成方法。输出控制在 15 行以内。", version: 2, ...by("lihf", 10 * DAY),
+    prompt_append: "你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。\n没有既定方法时先探索，结束后用 save_asset 沉淀成方法。输出控制在 15 行以内。", version: 2, ...by("liyd", 8 * DAY),
   },
 ];
 
-// ———————— 任务 ————————
+// ———————— 任务（conf/seeds/tasks.yaml；子任务是调用时点名自动建的） ————————
 
 const trig = {
   api: (id = "api"): Trigger => ({ id, type: "api" }),
   chat: (id = "chat"): Trigger => ({ id, type: "chat" }),
 };
 
-const taskBase = { enabled: true, profile: {}, memory: {}, deliver: null, extends: null, auto_created: false, dedup: null, handler: null };
+const taskBase = { enabled: true, profile: {}, memory: {}, deliver: null, extends: null, auto_created: false, dedup: null, handler: null, output_schema: null, envs: [] as string[] };
 
 export const tasks: Task[] = [
   // 通用入口：任何服务、任何环境直接提问或交代一件事，不用先建任务；要定时、事件、投递、去重时再建正式任务
@@ -166,12 +236,12 @@ export const tasks: Task[] = [
     ...taskBase, name: "ask", title: "问一下", description: "通用入口：对这个服务这个环境直接提问或交代一件事",
     service: "*", role: "generalist", form: "agent",
     input: { question: { type: "text", required: true, description: "问题或要做的事" } },
-    envs: [], triggers: [trig.chat(), trig.api()], timeout_s: 900,
-    version: 1, ...by("seed", 2 * DAY),
+    triggers: [trig.chat(), trig.api()], timeout_s: 900,
+    version: 1, ...by("seed", 9 * DAY),
   },
   {
-    ...taskBase, name: "failure-analysis", title: "Dagster 失败分析", description: "Dagster 资产物化失败时分析根因，结论推钉钉群",
-    service: "dagster", role: "ops_analyst", form: "agent",
+    ...taskBase, name: "failure-analysis", title: "Dagster 失败分析", description: "资产物化失败时分析根因，结论推到钉钉群",
+    service: "vision-dagster", role: "ops_analyst", form: "agent",
     input: {
       run_id: { type: "str", required: true, description: "Dagster run id" },
       asset_key: { type: "str", required: true, description: "失败的资产" },
@@ -179,194 +249,533 @@ export const tasks: Task[] = [
     },
     envs: ["prod", "test"],
     triggers: [
-      { id: "on-failure", type: "event", source: "dagster", event: "run_failure", map: { run_id: "run_id", asset_key: "asset_key", error: "error" },
+      {
+        id: "on-failure", type: "event", source: "dagster", event: "run_failure", session: "dagster:{asset_key}:{error_class}:{date}",
         rules: [
           { pattern: "connection.*(refused|timeout|reset)", category: "infra", conclusion: "数据库/服务连接失败，检查目标服务存活与网络" },
-          { pattern: "duplicate key|unique constraint", category: "data", conclusion: "主键冲突：上游重复投递或任务重复跑" },
-          { pattern: "out of memory|oom", category: "infra", conclusion: "内存不足：检查资源配额或拆分分区" },
+          { pattern: "out of memory|oom|memoryerror", category: "infra", conclusion: "内存不足：检查资源配额或拆分分区" },
         ],
-        session: "dagster:{asset_key}:{error_class}:{date}" },
+      },
       trig.api(),
     ],
-    deliver: { channel: "default" }, dedup: { key: "run_id", window_s: 600 }, timeout_s: 300,
-    profile: { pitfalls: "资产失败先看上游是否完成，80% 的失败是上游延迟级联" },
-    version: 9, ...by("lihf", 1 * DAY),
+    deliver: { channel: "default" }, dedup: { key: "run_id", window_s: 600 }, timeout_s: 900,
+    profile: { pitfalls: "资产失败先看上游资产是否完成，多数失败是上游延迟级联；先用 dagster 的 MCP 工具看线上这次运行的日志" },
+    version: 4, ...by("gaodl", 1 * DAY),
   },
+  // 事件里点名的资产不存在子任务时自动建（继承父任务）；值得写档案的资产后来补了档案
   {
-    ...taskBase, name: "failure-analysis:dwd_trade_order", title: "", description: "", service: "dagster", role: "ops_analyst", form: "agent",
-    input: {}, envs: [], triggers: [], deliver: { channel: "default" }, timeout_s: 300, extends: "failure-analysis",
+    ...taskBase, name: "failure-analysis:dws_account_pnl_daily", title: "账户收益日表", description: "", service: "vision-dagster", role: "ops_analyst", form: "agent",
+    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: true,
     profile: {
-      code_refs: "/srv/dagster/assets/dwd/trade_order.py",
-      upstream: "ods_order、ods_payment（03:00 前到齐）",
-      pitfalls: "支付回调乱序时会出现 amount 为负的脏数据，过滤规则在 transform_payment()",
+      upstream: "dwd_position_daily、market_kline_1d（交易日 18:30 前到齐）",
+      pitfalls: "新开的子账户在 dim_account 里晚一天才有，汇总时会丢行：先查 dim_account 再下结论",
     },
-    version: 3, ...by("lihf", 2 * DAY),
+    version: 2, ...by("gaodl", 2 * DAY),
   },
   {
-    ...taskBase, name: "failure-analysis:ads_gmv_daily", title: "", description: "", service: "dagster", role: "ops_analyst", form: "agent",
-    input: {}, envs: [], triggers: [], deliver: { channel: "default" }, timeout_s: 300, extends: "failure-analysis", auto_created: true,
-    version: 1, ...by("auto:event", 6 * HOUR),
+    ...taskBase, name: "failure-analysis:ods_trade_fills", title: "", description: "", service: "vision-dagster", role: "ops_analyst", form: "agent",
+    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: true,
+    version: 1, ...by("auto:event", 7 * HOUR),
   },
   {
-    ...taskBase, name: "data-qa", title: "数据口径问答", description: "业务方提问指标口径、取数；对话页默认任务",
+    ...taskBase, name: "data-qa", title: "数据口径问答", description: "业务方提问指标口径与取数",
     service: "*", role: "data_searcher", form: "agent",
     input: { question: { type: "text", required: true, description: "问题" } },
-    envs: [], triggers: [trig.chat(), trig.api()], deliver: null, timeout_s: 180,
-    profile: { conventions: "金额单位统一为元；日期按支付日；口径冲突时以指标字典为准" },
-    version: 5, ...by("wangzh", 4 * DAY),
+    triggers: [trig.chat(), trig.api()], timeout_s: 600,
+    version: 2, ...by("wangzh", 4 * DAY),
   },
-  // 数据口径问答的对象 = 一个指标：每个指标挂自己的口径档案
+  // 对话里点名了"账户收益"这个对象：自动建的子任务，口径后来写进了它的档案
   {
-    ...taskBase, name: "data-qa:gmv", title: "GMV", description: "", service: "*", role: "data_searcher", form: "agent",
-    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa",
-    profile: { conventions: "GMV = 已支付订单金额（含运费），不扣退款；退款单独看 refund_amount", code_refs: "ads_gmv_daily.gmv / dwd_trade_order.pay_amount" },
-    version: 4, ...by("wangzh", 3 * DAY),
-  },
-  {
-    ...taskBase, name: "data-qa:retention_7d", title: "7 日留存", description: "", service: "*", role: "data_searcher", form: "agent",
-    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa",
-    profile: { conventions: "分母 = 当日新增用户（首次 app_open）；分子 = 第 7 天仍有 app_open；内部账号剔除" },
-    version: 2, ...by("zhaoq", 6 * DAY),
+    ...taskBase, name: "data-qa:account_pnl", title: "账户收益", description: "", service: "*", role: "data_searcher", form: "agent",
+    input: {}, triggers: [], timeout_s: 600, extends: "data-qa", auto_created: true,
+    profile: { conventions: "账户收益 = 已实现盈亏 + 浮动盈亏，按交易日汇总，单位元；跨币种先按当日中间价折成人民币", code_refs: "vision-board 的 report/pnl.py（account_pnl()）" },
+    version: 2, ...by("wangzh", 3 * DAY),
   },
   {
-    ...taskBase, name: "data-qa:refund_rate", title: "退款率", description: "", service: "*", role: "data_searcher", form: "agent",
-    input: {}, envs: [], triggers: [], timeout_s: 180, extends: "data-qa", auto_created: true,
-    version: 1, ...by("auto:chat", 20 * HOUR),
-  },
-  {
-    ...taskBase, name: "pipeline-debug", title: "数据链路排查", description: "对话里排查某张表、某条链路为什么没数据或数据不对",
-    service: "dagster", role: "ops_analyst", form: "agent",
-    input: { question: { type: "text", required: true, description: "问题" }, date: { type: "str", description: "业务日期，默认昨天" } },
-    envs: ["prod", "test"], triggers: [trig.chat(), trig.api()], timeout_s: 600,
-    profile: { pitfalls: "先看上游分区是否到齐，再看本资产的物化日志" },
-    version: 3, ...by("lihf", 5 * DAY),
-  },
-  {
-    ...taskBase, name: "pipeline-debug:dwd_trade_order", title: "订单明细表", description: "", service: "dagster", role: "ops_analyst", form: "agent",
-    input: {}, envs: [], triggers: [], timeout_s: 600, extends: "pipeline-debug",
-    profile: { upstream: "ods_order、ods_payment（03:00 前到齐）", code_refs: "/srv/dagster/assets/dwd/trade_order.py" },
-    version: 2, ...by("lihf", 4 * DAY),
-  },
-  {
-    ...taskBase, name: "board-ops", title: "看板运维问答", description: "看板接口慢、页面报错、缓存、发布相关的问题",
-    service: "board", role: "ops_analyst", form: "agent",
-    input: { question: { type: "text", required: true, description: "问题" } },
-    envs: [], triggers: [trig.chat()], timeout_s: 300,
-    version: 1, ...by("chenyu", 9 * DAY),
-  },
-  {
-    ...taskBase, name: "frontend-smoke", title: "看板冒烟测试", description: "GitLab 部署成功后跑冒烟脚本",
-    service: "board", role: "qa_engineer", form: "agent",
+    ...taskBase, name: "frontend-smoke", title: "Board 冒烟测试", description: "GitLab 部署成功后检查报表页面与接口",
+    service: "vision-board", role: "qa_engineer", form: "agent",
     input: { version: { type: "str", required: true, description: "部署版本（ref）" }, project: { type: "str", description: "GitLab 项目" } },
     envs: ["test", "prod"],
-    triggers: [{ id: "on-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^board$" }, map: { version: "ref", project: "project" } }, trig.api()],
-    deliver: { channel: "default" }, dedup: { key: "version", window_s: 1800 }, timeout_s: 600,
-    version: 4, ...by("chenyu", 7 * DAY),
+    triggers: [{ id: "on-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^vision-board$" }, map: { version: "ref", project: "project" } }, trig.api()],
+    deliver: { channel: "default" }, dedup: { key: "version", window_s: 1800 }, timeout_s: 900,
+    version: 2, ...by("liyd", 7 * DAY),
   },
   {
-    ...taskBase, name: "daily-inspection", title: "看板日常巡检", description: "每天早上检查看板数据新鲜度、接口错误率和主机资源",
-    service: "board", role: "inspector", form: "agent", input: { scope: { type: "enum", options: ["full", "quick"], default: "full" } },
+    ...taskBase, name: "daily-inspection", title: "Board 日常巡检", description: "每天早上检查报表数据新鲜度与线上页面",
+    service: "vision-board", role: "inspector", form: "agent", input: { scope: { type: "enum", options: ["full", "quick"], default: "full" } },
     envs: ["prod", "test"],
-    triggers: [{ id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" }, timezone: "Asia/Shanghai" }, trig.api()],
-    deliver: { channel: "default" }, timeout_s: 600, version: 6, ...by("lihf", 3 * DAY),
+    triggers: [{ id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" } }, trig.api()],
+    deliver: { channel: "default" }, timeout_s: 900, version: 3, ...by("liyd", 3 * DAY),
+  },
+  // 代码跟踪发现远端有新提交时自动提交它；控制台的"同步"按钮也是它
+  {
+    ...taskBase, name: "code-sync", title: "代码同步", description: "把服务在某个环境的代码目录对齐到跟踪的分支（master），再按变更装依赖、收集静态资源等，重启内核与在跑的进程",
+    service: "*", role: null, form: "builtin", handler: "code-sync",
+    input: {
+      ref: { type: "str", description: "分支 / tag / 提交；不填 = 服务跟踪的分支（服务的 ref）" },
+      force: { type: "bool", description: "不管依赖文件变没变，所有同步步骤都重跑一遍（重建了 conda 环境之后用）" },
+    },
+    triggers: [trig.api()],
+    timeout_s: 1800, version: 2, ...by("seed", 9 * DAY),
   },
   {
-    ...taskBase, name: "config-audit", title: "配置变更审计", description: "工作日早上汇总前一天的配置发布，标出高风险变更",
-    service: "config-center", role: "ops_analyst", form: "agent", input: {},
-    envs: ["prod"],
-    triggers: [{ id: "weekday", type: "schedule", cron: "30 8 * * 1-5", envs: ["prod"], input: {} }],
-    deliver: { channel: "default" }, timeout_s: 900,
-    profile: { conventions: "高风险：timeout 放大 >5 倍、连接池缩小、支付相关开关 on→off；只有高风险才需要单独列出" },
-    version: 3, ...by("lihf", 12 * DAY),
-  },
-  {
-    ...taskBase, name: "report-regression", title: "报表回归对比", description: "渲染报表与基线逐格对比", service: "report-engine", role: "inspector", form: "agent",
-    input: { report: { type: "str", required: true }, baseline: { type: "str" } }, envs: ["test"],
-    triggers: [trig.api()], deliver: { url: "http://10.0.0.41:7000/hooks/regression" }, timeout_s: 900,
-    enabled: false, version: 1, ...by("chenyu", 14 * DAY),
-  },
-  {
-    ...taskBase, name: "code-sync", title: "代码同步", description: "把服务在某个环境的代码目录切到指定版本；GitLab 部署成功后自动切到刚部署的提交",
-    service: "*", role: null, form: "builtin", handler: "code-sync", envs: [],
-    input: { ref: { type: "str", description: "分支 / tag / 提交；不填 = 该环境跟踪的分支" } },
-    triggers: [trig.api(), { id: "board-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^board$" }, map: { ref: "sha" }, rules: [], session: null, service: "board" }],
-    dedup: { key: "ref", window_s: 300 }, timeout_s: 600, version: 1, ...by("seed", 20 * DAY),
-  },
-  {
-    ...taskBase, name: "memory-gardener", title: "记忆园丁", description: "夜间维护：code_ref 漂移巡检、负反馈条目处置提示",
-    service: null, role: null, form: "builtin", handler: "memory-gardener", input: {}, envs: [],
-    triggers: [{ id: "nightly", type: "schedule", cron: "0 3 * * *", envs: ["prod", "test", "dev"], input: {} }],
-    deliver: null, timeout_s: 1800, version: 2, ...by("seed", 20 * DAY),
+    ...taskBase, name: "memory-gardener", title: "记忆园丁", description: "夜间维护：知识的 code_ref 与代码对不上就标为过期",
+    service: null, role: null, form: "builtin", handler: "memory-gardener", input: {},
+    triggers: [{ id: "nightly", type: "schedule", cron: "0 3 * * *", envs: ["prod"], input: {} }],
+    timeout_s: 1800, version: 1, ...by("seed", 9 * DAY),
   },
 ];
+
+// ———————— 平台提示词（设置 → 提示词；内置默认文本见 domain/prompts.py，这里是 wangzh 改到的 v3） ————————
+
+const PROMPTS: PromptsConfig = {
+  base: `你是 agent-platform 上的一个业务 agent。平台约定：
+- 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。
+- 档案（[档案——…]）是人写的一手事实，优先级最高；历史知识与方法是过去运行沉淀的，可能过时，与代码或数据矛盾时以实际为准并指出。
+- 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里；服务代码只读，用 bash 直接读原路径（cat / grep / sed -n）。
+- 要跑项目自己的代码（import 项目模块、调口径函数、用项目的数据访问层取数、复现某个函数的报错），用 py：它就在本环境的项目 Python 里，配置已就位，变量在会话内保留。不要在 bash 里自己拼环境去跑项目代码。
+- py 里可以直接调用你的其他工具（同名函数，如 db_query("select …")、service_info(what="config")，返回文本）：要批量、循环地调工具时写进一段 py，中间结果不必进对话。
+- 配置文件（各环境的配置、密钥文件）在 bash 里被遮蔽、读到的是空文件；本环境的配置用 service_info(what=config) 读，密钥已打码。
+- 脚本先写进工作目录、跑通，再用 save_asset 收编成方法；以后同类运行会自动召回。
+- 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。`,
+  subagent: `你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
+- 你和主 agent 在同一次运行里：同一个服务、同一个环境，工具只作用于它们。
+- 只做交给你的那件事，做完给出可核对的结论（依据：命令输出、SQL、代码位置），不确定就明说。主 agent 只看得到你最后一条回复。
+- 跑项目代码用 py；配置用 service_info(what=config) 读。`,
+  compaction: `对话历史太长，要压缩成一份摘要替换掉下面这些消息，之后的工作只能看到摘要。
+按四节输出，没有内容的节写"无"，不要输出别的：
+
+## 目标
+（这次要解决的问题）
+
+## 已查明
+（关键事实与依据：命令输出、SQL 结果、代码位置；排除过的方向及原因）
+
+## 产物
+（写过的文件、保存的方法、起过的进程）
+
+## 下一步
+（还没做完的事）
+
+<messages>
+{messages}
+</messages>`,
+  distill: `以下是 agent 刚在服务 {service} 的 {env} 环境完成的一次任务记录。判断是否产出了以后还用得上的结论。
+
+任务：{task}
+输入：{input}
+结论：{output}
+
+只提炼"以后还会用到的"内容：指标口径（key 形如 metric:xxx）、表与字段含义、服务拓扑、调用方式等事实；
+有报错输入时，再给一条这类报错的教训（根因 + 怎么判断）。没有可沉淀的内容就返回空 JSON 数组。
+
+env_specific：结论只在 {env} 环境成立（比如这个环境特有的配置、数据量、主机）写 true；
+口径、代码逻辑、表结构这类各环境都一样的写 false。拿不准写 false。
+
+严格输出 JSON：
+[{{"kind": "fact", "key": "metric:account_pnl", "content": "...", "code_path": "/srv/svc/vision-board/code/{env}/...", "env_specific": false}},
+ {{"kind": "lesson", "category": "code|data|infra|upstream", "conclusion": "...", "env_specific": false}}]`,
+  handoff_summary: `把以下这次任务记录整理成"交接摘要"，供下次同类问题的新会话直接续用。
+严格按四节输出，没有内容的节写"无"，不要加其他内容：
+
+## 结论
+（本次判断的最终结论，一两句）
+
+## 被否方案
+（排查过但排除的方向及排除原因——新会话不要重复排查）
+
+## 当前约束
+（仍然成立的限制条件：环境、权限、上游依赖等）
+
+## 未决问题
+（没查完/待跟进的事项）
+
+任务：{task}
+输入：{input}
+结论：{output}`,
+  replay_judge: `你在做回归评审。同一个问题，旧答案被人点了 👎；现在用新版本的提示词 / 定义重答了一次。
+判断新答案有没有解决人指出的问题。
+
+任务：{task}（{where}）
+输入：
+{input}
+
+旧答案（被 👎）：
+{old}
+
+人指出的问题：
+{issues}
+
+新答案：
+{new}
+
+只输出 JSON，不要别的内容：{{"verdict": "fixed|same|worse|unclear", "reason": "一两句：新答案在被指出的问题上怎么样"}}
+- fixed：被指出的问题解决了，且没有引入明显的新错误
+- same：被指出的问题还在
+- worse：问题还在且更糟，或引入了明显的新错误
+- unclear：信息不够判断（比如要看实际数据才能确认）`,
+};
+/** 设置里的提示词一节（server.ts 的 PUT / 恢复会原地改它的版本）；31 小时前 wangzh 改到 v3 */
+const promptsEntry = { section: "prompts", ...PROMPTS, version: PROMPTS_VERSION, updated_by: "wangzh", updated_at: iso(VERSION_STEP) };
 
 // ———————— 运行 ————————
 
-const questions = [
-  "3 月以来 total_fee 是多少？", "上周 GMV 环比为什么跌了 12%？", "退款率指标的口径是什么？",
-  "dwd_trade_order 昨天行数比前天少了一半，正常吗？", "看板首页 DAU 和埋点平台对不上", "新客定义是首单还是首访？",
-  "7 天留存怎么算的？分母是哪天的新客？", "华东区 10 月订单量按天给我一下",
-];
-const askQuestions = [
-  "webserver 在 test 起得来吗？起来以后看一眼首页", "昨天 ads_gmv_daily 是几点物化完的？", "帮我看下 config.toml 里缓存 TTL 配的多少",
-  "dwd_trade_order 的 transform_payment 在本环境跑一下 10-19 分区", "最近一次部署改了哪些文件？",
-];
-const assets = ["dwd_trade_order", "ads_gmv_daily", "dwd_user_active", "ods_order", "ads_refund_rate", "dim_shop"];
-const errors = [
-  "psycopg.OperationalError: connection to server at \"10.0.2.5\", port 5432 failed: Connection refused",
-  "KeyError: 'pay_channel'\n  File \"/srv/dagster/assets/dwd/trade_order.py\", line 88, in transform_payment",
-  "dagster._core.errors.DagsterExecutionStepExecutionError: upstream asset ods_order partition 2026-10-19 missing",
-  "pandas.errors.MergeError: Merge keys are not unique in right dataset",
-  "MemoryError: Unable to allocate 3.2 GiB for an array",
-];
-
 export interface MockRun extends Run {
   _events?: RunEvent[];
-  _answer?: string;            // 指定最终答案（回归重放的新答案）；不填按任务与问题生成
+  _answer?: string;            // 指定最终答案（回归重放的新答案）；不填按场景生成
+  _output?: Run["output"];     // 内建任务（代码同步）的结果 JSON；不填按事件生成
+  _error_code?: string;
+  _scenario?: number;          // 选中的场景下标（问答、失败分析）
 }
+
+/** 角色继承链：根在前、自己在后 */
+function roleChain(name: string | null): Role[] {
+  const out: Role[] = [];
+  let r = name ? roles.find((x) => x.name === name) : undefined;
+  while (r && !out.includes(r)) {
+    out.unshift(r);
+    const parent: string | null = r.extends;
+    r = parent ? roles.find((x) => x.name === parent) : undefined;
+  }
+  return out;
+}
+/** 生效的子代理：沿继承链最后一个写了的（null = 跟随父角色） */
+const subagentsOf = (chain: Role[]) => [...chain].reverse().find((r) => r.subagents !== null)?.subagents ?? [];
+
+/**
+ * 配方（与 pipeline._record_recipe 一致）：任务（与父任务）、角色继承链每一层、子代理、服务、平台提示词（只 agent 运行有）、模型、平台版本。
+ * msAgo：运行开始于多久之前，按版本时间线推当时生效的版本；更早的运行没有配方。
+ */
+export function recipeOf(run: Run, msAgo = Math.max(0, NOW - new Date(run.created_at).getTime())): Recipe | null {
+  if (msAgo > RECIPE_SINCE) return null;
+  const [baseName, object] = run.task.split(":");
+  const base = tasks.find((t) => t.name === baseName);
+  const agent = base?.form === "agent" && run.resolution !== "rule";
+  const recipe: Recipe = { task: { name: run.task, version: run.task_version ?? 1 }, model: MODEL, platform: PLATFORM };
+  if (object && base) recipe.task.parent = { name: base.name, version: versionAt(base.version, msAgo) };
+  const chain = roleChain(run.role);
+  if (chain.length) {
+    recipe.role = { name: run.role!, lineage: chain.map((r) => ({ name: r.name, version: r.name === run.role ? run.role_version ?? r.version : versionAt(r.version, msAgo) })) };
+    const subs = agent ? subagentsOf(chain).filter((s) => s !== run.role) : [];
+    if (subs.length) recipe.subagents = subs.map((s) => ({ name: s, lineage: roleChain(s).map((r) => ({ name: r.name, version: versionAt(r.version, msAgo) })) }));
+  }
+  const svc = services.find((s) => s.name === run.service);
+  if (svc) recipe.service = { name: svc.name, version: versionAt(svc.version, msAgo) };
+  if (agent) recipe.prompts = versionAt(promptsEntry.version, msAgo);
+  return recipe;
+}
+
+// ———————— 场景：问题 → 每次模型调用的思考与工具调用 → 结论 ————————
+
+interface Call { tool: string; args: Record<string, unknown>; output: string; ms?: number; sub?: Plan[] }
+interface Plan { think?: string; calls: Call[] }
+interface Scenario { q: string; plans: (r: Run) => Plan[]; answer: (r: Run) => string }
+
+const mdTable = (cols: string[], rows: (string | number)[][]) =>
+  ["| " + cols.join(" | ") + " |", "|" + "---|".repeat(cols.length), ...rows.map((row) => "| " + row.join(" | ") + " |")].join("\n");
+
+/** db_query 的输出（与 agent/tools/db.py 的 render 一致）：超过 20 行时全部写进工作目录的文件 */
+function ckOut(o: { rows: number; cols: string[]; preview: (string | number)[][]; ms: number; file?: string }): string {
+  const lines = [`[ClickHouse · ck] ${o.rows} 行 × ${o.cols.length} 列，${o.ms} ms`];
+  if (o.file) lines.push(`全部结果在 ${o.file}（UTF-8 CSV，首行是列名）：用 bash（head / grep / awk / wc）或 py（pandas.read_csv）按需读，不要整份打印。下面是前 ${o.preview.length} 行：`);
+  lines.push(mdTable(o.cols, o.preview));
+  return lines.join("\n");
+}
+const csvOf = (r: Run, n = 0) => `${SCRATCH}/queries/${r.run_id}/${r.created_at.slice(11, 19).replace(/:/g, "")}-ck-${r.run_id.slice(n, n + 6)}.csv`;
+const codeDir = (r: Run) => `/srv/svc/${r.service}/code/${r.env}`;
+
+const ACCOUNTS = ["A001", "A002", "A003", "A005", "A007", "A008", "A011", "A012", "A015", "A016", "A019", "A021"];
+/** 某账户某交易日的收益（元）：确定性的假数据，预览、文件、汇总三处一致 */
+const pnlOf = (d: number, a: number) => Math.round((((d * 37 + a * 53) % 29) - 11) * 1712.4 + (a - 6) * 230) / 1;
+const DAYS7 = TD.slice(0, 7).reverse();
+const pnlRows = DAYS7.flatMap((day, d) => ACCOUNTS.map((acc, a) => [day, acc, pnlOf(d, a).toFixed(2)]));
+const pnlTotals = ACCOUNTS.map((acc, a) => [acc, DAYS7.reduce((n, _, d) => n + pnlOf(d, a), 0)] as [string, number]).sort((x, y) => y[1] - x[1]);
+const yuan = (n: number) => (n < 0 ? "-" : "") + "¥" + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
+const PNL_SQL = `SELECT trade_date, account_id, round(sum(realized_pnl + unrealized_pnl), 2) AS pnl
+FROM dws_account_pnl_daily
+WHERE trade_date >= '${DAYS7[0]}'
+GROUP BY trade_date, account_id
+ORDER BY trade_date, account_id`;
+
+const QA: Record<string, Scenario[]> = {
+  "vision-board": [
+    {
+      q: "近 7 个交易日各账户的收益是多少？",
+      plans: (r) => [
+        { think: "先确认口径：档案和记忆里账户收益 = 已实现 + 浮动盈亏，按交易日汇总。报表用的是 report/pnl.py 的 account_pnl()，先看它怎么取数，保证和报表一致。",
+          calls: [{ tool: "bash", args: { command: `sed -n '18,44p' ${codeDir(r)}/report/pnl.py` }, ms: 40,
+            output: `def account_pnl(start, end, accounts=None):\n    """账户收益：已实现 + 浮动，按交易日汇总（元）。"""\n    sql = """\n        SELECT trade_date, account_id, sum(realized_pnl + unrealized_pnl) AS pnl\n        FROM dws_account_pnl_daily\n        WHERE trade_date BETWEEN %(start)s AND %(end)s\n        GROUP BY trade_date, account_id\n    """\n    return ck.query_df(sql, {"start": start, "end": end})` }] },
+        { think: "account_pnl() 就是对 dws_account_pnl_daily 按交易日、账户求和。直接用同样的 SQL 查最近 7 个交易日；12 个账户 × 7 天会超过 20 行，结果写进文件后用 pandas 汇总。",
+          calls: [{ tool: "db_query", args: { query: PNL_SQL, db: "ck" }, ms: 412,
+            output: ckOut({ rows: pnlRows.length, cols: ["trade_date", "account_id", "pnl"], preview: pnlRows.slice(0, 20), ms: 386, file: csvOf(r) }) }] },
+        { think: "84 行在文件里。按账户汇总，再看哪几天波动大，不把明细贴出来。",
+          calls: [{ tool: "py", args: { code: `import pandas as pd\ndf = pd.read_csv("${csvOf(r)}")\nprint(df.groupby("account_id").pnl.sum().sort_values(ascending=False).round(0).to_string())\nprint(df.groupby("trade_date").pnl.sum().round(0).to_string())` }, ms: 920,
+            output: "account_id\n" + pnlTotals.map(([a, n]) => `${a}    ${n.toFixed(1)}`).join("\n") + "\ntrade_date\n" + DAYS7.map((d, i) => `${d}    ${ACCOUNTS.reduce((n, _, a) => n + pnlOf(i, a), 0).toFixed(1)}`).join("\n") }] },
+      ],
+      answer: () => `近 7 个交易日（${DAYS7[0]} ~ ${DAYS7[6]}）12 个账户收益合计 **${yuan(pnlTotals.reduce((n, [, v]) => n + v, 0))}**（已实现 + 浮动，按交易日汇总）。\n\n| 账户 | 收益 |\n|---|---|\n${pnlTotals.slice(0, 6).map(([a, n]) => `| ${a} | ${yuan(n)} |`).join("\n")}\n| 其余 6 个 | ${yuan(pnlTotals.slice(6).reduce((n, [, v]) => n + v, 0))} |\n\n口径与报表一致（report/pnl.py 的 \`account_pnl()\`）。明细 84 行在运行的工作目录里，需要的话可以导出。\n\n\`\`\`sql\n${PNL_SQL}\n\`\`\``,
+    },
+    {
+      q: "账户收益日报里的收益口径是什么？",
+      plans: (r) => [
+        { think: "口径问题：档案里没写收益的定义，先读报表代码。",
+          calls: [{ tool: "bash", args: { command: `grep -rn "def account_pnl\\|realized_pnl" ${codeDir(r)}/report/ | head -20` }, ms: 60,
+            output: `${codeDir(r)}/report/pnl.py:18:def account_pnl(start, end, accounts=None):\n${codeDir(r)}/report/pnl.py:22:        SELECT trade_date, account_id, sum(realized_pnl + unrealized_pnl) AS pnl\n${codeDir(r)}/report/views.py:41:    df = account_pnl(start, end, accounts)` }] },
+      ],
+      answer: () => "**账户收益 = 已实现盈亏 + 浮动盈亏**，按**交易日**汇总，单位元。\n\n- 数据来自 ClickHouse 的 `dws_account_pnl_daily`（vision-dagster 每个交易日 18:40 物化）；\n- 非交易日没有行，周报 / 月报是交易日求和；\n- 跨币种账户先按当日中间价折成人民币。\n\n依据：`report/pnl.py` 第 18 行的 `account_pnl()`，日报视图 `report/views.py` 第 41 行调用它。",
+    },
+    {
+      q: "策略周报的收益率和 CK 里算的对不上，差在哪？",
+      plans: () => [
+        { think: "周报的收益率在 report/strategy.py。用 py 直接调项目里的 strategy_return()，和自己用 SQL 算的对比。",
+          calls: [{ tool: "py", args: { code: `from report.strategy import strategy_return\nprint(strategy_return("alpha_mm_03", "${TD[4]}", "${TD[0]}"))` }, ms: 1340, output: "{'strategy': 'alpha_mm_03', 'pnl': 182344.12, 'nav_start': 12500000.0, 'return': 0.014588}" }] },
+        { think: "周报用的分母是期初净值 1250 万。看看 CK 里按平均净值算是多少。",
+          calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT sum(pnl) AS pnl, avg(nav) AS nav_avg, sum(pnl) / avg(nav) AS ret\nFROM dws_strategy_nav_daily\nWHERE strategy = 'alpha_mm_03' AND trade_date BETWEEN '${TD[4]}' AND '${TD[0]}'` }, ms: 95,
+            output: ckOut({ rows: 1, cols: ["pnl", "nav_avg", "ret"], preview: [[182344.12, 12930412.5, 0.014102]], ms: 81 }) }] },
+      ],
+      answer: () => "差在**分母**：\n\n| 算法 | 分母 | 收益率 |\n|---|---|---|\n| 策略周报（`strategy_return()`） | 期初净值 ¥12,500,000 | **1.46%** |\n| 你在 CK 里的算法 | 区间平均净值 ¥12,930,413 | 1.41% |\n\n分子一致（¥182,344）。周报口径是期初净值，期间有申购时两者会差几个基点；以周报口径为准的话，SQL 里改用期初那一天的 `nav`。",
+    },
+    {
+      q: "上周换手率最高的 5 个账户",
+      plans: () => [
+        { think: "换手率按记忆里的口径：成交额 / 期初与期末持仓市值的均值。直接在 CK 里算，结果只有 5 行。",
+          calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT account_id, sum(turnover) / ((argMin(mv, trade_date) + argMax(mv, trade_date)) / 2) AS turnover_rate\nFROM dws_account_pnl_daily\nWHERE trade_date BETWEEN '${TD[9]}' AND '${TD[5]}'\nGROUP BY account_id ORDER BY turnover_rate DESC LIMIT 5` }, ms: 140,
+            output: ckOut({ rows: 5, cols: ["account_id", "turnover_rate"], preview: [["A011", 3.82], ["A003", 2.97], ["A016", 2.41], ["A001", 1.88], ["A021", 1.62]], ms: 133 }) }] },
+      ],
+      answer: () => `上周（${TD[9]} ~ ${TD[5]}）换手率最高的 5 个账户：\n\n| 账户 | 换手率 |\n|---|---|\n| A011 | 382% |\n| A003 | 297% |\n| A016 | 241% |\n| A001 | 188% |\n| A021 | 162% |\n\n口径：成交额 / 期初与期末持仓市值的均值（2026-08 之后的口径）。`,
+    },
+    {
+      q: "dws_account_pnl_daily 上个交易日有多少行？",
+      plans: () => [
+        { think: "按交易日 count，顺便和前几个交易日比。",
+          calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT trade_date, count() AS n FROM dws_account_pnl_daily WHERE trade_date >= '${TD[4]}' GROUP BY trade_date ORDER BY trade_date` }, ms: 70,
+            output: ckOut({ rows: 5, cols: ["trade_date", "n"], preview: TD.slice(0, 5).reverse().map((d, i) => [d, i === 4 ? 1186 : 1190 + i]), ms: 58 }) }] },
+      ],
+      answer: () => `上个交易日（${TD[0]}）**1,186 行**，前 4 个交易日在 1,190~1,193 之间，少了 4~7 行。\n\n一行 = 一个账户一个交易日；少的几行通常是当天新开的子账户还没进 dim_account（晚一天才有），不是数据丢失。`,
+    },
+  ],
+  "vision-dagster": [
+    {
+      q: "dwd_position_daily 最近 5 个交易日的行数正常吗？",
+      plans: () => [
+        { think: "直接在 CK 里按交易日 count，再和前一周的均值比。",
+          calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT trade_date, count() AS n, uniqExact(account_id) AS accounts\nFROM dwd_position_daily WHERE trade_date >= '${TD[4]}'\nGROUP BY trade_date ORDER BY trade_date` }, ms: 210,
+            output: ckOut({ rows: 5, cols: ["trade_date", "n", "accounts"], preview: TD.slice(0, 5).reverse().map((d, i) => [d, 48211 + i * 37, 1190 + (i % 3)]), ms: 196 }) }] },
+      ],
+      answer: () => `正常。最近 5 个交易日每天 **4.82 万~4.84 万行**，覆盖 1,190~1,192 个账户，和前一周均值（4.82 万）一致。\n\n\`\`\`sql\nSELECT trade_date, count() AS n, uniqExact(account_id) AS accounts\nFROM dwd_position_daily WHERE trade_date >= '${TD[4]}'\nGROUP BY trade_date ORDER BY trade_date\n\`\`\``,
+    },
+    {
+      q: "ods_trade_fills 上个交易日的成交笔数按交易所分一下",
+      plans: () => [
+        { think: "成交表按 exchange 分组计数。",
+          calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT exchange, count() AS fills, round(sum(price * qty) / 1e8, 2) AS amount_yi\nFROM ods_trade_fills WHERE trade_date = '${TD[0]}'\nGROUP BY exchange ORDER BY fills DESC` }, ms: 330,
+            output: ckOut({ rows: 4, cols: ["exchange", "fills", "amount_yi"], preview: [["SSE", 412883, 38.21], ["SZSE", 377120, 31.07], ["CFFEX", 52310, 12.88], ["SHFE", 21944, 4.12]], ms: 318 }) }] },
+      ],
+      answer: () => `上个交易日（${TD[0]}）共 **86.4 万笔**成交：\n\n| 交易所 | 笔数 | 成交额（亿元） |\n|---|---|---|\n| SSE | 412,883 | 38.21 |\n| SZSE | 377,120 | 31.07 |\n| CFFEX | 52,310 | 12.88 |\n| SHFE | 21,944 | 4.12 |`,
+    },
+  ],
+};
+
+const ASK: Record<string, Scenario[]> = {
+  "vision-board": [
+    {
+      q: "本环境 settings 里 STATIC_ROOT 和 CRONTAB_COMMAND_PREFIX 配的是什么？",
+      plans: (r) => [
+        { think: "配置文件在 bash 里读不到，用 service_info(what=config) 读本环境的 settings（密钥打码）。",
+          calls: [{ tool: "service_info", args: { what: "config", path: `/srv/svc/vision-board/conf/${r.env}/settings.py` }, ms: 30,
+            output: `STATIC_URL = "/static/"\nSTATIC_ROOT = "/srv/svc/vision-board/static/${r.env}"\nCRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\nCLICKHOUSE = {"host": "${r.env === "prod" ? "172.168.0.125" : "172.24.17.66"}", "port": 8123, "user": "board_ro", "password": "***"}` }] },
+      ],
+      answer: (r) => `${r.env} 环境的 settings（\`vision_board/settings-${r.env}.py\`）：\n\n- \`STATIC_ROOT = "/srv/svc/vision-board/static/${r.env}"\`：collectstatic 收集到这里；\n- \`CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\`：定时任务按本环境的配置跑。\n\n按档案，本机副本不要执行 \`manage.py crontab add\`，否则会真的按这个前缀跑定时任务。`,
+    },
+    {
+      q: "server 在 test 起得来吗？起来以后看一眼账户收益日报页",
+      plans: () => [
+        { think: "要看页面得起进程：service_ctl start server，起来后用浏览器打开 local 地址，看完停掉。",
+          calls: [{ tool: "service_ctl", args: { action: "start", process: "server" }, ms: 4200, output: "start 完成：running，端口 8181，租约到 " + iso(-4 * HOUR).slice(0, 16) }] },
+        { think: "起来了，打开日报页。",
+          calls: [{ tool: "browser_navigate", args: { url: "http://127.0.0.1:8181/report/pnl_daily/" }, ms: 2600, output: "### Page state\n- Page URL: http://127.0.0.1:8181/report/pnl_daily/\n- Page Title: 账户收益日报 · Vision Board\n- 表格 12 行，最新交易日 " + TD[0] }] },
+        { think: "页面正常。用完把进程停掉。",
+          calls: [{ tool: "service_ctl", args: { action: "stop", process: "server" }, ms: 900, output: "stop 完成：stopped" }] },
+      ],
+      answer: () => `起得来：本机副本 \`server\` 在 test 用 8181 端口启动正常（runserver，用 test 的 settings）。\n\n账户收益日报页 \`/report/pnl_daily/\` 打开正常：12 个账户，最新交易日 ${TD[0]}。看完已停掉进程。`,
+    },
+  ],
+  "vision-dagster": [
+    {
+      q: "昨天 dws_account_pnl_daily 是几点物化完的？",
+      plans: () => [
+        { think: "线上的物化记录用 dagster 的 MCP 工具查，不用起本机 webserver。",
+          calls: [{ tool: "get_asset_materializations", args: { asset_key: "dws_account_pnl_daily", limit: 3 }, ms: 640,
+            output: `partition=${TD[0]} status=SUCCESS start=18:41:07 end=18:52:33 run=7f3c21ab\npartition=${TD[1]} status=SUCCESS start=18:40:55 end=18:49:10 run=2b81e0c4\npartition=${TD[2]} status=SUCCESS start=18:41:02 end=18:50:47 run=c0a91d33` }] },
+      ],
+      answer: () => `上个交易日（${TD[0]}）的分区 **18:52** 物化完成（18:41 开始，用时 11 分钟），比前两天晚 2~3 分钟，属正常波动。\n\n依据：dagster MCP \`get_asset_materializations\`，运行 7f3c21ab。`,
+    },
+    {
+      q: "在本环境跑一下 vision_dagster_tests 里 pnl 相关的测试",
+      plans: () => [
+        { think: "项目自带测试用 py 在项目内核里跑 pytest。",
+          calls: [{ tool: "py", args: { code: `import pytest\npytest.main(["-q", "vision_dagster_tests/test_pnl.py"])` }, ms: 5400, output: ".......                                                                  [100%]\n7 passed in 3.42s\nExitCode.OK" }] },
+      ],
+      answer: () => "`vision_dagster_tests/test_pnl.py` 7 个用例**全部通过**（3.4 秒）。用的是本环境的项目 Python 与配置。",
+    },
+  ],
+  "vision-web": [
+    {
+      q: "策略 alpha_mm_03 挂在哪些账户上？",
+      plans: () => [
+        { think: "配置在 vision_cfg 的模型里，用 py 直接查 ORM（只读）。",
+          calls: [{ tool: "py", args: { code: `from vision_cfg.models import Strategy\ns = Strategy.objects.get(code="alpha_mm_03")\nprint(list(s.accounts.values_list("code", "name", "status")))` }, ms: 880,
+            output: "[('A003', '做市三号', 'active'), ('A011', '做市主账户', 'active'), ('A016', '做市备用', 'paused')]" }] },
+      ],
+      answer: () => "策略 **alpha_mm_03** 挂在 3 个账户上：\n\n| 账户 | 名称 | 状态 |\n|---|---|---|\n| A003 | 做市三号 | 启用 |\n| A011 | 做市主账户 | 启用 |\n| A016 | 做市备用 | 暂停 |\n\n依据：`vision_cfg.models.Strategy.accounts`（只读查询，没有改任何配置）。",
+    },
+    {
+      q: "vision_cfg 里组合（Portfolio）有哪些字段？",
+      plans: (r) => [
+        { think: "读模型定义。",
+          calls: [{ tool: "bash", args: { command: `grep -n "class Portfolio" -A 16 ${codeDir(r)}/vision_cfg/models.py` }, ms: 30,
+            output: "88:class Portfolio(models.Model):\n89:    code = models.CharField(max_length=32, unique=True)\n90:    name = models.CharField(max_length=64)\n91:    accounts = models.ManyToManyField(Account, related_name=\"portfolios\")\n92:    risk_limit = models.JSONField(default=dict)   # 风控参数：单票上限、行业上限、回撤线\n93:    benchmark = models.CharField(max_length=32, blank=True)\n94:    status = models.CharField(max_length=16, default=\"active\")\n95:    updated_at = models.DateTimeField(auto_now=True)" }] },
+      ],
+      answer: () => "`vision_cfg.models.Portfolio` 的字段：\n\n| 字段 | 类型 | 说明 |\n|---|---|---|\n| code | CharField(32)，唯一 | 组合代码 |\n| name | CharField(64) | 名称 |\n| accounts | 多对多 Account | 组合里的账户 |\n| risk_limit | JSONField | 风控参数：单票上限、行业上限、回撤线 |\n| benchmark | CharField(32) | 基准 |\n| status | CharField(16) | 默认 active |\n| updated_at | DateTimeField | 自动更新 |\n\n位置：`vision_cfg/models.py` 第 88 行。",
+    },
+  ],
+};
+
+// ———————— 失败分析：资产 × 报错 ————————
+
+const ASSETS = ["dws_account_pnl_daily", "dwd_position_daily", "ads_strategy_report", "ods_trade_fills", "market_kline_1d"];
+const ERRORS = [
+  (asset: string) => `dagster._core.errors.DagsterExecutionStepExecutionError: Error occurred while executing op "${asset}":\n  upstream asset dwd_position_daily partition ${TD[0]} is missing`,
+  () => `KeyError: 'account_id'\n  File "/opt/dagster/app/vision_dagster/assets/pnl.py", line 88, in account_pnl_daily`,
+  () => `clickhouse_connect.driver.exceptions.OperationalError: Error HTTPConnectionPool(host='172.24.17.66', port=8123): Max retries exceeded (Caused by NewConnectionError: Connection refused)`,
+  () => `clickhouse_connect.driver.exceptions.DatabaseError: Code: 241. DB::Exception: Memory limit (for query) exceeded: would use 9.31 GiB (attempt to allocate chunk of 4194304 bytes), maximum: 9.31 GiB. (MEMORY_LIMIT_EXCEEDED)`,
+];
+
+function failurePlans(r: Run): Plan[] {
+  const asset = String(r.input.asset_key ?? "dws_account_pnl_daily");
+  const err = String(r.input.error ?? "");
+  const upstream = err.includes("upstream");
+  return [
+    { think: `按档案先用 dagster 的 MCP 工具看线上这次运行的日志，确认是上游缺分区还是 ${asset} 自己的问题。`,
+      calls: [{ tool: "get_run_logs", args: { run_id: r.input.run_id, level: "ERROR" }, ms: 720,
+        output: `18:41:12 ERROR ${asset} - STEP_FAILURE\n${err.split("\n")[0]}\n18:41:12 ERROR RUN_FAILURE Execution of run for "pnl_daily_job" failed.` }] },
+    upstream
+      ? { think: "日志里是读 dwd_position_daily 当天分区时报的。看上游最近几次物化：是不是晚于本资产的调度。",
+        calls: [{ tool: "get_asset_materializations", args: { asset_key: "dwd_position_daily", limit: 3 }, ms: 610,
+          output: `partition=${TD[0]} status=SUCCESS start=18:33:40 end=18:52:08 run=91ab3c0e\npartition=${TD[1]} status=SUCCESS start=18:20:11 end=18:31:46 run=5c07d2f1\npartition=${TD[2]} status=SUCCESS start=18:19:58 end=18:30:12 run=e4d8a6b0` }] }
+      : { think: "不是上游缺分区。读出错位置附近的代码，看最近的提交有没有动过。",
+        calls: [{ tool: "bash", args: { command: `cd ${codeDir(r)} && git log -3 --format='%h %cs %an %s' -- vision_dagster/assets/pnl.py` }, ms: 120,
+          output: "c41e9a2 " + TD[2] + " gaodl fix: account_pnl_daily 先映射子账户\n8d02b7f " + TD[8] + " wangzh feat: 成交回报接入子账户\n52be0aa " + TD[11] + " gaodl chore: 分区键改 trade_date" }] },
+    { think: "数据侧要验证上游这几天的行数是否正常，交给 data_searcher。",
+      calls: [{ tool: "task", args: { subagent: "data_searcher", description: `查 ck 里 dwd_position_daily 最近 3 个交易日（${TD[2]} ~ ${TD[0]}）每天的行数与账户数，和前一周均值比，判断上游数据是否完整` }, ms: 7400,
+        output: `dwd_position_daily 最近 3 个交易日行数 48,2xx 左右、账户 1,190 个，和前一周均值一致，数据完整；${TD[0]} 分区 18:52 才写完。`,
+        sub: [{ think: "按交易日 count 一下。", calls: [{ tool: "db_query", args: { db: "ck", query: `SELECT trade_date, count() AS n, uniqExact(account_id) AS accounts FROM dwd_position_daily WHERE trade_date >= '${TD[2]}' GROUP BY trade_date ORDER BY trade_date` }, ms: 190,
+          output: ckOut({ rows: 3, cols: ["trade_date", "n", "accounts"], preview: TD.slice(0, 3).reverse().map((d, i) => [d, 48238 + i * 21, 1190 + i % 2]), ms: 176 }) }] }] }] },
+  ];
+}
+
+function failureAnswer(r: Run): string {
+  const asset = String(r.input.asset_key ?? "dws_account_pnl_daily");
+  const err = String(r.input.error ?? "");
+  if (err.includes("KeyError")) return `## 根因\n成交回报里新开的子账户没有 \`account_id\`（只有 \`sub_account\`），\`account_pnl_daily()\` 第 88 行直接取 \`account_id\` 报 KeyError。\n\n## 证据\n- 运行日志：KeyError: 'account_id'，在 vision_dagster/assets/pnl.py:88\n- ${TD[2]} 的提交 c41e9a2 已经改成先按 sub_account 映射，但线上还没部署到这个版本\n\n## 影响范围\n\`${asset}\` 当日分区未产出，下游 \`ads_strategy_report\` 跟着缺数。\n\n## 建议\n线上部署到 c41e9a2 之后重跑当日分区；部署前可以先把新子账户补进 dim_account。`;
+  if (err.includes("Memory limit")) return `## 根因\nClickHouse 单查询内存超限：\`${asset}\` 的全量重算超过了 max_memory_usage（9.31 GiB）。\n\n## 证据\n- 运行日志：Code 241 MEMORY_LIMIT_EXCEEDED\n- 这次是 backfill 触发的全量重算，平时按交易日分区只用 1~2 GiB\n\n## 影响范围\n只影响这次 backfill，日常分区不受影响。\n\n## 建议\n按交易日分区逐个重算（scripts/backfill.py 的 --by-partition），不要一次全量。`;
+  return `## 根因\n上游 \`dwd_position_daily\` 的 ${TD[0]} 分区 18:52 才物化完成，晚于 \`${asset}\` 18:40 的调度，读到空分区后失败。\n\n## 证据\n- dagster MCP：dwd_position_daily ${TD[0]} 分区 end=18:52:08，前两天 18:31 前就完成了\n- data_searcher：上游行数与账户数正常，数据完整，只是晚了\n- 本资产近 3 次提交与报错无关\n\n## 影响范围\n\`${asset}\` → \`ads_strategy_report\` 当日分区未产出，策略周报会缺这一天。\n\n## 建议\n1. 上游已就绪，现在重跑 \`${asset}\` 当日分区；\n2. 把 \`${asset}\` 的调度改成依赖上游分区完成（freshness / 资产依赖），替代固定时间。`;
+}
+
+// ———————— 巡检 / 冒烟 ————————
+
+function inspectionPlans(r: Run): Plan[] {
+  const site = r.env === "prod" ? "https://vision-board.moon-prod.ipa.zs/" : "https://vision-board.ipa.zs/";
+  return [
+    { think: "按方法「Board 巡检」逐项：报表数据新鲜度、线上页面、主机资源。先查报表依赖的几张表的最新交易日。",
+      calls: [{ tool: "db_query", args: { db: "ck", query: "SELECT 'dws_account_pnl_daily' AS t, max(trade_date) AS latest FROM dws_account_pnl_daily\nUNION ALL SELECT 'dwd_position_daily', max(trade_date) FROM dwd_position_daily\nUNION ALL SELECT 'ads_strategy_report', max(trade_date) FROM ads_strategy_report\nUNION ALL SELECT 'market_kline_1d', max(trade_date) FROM market_kline_1d" }, ms: 160,
+        output: ckOut({ rows: 4, cols: ["t", "latest"], preview: [["dws_account_pnl_daily", TD[0]], ["dwd_position_daily", TD[0]], ["ads_strategy_report", TD[0]], ["market_kline_1d", TD[0]]], ms: 144 }) }] },
+    { think: "数据都到了上个交易日。看线上报表页能不能打开、耗时多少。",
+      calls: [{ tool: "py", args: { code: `import requests\nfor p in ["report/pnl_daily/", "report/positions/", "report/strategy_weekly/"]:\n    r = requests.get("${site}" + p, timeout=15)\n    print(p, r.status_code, round(r.elapsed.total_seconds(), 2))` }, ms: 3100,
+        output: "report/pnl_daily/ 200 0.84\nreport/positions/ 200 1.12\nreport/strategy_weekly/ 200 2.97" }] },
+    { think: "策略周报 2.97 秒，比基线 1.5 秒慢一倍，记一项关注。最后看主机资源。",
+      calls: [{ tool: "host_metrics", args: {}, ms: 420, output: `${r.env === "prod" ? "172.24.16.100" : "172.21.0.45"}  内存 63%  负载 1.12  根盘 81%` }] },
+  ];
+}
+const inspectionAnswer = () => "巡检完成：**6 项正常，2 项关注**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，建议看 `report/strategy.py` 的查询\n- ⚠️ 根盘 81%（阈值 80%），较上周 +5%，建议清理 static 旧版本与日志\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓";
+
+function smokePlans(r: Run): Plan[] {
+  const site = r.env === "prod" ? "https://vision-board.moon-prod.ipa.zs/" : "https://vision-board.ipa.zs/";
+  return [
+    { think: `先确认本机副本的提交是不是待测版本 ${String(r.input.version ?? "")}。`,
+      calls: [{ tool: "service_info", args: { what: "git" }, ms: 80, output: `## ${codeDir(r)}\n${String(r.input.version ?? "e5f6a7b").slice(0, 7)} ${TD[0]} wangzh feat: 离线 HTML 导出改用 Chrome headless\n5e6f7a8 ${TD[1]} liyd chore: 升级 Django 4.2.16` }] },
+    { think: "提交对得上。按方法 smoke-suite：打开线上报表页检查关键元素。",
+      calls: [
+        { tool: "browser_navigate", args: { url: site + "report/strategy_weekly/" }, ms: 3400, output: `### Page state\n- Page URL: ${site}report/strategy_weekly/\n- Page Title: 策略周报 · Vision Board` },
+        { tool: "browser_snapshot", args: {}, ms: 900, output: "- heading \"策略周报\" [level=1]\n- table [data-table=strategy] (14 rows)\n- button \"导出 HTML\"\n- img \"收益率曲线\"" },
+      ] },
+  ];
+}
+const smokeAnswer = (r: Run) => `冒烟通过：**${String(r.input.version ?? "").slice(0, 7)}** 在 ${r.env} 的报表页面正常。\n\n- 策略周报：表格 14 行、收益率曲线、导出按钮都在 ✓\n- 本机副本代码与部署版本一致 ✓`;
+
+// ———————— 生成运行 ————————
+
+const PEOPLE = ["liyd", "gaodl", "wangzh", "zhaoq"];
 
 function makeRun(): MockRun {
   const t = rand();
-  const picked = t < 0.08 ? "ask" : t < 0.34 ? "data-qa" : t < 0.58 ? "failure-analysis" : t < 0.72 ? "daily-inspection" : t < 0.82 ? "frontend-smoke" : t < 0.9 ? "config-audit" : t < 0.95 ? "memory-gardener" : "failure-analysis:dwd_trade_order";
-  const taskName = picked === "data-qa" && rand() < 0.3 ? pick(["data-qa:gmv", "data-qa:retention_7d"]) : picked;
+  const picked = t < 0.1 ? "ask" : t < 0.36 ? "data-qa" : t < 0.6 ? "failure-analysis" : t < 0.75 ? "daily-inspection" : t < 0.86 ? "frontend-smoke" : t < 0.91 ? "memory-gardener" : "failure-analysis:dws_account_pnl_daily";
+  const taskName = picked === "data-qa" && rand() < 0.25 ? "data-qa:account_pnl" : picked;
   const task = tasks.find((x) => x.name === taskName)!;
   const base = task.extends ? tasks.find((x) => x.name === task.extends)! : task;
   const ago = Math.floor(Math.pow(rand(), 1.6) * 72 * HOUR) + between(1, 20) * MIN;
-  const env = base.envs.length ? pick(base.envs) : pick(["prod", "test", "test", "dev"]);
-  const service = base.service === "*" ? pick(["board", "board", "dagster", "config-center"]) : base.service;
+  const env = base.envs.length ? pick(base.envs) : base.service === null ? "prod" : pick(["prod", "test", "test", "dev"]);
+  const service = base.service === "*"
+    ? (base.name === "data-qa" ? pick(["vision-board", "vision-board", "vision-board", "vision-dagster"]) : pick(["vision-board", "vision-dagster", "vision-web"]))
+    : base.service;
   const s = rand();
-  let status: RunStatus = s < 0.8 ? "success" : s < 0.93 ? "failed" : "cancelled";
+  let status: RunStatus = s < 0.82 ? "success" : s < 0.94 ? "failed" : "cancelled";
   if (ago < 25 * MIN && rand() < 0.5) status = "running";
-  const duration = status === "running" ? null : between(4_000, base.timeout_s * 600);
+  const duration = status === "running" ? null : between(6_000, Math.min(base.timeout_s, 600) * 400);
   const triggerType = base.triggers.find((x) => x.type !== "api")?.type ?? "api";
-  const fromTrigger = rand() < 0.75;
+  const fromTrigger = rand() < 0.78;
+  const caller = triggerType === "schedule" ? "schedule" : triggerType === "chat" ? pick(PEOPLE) : triggerType === "event" ? (base.name === "frontend-smoke" ? "gitlab" : "vision-dagster-sensor") : "sdk";
   const trigger = fromTrigger && triggerType !== "api"
-    ? { type: triggerType, id: base.triggers.find((x) => x.type === triggerType)?.id ?? null, source: triggerType === "event" ? (base.triggers.find((x) => x.type === "event") as { source: string }).source : null, caller: triggerType === "schedule" ? "schedule" : triggerType === "chat" ? pick(["wangzh", "lihf", "zhaoq", "web"]) : triggerType === "event" ? (base.name === "frontend-smoke" ? "gitlab" : "dagster-sensor") : "sdk" }
-    : { type: "api" as const, id: "api", source: null, caller: pick(["board-backend", "report-engine", "lihf", "sdk"]) };
-  const asset = taskName === "failure-analysis:dwd_trade_order" ? "dwd_trade_order" : pick(assets);
-  const err = pick(errors);
-  const input: Record<string, unknown> =
-    base.name === "data-qa" ? { question: pick(questions) }
-      : base.name === "ask" ? { question: pick(askQuestions) }
-      : base.name === "failure-analysis" ? { run_id: hex(8) + "-" + hex(4), asset_key: asset, error: err }
-        : base.name === "frontend-smoke" ? { version: `v2.${between(10, 40)}.${between(0, 9)}`, project: "board" }
-          : base.name === "daily-inspection" ? { scope: "full" } : {};
-  const ruleHit = base.name === "failure-analysis" && err.includes("Connection refused") && rand() < 0.7;
-  const summary = String(input.question ?? input.asset_key ?? input.version ?? (base.name === "daily-inspection" ? "定时巡检" : base.title));
-  const created = iso(ago);
-  return {
+    ? { type: triggerType, id: base.triggers.find((x) => x.type === triggerType)?.id ?? null, source: triggerType === "event" ? (base.triggers.find((x) => x.type === "event") as { source: string }).source : null, caller }
+    : { type: "api" as const, id: "api", source: null, caller: pick(["vision-board-backend", "notebook-zhaoq", "liyd"]) };
+  const asset = taskName.includes(":") && base.name === "failure-analysis" ? taskName.split(":")[1] : pick(ASSETS);
+  const err = pick(ERRORS)(asset);
+  let scenario: number | undefined;
+  let input: Record<string, unknown> = {};
+  if (base.name === "data-qa") {
+    const list = QA[service ?? ""] ?? QA["vision-board"];
+    scenario = taskName === "data-qa:account_pnl" ? 0 : Math.floor(rand() * list.length);
+    input = { question: list[scenario].q };
+  } else if (base.name === "ask") {
+    const list = ASK[service ?? ""] ?? ASK["vision-board"];
+    scenario = Math.floor(rand() * list.length);
+    input = { question: list[scenario].q };
+  } else if (base.name === "failure-analysis") {
+    input = { run_id: hex(8) + "-" + hex(4) + "-" + hex(4), asset_key: asset, error: err };
+  } else if (base.name === "frontend-smoke") {
+    input = { version: hex(40), project: "vision-board" };
+  } else if (base.name === "daily-inspection") {
+    input = { scope: "full" };
+  }
+  const ruleHit = base.name === "failure-analysis" && /connection.*(refused|timeout|reset)/i.test(err) && rand() < 0.8;
+  const summary = String(input.question ?? (input.asset_key ? `${input.asset_key} 物化失败` : input.version ? `部署 ${String(input.version).slice(0, 8)}` : base.name === "daily-inspection" ? "定时巡检" : base.title));
+  const run: MockRun = {
     run_id: hex(12), session_id: "", task: taskName, task_title: base.title, service, env, role: base.role,
     status: ruleHit ? "success" : status, resolution: ruleHit ? "rule" : status === "running" ? null : base.form === "builtin" ? "builtin" : "agent",
-    trigger: trigger as Run["trigger"], summary, tokens: ruleHit || base.form === "builtin" ? 0 : between(2_000, 48_000),
-    duration_ms: ruleHit ? between(40, 300) : duration, created_at: created,
-    finished_at: status === "running" ? null : new Date(NOW - ago + (duration ?? 0)).toISOString(),
-    task_version: base.version - (rand() < 0.2 ? 1 : 0), role_version: base.role ? roles.find((r) => r.name === base.role)!.version : null,
-    replay_of: null, input, output: null, error_code: null, pending_approval: null,
+    trigger: trigger as Run["trigger"], summary, tokens: ruleHit || base.form === "builtin" ? 0 : between(6_000, 96_000),
+    duration_ms: ruleHit ? between(40, 300) : duration, created_at: iso(ago),
+    finished_at: status === "running" && !ruleHit ? null : new Date(NOW - ago + (duration ?? 0)).toISOString(),
+    // 任务版本：两成停在上一版；角色版本按版本时间线（每 31 小时一版）
+    task_version: Math.max(1, task.version - (rand() < 0.2 ? 1 : 0)),
+    role_version: base.role ? versionAt(roles.find((r) => r.name === base.role)!.version, ago) : null,
+    recipe: null,
+    replay_of: null, input, output: null, error_code: null,
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     feedback: [],
     memory: {},
-    _events: undefined,
+    _scenario: scenario,
   };
+  run.recipe = recipeOf(run, ago);
+  return run;
 }
 
 export const runs: MockRun[] = Array.from({ length: 260 }, () => makeRun())
@@ -374,36 +783,35 @@ export const runs: MockRun[] = Array.from({ length: 260 }, () => makeRun())
 
 // 反馈：约 15% 的已结束运行有人评价；负反馈带问题类型与说明，少数针对某一步
 const NEGATIVE: { reasons: FeedbackReason[]; comment: string; step?: number }[] = [
-  { reasons: ["wrong_definition"], comment: "GMV 不扣退款，退款单独看 refund_amount；这里把退款减掉了。" },
-  { reasons: ["wrong_data"], comment: "应该按支付日 pay_date 统计，不是下单日。" },
-  { reasons: ["incomplete"], comment: "只给了华东，没给分省明细。" },
-  { reasons: ["wrong_conclusion", "detour"], comment: "根因是上游 ods_payment 延迟，不是代码问题；查了半天无关的日志。" },
-  { reasons: ["wrong_tool"], comment: "这里应该查 test 的只读库，不该用 bash 去 grep 日志。", step: 4 },
+  { reasons: ["wrong_definition"], comment: "收益要按交易日统计，这里按自然日算，周末多出两天。" },
+  { reasons: ["wrong_data"], comment: "查的是国内测试的 CK，问的是生产数据。" },
+  { reasons: ["incomplete"], comment: "只给了合计，没给分账户明细。" },
+  { reasons: ["wrong_conclusion", "detour"], comment: "根因是上游 dwd_position_daily 晚到，不是代码问题；查了半天无关的提交。" },
+  { reasons: ["wrong_tool"], comment: "这里用 dagster 的 MCP 工具看运行日志就行，不用 bash 去翻容器日志。", step: 6 },
   { reasons: ["off_topic"], comment: "" },
-  { reasons: ["unsafe"], comment: "不要在 prod 上直接重启 webserver，先在 test 复现。", step: 3 },
+  { reasons: ["unsafe"], comment: "不要在 prod 的本机副本上物化资产，先在 test 复现。", step: 5 },
 ];
-const PEOPLE = ["wangzh", "zhaoq", "lihf", "chenyu"];
 for (const r of runs) {
   if (r.status === "running" || r.status === "queued" || r.resolution !== "agent" || rand() > 0.15) continue;
-  const by = pick(PEOPLE);
+  const who = pick(PEOPLE);
   const negative = rand() < 0.45;
   const at = new Date(new Date(r.created_at).getTime() + between(5, 300) * 60_000).toISOString();
-  const base = { id: r.feedback.length + Math.floor(rand() * 1e6), run_id: r.run_id, created_by: by, created_at: at, updated_at: at };
+  const base = { id: r.feedback.length + Math.floor(rand() * 1e6), run_id: r.run_id, created_by: who, created_at: at, updated_at: at };
   if (!negative) { r.feedback.push({ ...base, step_seq: 0, score: 1, reasons: [], comment: rand() < 0.3 ? "结论准确，省了半小时。" : "" }); continue; }
   const n = pick(NEGATIVE);
   r.feedback.push({ ...base, step_seq: n.step ?? 0, score: -1, reasons: n.reasons, comment: n.comment });
 }
 
-// 会话：data-qa 的对话 run 串成会话；其余 run 自会话
+// 会话：对话触发的问答串成会话；失败分析按会话模板 dagster:{asset_key}:{error_class}:{date}；其余运行自会话
 const sessionPool = Array.from({ length: 9 }, () => hex(12));
 for (const r of runs) {
   if (r.task.startsWith("data-qa") && r.trigger.type === "chat") r.session_id = (r.task === "data-qa" ? "" : r.task.split(":")[1] + "-") + pick(sessionPool);
   else if (r.task === "ask" && r.trigger.type === "chat") r.session_id = "ask-" + pick(sessionPool.slice(0, 4));
-  else if (r.task.startsWith("failure-analysis") && r.input.asset_key) r.session_id = `dagster:${r.input.asset_key}:infra:${r.created_at.slice(0, 10)}`;
-  else r.session_id = r.run_id;
+  else if (r.task.startsWith("failure-analysis") && r.trigger.type === "event" && r.input.asset_key) {
+    const cls = String(r.input.error).match(/^[\w.]+?(\w+(?:Error|Exception))/)?.[1] ?? "Error";
+    r.session_id = `dagster:${r.input.asset_key}:${cls}:${r.created_at.slice(0, 10)}`;
+  } else r.session_id = r.run_id;
 }
-
-// 审批默认关闭（设置 → 审批）：没有挂起中的运行；审批记录只剩之前打开时处理过的
 
 // ———————— 回归重放（样例） ————————
 // 拿被 👎 的 agent 运行用当前定义重跑（新会话、不沉淀、不投递），模型对照原答案 + 人指出的问题 + 新答案判定
@@ -444,27 +852,31 @@ export interface MockReplay {
 
 /** 用当前定义重放一条原运行：同样的任务 / 服务 / 环境 / 输入，新会话，trigger=replay */
 export function replayRunOf(source: MockRun, createdAt: string, status: RunStatus, caller: string, answer?: string): MockRun {
-  const parent = tasks.find((t) => t.name === source.task.split(":")[0]);
+  const own = tasks.find((t) => t.name === source.task);
   const run_id = hex(12);
   const done = status !== "running" && status !== "queued";
-  return {
+  const run: MockRun = {
     ...source, run_id, session_id: run_id, status, resolution: done ? "agent" : null,
     trigger: { type: "replay", id: source.run_id, source: null, caller },
-    tokens: done ? between(3_000, 30_000) : null, duration_ms: done ? between(8_000, 60_000) : null,
+    tokens: done ? between(8_000, 60_000) : null, duration_ms: done ? between(20_000, 120_000) : null,
     created_at: createdAt, finished_at: done ? new Date(new Date(createdAt).getTime() + 40_000).toISOString() : null,
-    task_version: parent?.version ?? source.task_version, role_version: roles.find((r) => r.name === source.role)?.version ?? null,
-    replay_of: source.run_id, input: source.input, output: null, error_code: null, pending_approval: null, feedback: [], memory: {},
+    task_version: own?.version ?? source.task_version, role_version: roles.find((r) => r.name === source.role)?.version ?? null,
+    recipe: null,
+    replay_of: source.run_id, input: source.input, output: null, error_code: null, feedback: [], memory: {},
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     _events: undefined, _answer: answer,
   };
+  run.recipe = recipeOf(run, 0);       // 用当前定义重跑：配方是现在生效的各版本
+  return run;
 }
 
+const total7 = pnlTotals.reduce((n, [, v]) => n + v, 0);
 const ANSWERS: Record<string, string> = {
-  qaFixed: "按口径重算：GMV = 已支付订单金额，**不扣退款**（退款单独看 `refund_amount`），按**支付日** `pay_date` 统计。\n\n近 7 天 GMV 合计 **31.8 万元**，日均 4.54 万，较前 7 天 **+3.6%**。",
-  qaSame: "近 7 天 GMV 合计 **29.4 万元**（已扣除退款），按下单日统计，较前 7 天 +2.1%。",
-  qaWorse: "近 7 天 GMV 合计 **27.1 万元**：已扣除退款，并把测试店铺的订单也计入了。",
-  qaUnclear: "改用 ads_gmv_daily 的预聚合结果：近 7 天 GMV 合计 **31.2 万元**。与明细表的差异需要核对分区是否到齐。",
-  faFixed: "## 根因\n上游 `ods_payment` 的 10-19 分区 03:52 才到齐，晚于 `dwd_trade_order` 03:00 的调度，读到空分区后 merge 失败。\n\n## 证据\n- ods_payment 物化记录：end_time 03:52\n- 本资产近 3 次提交与报错无关\n\n## 建议\n等上游到齐后补跑当日分区；给 dwd_trade_order 加上游 freshness 依赖。",
+  qaFixed: `按交易日统计（非交易日没有行）：近 7 个交易日 12 个账户收益合计 **${yuan(total7)}**，已实现 + 浮动，口径与报表的 \`account_pnl()\` 一致。\n\n最高的是 ${pnlTotals[0][0]}（${yuan(pnlTotals[0][1])}），最低的是 ${pnlTotals[11][0]}（${yuan(pnlTotals[11][1])}）。分账户明细见下表。\n\n| 账户 | 收益 |\n|---|---|\n${pnlTotals.map(([a, n]) => `| ${a} | ${yuan(n)} |`).join("\n")}`,
+  qaSame: `近 7 天（自然日，含周末）12 个账户收益合计 **${yuan(Math.round(total7 * 1.08))}**。`,
+  qaWorse: `近 7 天（自然日）收益合计 **${yuan(Math.round(total7 * 1.15))}**：把测试账户 T001 也算进去了。`,
+  qaUnclear: `改用 ads_strategy_report 的预聚合结果：近 7 个交易日收益合计 **${yuan(Math.round(total7 * 0.99))}**。与 dws 明细表差 1%，要核对 ads 分区是否到齐。`,
+  faFixed: `## 根因\n上游 \`dwd_position_daily\` 的 ${TD[0]} 分区 18:52 才物化完成，晚于本资产 18:40 的调度，读到空分区。\n\n## 证据\n- dagster MCP 的运行日志：读 dwd_position_daily 当天分区时报 missing\n- 上游物化记录 end=18:52:08；本资产近 3 次提交与报错无关\n\n## 建议\n上游已就绪，重跑当日分区；调度改成依赖上游分区完成。`,
 };
 
 const negatives = runs.filter((r) => r.resolution === "agent" && r.feedback.some((f) => f.score < 0));
@@ -478,55 +890,99 @@ let replayItemId = 1;
 export const nextReplayItemId = () => replayItemId++;
 
 /** plans：[原运行, 判定（null = 重放还在跑）, 理由, 新答案]；判定 error = 重放没建成 */
-function makeReplay(id: number, title: string, filter: ReplayFilter, note: string, by: string, msAgo: number,
+function makeReplay(id: number, title: string, filter: ReplayFilter, note: string, who: string, msAgo: number,
   plans: [MockRun, ReplayVerdict | null, string, string?][]): MockReplay {
   const createdAt = iso(msAgo);
   const judgedAt = new Date(NOW - msAgo + 90_000).toISOString();
   const items = plans.map(([src, verdict, reason, answer]): MockReplayItem => {
-    const parent = tasks.find((t) => t.name === src.task.split(":")[0]);
-    if (parent) src.task_version = Math.max(1, parent.version - 1);     // 原运行停在上一版定义
+    const own = tasks.find((t) => t.name === src.task);
+    if (own) src.task_version = Math.max(1, own.version - 1);     // 原运行停在上一版定义
+    if (src.recipe) src.recipe.task.version = src.task_version!;
     if (verdict === "error") return { id: nextReplayItemId(), source_run: src.run_id, new_run: null, verdict, reason, judged_at: createdAt };
-    const run = replayRunOf(src, createdAt, verdict === null ? "running" : "success", by, answer);
+    const run = replayRunOf(src, createdAt, verdict === null ? "running" : "success", who, answer);
     runs.push(run);
     return { id: nextReplayItemId(), source_run: src.run_id, new_run: run.run_id, verdict, reason, judged_at: verdict ? judgedAt : null };
   });
-  return { id, title, filter, note, created_by: by, created_at: createdAt, items };
+  return { id, title, filter, note, created_by: who, created_at: createdAt, items };
 }
 
 const qaNeg = sample(negatives.filter((r) => r.task.startsWith("data-qa")), 5);
 const faNeg = sample(negatives.filter((r) => r.task.startsWith("failure-analysis")), 3);
 const oneNeg = sample(negatives, 1);
 const QA_PLAN: [ReplayVerdict, string, string][] = [
-  ["fixed", "新答案按支付日统计、不再扣减退款，被指出的口径问题已解决，也没有引入新的错误。", ANSWERS.qaFixed],
-  ["fixed", "新答案改为不扣退款并单列 refund_amount，与人指出的口径一致。", ANSWERS.qaFixed],
-  ["same", "新答案仍按下单日统计、仍扣了退款，人指出的问题还在。", ANSWERS.qaSame],
-  ["worse", "新答案仍扣了退款，还把测试店铺订单算了进来，比原答案更偏。", ANSWERS.qaWorse],
-  ["unclear", "新答案换了取数表，结果是否正确要核对实际分区数据才能判断。", ANSWERS.qaUnclear],
+  ["fixed", "新答案改为按交易日统计、口径与报表一致，被指出的问题已解决，也没有引入新的错误。", ANSWERS.qaFixed],
+  ["fixed", "新答案给出了分账户明细，并按交易日统计，与人指出的要求一致。", ANSWERS.qaFixed],
+  ["same", "新答案仍按自然日统计（含周末），人指出的问题还在。", ANSWERS.qaSame],
+  ["worse", "新答案仍按自然日统计，还把测试账户算了进来，比原答案更偏。", ANSWERS.qaWorse],
+  ["unclear", "新答案换了取数表，结果是否正确要核对 ads 分区才能判断。", ANSWERS.qaUnclear],
 ];
 const FA_PLAN: [ReplayVerdict | null, string, string?][] = [
-  ["fixed", "新答案把根因落到上游 ods_payment 延迟，并给出补跑建议，没有再归因到代码。", ANSWERS.faFixed],
-  ["error", "提交被拒绝：服务 dagster 在 dev 环境已停用"],
+  ["fixed", "新答案先看了 dagster 的运行日志，把根因落到上游 dwd_position_daily 晚到，并给出重跑建议，没有再归因到代码。", ANSWERS.faFixed],
+  ["error", "提交被拒绝：服务 vision-dagster 在 test 环境已停用（重放时 test 临时停用过，之后已恢复）"],
   [null, ""],
 ];
 
 export const replays: MockReplay[] = [
-  makeReplay(3, "failure-analysis · dagster · 3 条 👎", { task: "failure-analysis", service: "dagster", limit: 20 },
-    "failure-analysis 的任务档案补了上游依赖：ods_order、ods_payment 03:00 前到齐", "lihf", 2 * MIN,
+  makeReplay(3, "failure-analysis · vision-dagster · 3 条 👎", { task: "failure-analysis", service: "vision-dagster", limit: 20 },
+    "failure-analysis 的档案补了：资产失败先看上游；先用 dagster 的 MCP 工具看线上这次运行的日志", "gaodl", 2 * MIN,
     faNeg.map((r, i) => [r, ...FA_PLAN[i % FA_PLAN.length]] as [MockRun, ReplayVerdict | null, string, string?])),
   makeReplay(2, "全部 · 1 条 👎", { run_ids: oneNeg.map((r) => r.run_id) }, "单独验证一条：改了任务档案之后", "wangzh", 26 * HOUR,
     oneNeg.map((r) => [r, "fixed", "新答案针对人指出的问题做了修正，没有引入新的错误。"] as [MockRun, ReplayVerdict, string])),
   makeReplay(1, "data_searcher 提示词 v4 回归", { task: "data-qa", hours: 168, limit: 20 },
-    "data_searcher 的提示词补了「GMV 不扣退款，退款单独看 refund_amount；按支付日统计」", "wangzh", 2 * DAY,
+    "data_searcher 的提示词补了「收益按交易日统计；db_query 的大结果用 pandas 读文件汇总，别把明细整份贴出来」", "wangzh", 2 * DAY,
     qaNeg.map((r, i) => [r, ...QA_PLAN[i % QA_PLAN.length]] as [MockRun, ReplayVerdict, string, string])),
 ];
 runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 
 // ———————— 运行事件（详情页按需生成，确定性） ————————
 
+/** 系统提示：平台基础约定 + 角色提示词（沿继承链）+ 可委派的子代理 */
+function systemPrompt(roleName: string | null): string {
+  const chain = roleChain(roleName);
+  const [root, ...children] = chain;
+  const parts = [promptsEntry.base];
+  if (root?.prompt) parts.push(`[角色：${(children[children.length - 1] ?? root).title}]\n${root.prompt}`);
+  for (const c of children) if (c.prompt_append) parts.push(c.prompt_append);
+  const subs = subagentsOf(chain).filter((s) => s !== roleName);
+  if (subs.length) parts.push("[可委派的子代理] 子问题明显属于下面某个角色的专长时，用 task 工具交给它（subagent 填名字），它用自己的工具独立完成并交回结论。它看不到你的对话，说明里要写全背景和要交回什么：\n"
+    + subs.map((s) => `- ${s}（${roles.find((r) => r.name === s)?.title ?? s}）：${roles.find((r) => r.name === s)?.description ?? "—"}`).join("\n"));
+  return parts.join("\n\n");
+}
+
+/** 旧运行（9.0 之前）的查库结果：只有表格和行数 */
+function legacyDbOutput(output: string): string {
+  const lines = output.split("\n");
+  const rows = Number(/(\d+) 行/.exec(lines[0])?.[1] ?? 0);
+  const body = lines.slice(1).filter((l) => !l.startsWith("全部结果在"));
+  return [...body, `(${rows} 行${rows > 20 ? "，只显示前 20 行" : ""})`].join("\n");
+}
+
+function plansOf(run: MockRun): Plan[] {
+  const base = run.task.split(":")[0];
+  if (base === "data-qa") return (QA[run.service ?? ""] ?? QA["vision-board"])[run._scenario ?? 0]?.plans(run) ?? [];
+  if (base === "ask") return (ASK[run.service ?? ""] ?? ASK["vision-board"])[run._scenario ?? 0]?.plans(run) ?? [];
+  if (base === "failure-analysis") return failurePlans(run);
+  if (base === "daily-inspection") return inspectionPlans(run);
+  if (base === "frontend-smoke") return smokePlans(run);
+  return [];
+}
+
+function answerOf(run: MockRun): string {
+  const base = run.task.split(":")[0];
+  if (base === "data-qa") return (QA[run.service ?? ""] ?? QA["vision-board"])[run._scenario ?? 0]?.answer(run) ?? "";
+  if (base === "ask") return (ASK[run.service ?? ""] ?? ASK["vision-board"])[run._scenario ?? 0]?.answer(run) ?? "";
+  if (base === "failure-analysis") return failureAnswer(run);
+  if (base === "daily-inspection") return inspectionAnswer();
+  if (base === "frontend-smoke") return smokeAnswer(run);
+  return "完成。";
+}
+
 export function eventsOf(run: MockRun): RunEvent[] {
   if (run._events) return run._events;
   const r = mulberry32(parseInt(run.run_id.slice(0, 8), 16));
   const start = new Date(run.created_at).getTime();
+  /** 9.0 之前的运行：没有配方；查库工具叫 sql_query，思考是 thought 事件，没有逐次的模型调用记录 */
+  const legacy = NOW - start > RECIPE_SINCE && run.trigger.type !== "replay";
   let t = start;
   let seq = 0;
   const out: RunEvent[] = [];
@@ -538,86 +994,70 @@ export function eventsOf(run: MockRun): RunEvent[] {
   if (run.resolution === "rule") {
     push("stage", { stage: "rule", title: "规则先行命中", content: "infra：数据库/服务连接失败，检查目标服务存活与网络" }, 30);
     push("final", { content: "**规则判定（infra）**：数据库/服务连接失败，检查目标服务存活与网络。\n\n报错摘要：`" + String(run.input.error ?? "").split("\n")[0] + "`" }, 20);
-    push("stage", { stage: "deliver", title: "投递", content: "dingtalk ✓" }, 300);
+    push("stage", { stage: "deliver", title: "投递", content: "钉钉 default ✓" }, 300);
     return (run._events = out);
   }
   if (run.task === "memory-gardener") {
-    push("stage", { stage: "execute", title: "内建处理器 memory-gardener", content: "逐环境巡检 code_ref 漂移" }, 800);
-    push("final", { content: "prod：校验 412 条，过期 3 条\ntest：校验 287 条，过期 1 条\ndev：校验 96 条，过期 0 条" }, 12000);
+    push("stage", { stage: "execute", title: "内建处理器 memory-gardener", content: "逐服务校验记忆的 code_ref 与代码是否一致" }, 800);
+    push("final", { content: "vision-dagster：校验 86 条，过期 1 条\nvision-board：校验 112 条，过期 2 条\nvision-web：校验 23 条，过期 0 条" }, 12000);
     return (run._events = out);
   }
-  push("stage", { stage: "profile", title: "注入档案", content: "服务档案 4 项 · 任务档案 1 项" }, 120);
+  const svc = services.find((s) => s.name === run.service);
+  const task = tasks.find((x) => x.name === run.task);
+  push("stage", { stage: "profile", title: "注入档案", content: `服务档案 ${Object.keys(svc?.profile ?? {}).length} 项 · 任务档案 ${Object.keys(task?.profile ?? {}).length} 项` }, 120);
   push("stage", { stage: "recall", title: "召回记忆", content: run.task.startsWith("failure-analysis") ? "事实 2 条 · 教训 1 条 · 方法 1 条" : "事实 3 条 · 方法 1 条" }, 600);
-  const steps = run.task === "ask"
-    ? [
-      ["thought", { content: "先看运行环境：项目 Python、配置文件、地址都已列出。问题要在本环境的项目里验证，用 py 直接调项目函数。", tokens: 640 }],
-      ["tool_call", { tool: "py", args: { code: "from board.metrics import cache\nprint(cache.ttl_seconds(), cache.backend())" } }],
-      ["tool_result", { tool: "py", output: "600 redis://10.0.0.21:6379/2", duration_ms: 310 }],
-      ["thought", { content: "结果与配置文件一致，整理成结论并附上依据。", tokens: 280 }],
-    ]
-    : run.task === "data-qa"
-    ? [
-      ["thought", { content: "先确认口径：档案里约定 total_fee 单位是分、GMV 不含退款。问题问的是 3 月以来，按自然月从 2026-03-01 起算。", tokens: 820 }],
-      ["tool_call", { tool: "sql_query", args: { sql: "SELECT date_trunc('month', paid_at) AS m, sum(total_fee)/100.0 AS yuan\nFROM ads_order_daily\nWHERE paid_at >= '2026-03-01'\nGROUP BY 1 ORDER BY 1" } }],
-      ["tool_result", { tool: "sql_query", output: "| m | yuan |\n|---|---|\n| 2026-03-01 | 1,284,302.50 |\n| 2026-04-01 | 1,412,880.00 |\n| … | … |\n(8 行)", duration_ms: 842 }],
-      ["thought", { content: "数据有 8 个月，汇总并给出月度明细，附 SQL。", tokens: 410 }],
-    ]
-    : run.task.startsWith("failure-analysis")
-      ? [
-        ["thought", { content: "报错是上游分区缺失还是代码问题？先看前序交接摘要：昨天同资产同类失败结论是 ods_order 延迟。先查上游物化状态。", tokens: 960 }],
-        ["tool_call", { tool: "service_info", args: { what: "config", file: "dagster.yaml" } }],
-        ["tool_result", { tool: "service_info", output: "run_coordinator: QueuedRunCoordinator\nstorage: postgres (test-db:5432/dagster)\n…", duration_ms: 35 }],
-        ["tool_call", { tool: "bash", args: { command: "cd /srv/dagster && git log -3 --oneline -- assets/dwd/trade_order.py" } }],
-        ["tool_result", { tool: "bash", output: "a41c2e9 fix: pay_channel 兼容旧版回调\n7d0f113 feat: 拆分退款\n52be0aa chore: 分区键改 dt", duration_ms: 120 }],
-        ["tool_call", { tool: "sql_query", args: { sql: "SELECT partition, status, end_time FROM asset_materializations WHERE asset_key='ods_order' ORDER BY end_time DESC LIMIT 3" } }],
-        ["tool_result", { tool: "sql_query", output: "| partition | status | end_time |\n|---|---|---|\n| 2026-10-19 | SUCCESS | 03:41 |\n| 2026-10-18 | SUCCESS | 02:12 |", duration_ms: 230 }],
-        ["thought", { content: "ods_order 03:41 才完成，晚于 dwd 的调度时间 03:00。与档案里的已知坑一致。", tokens: 640 }],
-      ]
-      : [
-        ["thought", { content: "按方法资产「看板巡检 v3」逐项执行：数据新鲜度、接口 5xx 比例、主机资源。", tokens: 520 }],
-        ["tool_call", { tool: "host_metrics", args: {} }],
-        ["tool_result", { tool: "host_metrics", output: "10.0.0.21  内存 61%  负载 0.84  根盘 72%", duration_ms: 410 }],
-        ["tool_call", { tool: "sql_query", args: { sql: "SELECT max(dt) FROM ads_gmv_daily" } }],
-        ["tool_result", { tool: "sql_query", output: "| max |\n|---|\n| 2026-10-19 |", duration_ms: 95 }],
-      ];
-  for (const [kind, payload] of steps) push(kind as RunEvent["kind"], payload as RunEvent["payload"], kind === "thought" ? 2400 : kind === "tool_result" ? 900 : 300);
+  push("stage", { stage: "system", title: legacy ? `系统提示 · 角色 ${run.role ?? "—"}` : `系统提示 · 平台提示词 v${run.recipe?.prompts ?? promptsEntry.version} + 角色 ${run.role ?? "—"}`, content: systemPrompt(run.role) }, 80);
+
+  /** 一次模型调用：输入 token 随对话增长；content 是模型的思考过程 */
+  let context = 3200 + Math.round(r() * 2400);
+  const model = (calls: string[], content?: string, agent?: string) => {
+    if (legacy) { if (content) push("thought", { ...(agent ? { agent } : {}), content }, 1500); return; }
+    const input = context;
+    const output = 80 + Math.round(r() * 520);
+    context += output + 600 + Math.round(r() * 1400);
+    // 账号限 3 RPM：每分钟第 4 次起要排队，耗时里大头是排队
+    const queued = r() < 0.35 ? 8000 + Math.round(r() * 48000) : 0;
+    const ms = 1600 + Math.round(r() * 6800) + queued;
+    push("model_call", { ...(agent ? { agent } : {}), model: MODEL, ms, ...(queued ? { queued_ms: queued } : {}), input_tokens: input, output_tokens: output, tokens: input + output, tool_calls: calls, ...(content ? { content } : {}) }, ms);
+  };
+  const emit = (plans: Plan[], agent?: string) => {
+    for (const p of plans) {
+      model(p.calls.map((c) => (legacy && c.tool === "db_query" ? "sql_query" : c.tool)), p.think, agent);
+      for (const c of p.calls) {
+        const old = legacy && c.tool === "db_query";
+        const tool = old ? "sql_query" : c.tool;
+        push("tool_call", { ...(agent ? { agent } : {}), tool, args: old ? { sql: c.args.query } : c.args }, 300);
+        if (c.sub) {
+          const sub = String(c.args.subagent);
+          emit(c.sub, sub);
+          model([], "查完了，按要求交回结论。", sub);
+        }
+        push("tool_result", { ...(agent ? { agent } : {}), tool, output: old ? legacyDbOutput(c.output) : c.output, duration_ms: c.ms ?? 300 }, c.ms ?? 300);
+      }
+    }
+  };
+  emit(plansOf(run));
   if (run.status === "running") return (run._events = out);
-  if (run.status === "awaiting_approval") {
-    const pending = approvals.find((a) => a.run_id === run.run_id && a.status === "pending");
-    push("approval", { title: "等待审批 · 危险命令", content: pending?.detail ?? "systemctl restart board-prod", approval_id: pending?.id }, 300);
-    return (run._events = out);
-  }
   if (run.status === "failed") {
-    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"#gmv-card\"" : "模型调用失败：429 Too Many Requests（3 个 token 均已限流）" }, 800);
+    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（账号 RPM 上限 3，重试 6 次后放弃）" }, 800);
     return (run._events = out);
   }
   if (run.status === "cancelled") {
-    push("stage", { stage: "cancelled", title: "已取消", content: "人工取消（lihf）" }, 500);
+    push("stage", { stage: "cancelled", title: "已取消", content: "人工取消（liyd）" }, 500);
     return (run._events = out);
   }
-  const qa: Record<string, string> = {
-    "上周 GMV 环比为什么跌了 12%？": "上周 GMV **环比 -12.1%**，主要来自两处：\n\n1. **华东区大促回落**：前一周有 9.9 大促，华东区 GMV 占比从 41% 回到 34%，贡献了约 -8.6pt；\n2. **退款冲回**：10-15 起一批 9 月订单集中退款，按口径 GMV 不含退款，贡献 -2.9pt。\n\n剔除大促影响后，日均 GMV 与 9 月第三周基本持平（-0.6%）。",
-    "退款率指标的口径是什么？": "**退款率 = 当日发起退款的订单数 / 当日支付订单数**。\n\n- 按**发起日**计，不按退款完成日；\n- 分母只算支付成功订单，不含测试店铺（`shop.is_test = true`）；\n- 部分退款也算 1 单。\n\n这条口径来自服务档案，代码位置 `/srv/board/src/metrics/refund.ts`。",
-    "新客定义是首单还是首访？": "**首单**。新客 = 首次**支付成功**的用户，不是首次访问。\n\n> 注意：知识库里有一条旧口径（首访）已被取代，看板 2026-08 之前的历史数据仍按首访计，跨期对比时要注意。",
-    "7 天留存怎么算的？分母是哪天的新客？": "分母是 **D0 当日的新客**（首单口径），分子是 **D7 当天（含）**有 `app_open` 的人，按自然日计。\n\n例如 10-01 的新客 1,284 人，10-08 有打开的 402 人，7 日留存 = 31.3%。",
-    "看板首页 DAU 和埋点平台对不上": "差异来自两处口径不同：\n\n| 项 | 看板 | 埋点平台 |\n|---|---|---|\n| 去重键 | user_id | device_id |\n| 内部账号 | 过滤 | 不过滤 |\n\n昨天看板 DAU 38,120，埋点平台 41,906；按 device_id 去重并保留内部账号重算后为 41,870，差 0.09%，属正常范围。",
-  };
-  const answer = run._answer ?? (run.task.startsWith("data-qa") && qa[String(run.input.question)]
-    ? qa[String(run.input.question)]
-    : run.task === "ask"
-      ? `在 ${run.service}@${run.env} 的项目环境里直接验证了：缓存 TTL 为 **600 秒**，后端是 redis（10.0.0.21:6379/2），与本环境配置文件一致。\n\n依据：\`board.metrics.cache.ttl_seconds()\` 的返回值。需要定期检查的话，可以建一个正式任务配上定时触发。`
-    : run.task === "config-audit"
-      ? "昨日共 **14 条**配置发布：高风险 1 · 中风险 3 · 低风险 10。\n\n**需要关注**\n- `payment.gateway.timeout` 3s → 30s（payment-svc，prod）：放大 10 倍，超时堆积会拖垮线程池，建议确认是否笔误\n\n**中风险**\n- `db.pool.max` 50 → 20（order-svc）\n- `feature.refund_v2` off → on（board）\n- `cache.ttl.gmv` 600 → 60（board）"
-    : run.task.startsWith("data-qa")
-    ? "3 月以来累计 **total_fee 为 1,082.4 万元**（按自然月，单位已从分换算为元，不含退款）。\n\n| 月份 | 金额（万元） |\n|---|---|\n| 2026-03 | 128.4 |\n| 2026-04 | 141.3 |\n| 2026-05 | 135.0 |\n| 2026-06 | 139.8 |\n| 2026-07 | 133.2 |\n| 2026-08 | 136.7 |\n| 2026-09 | 142.1 |\n| 2026-10（至 19 日） | 125.9 |\n\n```sql\nSELECT date_trunc('month', paid_at) AS m, sum(total_fee)/100.0 AS yuan\nFROM ads_order_daily WHERE paid_at >= '2026-03-01'\nGROUP BY 1 ORDER BY 1\n```"
-    : run.task.startsWith("failure-analysis")
-      ? "## 根因\n上游 `ods_order` 的 2026-10-19 分区 03:41 才物化完成，晚于 `dwd_trade_order` 03:00 的调度，读到空分区后 merge 失败。\n\n## 证据\n- ods_order 物化记录：end_time 03:41\n- 档案已知坑：上游延迟会级联失败\n\n## 影响范围\n`dwd_trade_order` → `ads_gmv_daily`、`ads_refund_rate` 当日分区未产出。\n\n## 建议\n1. 现在补跑 dwd_trade_order 当日分区（上游已就绪）；\n2. 给 dwd_trade_order 加上游 freshness 依赖，替代固定时间调度。"
-      : "巡检完成：**12 项正常，1 项关注**。\n\n- ⚠️ 根盘使用率 72%（阈值 80%），较上周 +6%，建议清理 /srv/board/logs\n- 数据新鲜度：ads_gmv_daily 最新分区 2026-10-19 ✓\n- 接口 5xx 比例 0.02% ✓");
-  push("final", { content: answer, tokens: between(600, 1800) }, 2000);
+  const answer = run._answer ?? answerOf(run);
+  model([], "依据齐了，整理成结论给用户。");      // 不调工具的这次就是最终回答，正文在 final 里
+  push("final", { content: answer }, 2000);
   // 回归重放：新会话、不沉淀记忆、不投递
   if (run.trigger.type === "replay") return (run._events = out);
-  push("stage", { stage: "finalize", title: "沉淀记忆", content: run.task === "data-qa" ? "事实 1 条（metric:total_fee）" : run.task.startsWith("failure-analysis") ? "教训 1 条 · 交接摘要" : "交接摘要" }, 1500);
-  if (tasks.find((x) => x.name === run.task.split(":")[0])?.deliver) push("stage", { stage: "deliver", title: "投递", content: "渠道 default ✓" }, 400);
+  // 平台的辅助调用（记忆沉淀）也记一条 model_call，标着用途
+  if (!legacy) {
+    const input = 2400 + Math.round(r() * 1600), output = 140 + Math.round(r() * 320);
+    push("model_call", { purpose: "记忆沉淀", model: MODEL, ms: 2200 + Math.round(r() * 3400), input_tokens: input, output_tokens: output, tokens: input + output }, 1200);
+  }
+  push("stage", { stage: "finalize", title: "沉淀记忆", content: run.task.startsWith("data-qa") ? "事实 1 条（table:dws_account_pnl_daily）" : run.task.startsWith("failure-analysis") ? "教训 1 条 · 交接摘要" : "交接摘要" }, 1500);
+  if (tasks.find((x) => x.name === run.task.split(":")[0])?.deliver) push("stage", { stage: "deliver", title: "投递", content: "钉钉 default ✓" }, 400);
   return (run._events = out);
 }
 
@@ -629,8 +1069,9 @@ export function detailOf(run: MockRun): Run {
   const task = tasks.find((t) => t.name === run.task);
   const parent = task?.extends ? tasks.find((t) => t.name === task.extends) : null;
   const ctxLines = Object.entries({ ...(parent?.profile ?? {}), ...(task?.profile ?? {}) });
+  const svcProfile = { ...(service?.profile ?? {}), ...(service?.envs[run.env]?.profile ?? {}) };
   const profile = [
-    service && Object.keys(service.profile).length ? `[档案——服务 ${service.name}：一手事实，逐字保留，优先级最高]\n` + Object.entries(service.profile).map(([k, v]) => `${label(k)}：${v}`).join("\n") : "",
+    service && Object.keys(svcProfile).length ? `[档案——服务 ${service.name}：一手事实，逐字保留，优先级最高]\n` + Object.entries(svcProfile).map(([k, v]) => `${label(k)}：${v}`).join("\n") : "",
     ctxLines.length ? `[档案——任务 ${run.task}：一手事实，逐字保留，优先级最高]\n` + ctxLines.map(([k, v]) => `${label(k)}：${v}`).join("\n") : "",
   ].filter(Boolean).join("\n\n");
   // 召回：该环境的 + 所有环境通用的；教训优先给失败分析
@@ -638,17 +1079,19 @@ export function detailOf(run: MockRun): Run {
     .sort((a, b) => (run.task.startsWith("failure-analysis") ? Number(b.kind === "lesson") - Number(a.kind === "lesson") : Number(a.kind === "lesson") - Number(b.kind === "lesson")));
   const replay = run.trigger.type === "replay";
   const savedLesson = knowledge.find((k) => k.kind === "lesson" && k.service === run.service && k.task.startsWith("failure-analysis"));
+  const savedFact = knowledge.find((k) => k.key === "table:dws_account_pnl_daily");
   return {
     ...run,
-    output: final ? { answer: String(final.payload.content) } : err ? { error: String(err.payload.content) } : null,
-    error_code: err ? "model_unavailable" : null,
-    pending_approval: run.status === "awaiting_approval" ? approvals.find((a) => a.run_id === run.run_id) ?? null : null,
+    output: run._output !== undefined ? run._output
+      : final ? { answer: String(final.payload.content) }
+        : err ? { error: String(err.payload.content) } : null,
+    error_code: run._error_code ?? (err ? (run.task === "frontend-smoke" ? "run_failed" : "model_unavailable") : null),
     context: {
       profile,
       recalled_knowledge: run.resolution === "agent" ? recallable.slice(0, 3).map((k, i) => ({ id: k.id, key: k.key, kind: k.kind, rank: i + 1 })) : [],
-      recalled_assets: run.task === "daily-inspection" ? assetList.filter((a) => a.task === "daily-inspection").slice(0, 1).map((a) => ({ id: a.id, kind: a.kind, name: a.name })) : [],
+      recalled_assets: assetList.filter((a) => a.status === "active" && a.service === run.service && a.task === run.task.split(":")[0]).slice(0, 1).map((a) => ({ id: a.id, kind: a.kind, name: a.name })),
       saved_knowledge: replay || run.status !== "success" || run.resolution !== "agent" ? []
-        : run.task === "data-qa" ? [{ id: 3, key: "metric:total_fee", kind: "fact" }]
+        : run.task.startsWith("data-qa") && savedFact ? [{ id: savedFact.id, key: savedFact.key, kind: "fact" }]
           : run.task.startsWith("failure-analysis") && savedLesson ? [{ id: savedLesson.id, key: savedLesson.key, kind: "lesson" }] : [],
       saved_assets: [],
       session_runs: runs.filter((x) => x.session_id === run.session_id && x.run_id !== run.run_id).slice(0, 6)
@@ -661,38 +1104,19 @@ function label(k: string): string {
   return ({ conventions: "口径与术语", no_go: "禁区", env_notes: "环境差异", pitfalls: "常见坑", code_refs: "代码位置", upstream: "上游依赖", downstream: "下游影响", runbook: "运维备注" } as Record<string, string>)[k] ?? k;
 }
 
-// ———————— 审批 ————————
-// 只有危险命令与进程启停两类；审批默认关闭，这里是之前打开时留下的记录（103 是关闭前提交、还没处理的一条）
-
-export const approvals: Approval[] = [
-  { id: 103, kind: "process", run_id: null, title: "进程启动 · dagster/webserver@prod", detail: "启动 dagster-webserver（prod，端口 3000），租约 2 小时\n# 用于排查 dwd_trade_order 的 UI 运行记录", service: "dagster", env: "prod", task: null, payload: { service: "dagster", env: "prod", process: "webserver", action: "start", executor: "api" }, requested_by: "lihf", status: "pending", decided_by: null, comment: null, created_at: iso(4 * MIN), decided_at: null, expires_at: new Date(NOW + 26 * MIN).toISOString() },
-  ...Array.from({ length: 14 }, (_, i): Approval => {
-    const ok = rand() < 0.78;
-    const at = between(2, 70) * HOUR;
-    const kind = pick(["command", "command", "command", "process", "process"] as const);
-    return {
-      id: 90 - i, kind, run_id: kind === "process" ? null : pick(runs).run_id,
-      title: { command: "危险命令", process: pick(["进程启动 · board/server@prod", "进程停止 · dagster/webserver@prod"]) }[kind],
-      detail: { command: pick(["rm -rf /srv/board/logs/2026-09-*", "kill -9 28812", "systemctl restart dagster-daemon-prod"]), process: "lihf 请求在 prod 启停进程（租约 4 小时）" }[kind],
-      service: pick(["board", "dagster", "config-center"]), env: "prod", task: kind === "process" ? null : pick(["daily-inspection", "failure-analysis", "config-audit"]), payload: {},
-      requested_by: pick(["lihf", "run:a41c2e90", "wangzh"]), status: ok ? "approved" : "rejected", decided_by: pick(["lihf", "wangzh", "chenyu"]),
-      comment: ok ? (rand() < 0.4 ? "确认过影响范围" : null) : "先在 test 复现", created_at: iso(at + 9 * MIN), decided_at: iso(at), expires_at: null,
-    };
-  }),
-];
-
-// ———————— 进程 ————————
+// ———————— 进程（本机副本） ————————
 
 export const instances: Instance[] = services.flatMap((s) => Object.entries(s.processes).flatMap(([proc, def]) =>
   envs.map((e): Instance => {
-    const running = (s.name === "dagster" && e.name === "test") || (s.name === "board" && e.name === "test" && proc === "server") || (s.name === "config-center" && e.name === "test");
+    const running = (s.name === "vision-board" && e.name === "test") || (s.name === "vision-dagster" && e.name === "test");
+    const failed = s.name === "vision-web" && e.name === "dev";
     const startedAgo = between(10, 90) * MIN;
     return {
-      service: s.name, env: e.name, process: proc, state: running ? "running" : s.name === "report-engine" && e.name === "test" ? "failed" : "stopped",
+      service: s.name, env: e.name, process: proc, state: running ? "running" : failed ? "failed" : "stopped",
       port: def.ports?.[e.name] ?? null, pid: running ? between(2000, 39999) : null,
       started_at: running ? iso(startedAgo) : null, lease_until: running ? new Date(NOW - startedAgo + (def.lease_hours ?? 2) * HOUR).toISOString() : null,
-      started_by: running ? pick(["lihf", "run:7d0f1132", "wangzh"]) : null,
-      last_exit: running ? null : s.name === "report-engine" && e.name === "test" ? { code: 1, at: iso(3 * HOUR) } : { code: 0, at: iso(between(3, 40) * HOUR) },
+      started_by: running ? pick(["liyd", "run:7d0f1132a4c8", "gaodl"]) : null,
+      last_exit: running ? null : failed ? { code: 1, at: iso(3 * HOUR) } : { code: 0, at: iso(between(3, 40) * HOUR) },
       enabled: s.enabled && s.envs[e.name]?.enabled !== false,
     };
   })));
@@ -713,33 +1137,33 @@ const lesson = (id: number, service: string, env: string, task: string, fp: stri
   kn(id, service, env, task, `lesson:${fp}`, `${conclusion}\n（报错：${error}）`, hits, { kind: "lesson", fingerprint: fp, category, ...extra });
 
 export const knowledge: Knowledge[] = [
-  kn(1, "board", "", "data-qa", "metric:gmv", "GMV = 支付成功订单的 total_fee 之和（单位分），不含退款、不含测试店铺（shop.is_test=true）。", 46, { code_ref: { path: "/srv/board/src/metrics/gmv.ts", commit: "a41c2e9" } }),
-  kn(2, "board", "prod", "data-qa", "metric:refund_rate", "退款率 = 当日发起退款的订单数 / 当日支付订单数；按发起日计，不按完成日。", 12),
-  kn(3, "board", "", "data-qa", "metric:total_fee", "total_fee 字段单位是分；看板展示时除以 100 并保留两位小数。", 48),
-  kn(4, "board", "test", "data-qa", "fact:test-amount-noise", "test 环境金额乘了 0.8~1.2 的随机系数，不能与 prod 数值对比。", 9),
-  kn(5, "dagster", "", "failure-analysis", "pattern:upstream-delay", "dwd 层失败时先查 ods 上游分区完成时间；03:00 后完成的分区会导致级联失败。", 31),
-  kn(6, "dagster", "prod", "failure-analysis:dwd_trade_order", "fact:payment-out-of-order", "支付回调乱序会产生 amount<0 的记录，transform_payment() 第 88 行过滤。", 4, { code_ref: { path: "/srv/dagster/assets/dwd/trade_order.py", commit: "7d0f113" }, status: "expired" }),
-  kn(7, "dagster", "test", "failure-analysis", "fact:test-db-reset", "test 库每周一 06:00 重置，周一早上的失败大概率是重置窗口内运行。", 14),
-  kn(8, "board", "prod", "daily-inspection", "topology:board", "board 部署在 10.0.0.21，nginx → node(8080)，缓存 redis 10 分钟过期。", 0),
-  kn(9, "config-center", "prod", "config-audit", "risk:timeout-keys", "payment.*timeout、db.pool.* 类配置变更视为高风险，需要通知。", 22),
-  kn(10, "board", "prod", "data-qa", "metric:dau", "DAU 以埋点 app_open 去重 user_id；与埋点平台口径差异在于看板过滤了内部账号。", 24, { feedback_score: -2 }),
-  kn(11, "dagster", "prod", "failure-analysis:dwd_trade_order", "session:dagster:dwd_trade_order:infra:2026-10-18:summary", "## 结论\n上游 ods_order 延迟\n\n## 被否方案\n- 代码回归（近 3 次提交与报错无关）\n\n## 当前约束\n- prod 不能手工 backfill\n\n## 未决问题\n- 是否改为 freshness 依赖", 3, { kind: "handoff" }),
-  kn(12, "board", "", "data-qa", "metric:new_customer_v1", "新客 = 首次访问的用户（2026-08 之前的旧口径）。", 0, { status: "superseded", superseded_by: "metric:new_customer" }),
-  kn(13, "board", "", "data-qa:retention_7d", "metric:retention_7d", "7 日留存分母是当日新客，分子是第 7 天（含）有 app_open 的人。", 7),
-  kn(14, "board", "dev", "data-qa", "fact:dev-reset", "dev 库每周一重置，周一上午的数据不完整。", 3),
-  kn(15, "board", "", "data-qa", "metric:new_customer", "新客 = 首次支付成功的用户，不是首次访问；2026-08 之前的历史数据仍按首访计。", 16),
-  kn(16, "board", "", "data-qa:gmv", "metric:gmv_refund", "GMV 不扣退款，退款单独看 refund_amount。", 0, { status: "superseded", superseded_by: "profile:service:board:conventions", source_run: null }),
-  // 教训（原"案例"）：同类报错再出现时按指纹精确命中
-  lesson(17, "dagster", "prod", "failure-analysis", "a3f19c2e5b7d8810", "upstream", "上游 ods_order 分区延迟导致级联失败：等上游到齐后补跑当日分区",
-    "dagster._core.errors.DagsterExecutionStepExecutionError: upstream asset ods_order partition ? missing", 11),
-  lesson(18, "dagster", "", "failure-analysis", "77be0d41c9a2f063", "code", "pay_channel 字段在旧版回调里缺失：transform_payment() 里改用 .get 兜底",
+  kn(1, "vision-board", "", "data-qa", "metric:account_pnl", "账户收益 = 已实现盈亏 + 浮动盈亏，按交易日汇总，单位元；来自 ClickHouse 的 dws_account_pnl_daily（vision-dagster 产出），报表里是 report/pnl.py 的 account_pnl()。", 46, { code_ref: { path: "report/pnl.py", commit: "e5f6a7b" } }),
+  kn(2, "vision-board", "prod", "data-qa", "fact:prod-ck", "国内生产的报表读 CK 172.168.0.125；国内测试和开发读 172.24.17.66。", 12),
+  kn(3, "vision-board", "", "data-qa", "table:dws_account_pnl_daily", "dws_account_pnl_daily 一行 = 一个账户一个交易日；trade_date 是交易日（非交易日没有行），pnl 字段单位元。", 48),
+  kn(4, "vision-board", "test", "data-qa", "fact:test-data-lag", "国内测试的 CK 数据每天 06:00 从生产同步上一个交易日，盘中查不到当天数据。", 9),
+  kn(5, "vision-dagster", "", "failure-analysis", "pattern:upstream-delay", "dws 层资产失败先查上游 dwd_position_daily 当天分区是否物化完成；上游晚于 18:40 完成会级联失败。", 31),
+  kn(6, "vision-dagster", "prod", "failure-analysis:dws_account_pnl_daily", "fact:sub-account-mapping", "新开的子账户在 dim_account 里晚一天才有：account_pnl_daily() 汇总前要先 join dim_account，缺的记 warning。", 4, { code_ref: { path: "vision_dagster/assets/pnl.py", commit: "8d02b7f" }, status: "expired" }),
+  kn(7, "vision-dagster", "test", "failure-analysis", "fact:test-ck-restart", "国内测试 CK（172.24.17.66）每周一 05:30 重启，周一早上的连接失败大概率是重启窗口。", 14),
+  kn(8, "vision-board", "prod", "daily-inspection", "topology:board", "线上 vision-board：nginx → 源码服务，生产 172.24.16.100；报表页缓存 10 分钟，刚更新的数据不会立刻出现。", 0),
+  kn(9, "vision-web", "", "ask", "fact:auth-code", "本地应用授权码要手动生成，写进该环境 settings 的 AUTH_APP_CODE；登录走 FreeIPA。", 22),
+  kn(10, "vision-board", "prod", "data-qa", "metric:strategy_return", "策略收益率 = 策略下各账户收益之和 / 期初净值；口径在 report/strategy.py 的 strategy_return()。", 24, { feedback_score: -2 }),
+  kn(11, "vision-dagster", "prod", "failure-analysis:dws_account_pnl_daily", `session:dagster:dws_account_pnl_daily:DagsterExecutionStepExecutionError:${TD[1]}:summary`, "## 结论\n上游 dwd_position_daily 晚到\n\n## 被否方案\n- 代码回归（近 3 次提交与报错无关）\n\n## 当前约束\n- 本机副本不手工物化生产资产\n\n## 未决问题\n- 是否把调度改成依赖上游分区", 3, { kind: "handoff" }),
+  kn(12, "vision-board", "", "data-qa", "metric:turnover_v1", "换手率 = 成交额 / 期末持仓市值（2026-08 之前的旧口径）。", 0, { status: "superseded", superseded_by: "metric:turnover" }),
+  kn(13, "vision-board", "", "data-qa:account_pnl", "metric:pnl_currency", "跨币种账户的收益先按当日中间价折成人民币再汇总。", 7),
+  kn(14, "vision-board", "dev", "data-qa", "fact:dev-ck", "开发环境没有自己的 CK，读的是国内测试的 CK（172.24.17.66）。", 3),
+  kn(15, "vision-board", "", "data-qa", "metric:turnover", "换手率 = 成交额 / 期初与期末持仓市值的均值；2026-08 之前的报表仍按期末市值算。", 16),
+  kn(16, "vision-board", "", "data-qa:account_pnl", "metric:pnl_fee", "账户收益已扣手续费与印花税。", 0, { status: "superseded", superseded_by: "profile:service:vision-board:conventions", source_run: null }),
+  // 教训：同类报错再出现时按指纹精确命中
+  lesson(17, "vision-dagster", "prod", "failure-analysis", "a3f19c2e5b7d8810", "upstream", "上游 dwd_position_daily 当天分区没物化完导致级联失败：等上游跑完后重跑本资产当日分区",
+    "dagster._core.errors.DagsterExecutionStepExecutionError: upstream asset dwd_position_daily partition ? is missing", 11),
+  lesson(18, "vision-dagster", "", "failure-analysis", "77be0d41c9a2f063", "code", "成交回报里新加的子账户没有 account_id：先按 sub_account 映射到主账户再汇总",
     "KeyError: '?'", 6, { feedback_score: -1 }),
-  lesson(19, "dagster", "test", "failure-analysis", "c0d2e9aa71f4b3e5", "infra", "test 库重置窗口（周一 06:00）内运行导致连接失败，窗口过后重跑即可",
-    "psycopg.OperationalError: connection to server at \"?\", port ? failed: Connection refused", 4),
-  lesson(20, "board", "test", "frontend-smoke", "19aa03fe8c6d2b47", "code", "首页卡片选择器改成了 [data-card=gmv]，冒烟脚本没同步",
+  lesson(19, "vision-dagster", "test", "failure-analysis", "c0d2e9aa71f4b3e5", "infra", "国内测试 CK 周一 05:30 重启窗口内连接被拒，窗口过后重跑即可",
+    "clickhouse_connect.driver.exceptions.OperationalError: Error HTTPConnectionPool(host='?', port=?): Max retries exceeded (Caused by NewConnectionError: Connection refused)", 4),
+  lesson(20, "vision-board", "test", "frontend-smoke", "19aa03fe8c6d2b47", "code", "策略周报页的表格改成了 [data-table=strategy]，冒烟脚本里的选择器没同步",
     "Playwright: Timeout ?ms exceeded waiting for selector \"?\"", 3),
-  lesson(21, "dagster", "prod", "failure-analysis", "5e8b11c0d4e6a9f2", "infra", "worker 内存不足：ads_gmv_daily 全量重算超过 4G，改成按分区重算",
-    "MemoryError: Unable to allocate ? GiB for an array", 0, { status: "expired" }),
+  lesson(21, "vision-dagster", "prod", "failure-analysis", "5e8b11c0d4e6a9f2", "infra", "CK 单查询内存超限：全量重算超过 max_memory_usage，改成按交易日分区逐个重算",
+    "clickhouse_connect.driver.exceptions.DatabaseError: Code: ?. DB::Exception: Memory limit (for query) exceeded", 0, { status: "expired" }),
 ];
 
 /** mock 用 30 天命中次数近似"近 30 天被 ≥5 次运行召回" */
@@ -747,12 +1171,23 @@ export const PROMOTE_MIN_HITS = 20;
 export const isPromotable = (k: Knowledge) => k.kind === "fact" && k.status === "active" && k.feedback_score >= 0 && k.hits_30d >= PROMOTE_MIN_HITS;
 
 export const assetList: Asset[] = [
-  { id: 1, service: "board", env: "prod", task: "daily-inspection", kind: "procedure", name: "看板巡检", summary: "13 项检查：数据新鲜度、接口错误率、主机资源、缓存命中", content: "1. SELECT max(dt) FROM ads_gmv_daily —— 应为 T-1\n2. nginx 5xx 比例 < 0.5%（近 1h）\n3. host_metrics：内存 < 85%，根盘 < 80%\n…", files: [], source_run: runs[5].run_id, use_count: 38, last_used_at: iso(6 * HOUR), feedback_score: 0, status: "active", updated_at: iso(4 * DAY) },
-  { id: 2, service: "board", env: "test", task: "frontend-smoke", kind: "script", name: "smoke-suite", summary: "Playwright 冒烟脚本：登录、首页 6 张卡片、导出", content: "运行：cd <path> && npx playwright test smoke.spec.ts", files: [{ name: "smoke.spec.ts", size: 4821 }, { name: "playwright.config.ts", size: 612 }, { name: "fixtures/login.json", size: 188 }], source_run: runs[8].run_id, use_count: 22, last_used_at: iso(1 * DAY), feedback_score: 0, status: "active", updated_at: iso(2 * DAY) },
-  { id: 3, service: "dagster", env: "prod", task: "failure-analysis", kind: "query", name: "上游分区完成时间", summary: "查某资产所有上游的最近分区完成时间", content: "SELECT a.asset_key, max(m.end_time) FROM asset_deps a JOIN asset_materializations m ON …", files: [], source_run: runs[12].run_id, use_count: 17, last_used_at: iso(5 * HOUR), feedback_score: -1, status: "active", updated_at: iso(6 * DAY) },
-  { id: 4, service: "board", env: "prod", task: "", kind: "baseline", name: "首页指标基线", summary: "近 30 天首页 6 个指标的日均与波动区间", content: "gmv: 4.3万±12%\norders: 3,120±9%\n…", files: [], source_run: null, use_count: 9, last_used_at: iso(2 * DAY), feedback_score: 0, status: "active", updated_at: iso(10 * DAY) },
-  { id: 5, service: "config-center", env: "prod", task: "config-audit", kind: "procedure", name: "高风险配置判定", summary: "哪些 key 变更算高风险", content: "timeout 类放大 >5 倍、连接池缩小、开关从 on→off 的支付相关配置", files: [], source_run: runs[18].run_id, use_count: 11, last_used_at: iso(1 * DAY), feedback_score: 0, status: "active", updated_at: iso(12 * DAY) },
-  { id: 6, service: "board", env: "test", task: "frontend-smoke", kind: "script", name: "smoke-suite-v1", summary: "旧版冒烟脚本（已被 smoke-suite 取代）", content: "", files: [{ name: "smoke.js", size: 2210 }], source_run: null, use_count: 41, last_used_at: iso(20 * DAY), feedback_score: -1, status: "superseded", updated_at: iso(20 * DAY) },
+  { id: 1, service: "vision-board", env: "prod", task: "daily-inspection", kind: "procedure", name: "Board 巡检", summary: "8 项检查：报表数据新鲜度、线上报表页、离线导出、主机资源",
+    content: "1. db_query：dws_account_pnl_daily / dwd_position_daily / ads_strategy_report / market_kline_1d 的 max(trade_date) 都应是上一个交易日\n2. py requests：report/pnl_daily/、report/positions/、report/strategy_weekly/ 返回 200，耗时 < 基线 2 倍\n3. 离线导出：/report/export/?fmt=html 返回 200\n4. host_metrics：内存 < 85%，根盘 < 80%\n…",
+    files: [], source_run: runs[5].run_id, use_count: 38, last_used_at: iso(6 * HOUR), feedback_score: 0, status: "active", updated_at: iso(4 * DAY) },
+  { id: 2, service: "vision-board", env: "test", task: "frontend-smoke", kind: "script", name: "smoke-suite", summary: "Playwright 冒烟：登录、账户收益日报、持仓明细、策略周报、离线导出",
+    content: "运行：cd <path> && npx playwright test smoke.spec.ts；BASE_URL 取运行环境里的 site 地址",
+    files: [{ name: "smoke.spec.ts", size: 5321 }, { name: "playwright.config.ts", size: 612 }, { name: "fixtures/login.json", size: 188 }], source_run: runs[8].run_id, use_count: 22, last_used_at: iso(1 * DAY), feedback_score: 0, status: "active", updated_at: iso(2 * DAY) },
+  { id: 3, service: "vision-dagster", env: "prod", task: "failure-analysis", kind: "query", name: "上游分区行数", summary: "查某张表最近 5 个交易日的行数与账户数，判断上游是否完整",
+    content: "SELECT trade_date, count() AS n, uniqExact(account_id) AS accounts\nFROM {table}\nWHERE trade_date >= today() - 10\nGROUP BY trade_date ORDER BY trade_date DESC LIMIT 5",
+    files: [], source_run: runs[12].run_id, use_count: 17, last_used_at: iso(5 * HOUR), feedback_score: -1, status: "active", updated_at: iso(6 * DAY) },
+  { id: 4, service: "vision-board", env: "prod", task: "", kind: "baseline", name: "报表页耗时基线", summary: "近 30 个交易日各报表页的耗时中位数与 P95",
+    content: "report/pnl_daily/: 0.8s（P95 1.4s）\nreport/positions/: 1.1s（P95 1.9s）\nreport/strategy_weekly/: 1.5s（P95 2.6s）",
+    files: [], source_run: null, use_count: 9, last_used_at: iso(2 * DAY), feedback_score: 0, status: "active", updated_at: iso(10 * DAY) },
+  { id: 5, service: "vision-web", env: "prod", task: "ask", kind: "procedure", name: "查策略挂在哪些账户", summary: "用 vision_cfg 的 ORM 只读查询策略、账户、组合之间的关系",
+    content: "from vision_cfg.models import Strategy\ns = Strategy.objects.get(code=\"<策略代码>\")\nprint(list(s.accounts.values_list(\"code\", \"name\", \"status\")))\n# 只读：不要 save()，不要调管理命令",
+    files: [], source_run: runs[18].run_id, use_count: 11, last_used_at: iso(1 * DAY), feedback_score: 0, status: "active", updated_at: iso(12 * DAY) },
+  { id: 6, service: "vision-board", env: "test", task: "frontend-smoke", kind: "script", name: "smoke-suite-v1", summary: "旧版冒烟脚本（已被 smoke-suite 取代）", content: "",
+    files: [{ name: "smoke.js", size: 2210 }], source_run: null, use_count: 41, last_used_at: iso(20 * DAY), feedback_score: -1, status: "superseded", updated_at: iso(20 * DAY) },
 ];
 
 // ———————— 对话 ————————
@@ -764,48 +1199,43 @@ export function sessionsList(): SessionDetail[] {
     const asc = [...rs].sort((a, b) => a.created_at.localeCompare(b.created_at));
     const turns: ChatTurn[] = asc.map((r) => {
       const d = detailOf(r);
-      return { run_id: r.run_id, question: String(r.input.question), answer: d.output?.answer ?? null, status: r.status, events: eventsOf(r), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "lihf") ?? null, created_at: r.created_at };
+      return { run_id: r.run_id, question: String(r.input.question), answer: d.output?.answer ?? d.output?.error ?? null, status: r.status, events: eventsOf(r).filter((e) => e.kind !== "final" && e.kind !== "error"), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "liyd") ?? null, created_at: r.created_at };
     });
     return { session_id: sid, title: String(asc[0].input.question).slice(0, 28), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[0].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
   }).sort((a, b) => b.last_at.localeCompare(a.last_at));
 }
 
-// ———————— 设置 ————————
+// ———————— 设置（conf/seeds/settings.yaml） ————————
 
 const entry = <T extends object>(section: string, v: T, version: number, by_: string, at: number) =>
   ({ section, ...v, version, updated_by: by_, updated_at: iso(at) });
 
+const rule = (name: string, events: string[], o: { envs?: string[]; triggers?: string[] } = {}) =>
+  ({ name, enabled: true, events, services: [], envs: o.envs ?? [], tasks: [], triggers: o.triggers ?? [], channel: "default" });
+
 export const settings = {
-  envs: entry("envs", { items: envs, default: "test" }, 3, "lihf", 9 * DAY),
-  approvals: entry("approvals", {
-    danger_patterns: ["\\brm\\s+-[a-z]*[rf]", "\\bdrop\\s+(table|database|schema)\\b", "\\btruncate\\b", "\\bdelete\\s+from\\b", "\\bkill(all)?\\b", "\\bsystemctl\\s+(stop|restart|disable)\\b", "\\bgit\\s+push\\b"],
-    required_in: "off", timeout_minutes: 30,
-  }, 2, "lihf", 12 * DAY),
+  envs: entry("envs", { items: envs, default: "test" }, 2, "liyd", 9 * DAY),
   notifications: entry("notifications", {
-    channels: {
-      default: { type: "dingtalk", url: "https://alert-notification.ipa.zs/robot/send", token: "***" },
-      "data-team": { type: "dingtalk", url: "https://alert-notification.ipa.zs/robot/send", token: "***" },
-      "ops-webhook": { type: "webhook", url: "https://ops.internal/hooks/agent", token: "" },
-    },
+    channels: { default: { type: "dingtalk", url: "https://alert-notification.ipa.zs/robot/send", token: "***" } },
     rules: [
-      { name: "审批提醒", enabled: true, events: ["approval_requested"], services: [], envs: [], tasks: [], triggers: [], channel: "default" },
-      { name: "自动运行失败", enabled: true, events: ["run_failed"], services: [], envs: [], tasks: [], triggers: ["schedule", "event"], channel: "default" },
-      { name: "看板问答失败", enabled: true, events: ["run_failed"], services: ["board"], envs: ["prod"], tasks: ["data-qa"], triggers: [], channel: "data-team" },
-      { name: "进程停止", enabled: false, events: ["process_stopped"], services: [], envs: ["prod"], tasks: [], triggers: [], channel: "ops-webhook" },
-      { name: "问答负反馈", enabled: true, events: ["feedback_negative"], services: [], envs: [], tasks: ["data-qa"], triggers: [], channel: "data-team" },
+      rule("自动运行失败", ["run_failed"], { triggers: ["schedule", "event", "watch"] }),
+      rule("进程停止", ["process_stopped"], { envs: ["prod"] }),
+      rule("负反馈", ["feedback_negative"]),
+      rule("配置待更新", ["config_outdated"]),
     ],
-  }, 5, "wangzh", 2 * DAY),
-  memory: entry("memory", { recall: true, save: true, handoff_summary: true, knowledge_limit: 5, asset_limit: 8 }, 1, "seed", 20 * DAY),
-  processes: entry("processes", { default_lease_hours: 2, max_lease_hours: 24 }, 2, "lihf", 7 * DAY),
+  }, 1, "seed", 9 * DAY),
+  memory: entry("memory", { recall: true, save: true, handoff_summary: true, knowledge_limit: 5, asset_limit: 8 }, 1, "seed", 9 * DAY),
+  processes: entry("processes", { default_lease_hours: 2, max_lease_hours: 24 }, 1, "seed", 9 * DAY),
+  prompts: promptsEntry,
 } as unknown as Settings;
 
 export const apiKeys: ApiKey[] = [
-  { id: 1, name: "board-backend", prefix: "ap_x8Kq2m", scope: "run", services: ["board"], envs: [], note: "看板后端调用问答", created_by: "lihf", created_at: iso(30 * DAY), expires_at: null, last_used_at: iso(4 * MIN), revoked_at: null },
-  { id: 2, name: "dagster-sensor", prefix: "ap_N3pZ0c", scope: "run", services: ["dagster"], envs: ["prod", "test"], note: "run_failure_sensor 回调", created_by: "lihf", created_at: iso(28 * DAY), expires_at: null, last_used_at: iso(26 * MIN), revoked_at: null },
-  { id: 3, name: "gitlab", prefix: "ap_7Hh1Wd", scope: "run", services: [], envs: [], note: "GitLab 部署 Webhook（X-Gitlab-Token）", created_by: "chenyu", created_at: iso(21 * DAY), expires_at: null, last_used_at: iso(5 * HOUR), revoked_at: null },
-  { id: 4, name: "report-engine", prefix: "ap_q0LmE4", scope: "run", services: ["report-engine"], envs: ["test"], note: "报表回归", created_by: "chenyu", created_at: iso(15 * DAY), expires_at: new Date(NOW + 45 * DAY).toISOString(), last_used_at: null, revoked_at: null },
-  { id: 5, name: "lihf-console", prefix: "ap_Bx9tYv", scope: "admin", services: [], envs: [], note: "控制台登录", created_by: "root", created_at: iso(40 * DAY), expires_at: null, last_used_at: iso(1 * MIN), revoked_at: null },
-  { id: 6, name: "old-cli", prefix: "ap_Ze2Rr8", scope: "run", services: [], envs: [], note: "旧 CLI，已停用", created_by: "lihf", created_at: iso(60 * DAY), expires_at: null, last_used_at: iso(33 * DAY), revoked_at: iso(20 * DAY) },
+  { id: 1, name: "vision-dagster-sensor", prefix: "ap_N3pZ0c", note: "Dagster run_failure_sensor 回调 POST /v1/events/dagster", created_by: "gaodl", created_at: iso(9 * DAY), expires_at: null, last_used_at: iso(26 * MIN), revoked_at: null },
+  { id: 2, name: "gitlab", prefix: "ap_7Hh1Wd", note: "GitLab 部署 Webhook（X-Gitlab-Token）", created_by: "liyd", created_at: iso(9 * DAY), expires_at: null, last_used_at: iso(5 * HOUR), revoked_at: null },
+  { id: 3, name: "vision-board-backend", prefix: "ap_x8Kq2m", note: "报表页面里的「问一下」", created_by: "liyd", created_at: iso(8 * DAY), expires_at: null, last_used_at: iso(4 * MIN), revoked_at: null },
+  { id: 4, name: "notebook-zhaoq", prefix: "ap_q0LmE4", note: "数据分析 notebook 里用 SDK 调 data-qa", created_by: "zhaoq", created_at: iso(6 * DAY), expires_at: new Date(NOW + 45 * DAY).toISOString(), last_used_at: iso(2 * HOUR), revoked_at: null },
+  { id: 5, name: "liyd-console", prefix: "ap_Bx9tYv", note: "控制台登录", created_by: "root", created_at: iso(9 * DAY), expires_at: null, last_used_at: iso(1 * MIN), revoked_at: null },
+  { id: 6, name: "old-cli", prefix: "ap_Ze2Rr8", note: "旧 CLI，已停用", created_by: "liyd", created_at: iso(9 * DAY), expires_at: null, last_used_at: iso(8 * DAY), revoked_at: iso(7 * DAY) },
 ];
 
-export { NOW, MIN, HOUR, DAY, iso, hex, pick, between };
+export { NOW, MIN, HOUR, DAY, MODEL, TD, SCRATCH, ckOut, iso, hex, pick, between };

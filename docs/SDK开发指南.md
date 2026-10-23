@@ -1,6 +1,6 @@
 # SDK 开发指南
 
-`sdk/agent_client` 是 `/v1` 接口的 Python 薄封装（包名 `agent-client`，版本 2.x，对应服务端 v8）。
+`sdk/agent_client` 是 `/v1` 接口的 Python 薄封装（包名 `agent-client`，版本 2.x，对应服务端 v9）。
 它只做转发，不含业务逻辑，**HTTP 接口才是唯一契约**。
 
 其他语言的项目、或不想多一个依赖的项目，照着 `agent_client/client.py` 抄一份即可：一个文件，
@@ -9,8 +9,7 @@
 ## 安装
 
 ```bash
-pip install ./sdk                        # 仓库里
-pip install /opt/agent-platform/sdk      # 已部署的机器上
+pip install ./sdk                        # 仓库里（已部署的机器上也用仓库里的：安装脚本不拷 sdk）
 # 零安装：把 sdk/agent_client/client.py 拷进自己的项目
 ```
 
@@ -20,35 +19,37 @@ pip install /opt/agent-platform/sdk      # 已部署的机器上
 
 ```bash
 export AGENT_URL=https://agent.internal      # 或 http://127.0.0.1:8100
-export AGENT_KEY=ak_xxx                      # 设置 → API 密钥 里给这个项目建的那把
+export AGENT_KEY=ap_xxx                      # 设置 → API 密钥 里给这个项目建的那把
 ```
 
 也可以在构造时显式传 `url=`、`key=`，显式参数优先于环境变量。
 
-建议每个项目一把密钥，名字用项目名（如 `board-backend`）。这样运行记录里的「发起方」一眼能看出是谁调的；
-需要时，还可以把这把密钥限定在自己的服务和环境上。
+建议每个项目一把密钥，名字用项目名（如 `vision-board`）。这样运行记录里的「发起方」一眼能看出是谁调的。
+密钥只标识身份、不分权限，有效密钥能调全部接口，别外传。
 
 ## 快速开始
 
 ```python
 from agent_client import AgentClient, AgentError
 
-agent = AgentClient(service="board", env="test")
+agent = AgentClient(service="vision-board", env="test")
 
 # 1) 对话：用服务的对话任务（没有专属的就用通用入口 ask）；同一个 client 自动续会话
-print(agent.ask("3 月以来 total_fee 是多少"))
-print(agent.ask("环比 2 月呢"))             # 记得上一问
-agent.ask("换个话题", new_session=True)     # 另起一段
+print(agent.ask("报表页面的数据来自 ck 库的哪几张表"))
+print(agent.ask("其中哪张表昨天没有新数据"))    # 记得上一问
+agent.ask("换个话题", new_session=True)         # 另起一段
 
 # 2) 任务：等到结束，返回运行详情
 run = agent.run("frontend-smoke", {"version": "1.2.0"})
 print(run["status"], run["output"])
 
-# 3) 针对某个对象跑（子任务不存在会自动建，档案在控制台补）
-run = agent.run("failure-analysis", {"run_id": "8f2c", "asset_key": "dwd_trade_order", "error": "…"},
-                subtask="dwd_trade_order", env="prod", wait=False)
+# 3) 针对某个对象跑（子任务不存在会自动建，档案在控制台补）；failure-analysis 是 vision-dagster 的任务
+run = agent.run("failure-analysis", {"run_id": run_id, "asset_key": asset_key, "error": error},
+                service="vision-dagster", subtask=asset_key, env="prod", wait=False)
 print(run["run_id"], run["subtask_created"])
 ```
+
+模型账号限并发 1、3 RPM，一次 agent 运行通常要几分钟；`ask` 和 `run()`（默认 `wait=True`）会一直等到结束。
 
 ## API 参考
 
@@ -65,7 +66,8 @@ AgentClient(service=None, env=None, *, url=None, key=None, timeout=330.0)
 | `url` / `key` | 不传就读 `AGENT_URL` / `AGENT_KEY` |
 | `timeout` | 单次 HTTP 超时（秒） |
 
-`ask` 和 `run` 都能按次传 `service` / `env`，覆盖构造时的默认值。
+`ask` 和 `run` 都能按次传 `service` / `env`，覆盖构造时的默认值。专属任务传了别的服务会被拒（`service_not_allowed`），
+所以调别的服务的任务时按次传它的 `service`。
 
 ### 对话
 
@@ -78,7 +80,7 @@ agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_sessi
 - 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。
 - `task` 不传时，该服务专属的对话任务（声明了 `chat` 触发）优先，没有就用通用入口 `ask`；`subtask` 选用子任务（不存在会按父任务自动建）。
 - `recall` / `save` 按次覆盖记忆开关，`None` 表示跟随任务与平台默认。
-- `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`thought`、`tool_call`、`tool_result`、`approval`。
+- `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`model_call`（每次模型调用：耗时、token、调了哪些工具、思考）、`tool_call`、`tool_result`。子代理里发生的带 `agent` 字段。
 - `**input_fields` 是对话任务的其他输入字段。
 
 ### 任务
@@ -99,8 +101,10 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 
 `run` 的返回值有两种形状：
 
-- 等到了结束：返回运行详情，包含 `status`、`output`、`context` 等，字段见接口文档 §2。
-- `wait=False`，或服务端等待结束时运行正停在审批上（设置里打开了审批才会有）：立即返回回执 `{run_id, session_id, status, output, dedup, subtask_created}`。
+- 等到了结束（或等到了 `wait` 秒数）：返回运行详情，包含 `status`、`output`、`recipe`（配方：这次用的各定义版本）、`context` 等，字段见接口文档 §2。
+  任务声明了 `output_schema` 时，校验过的结构化结果在 `output["data"]`（`output["answer"]` 仍是文字结论）；
+  agent 没交回合规结果的运行以 `error_code: invalid_output` 失败。
+- `wait=False`：立即返回回执 `{run_id, session_id, status, output, dedup, subtask_created}`。
 
 | 方法 | 说明 |
 |---|---|
@@ -116,7 +120,7 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 ### 事件
 
 ```python
-agent.emit("webhook", {"service": "board", "env": "test", "version": "1.2.0"}, event="release")
+agent.emit("webhook", {"service": "vision-board", "env": "test", "version": "1.2.0"}, event="release")
 ```
 
 把事件推给平台（`POST /v1/events/{source}`），返回匹配到的任务及其运行。
@@ -149,8 +153,8 @@ except AgentError as e:
 | e.code | 含义 | 该怎么办 |
 |---|---|---|
 | `unauthorized` | 密钥无效 / 吊销 / 过期 | 检查 `AGENT_KEY` |
-| `forbidden` | 密钥不允许这个服务或环境 | 换密钥，或让管理员放宽范围 |
 | `service_required` | 通用任务没指定服务 | 传 `service` |
+| `service_not_allowed` | 专属任务传了别的服务 | 按次传任务所属的 `service` |
 | `invalid_input` | 输入不合法 | 看 `e.detail["fields"]` |
 | `service_disabled` / `service_env_disabled` / `task_disabled` | 停用 | 控制台启用，或换环境 |
 | `env_not_allowed` | 任务不能在这个环境跑 | 换环境 |
@@ -163,14 +167,14 @@ except AgentError as e:
 装好 SDK 就有这个命令。过程实时可见，会话存在服务端，跨天、跨机器都能续：
 
 ```bash
-agent-chat board                        # 默认环境
-agent-chat board --env prod
-agent-chat board --task data-qa
-agent-chat board --resume <会话 id>
+agent-chat vision-board                        # 默认环境
+agent-chat vision-board --env prod
+agent-chat vision-board --task data-qa
+agent-chat vision-board --resume <会话 id>
 ```
 
 ## 常见问题
 
 - **想看中间过程**：`ask(on_event=...)`，或者事后 `events(run_id)` 拉全量事件。
-- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。
+- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。并发多了也快不了：模型请求在平台侧排队（并发 1、3 RPM）。
 - **嵌入自己的服务**：直接把 `client.py` 拷进去，类名和方法名随意改，只要不破坏 HTTP 契约。

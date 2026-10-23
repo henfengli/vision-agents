@@ -28,7 +28,7 @@ from ...domain import Rejected
 from ...memory import recall
 from ...store import assets as assets_store
 from ...store import knowledge as knowledge_store
-from ..deps import ADMIN, RT, WHO, Caller, Runtime
+from ..deps import RT, WHO, Caller, Runtime
 from ..schemas import AssetCreate, AssetPatch, KnowledgeCreate, KnowledgePatch, KnowledgePromote, KnowledgeSearch
 
 router = APIRouter(prefix="/v1")
@@ -77,7 +77,7 @@ async def search_knowledge(body: KnowledgeSearch, rt: Runtime = RT, _: Caller = 
 
 
 @router.post("/knowledge", status_code=201)
-async def create_knowledge(body: KnowledgeCreate, rt: Runtime = RT, _: Caller = ADMIN):
+async def create_knowledge(body: KnowledgeCreate, rt: Runtime = RT, _: Caller = WHO):
     await _scope(rt, body.service, body.env)
     if body.kind == "lesson":
         if not body.error.strip():
@@ -102,7 +102,7 @@ async def get_knowledge(entry_id: int, _: Caller = WHO):
 
 
 @router.patch("/knowledge/{entry_id}")
-async def patch_knowledge(entry_id: int, body: KnowledgePatch, rt: Runtime = RT, _: Caller = ADMIN):
+async def patch_knowledge(entry_id: int, body: KnowledgePatch, rt: Runtime = RT, _: Caller = WHO):
     await _knowledge(entry_id)
     if body.content is not None:
         await knowledge_store.update_content(entry_id, body.content, embedder=rt.model_pool.embed)
@@ -114,7 +114,7 @@ async def patch_knowledge(entry_id: int, body: KnowledgePatch, rt: Runtime = RT,
 
 
 @router.delete("/knowledge/{entry_id}")
-async def delete_knowledge(entry_id: int, _: Caller = ADMIN):
+async def delete_knowledge(entry_id: int, _: Caller = WHO):
     await _knowledge(entry_id)
     await knowledge_store.mark_expired(entry_id)
     return await _knowledge(entry_id)
@@ -127,7 +127,7 @@ async def knowledge_history(entry_id: int, _: Caller = WHO):
 
 
 @router.post("/knowledge/{entry_id}/promote")
-async def promote_knowledge(entry_id: int, body: KnowledgePromote, rt: Runtime = RT, who: Caller = ADMIN):
+async def promote_knowledge(entry_id: int, body: KnowledgePromote, rt: Runtime = RT, who: Caller = WHO):
     """记忆升格为档案：档案逐字置顶注入、不会过期，适合被反复用到、确认无误的口径与约定。"""
     e = await _knowledge(entry_id)
     if e["status"] != "active":
@@ -184,7 +184,7 @@ async def list_assets(service: str | None = None, env: str | None = None, task: 
 
 
 @router.post("/assets", status_code=201)
-async def create_asset(body: AssetCreate, rt: Runtime = RT, _: Caller = ADMIN):
+async def create_asset(body: AssetCreate, rt: Runtime = RT, _: Caller = WHO):
     await _scope(rt, body.service, body.env)
     await assets_store.upsert(body.env, body.service, body.task, body.kind, body.name, body.summary, body.content,
                               source_run=None)
@@ -196,7 +196,7 @@ async def create_asset(body: AssetCreate, rt: Runtime = RT, _: Caller = ADMIN):
 
 
 @router.patch("/assets/{asset_id}")
-async def patch_asset(asset_id: int, body: AssetPatch, _: Caller = ADMIN):
+async def patch_asset(asset_id: int, body: AssetPatch, _: Caller = WHO):
     a = await _asset(asset_id)
     if body.summary is not None or body.content is not None:
         await assets_store.update(asset_id, body.summary if body.summary is not None else a["summary"],
@@ -209,7 +209,7 @@ async def patch_asset(asset_id: int, body: AssetPatch, _: Caller = ADMIN):
 
 
 @router.delete("/assets/{asset_id}")
-async def delete_asset(asset_id: int, _: Caller = ADMIN):
+async def delete_asset(asset_id: int, _: Caller = WHO):
     await _asset(asset_id)
     await assets_store.mark_expired(asset_id)
     return await _asset(asset_id)

@@ -5,30 +5,33 @@ dynamic = ["version"]
 description = "给同机部署的业务项目提供 agent 能力：API 调用、对话、定时与事件触发、按环境启停服务"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents==0.6.*",          # 锁版本：pre-1.0，角色定义收在自有配置层隔离 API 变更
+    "langchain>=1.4,<2.0",        # create_agent + 中间件（补齐悬空工具调用、上下文压缩）；agent/factory.py 是唯一用它装配的地方
     "langgraph>=1.0,<2.0",
     "langgraph-checkpoint-postgres>=2.0",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "openai>=1.50",               # 模型连接池用（OpenAI 兼容协议）
-    "langchain-openai>=0.2",      # init_chat_model 的 OpenAI provider
+    "openai>=1.50",               # 模型连接池用（OpenAI 兼容协议，接 Kimi）
+    "langchain-openai>=1.0,<2.0", # agent 的聊天模型（model/chat.py 继承 ChatOpenAI 保留思考过程）
     "psycopg[binary,pool]>=3.2",
     "pyyaml>=6.0",
     "pydantic>=2.6",
     "httpx>=0.27",
+    "jsonschema>=4.20,<5.0",      # 任务结构化输出（output_schema）的校验
+    # db_query 的驱动（PostgreSQL 用上面的 psycopg）
+    "pymysql>=1.1",               # MySQL / MariaDB / Doris（MySQL 协议）
+    "clickhouse-connect>=0.8",    # ClickHouse（HTTP 接口）
+    "pymongo>=4.8",               # MongoDB
 ]
 
 [project.optional-dependencies]
 # 测试用标准库 unittest 跑（python3 -m unittest discover -s tests），无额外 dev 依赖
-# Langfuse 集成（prompt 源头 + OTEL 观测）：生产建议安装；不装则 langfuse.enabled 不可开
-# langfuse 官方 SDK 负责 prompt/score 数据 API；OTEL 三件套负责 tracing 管线
-obs = ["langfuse>=4.0,<5.0",
-       "opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
+# 链路追踪（可选）：OTLP/HTTP 导出到任意兼容后端；不装则 otel.enabled 不生效
+obs = ["opentelemetry-sdk>=1.26", "opentelemetry-exporter-otlp-proto-http>=1.26",
        "openinference-instrumentation-langchain>=0.1"]
-# 内部 MCP 服务器接入（可选；不配 mcp_servers 则不需要）
+# MCP 接入（可选；不配平台 MCP、服务也没声明 mcp 则不需要）。常驻会话用到适配器的 sessions 模块，锁小版本
 # browser / datahub 用官方实现（@playwright/mcp、mcp-server-datahub），是独立
-# 进程的外部运行时（Node.js / uv），不入 Python 依赖；见 conf/env/prod.yaml
-mcp = ["langchain-mcp-adapters>=0.1"]
+# 进程的外部运行时（Node.js / uv），不入 Python 依赖；见 conf/base/common.yaml
+mcp = ["langchain-mcp-adapters>=0.3,<0.4"]
 # mcp_servers/dagster_mcp.py 的 server 端依赖（独立进程，不随主服务装）
 dagster-mcp = ["fastmcp>=2.0", "httpx>=0.27"]
 

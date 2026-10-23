@@ -1,11 +1,11 @@
-"""鉴权：每个请求解析出一个 Caller（谁在调用、能做什么）。
+"""鉴权：每个请求解析出一个 Caller（谁在调用）。只认身份，不分权限：有效凭据都能做全部操作。
 
 凭据三种，任选其一：
 - Authorization: Bearer <密钥>      项目 / 脚本 / SDK
 - X-Gitlab-Token: <密钥>            GitLab Webhook 只能这样带
 - Cookie ap_session                 控制台登录（POST /auth/session 用密钥换取，带上操作人姓名）
 
-密钥是设置 → API 密钥里建的（库里只存哈希），或部署配置里的 root_token（引导用，权限最高）。
+密钥是设置 → API 密钥里建的（库里只存哈希），或部署配置里的 root_token（引导用：第一次登录、建第一把密钥）。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import hashlib
 import hmac
 import json
 
-from fastapi import Depends, Request
+from fastapi import Request
 
 from ..domain import Caller, Rejected
 from ..store import api_keys
@@ -32,12 +32,11 @@ async def caller_for_token(request: Request, token: str, person: str | None = No
 
 async def _caller_for_digest(rt, token_digest: str, person: str | None) -> Caller | None:
     if hmac.compare_digest(token_digest, api_keys.digest(rt.settings.root_token)):
-        return Caller(name=person or "root", kind="user" if person else "root", admin=True)
+        return Caller(name=person or "root", kind="user" if person else "root")
     key = await api_keys.authenticate(token_digest)
     if key is None:
         return None
-    return Caller(name=person or key["name"], kind="user" if person else "key", admin=key["scope"] == "admin",
-                  services=key["services"], envs=key["envs"])
+    return Caller(name=person or key["name"], kind="user" if person else "key")
 
 
 async def current_caller(request: Request) -> Caller:
@@ -55,12 +54,6 @@ async def current_caller(request: Request) -> Caller:
         if who is not None:
             return who
     raise Rejected("unauthorized", "需要登录或提供 API 密钥（Authorization: Bearer …）", 401)
-
-
-async def admin_caller(who: Caller = Depends(current_caller)) -> Caller:
-    if not who.admin:
-        raise Rejected("forbidden", f"{who.name} 没有管理权限（需要 admin 范围的密钥）", 403)
-    return who
 
 
 # —— 控制台会话 cookie：{t: 密钥摘要, n: 操作人}，用 root_token 做 HMAC 签名 ——

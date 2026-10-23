@@ -3,7 +3,7 @@
     prepare → agent / 内建 / 规则 → finalize → deliver
                    └─ 任一步失败 → fail → deliver
 
-执行步骤（agent / 内建）限时：任务的 timeout_s 加一次审批的等待预留（打开了审批时）。
+执行步骤（agent / 内建）限时：任务的 timeout_s（上限 MAX_EXEC_S）。
 被取消（控制台 / 接口）就安静地停下，台账已由提交端标好；执行进程退出导致的中断记为 interrupted，可续跑。
 """
 
@@ -17,17 +17,15 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from .. import observability
+from .. import __version__, observability
 from ..agent import factory as agent_factory
 from ..agent import scope as run_scope
-from ..agent.approvals import Gatekeeper
 from ..config import Settings
 from ..domain import Rejected, RunTrigger, compose_profile, question_text
 from ..memory import distill, recall
 from ..memory.gardener import run_gardener
 from ..notify import Message, Notifier
 from ..registry import Registry
-from ..services import codesync
 from ..store import assets as assets_store
 from ..store import knowledge as knowledge_store
 from ..store import runs
@@ -44,10 +42,10 @@ class Deps:
     settings: Settings
     registry: Registry
     factory: agent_factory.AgentFactory
-    gate: Gatekeeper
     notifier: Notifier
     model_pool: Any
     service_mcp: Any = None                                           # agent.tools.mcp_bridge.ServiceMcp
+    code_sync: Any = None                                             # services.codesync.CodeSync
     on_finished: Callable[[RunSpec], Awaitable[None]] | None = None   # 回归重放的判定挂在这里
 
 
@@ -63,7 +61,6 @@ async def build_spec(reg: Registry, run: dict) -> RunSpec:
         raise Rejected("unknown_task", f"任务 {run['task']} 已不存在")
     task = entry.spec
     memory = await reg.config("memory")
-    approvals = await reg.config("approvals")
     wanted = run.get("memory") or {}
     by_rule = run.get("resolution") == "rule"
     trigger = RunTrigger(**run["trigger"])
@@ -73,12 +70,12 @@ async def build_spec(reg: Registry, run: dict) -> RunSpec:
         role=task.role, rule_output=run["output"] if by_rule else None,
         service=run["service"], env=run["env"], input=run["input"],
         question=question_text(run["task"], task, run["input"]), trigger=trigger, timeout_s=task.timeout_s,
-        approval_budget_s=0 if approvals.required_in == "off" else approvals.timeout_minutes * 60,
         # 回归重放：不投递、不沉淀（对比用，不该改动记忆或打扰群）
         deliver=None if replay or not task.deliver else task.deliver.model_dump(exclude_none=True),
         recall=_pick(wanted.get("recall"), task.memory.recall, memory.recall),
         save=False if replay else _pick(wanted.get("save"), task.memory.save, memory.save),
-        handler=task.handler, resume=bool(run.get("resume")), correction=trigger.type == "correction")
+        handler=task.handler, resume=bool(run.get("resume")), correction=trigger.type == "correction",
+        output_schema=task.output_schema)
 
 
 class Pipeline:
@@ -124,23 +121,18 @@ class Pipeline:
                 log.exception("运行 %s 结束后的回调失败", run_id)
 
     async def _limited(self, spec: RunSpec, coro: Awaitable[dict]) -> dict:
-        return await asyncio.wait_for(coro, min(spec.timeout_s, MAX_EXEC_S) + spec.approval_budget_s)
+        return await asyncio.wait_for(coro, min(spec.timeout_s, MAX_EXEC_S))
 
     # —— 步骤 ——
 
     async def prepare(self, spec: RunSpec) -> RunSpec:
-        """定版本、重过开关（1–4 环）、拼提示：档案 → 运行环境 → 召回 → 方法 → 问题。"""
+        """记配方、重过开关（1–4 环）、拼提示：档案 → 运行环境 → 召回 → 方法 → 问题。"""
         d = self._d
         task = await d.registry.task(spec.task)
         if task is None:
             raise Rejected("unknown_task", f"任务 {spec.task} 已不存在")
         await gates.check_switches(d.registry, task_name=spec.task, task=task.spec, service=spec.service, env=spec.env)
-
-        role_version = None
-        if spec.role:
-            _role, versions = await d.registry.resolved_role(spec.role)
-            role_version = versions[-1]
-        await runs.set_versions(spec.run_id, task.version, role_version)
+        await self._record_recipe(spec, task)
 
         if spec.form == "rule":
             out = spec.rule_output or {}
@@ -190,18 +182,56 @@ class Pipeline:
         spec.prompt = "\n\n".join(parts)
         return spec
 
+    async def _record_recipe(self, spec: RunSpec, task: Any) -> None:
+        """配方：这次运行用到的每样定义各是第几版——任务（与父任务）、角色继承链每一层、子代理、服务、
+        平台提示词，加上模型与平台版本。运行详情与回归重放的对比都看它。"""
+        d = self._d
+        recipe: dict[str, Any] = {"task": {"name": spec.task, "version": task.version},
+                                  "model": d.settings.model.name, "platform": __version__}
+        if task.spec.extends and (parent := await d.registry.task_raw(task.spec.extends)) is not None:
+            recipe["task"]["parent"] = {"name": parent.name, "version": parent.version}
+        role_version = None
+        if spec.role:
+            main, subs, key = await d.registry.agent_roles(spec.role)
+            layers = [[{"name": n, "version": v} for n, v in zip(r.lineage, versions)]
+                      for r, (_, versions) in zip((main, *subs), key)]
+            recipe["role"] = {"name": main.name, "lineage": layers[0]}
+            if subs and spec.form == "agent":
+                recipe["subagents"] = [{"name": r.name, "lineage": layer} for r, layer in zip(subs, layers[1:])]
+            role_version = layers[0][-1]["version"]
+        if spec.service and (svc := await d.registry.service(spec.service)) is not None:
+            recipe["service"] = {"name": svc.name, "version": svc.version}
+        if spec.form == "agent":
+            _prompts, recipe["prompts"] = await d.registry.config_versioned("prompts")
+        await runs.set_recipe(spec.run_id, task.version, role_version, recipe)
+
     async def run_agent(self, spec: RunSpec) -> dict:
         """按任务的角色装配 agent 执行（带子代理与服务 MCP 工具）；会话即 LangGraph thread，续跑从 checkpoint 接着走。"""
         d = self._d
         role, subagents, version_key = await d.registry.agent_roles(spec.role or "")
+        prompts, prompts_version = await d.registry.config_versioned("prompts")
         service_tools, service_key = await service_mcp_tools(d.registry, d.service_mcp, spec.service)
-        agent = await d.factory.agent_for(role, subagents, version_key, spec.service, service_tools, service_key)
-        with run_scope.bind(await _scope(d, spec, role.tools)), \
+        agent = await d.factory.agent_for(role, subagents, (version_key, prompts_version), spec.service, service_tools,
+                                          service_key, prompts=prompts, output_schema=spec.output_schema)
+        if not spec.resume:
+            await runs.log_event(spec.run_id, "stage", {
+                "stage": "system", "title": f"系统提示 · 平台提示词 v{prompts_version} + 角色 {role.name}",
+                "content": agent_factory.system_prompt(role, subagents, prompts, spec.output_schema)})
+        extra = tuple(service_tools) if role.service_tools else ()
+        with run_scope.bind(await _scope(d, spec, role.tools, extra)), \
                 observability.run_span("agent.run", run_id=spec.run_id, task=spec.task, service=spec.service, env=spec.env):
-            answer = await agent_factory.invoke(agent, spec.run_id, thread_id=spec.thread_id,
-                                                prompt=None if spec.resume else spec.prompt)
-        await runs.log_event(spec.run_id, "final", {"content": answer})
-        return {"answer": answer}
+            result = await agent_factory.invoke(agent, spec.run_id, thread_id=spec.thread_id,
+                                                prompt=None if spec.resume else spec.prompt,
+                                                structured=bool(spec.output_schema))
+        answer, data = result["answer"], result.get("data")
+        if spec.output_schema and data is None:
+            raise Rejected("invalid_output", "agent 没有交回符合任务 output_schema 的结构化结果（已提醒一次）；"
+                                             f"它最后的文字回复：{answer[:1000] or '（无）'}")
+        output: dict[str, Any] = {"answer": answer or (json.dumps(data, ensure_ascii=False, indent=2) if data else "")}
+        if spec.output_schema:
+            output["data"] = data
+        await runs.log_event(spec.run_id, "final", {"content": output["answer"], **({"data": data} if data else {})})
+        return output
 
     async def run_builtin(self, spec: RunSpec) -> dict:
         """内建任务：不过模型的确定性维护作业。"""
@@ -229,7 +259,8 @@ class Pipeline:
                 memory = await d.registry.config("memory")
                 await distill(d.model_pool, env=spec.env, service=spec.service, run_id=spec.run_id, task=spec.task,
                               run_input=spec.input, run_output=output, code_paths=spec.code_paths,
-                              session_id=spec.session_id, handoff_summary=memory.handoff_summary)
+                              session_id=spec.session_id, handoff_summary=memory.handoff_summary,
+                              prompts=await d.registry.config("prompts"))
         except Exception:  # noqa: BLE001
             log.exception("运行 %s 的纠正 / 记忆沉淀失败", spec.run_id)
         await _announce(d, spec, "run_succeeded", "运行成功", str(output.get("answer") or output)[:1500])
@@ -283,14 +314,14 @@ async def _gardener(d: Deps, spec: RunSpec) -> dict:
 
 
 async def _code_sync(d: Deps, spec: RunSpec) -> dict:
-    """把本运行的 服务×环境 的代码目录切到 input.ref（不填 = 该环境跟踪的分支）。"""
-    view = await _view(d, spec)
-    if view is None:
+    """把本运行的 服务×环境 的代码目录对齐到 input.ref（不填 = 跟踪的分支），再跑同步步骤（services/codesync.py）。"""
+    if not spec.service or d.code_sync is None:
         raise Rejected("invalid_input", "代码同步需要指定服务")
-    try:
-        return await codesync.sync(view, spec.input.get("ref") or None)
-    except codesync.SyncError as e:
-        raise Rejected("code_sync_failed", str(e)) from None
+
+    async def log(kind: str, payload: dict) -> None:
+        await runs.log_event(spec.run_id, kind, payload)
+    return await d.code_sync.sync(spec.service, spec.env, ref=spec.input.get("ref") or None, run_id=spec.run_id,
+                                  log=log, force=spec.input.get("force") in (True, "true", "1"))
 
 
 BUILTINS: dict[str, Callable[[Deps, RunSpec], Awaitable[dict]]] = {
@@ -326,21 +357,22 @@ async def _view(d: Deps, spec: RunSpec):
 
 
 async def _hidden(d: Deps) -> tuple[str, ...]:
-    """bash / run_code 沙箱里遮蔽的路径：所有服务所有环境的配置文件 + 平台密钥与凭据 + 进程启动规格。
+    """bash 沙箱里遮蔽的路径：所有服务所有环境的配置文件 + 平台密钥与凭据 + 进程启动规格 + 配置备份与同步补丁。
     跨服务也遮：board 的运行里同样读不到 dagster 的配置。项目内核在此基础上放开本服务本环境的配置。"""
     envs = (await d.registry.envs()).names
-    paths = set(d.settings.hidden_paths) | {d.settings.instances_dir}
+    s = d.settings
+    paths = set(s.hidden_paths) | {s.instances_dir, s.config_history_dir, s.sync_backups_dir}
     for s in await d.registry.services():
         paths |= s.spec.secret_paths(envs)
     return tuple(sorted(paths))
 
 
-async def _scope(d: Deps, spec: RunSpec, tools: list[str]) -> run_scope.RunScope:
+async def _scope(d: Deps, spec: RunSpec, tools: list[str], extra: tuple = ()) -> run_scope.RunScope:
     env = await d.registry.env(spec.env)
     return run_scope.RunScope(
         run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
-        notify_channel=(spec.deliver or {}).get("channel"), hidden=await _hidden(d))
+        extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=await _hidden(d))
 
 
 async def _cancelled(run_id: str) -> bool:

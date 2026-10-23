@@ -44,6 +44,14 @@ export function duration(ms: number | null | undefined): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** 配置里的秒数（超时、去重窗口）："15 分钟"、"2 小时"、"45 秒" */
+export function seconds(s: number | null | undefined): string {
+  if (s === null || s === undefined) return "—";
+  if (s >= 3600 && s % 3600 === 0) return `${s / 3600} 小时`;
+  if (s >= 60 && s % 60 === 0) return `${s / 60} 分钟`;
+  return `${s} 秒`;
+}
+
 export function num(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";

@@ -5,7 +5,6 @@ import { CommandPalette } from "./components/layout/palette";
 import { Toaster } from "./components/ui/overlay";
 import { Empty } from "./components/ui/primitives";
 import { LinkButton } from "./components/ui/button";
-import { ApprovalsPage } from "./features/approvals/approvals";
 import { ChatPage } from "./features/chat/chat";
 import { LoginPage } from "./features/login";
 import { MemoryPage } from "./features/memory/memory";
@@ -17,7 +16,7 @@ import { ServiceDetailPage } from "./features/services/service-detail";
 import { ServicesPage } from "./features/services/services";
 import { ApiKeysPage } from "./features/settings/api-keys";
 import {
-  ApprovalsSettingsPage, EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, ProcessesSettingsPage,
+  EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, ProcessesSettingsPage, PromptsSettingsPage,
 } from "./features/settings/platform";
 import { PreferencesPage } from "./features/settings/preferences";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
@@ -38,15 +37,14 @@ const routes: RouteDef[] = [
   { path: "/replays/:id", component: ReplayDetailPage },
   { path: "/chat", component: ChatPage },
   { path: "/chat/:session", component: ChatPage },
-  { path: "/approvals", component: ApprovalsPage },
   { path: "/memory", component: MemoryPage },
   { path: "/settings", component: PreferencesPage },
   { path: "/settings/preferences", component: PreferencesPage },
   { path: "/settings/envs", component: EnvsSettingsPage },
-  { path: "/settings/approvals", component: ApprovalsSettingsPage },
   { path: "/settings/notifications", component: NotificationsSettingsPage },
   { path: "/settings/memory", component: MemorySettingsPage },
   { path: "/settings/processes", component: ProcessesSettingsPage },
+  { path: "/settings/prompts", component: PromptsSettingsPage },
   { path: "/settings/roles", component: RolesPage },
   { path: "/settings/roles/:name", component: RoleDetailPage },
   { path: "/settings/api-keys", component: ApiKeysPage },
@@ -63,7 +61,7 @@ export function App() {
     if (path === "/" && getUi().landing !== "/") navigate(getUi().landing, { replace: true });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const onUnauthorized = () => navigate("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search), { replace: true });
+    const onUnauthorized = () => navigate("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search), { replace: true, force: true });
     window.addEventListener("ap:unauthorized", onUnauthorized);
     return () => window.removeEventListener("ap:unauthorized", onUnauthorized);
   }, []);

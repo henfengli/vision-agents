@@ -83,7 +83,7 @@ async def items(replay_id: int) -> list[dict]:
         cur = await conn.execute(
             "SELECT i.id, i.source_run, i.new_run, i.verdict, i.reason, i.judged_at,"
             " s.task, s.service, s.env, s.summary, s.task_version, s.role_version, s.output, s.status,"
-            " n.task_version, n.role_version, n.output, n.status"
+            " n.task_version, n.role_version, n.output, n.status, s.recipe, n.recipe"
             " FROM replay_items i JOIN runs s ON s.run_id = i.source_run LEFT JOIN runs n ON n.run_id = i.new_run"
             " WHERE i.replay_id=%s ORDER BY i.id", (replay_id,))
         rows = await cur.fetchall()
@@ -92,8 +92,10 @@ async def items(replay_id: int) -> list[dict]:
         out.append({
             "id": r[0], "source_run": r[1], "new_run": r[2], "verdict": r[3], "reason": r[4], "judged_at": _iso(r[5]),
             "task": r[6], "service": r[7], "env": r[8], "summary": r[9],
-            "before": {"task_version": r[10], "role_version": r[11], "answer": _answer(r[12]), "status": r[13]},
-            "after": {"task_version": r[14], "role_version": r[15], "answer": _answer(r[16]), "status": r[17]},
+            "before": {"task_version": r[10], "role_version": r[11], "answer": _answer(r[12]), "status": r[13],
+                       "recipe": r[18]},
+            "after": {"task_version": r[14], "role_version": r[15], "answer": _answer(r[16]), "status": r[17],
+                      "recipe": r[19]},
         })
     return out
 

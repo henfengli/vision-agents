@@ -1,14 +1,14 @@
 /**
- * 领域徽标：运行状态、环境、触发类型、实例状态、审批类型、回归判定——全站一致的颜色与措辞。
+ * 领域徽标：运行状态、环境、触发类型、实例状态、回归判定——全站一致的颜色与措辞。
  */
 import { type ReactNode } from "react";
 import {
-  LuBan, LuBot, LuCalendarClock, LuCircleCheck, LuCircleDot, LuCircleHelp, LuCircleMinus, LuCirclePause, LuCircleX, LuCode,
-  LuFlaskConical, LuGlobe, LuHand, LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuTrendingDown,
+  LuBan, LuBot, LuCalendarClock, LuCircleCheck, LuCircleHelp, LuCircleMinus, LuCirclePause, LuCircleX, LuCode,
+  LuFlaskConical, LuGitPullRequestArrow, LuGlobe, LuHand, LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuTrendingDown,
   LuWebhook, LuZap,
 } from "react-icons/lu";
 
-import type { ApprovalKind, Env, InstanceState, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
+import type { Env, InstanceState, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
 import { useEnvs } from "@/api/hooks";
 import { cn } from "@/lib/cn";
 import { Badge, Dot, type Tone } from "./ui/primitives";
@@ -16,7 +16,6 @@ import { Tooltip } from "./ui/overlay";
 
 export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone; icon: ReactNode }> = {
   queued: { label: "排队中", tone: "idle", icon: <LuCirclePause /> },
-  awaiting_approval: { label: "待审批", tone: "warn", icon: <LuShieldCheck /> },
   running: { label: "运行中", tone: "info", icon: <LuLoaderCircle className="animate-spin" /> },
   success: { label: "成功", tone: "ok", icon: <LuCircleCheck /> },
   failed: { label: "失败", tone: "bad", icon: <LuCircleX /> },
@@ -33,7 +32,7 @@ export function RunStatusDot({ status }: { status: RunStatus }) {
   const s = RUN_STATUS[status];
   return (
     <Tooltip content={s.label}>
-      <span className={cn("inline-flex size-4 items-center justify-center [&_svg]:size-3.5",
+      <span role="img" aria-label={s.label} className={cn("inline-flex size-4 items-center justify-center [&_svg]:size-3.5",
         { ok: "text-ok", bad: "text-bad", warn: "text-warn", info: "text-info", idle: "text-idle", neutral: "text-fg-3", accent: "text-accent", outline: "" }[s.tone])}>
         {s.icon}
       </span>
@@ -59,7 +58,8 @@ export function EnvBadge({ env, className }: { env: string | null | undefined; c
   const meta = useEnvMeta(env);
   if (!env) return <span className="text-fg-3">—</span>;
   return (
-    <span className={cn("inline-flex h-5 items-center gap-1 rounded px-1.5 font-mono text-[11px] font-semibold uppercase leading-none tracking-wide", ENV_TONE[meta?.color ?? "gray"], className)}>
+    <span title={meta ? `${meta.title || env}${meta.protected ? " · 受保护" : ""}` : undefined}
+      className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 font-mono text-[11px] font-semibold uppercase leading-none tracking-wide", ENV_TONE[meta?.color ?? "gray"], className)}>
       {meta?.protected && <LuShieldCheck className="size-3" />}
       {env}
     </span>
@@ -76,6 +76,7 @@ export const TRIGGER: Record<string, { label: string; icon: ReactNode }> = {
   resume: { label: "续跑", icon: <LuRotateCcw /> },
   correction: { label: "纠正", icon: <LuHand /> },
   replay: { label: "回归重放", icon: <LuFlaskConical /> },
+  watch: { label: "代码跟踪", icon: <LuGitPullRequestArrow /> },
 };
 
 export function TriggerBadge({ type, source, className }: { type: TriggerType | string; source?: string | null; className?: string }) {
@@ -102,11 +103,6 @@ export function InstanceBadge({ state }: { state: InstanceState }) {
     </span>
   );
 }
-
-export const APPROVAL_KIND: Record<ApprovalKind, { label: string; icon: ReactNode }> = {
-  command: { label: "危险命令", icon: <LuTerminal /> },
-  process: { label: "进程启停", icon: <LuCircleDot /> },
-};
 
 /** 回归重放的判定：fixed 绿 / same 琥珀 / worse 红 / unclear、error 灰 / null 判定中 */
 export const REPLAY_VERDICT: Record<ReplayVerdict | "pending", { label: string; tone: Tone; icon: ReactNode }> = {

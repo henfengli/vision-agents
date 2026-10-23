@@ -1,6 +1,6 @@
 """runs / run_events：运行台账，同时是执行队列。
 
-状态机：queued → running →（awaiting_approval ⇄ running）→ success | failed | cancelled。
+状态机：queued → running → success | failed | cancelled。
 started_at 在第一次进入 running 时落，finished_at 在进入终态时落——耗时、
 时间线偏移、SLA 统计都从这两列算，不从事件里猜。
 caller 永不为空：调用方没给身份时回退为触发类型（定时跑的 caller 就是 schedule）。
@@ -65,7 +65,7 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
 # ———————— 执行队列 ————————
 
 async def enqueue(run_id: str, *, resume: bool = False) -> None:
-    """把一个已有的运行放回队列（续跑 / 审批放行），并叫醒 worker。"""
+    """把一个已有的运行放回队列（续跑），并叫醒 worker。"""
     async with db.pool().connection() as conn:
         await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL WHERE run_id=%s",
                            (resume, run_id))
@@ -92,10 +92,10 @@ async def heartbeat(run_ids: list[str]) -> None:
 
 
 async def orphaned(stale_s: int) -> list[str]:
-    """执行中却很久没心跳的运行（执行进程崩溃或被杀）。等提交前审批的运行没有心跳，不算。"""
+    """执行中却很久没心跳的运行（执行进程崩溃或被杀）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id FROM runs WHERE status IN ('running','awaiting_approval')"
+            "SELECT run_id FROM runs WHERE status='running'"
             " AND heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => %s)", (stale_s,))
         return [r[0] for r in await cur.fetchall()]
 
@@ -105,7 +105,7 @@ async def active_of_trigger(task: str, trigger_id: str, env: str) -> str | None:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "SELECT run_id FROM runs WHERE task=%s AND trigger_id=%s AND env=%s"
-            " AND status IN ('queued','awaiting_approval','running') LIMIT 1", (task, trigger_id, env))
+            " AND status IN ('queued','running') LIMIT 1", (task, trigger_id, env))
         row = await cur.fetchone()
     return row[0] if row else None
 
@@ -135,10 +135,11 @@ async def set_status(run_id: str, status: str, *, output: dict | None = None, re
              resolution, error_code, tokens, status, terminal, terminal, run_id))
 
 
-async def set_versions(run_id: str, task_version: int | None, role_version: int | None) -> None:
+async def set_recipe(run_id: str, task_version: int | None, role_version: int | None, recipe: dict) -> None:
+    """配方：这次运行用到的每样定义各是第几版。task_version / role_version 两列单独留着，版本统计按它们聚合。"""
     async with db.pool().connection() as conn:
-        await conn.execute("UPDATE runs SET task_version=%s, role_version=%s WHERE run_id=%s",
-                           (task_version, role_version, run_id))
+        await conn.execute("UPDATE runs SET task_version=%s, role_version=%s, recipe=%s WHERE run_id=%s",
+                           (task_version, role_version, json.dumps(recipe, ensure_ascii=False), run_id))
 
 
 async def add_tokens(run_id: str, n: int) -> None:
@@ -148,11 +149,11 @@ async def add_tokens(run_id: str, n: int) -> None:
 
 
 async def find_dedup(dedup_key: str, window_s: int) -> dict | None:
-    """时间窗内同键、没有失败或取消的运行（任务声明的去重）。排队、等审批、运行中的也算：
+    """时间窗内同键、没有失败或取消的运行（任务声明的去重）。排队、运行中的也算：
     重复回调（Dagster 重发、GitLab 重投）不该在前一次还没跑完时再起一份。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT * FROM runs WHERE dedup_key=%s AND status IN ('queued','awaiting_approval','running','success')"
+            "SELECT * FROM runs WHERE dedup_key=%s AND status IN ('queued','running','success')"
             " AND created_at > now() - make_interval(secs => %s) ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
         row = await cur.fetchone()
     return _row(cur, row) if row else None
@@ -365,9 +366,8 @@ async def stats(hours: int = 24, env: str | None = None, service: str | None = N
             f" FROM runs{where} AND status='failed' GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 5", params)
         failures = [{"task": t, "service": s, "failed": n, "last_error": (e or "")[:300]} for t, s, n, e in await cur.fetchall()]
         cur = await conn.execute(
-            "SELECT count(*) FILTER (WHERE status='running'), (SELECT count(*) FROM approvals WHERE status='pending')"
-            " FROM runs WHERE status='running'" + (" AND env=%s" if env else ""), [env] if env else [])
-        running, awaiting = await cur.fetchone()
+            "SELECT count(*) FROM runs WHERE status='running'" + (" AND env=%s" if env else ""), [env] if env else [])
+        running = (await cur.fetchone())[0]
         cur = await conn.execute("SELECT now()")
         now = (await cur.fetchone())[0]
     from datetime import timedelta
@@ -381,7 +381,7 @@ async def stats(hours: int = 24, env: str | None = None, service: str | None = N
     return {
         "hours": hours,
         "totals": {"runs": total, "success": by_status.get("success", (0, 0))[0], "failed": by_status.get("failed", (0, 0))[0],
-                   "running": running or 0, "awaiting": awaiting or 0},
+                   "running": running or 0},
         "by_env": by_env, "series": series, "top_failures": failures,
         "tokens": sum(t for _, t in by_status.values()),
     }
@@ -408,6 +408,30 @@ async def task_stats(hours: int = 24) -> dict[str, dict]:
                 out.setdefault(name, {"runs": 0, "success": 0, "failed": 0, "p50_ms": None})
                 out[name]["last_run"] = {"run_id": run_id, "status": status, "created_at": at.isoformat()}
     return out
+
+
+_VERSION_OF = {                         # kind → (版本表达式, 条件)；条件里的 %s 是名字
+    "task": ("task_version", "task=%s"),
+    "role": ("role_version", "role=%s"),
+    "prompts": ("(recipe->>'prompts')::int", "recipe->>'prompts' IS NOT NULL AND %s::text IS NOT NULL"),
+}
+
+
+async def version_stats(kind: str, name: str) -> list[dict]:
+    """每个版本的运行效果（新版本在前）：次数、成功、失败、被 👎 的运行数、平均 token 与耗时、首末次时间。
+    kind：task（按任务自己的版本）/ role（按任务主角色的版本）/ prompts（平台提示词的版本）。回归重放的运行不算。"""
+    col, cond = _VERSION_OF[kind]
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {col} AS v, count(*), count(*) FILTER (WHERE status='success'),"
+            " count(*) FILTER (WHERE status='failed'),"
+            " count(*) FILTER (WHERE EXISTS (SELECT 1 FROM feedback f WHERE f.run_id = runs.run_id AND f.score < 0)),"
+            " avg(tokens)::int, avg(duration_ms)::int, min(created_at), max(created_at)"
+            f" FROM runs WHERE {cond} AND {col} IS NOT NULL AND trigger_type <> 'replay'"
+            " GROUP BY 1 ORDER BY 1 DESC", (name,))
+        rows = await cur.fetchall()
+    return [{"version": v, "runs": n, "success": s, "failed": f, "negative": neg, "avg_tokens": t, "avg_ms": ms,
+             "first_at": a.isoformat(), "last_at": b.isoformat()} for v, n, s, f, neg, t, ms, a, b in rows]
 
 
 async def service_health(hours: int = 24) -> dict[tuple[str, str], dict]:

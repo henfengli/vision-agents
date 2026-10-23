@@ -1,10 +1,9 @@
 """ProcessController：服务进程按环境启停（唯一执行点）。
 
 后端：
-- systemd（生产）：模板单元 agent-svc@<服务:环境:进程>.service，ExecStart 是 svcrun，
-  平台写好启动规格再 systemctl start；日志走 journald。
-  scope=system：系统级单元，polkit 允许平台用户管理 agent-svc@*.service（deploy/50-agent-svc.rules）；
-  scope=user：平台用户自己的 systemd --user 单元（deploy/install-user.sh），不需要 root 与 polkit。
+- systemd（生产）：平台用户自己的 systemd --user 模板单元 agent-svc@<服务:环境:进程>.service
+  （deploy/install-user.sh 装），ExecStart 是 svcrun；平台写好启动规格再 systemctl --user start，
+  日志走 journalctl --user。
 - local（开发）：本机子进程跑 svcrun，日志写 <数据目录>/instances/<实例>.log。
 - off：只读，不允许启停。
 
@@ -12,7 +11,6 @@
 
 租约：每次启动带租约（默认取进程定义，封顶 max_lease_hours），到期自动停——
 调试用的环境不会被遗忘地一直跑着。续期从当前到期时间往后加。
-审批不在这里：设置里打开了审批时，由调用方（API / service_ctl 工具）先过人工门。
 
 env_spec() 是"按环境把配置文件就位"的唯一出处：进程启动规格和项目内核（services/kernel.py）共用。
 """
@@ -77,7 +75,9 @@ class ProcessController:
     async def env_spec(self, svc: ServiceDef, env: str) -> dict:
         """这个环境的配置文件 bind 到固定路径，其他环境的同名文件与平台密钥遮蔽。
         → {binds: [[源, 固定路径]], masks: [...], python, env_vars}。缺配置文件时报 config_missing。"""
-        binds, masks = [], list(self._settings.hidden_paths)
+        s = self._settings
+        # 配置备份与同步补丁里有各环境的配置原文：和别的环境的配置文件一样遮蔽
+        binds, masks = [], [*s.hidden_paths, s.config_history_dir, s.sync_backups_dir]
         all_envs = (await self._reg.envs()).names
         for c in svc.configs:
             selected = c.path_for(env)
@@ -109,7 +109,7 @@ class ProcessController:
         missing = [src for src, _ in spec["binds"] if not os.path.exists(src)]
         if missing:
             raise Rejected("config_missing", f"{service} 在 {env} 的配置文件不存在：{'、'.join(missing)}")
-        _ensure_mount_points([dst for _, dst in spec["binds"]])
+        ensure_mount_points([dst for _, dst in spec["binds"]])
 
     async def build_spec(self, service: str, svc: ServiceDef, env: str, process: str) -> dict:
         """启动规格：命令/工作目录渲染好（cmd 里可写 {env} {port} {python}），配置文件按环境就位。"""
@@ -190,7 +190,7 @@ class ProcessController:
         inst = instance_name(service, env, process)
         lines = max(10, min(lines, 2000))
         if self.backend == "systemd":
-            _, out = await _exec("journalctl", *self._journal_scope(), "-u", self._unit(inst), "-n", str(lines),
+            _, out = await _exec("journalctl", "--user", "-u", self._unit(inst), "-n", str(lines),
                                  "--no-pager", "-o", "short-iso")
             return out.splitlines()
         path = self._log_path(inst)
@@ -206,7 +206,7 @@ class ProcessController:
             raise Rejected("process_control_off", "平台未开启进程启停（process_control.backend=off）")
 
     async def ensure_startable(self, service: str, env: str) -> None:
-        """能不能在这个环境起进程：开了进程控制、服务在该环境启用。要审批的调用方先问这里，免得审批注定失败的单。"""
+        """能不能在这个环境起进程：开了进程控制、服务在该环境启用。"""
         self._require_enabled()
         view = await self._reg.service_view(service, env)
         if view is None:
@@ -263,11 +263,7 @@ class ProcessController:
         return f"{self._cfg.unit}@{inst}.service"
 
     async def _systemctl(self, *args: str, timeout: float = 20.0) -> tuple[int, str]:
-        user = ("--user",) if self._cfg.scope == "user" else ()
-        return await _exec("systemctl", *user, *args, timeout=timeout)
-
-    def _journal_scope(self) -> tuple[str, ...]:
-        return ("--user",) if self._cfg.scope == "user" else ()
+        return await _exec("systemctl", "--user", *args, timeout=timeout)
 
     def _log_path(self, inst: str) -> Path:
         return Path(self._settings.instances_dir) / f"{inst}.log"
@@ -325,7 +321,7 @@ class ProcessController:
         return None
 
 
-def _ensure_mount_points(paths: list[str]) -> None:
+def ensure_mount_points(paths: list[str]) -> None:
     """bwrap 往固定路径 bind 时目标必须已存在，否则它会以业务进程用户的身份去建（多半没有写权限）。
     每环境一个 worktree 时固定路径（如 /srv/code/board/test/.env）通常不存在：平台先建个空文件占位。"""
     for p in paths:

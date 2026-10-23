@@ -8,7 +8,7 @@
 2. 每条原运行用同样的输入开一个重放运行（trigger=replay：新会话、不沉淀记忆、不投递）
 3. 重放运行结束后，一次模型调用对照"原答案 + 人指出的问题 + 新答案"判定：
    fixed（问题解决了）/ same（问题还在）/ worse（更糟或引入新错）/ unclear（判断不了）
-4. 页面上并排看原答案与新答案、判定理由，以及两边的任务 / 角色版本
+4. 页面上并排看原答案与新答案、判定理由，以及两边的配方（任务 / 角色 / 子代理 / 服务 / 平台提示词各是第几版）
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import json
 import logging
 
 from ..domain import FEEDBACK_REASONS, Caller, Rejected
+from ..registry import Registry
 from ..store import feedback as feedback_store
 from ..store import replays as replays_store
 from ..store import runs
@@ -27,33 +28,14 @@ log = logging.getLogger(__name__)
 
 VERDICTS = ("fixed", "same", "worse", "unclear")
 
-_JUDGE_PROMPT = """你在做回归评审。同一个问题，旧答案被人点了 👎；现在用新版本的提示词 / 定义重答了一次。
-判断新答案有没有解决人指出的问题。
-
-任务：{task}（{where}）
-输入：
-{input}
-
-旧答案（被 👎）：
-{old}
-
-人指出的问题：
-{issues}
-
-新答案：
-{new}
-
-只输出 JSON，不要别的内容：{{"verdict": "fixed|same|worse|unclear", "reason": "一两句：新答案在被指出的问题上怎么样"}}
-- fixed：被指出的问题解决了，且没有引入明显的新错误
-- same：被指出的问题还在
-- worse：问题还在且更糟，或引入了明显的新错误
-- unclear：信息不够判断（比如要看实际数据才能确认）"""
+# 判定提示词是平台配置（设置 → 提示词：replay_judge），默认文本在 domain/prompts.py
 
 
 class Replayer:
-    def __init__(self, submitter: Submitter, model_pool):
+    def __init__(self, submitter: Submitter, model_pool, registry: Registry):
         self._submitter = submitter
         self._pool = model_pool
+        self._registry = registry
 
     async def start(self, *, caller: Caller, run_ids: list[str] | None = None, task: str | None = None,
                     service: str | None = None, env: str | None = None, hours: int | None = None,
@@ -105,12 +87,13 @@ class Replayer:
                                       f"重放没有成功结束：{why}"[:500])
             return
         issues = await feedback_store.negatives_of(old["run_id"])
-        prompt = _JUDGE_PROMPT.format(
+        template = (await self._registry.config("prompts")).replay_judge
+        prompt = template.format(
             task=old["task"], where=f"{old['service'] or '平台'} · {old['env']}",
             input=json.dumps(old["input"], ensure_ascii=False, indent=1)[:3000],
             old=_answer(old)[:6000], issues=_issues(issues), new=_answer(new)[:6000])
         try:
-            resp = await self._pool.chat([{"role": "user", "content": prompt}])
+            resp = await self._pool.chat([{"role": "user", "content": prompt}], run_id=new_run_id, purpose="回归判定")
             verdict, reason = _parse(resp.choices[0].message.content or "")
         except Exception as e:  # noqa: BLE001 —— 判不了就标 unclear，页面上可以重判
             log.exception("回归判定失败（%s）", new_run_id)

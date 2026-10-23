@@ -66,12 +66,27 @@ class ReplayBody(BaseModel):
     note: str = Field("", description="这次改了什么，方便回看")
 
 
-class DecisionBody(BaseModel):
-    comment: str = ""
-
-
 class ProcessBody(BaseModel):
     hours: float | None = Field(None, gt=0, description="start：租约时长；renew：续多久。缺省用进程/平台默认")
+
+
+class SyncBody(BaseModel):
+    """POST /v1/services/{s}/sync：立即同步（不等每小时的代码跟踪）。"""
+
+    envs: list[str] | None = Field(None, description="同步哪些环境；不填 = 服务启用的全部环境")
+    force: bool = Field(False, description="所有同步步骤都重跑（不管依赖文件变没变；重建了 conda 环境之后用）")
+
+
+class ConfigWrite(BaseModel):
+    """PUT /v1/services/{s}/envs/{env}/config"""
+
+    path: str = Field(description="配置文件：真实路径或固定路径")
+    content: str
+    sha: str | None = Field(None, description="打开时读到的 sha（新建传空串）；期间文件被改过返回 409。不传则不检查")
+
+
+class ConfigAck(BaseModel):
+    path: str
 
 
 class KnowledgeCreate(BaseModel):
@@ -126,23 +141,18 @@ class AssetPatch(BaseModel):
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(pattern=r"^[\w.-]{2,40}$", description="调用方身份，写进运行记录")
-    scope: Literal["run", "admin"] = "run"
-    services: list[str] = Field(default_factory=list)
-    envs: list[str] = Field(default_factory=list)
     note: str = ""
     expires_at: str | None = None
 
 
 class ApiKeyPatch(BaseModel):
-    services: list[str] | None = None
-    envs: list[str] | None = None
     note: str | None = None
     expires_at: str | None = None
 
 
 class LoginBody(BaseModel):
     token: str
-    name: str = Field("", max_length=40, description="操作人姓名：审批记录、运行发起人里显示")
+    name: str = Field("", max_length=40, description="操作人姓名：运行发起人、定义修改人里显示")
 
 
 class ChannelTest(BaseModel):

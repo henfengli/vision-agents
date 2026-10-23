@@ -1,0 +1,48 @@
+title: Vision Board
+description: Vision 报表展示系统（Django）：报表页面与离线 HTML 导出；线上 nginx + 源码服务
+root: /srv/svc/vision-board/code/{env}
+repo: git@gitlab.ipa.zs:vision/vision-board.git
+ref: master
+# 项目同名 conda 环境（python 3.12），三个环境共用；py 工具、进程、同步步骤都用它
+python: /opt/conda/envs/vision-board/bin/python
+# 项目约定：每个环境一份 vision_board/settings-{后缀}.py，DJANGO_SETTINGS_MODULE 指过去
+env_vars: {DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}"}
+urls:
+  local: "http://127.0.0.1:{port:server}"
+hosts: [172.21.0.45]
+databases:
+  ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
+# settings-{env}.py 不进仓库（.gitignore）：真实文件放 conf/{env}/settings.py，bind 到 vision_board/settings-{env}.py；
+# 上游是仓库里的 vision_board/settings.py（项目的做法是复制它再改 STATIC_ROOT、CRONTAB_COMMAND_PREFIX、库口令、认证授权）
+configs:
+  - canonical: "/srv/svc/vision-board/code/{env}/vision_board/settings-{env}.py"
+    template: "/srv/svc/vision-board/conf/{env}/settings.py"
+    upstream: vision_board/settings.py
+processes:
+  server:
+    cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"]
+    ports: {prod: 8180, test: 8181, dev: 8182}
+    lease_hours: 4
+# 同步之后的步骤：when 里的文件自上次成功以来变了才跑；装依赖三个环境共用 conda 环境，只装一次
+sync:
+  auto: true
+  steps:
+    - {title: 安装依赖, when: [requirements.txt], shared: true, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"]}
+    - title: 收集静态资源
+      when: ["**/static/**", "templates/**", "vision_board/settings.py", requirements.txt]
+      run: ["{python}", "manage.py", "collectstatic", "--noinput"]
+envs:
+  prod:
+    hosts: [172.24.16.100]
+    urls: {site: "https://vision-board.moon-prod.ipa.zs/"}
+    databases:
+      ck: "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default"
+  test:
+    urls: {site: "https://vision-board.ipa.zs/"}
+profile:
+  conventions: 每个环境一份 settings：vision_board/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_board.settings-{环境}；manage.py 命令都按它的配置走
+  no_go: 本机副本不执行 python manage.py crontab add（CRONTAB_COMMAND_PREFIX 会按该环境的配置真的跑定时任务）；不改线上 nginx
+  env_notes: 线上是 nginx + 源码服务：生产 172.24.16.100（https://vision-board.moon-prod.ipa.zs/），测试 172.21.0.45（https://vision-board.ipa.zs/）。离线 HTML 导出接口需要本机装 Chrome
+  code_refs: report/（报表）、templates/、vision_board/（项目配置与 settings）、scripts/、check_deps.py（依赖检查脚本）
+  upstream: ClickHouse 国内生产 172.168.0.125、国内测试 172.24.17.66；登录走认证服务（settings 里配应用授权）
+  runbook: 运维 @李艳东

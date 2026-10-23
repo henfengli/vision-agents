@@ -2,7 +2,7 @@
 
 submit 的顺序就是它的全部逻辑：
 
-    幂等键命中？→ 解析任务 → 解析服务 → 解析环境 → 调用方权限 → 校验输入 → 闸门链 → 任务去重
+    幂等键命中？→ 解析任务 → 解析服务 → 解析环境 → 校验输入 → 闸门链 → 任务去重
     → （点名的子任务不存在就按父任务建）→ 建台账行（queued，叫醒 worker）
 
 建行之后的事都由 worker 从台账行出发（pipeline.build_spec）：新提交、续跑、重跑、重放走的是同一段代码。
@@ -20,7 +20,6 @@ import psycopg
 from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef
 from ..domain.tasks import check_task_name
 from ..registry import Registry
-from ..store import approvals as approvals_store
 from ..store import db, runs
 from . import gates
 
@@ -63,8 +62,6 @@ class Submitter:
         task = (await self._reg.task(base if to_create else task_name)).spec
         service = await self._resolve_service(task_name, task, req.service)
         env = (await self._reg.env(req.env)).name
-        if (why := caller.may_run(service, env)) is not None:
-            raise Rejected("forbidden", why, 403)
         input_data = task.with_defaults(req.input)
         if errors := task.validate_input(input_data):
             raise Rejected("invalid_input", "输入不合法：" + "；".join(f"{k} {v}" for k, v in errors.items()),
@@ -165,8 +162,6 @@ class Submitter:
         entry = await self._reg.task(old["task"])
         if entry is None:
             raise Rejected("unknown_task", f"任务 {old['task']} 已不存在")
-        if (why := caller.may_run(old["service"], old["env"])) is not None:
-            raise Rejected("forbidden", why, 403)
         await gates.check_switches(self._reg, task_name=old["task"], task=entry.spec, service=old["service"], env=old["env"])
         run_id = uuid.uuid4().hex[:16]
         session_id = req.session_id or run_id
@@ -196,7 +191,6 @@ class Submitter:
             raise Rejected("already_finished", f"运行已结束（{run['status']}）", 409)
         await runs.set_status(run_id, "cancelled", output={"error": f"被 {caller.name} 取消"}, error_code="cancelled")
         await runs.log_event(run_id, "error", {"title": "cancelled", "content": f"被 {caller.name} 取消"})
-        await approvals_store.reject_pending_of_run(run_id, caller.name)
         await db.notify("run_cancel", run_id)
         return await runs.get(run_id)
 

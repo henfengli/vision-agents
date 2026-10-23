@@ -8,11 +8,16 @@
 - 驱动脚本只用标准库，业务 venv 里不用额外装东西
 - 文件系统只读，scratch（和 bash 共用的工作区）可写，/tmp 是独立 tmpfs；网络照常（要连库）
 - 空闲超时回收；同时存在的内核有上限，超了先回收最久没用的
+- 代码同步或配置更新后，该服务×环境的内核重启（drop），否则 import 过的还是旧模块、读到的还是旧配置
 
 协议（驱动在子进程里把 fd 0/1 挪走，业务代码和子进程的输出不会混进协议）：
-- 宿 → 内核（原 stdin）：一行 JSON {"id", "code", "timeout"}
+- 宿 → 内核（原 stdin）：一行 JSON {"id", "code", "timeout", "tools"}
 - 内核 → 宿（原 stdout）：一行 JSON {"id", "out", "value", "error", "ms"}
 - 直接写 fd 1/2 的输出（C 扩展、子进程）都进 stderr 管道，宿主收集后附在这次结果后面
+
+平台工具（RPC）：请求里 tools 列出的工具名在内核里是同名函数（db_query(...)、service_info(...)、MCP 工具…），
+调用时内核写一行 {"rpc", "call", "args", "kwargs"}，宿主在本次运行的上下文里执行该工具，回一行 {"rpc", "result"|"error"}。
+要循环 / 批量调工具时一段 py 搞定，中间结果不进模型上下文。
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import re
 import shutil
 import time
 from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
 
 from ..agent.tools.bash import build_safe_env
 from ..agent.tools.sandbox import has_bwrap
@@ -80,6 +86,37 @@ def _input(*_a, **_k):
     raise RuntimeError("内核里不能交互输入")
 
 
+_rpc_seq = [0]
+
+
+def _rpc(name, args, kwargs):
+    """平台工具调用：写一行请求给宿主，等同号的回复（超时中断后迟到的旧回复直接丢掉）。"""
+    _rpc_seq[0] += 1
+    rid = _rpc_seq[0]
+    _pout.write(json.dumps({"rpc": rid, "call": name, "args": args, "kwargs": kwargs},
+                           ensure_ascii=False, default=str) + "\n")
+    _pout.flush()
+    while True:
+        line = _pin.readline()
+        if not line:
+            raise RuntimeError("宿主连接中断")
+        resp = json.loads(line)
+        if resp.get("rpc") != rid:
+            continue
+        if "error" in resp:
+            raise RuntimeError("%s：%s" % (name, resp["error"]))
+        return resp.get("result")
+
+
+def _stub(name):
+    def tool(*args, **kwargs):
+        return _rpc(name, list(args), kwargs)
+    tool.__name__ = name
+    tool.__doc__ = "平台工具 %s：在宿主上按本次运行的服务×环境执行，返回文本" % name
+    tool._platform_tool = True
+    return tool
+
+
 def _tb():
     """只留用户代码的栈帧：驱动自己的帧（文件名 <string>）对 agent 没用。"""
     et, ev, tb = sys.exc_info()
@@ -101,6 +138,11 @@ while True:
     if not line:
         break
     req = json.loads(line)
+    if "code" not in req:
+        continue                      # 迟到的 RPC 回复（那次调用已超时中断）
+    for _n in req.get("tools") or ():
+        if _n not in G or getattr(G[_n], "_platform_tool", False):
+            G[_n] = _stub(_n)         # 用户自己定义了同名变量就不覆盖
     buf = io.StringIO()
     old = sys.stdout, sys.stderr
     sys.stdout = sys.stderr = buf
@@ -142,6 +184,7 @@ class _Kernel:
     stray: list[str] = field(default_factory=list)
     seq: int = 0
     drain: asyncio.Task | None = None
+    stale: bool = False                    # 代码或配置更新时正在执行：执行完、下次调用前重启
 
     @property
     def alive(self) -> bool:
@@ -154,30 +197,55 @@ class KernelManager:
         self._idle_s = idle_minutes * 60
         self._max = max_kernels
         self._kernels: dict[str, _Kernel] = {}
+        self._renewed: set[str] = set()           # 因代码 / 配置更新被重启过、还没告诉 agent 的内核
         self._reaper: asyncio.Task | None = None
 
     # —— 对外 ——
 
     async def execute(self, key: str, spec: dict, code: str, *, timeout: float = 120,
-                      hidden: tuple[str, ...] = (), restart: bool = False) -> str:
-        """spec：ProcessController.runtime_spec() 的结果（service/env/python/workdir/binds/masks/env_vars）。"""
+                      hidden: tuple[str, ...] = (), restart: bool = False,
+                      tools: dict[str, Callable[..., Awaitable[Any]]] | None = None) -> str:
+        """spec：ProcessController.runtime_spec() 的结果（service/env/python/workdir/binds/masks/env_vars）。
+        tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。"""
         if restart:
             await self.shutdown(key)
         k = self._kernels.get(key)
+        if k is not None and k.stale and not k.lock.locked():
+            await self.shutdown(key)                # 代码或配置更新时它正忙：现在重启
+            k = None
+        notice = ""
+        if key in self._renewed:
+            self._renewed.discard(key)
+            if not restart:
+                notice = "[内核已重启：代码同步或配置更新之后，之前的变量已清空]\n"
         if k is None or not k.alive:
             k = await self._start(key, spec, hidden)
+        tools = tools or {}
         async with k.lock:
             k.last_used = time.monotonic()
             k.seq += 1
             k.stray.clear()
             assert k.proc.stdin is not None and k.proc.stdout is not None
-            k.proc.stdin.write((json.dumps({"id": k.seq, "code": code, "timeout": timeout}) + "\n").encode())
+            k.proc.stdin.write((json.dumps({"id": k.seq, "code": code, "timeout": timeout,
+                                            "tools": sorted(tools)}) + "\n").encode())
             await k.proc.stdin.drain()
-            try:
-                line = await asyncio.wait_for(k.proc.stdout.readline(), timeout + 15)
-            except (TimeoutError, asyncio.TimeoutError):
-                await self.shutdown(key)
-                return f"[内核无响应] 超过 {int(timeout) + 15}s 没有返回，已结束内核（变量清空，下次调用自动重启）"
+            deadline = time.monotonic() + timeout + 15
+            calls = 0
+            while True:
+                try:
+                    line = await asyncio.wait_for(k.proc.stdout.readline(), max(1.0, deadline - time.monotonic()))
+                except (TimeoutError, asyncio.TimeoutError):
+                    await self.shutdown(key)
+                    return f"[内核无响应] 超过 {int(timeout) + 15}s 没有返回，已结束内核（变量清空，下次调用自动重启）"
+                if not line:
+                    break
+                msg = json.loads(line)
+                if "rpc" not in msg:
+                    break
+                calls += 1
+                reply = await _serve_rpc(msg, tools)
+                k.proc.stdin.write((json.dumps(reply, ensure_ascii=False, default=str) + "\n").encode())
+                await k.proc.stdin.drain()
             await asyncio.sleep(0.05)                 # 让 stderr 里紧跟着的输出落进来
             if not line:
                 code_ = await k.proc.wait()
@@ -185,11 +253,23 @@ class KernelManager:
                 tail = "".join(k.stray)[-4000:]
                 return f"[内核已退出] 退出码 {code_}（变量清空，下次调用自动重启）\n{tail}".strip()
             k.last_used = time.monotonic()
-            return _format(json.loads(line), "".join(k.stray))
+            return notice + _format(msg, "".join(k.stray), calls)
 
     def alive(self, key: str) -> bool:
         k = self._kernels.get(key)
-        return k is not None and k.alive
+        return k is not None and k.alive and not k.stale
+
+    async def drop(self, service: str, env: str) -> int:
+        """该服务×环境的代码或配置更新了：空闲的内核关掉，正在执行的标记一下、这次执行完再重启。
+        下次调用时结果开头会说明变量已清空。→ 涉及的内核数。"""
+        hit = [k for k in self._kernels.values() if k.service == service and k.env == env]
+        for k in hit:
+            self._renewed.add(k.key)
+            if k.lock.locked():
+                k.stale = True
+            else:
+                await self.shutdown(k.key)
+        return len(hit)
 
     async def shutdown(self, key: str) -> None:
         k = self._kernels.pop(key, None)
@@ -305,7 +385,19 @@ async def _kill(k: _Kernel) -> None:
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _format(resp: dict, stray: str) -> str:
+async def _serve_rpc(msg: dict, tools: dict[str, Callable[..., Awaitable[Any]]]) -> dict:
+    """内核里调平台工具：在宿主上执行，结果（文本）或错误回给内核。"""
+    rid, name = msg.get("rpc"), msg.get("call")
+    fn = tools.get(name or "")
+    if fn is None:
+        return {"rpc": rid, "error": f"工具 {name} 不在本角色的工具里（可用：{'、'.join(sorted(tools)) or '无'}）"}
+    try:
+        return {"rpc": rid, "result": await fn(*(msg.get("args") or []), **(msg.get("kwargs") or {}))}
+    except Exception as e:  # noqa: BLE001 —— 工具失败回传错误，由内核里的代码决定怎么兜底
+        return {"rpc": rid, "error": f"{type(e).__name__}: {str(e)[:1000]}"}
+
+
+def _format(resp: dict, stray: str, calls: int = 0) -> str:
     parts = []
     if resp.get("out"):
         parts.append(resp["out"].rstrip("\n"))
@@ -319,4 +411,4 @@ def _format(resp: dict, stray: str) -> str:
     if len(text) > MAX_RESULT_CHARS:
         half = MAX_RESULT_CHARS // 2
         text = text[:half] + f"\n…[截断，共 {len(text)} 字符]…\n" + text[-half:]
-    return f"{text}\n（{resp.get('ms', 0)} ms）"
+    return f"{text}\n（{resp.get('ms', 0)} ms" + (f"，平台工具调用 {calls} 次）" if calls else "）")

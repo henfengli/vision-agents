@@ -57,39 +57,42 @@ def restore_dsn(new: str | None, current: str | None) -> str | None:
     return current if redact_dsn(current) == new else new
 
 
-def _dsn_slots(body: dict):
-    """服务定义里放只读库连接串的位置：顶层 + 各环境覆盖。"""
-    yield body, "readonly_dsn"
-    for override in (body.get("envs") or {}).values():
-        if isinstance(override, dict):
-            yield override, "readonly_dsn"
+def _db_maps(body: dict):
+    """服务定义里放只读库连接串的位置：顶层 databases + 各环境覆盖的 databases，各是 {库名: 连接串}。"""
+    if isinstance(body.get("databases"), dict):
+        yield None, body["databases"]
+    for env, override in (body.get("envs") or {}).items():
+        if isinstance(override, dict) and isinstance(override.get("databases"), dict):
+            yield env, override["databases"]
 
 
 def redact_service(body: dict) -> dict:
     out = copy.deepcopy(body)
-    for holder, key in _dsn_slots(out):
-        if holder.get(key):
-            holder[key] = redact_dsn(holder[key])
+    for _env, dbs in _db_maps(out):
+        for name, url in dbs.items():
+            if url:
+                dbs[name] = redact_dsn(url)
     return out
 
 
 def restore_service(body: dict, current: dict) -> dict:
     """body 是请求体（可能只含部分顶层字段），current 是库里的当前定义。"""
     out = copy.deepcopy(body)
-    if out.get("readonly_dsn"):
-        out["readonly_dsn"] = restore_dsn(out["readonly_dsn"], current.get("readonly_dsn"))
-    current_envs = current.get("envs") or {}
-    for env, override in (out.get("envs") or {}).items():
-        if isinstance(override, dict) and override.get("readonly_dsn"):
-            override["readonly_dsn"] = restore_dsn(override["readonly_dsn"],
-                                                   (current_envs.get(env) or {}).get("readonly_dsn"))
+    for env, dbs in _db_maps(out):
+        holder = current if env is None else (current.get("envs") or {}).get(env) or {}
+        old = holder.get("databases") or {}
+        for name, url in dbs.items():
+            dbs[name] = restore_dsn(url, old.get(name))
     return out
 
 
 def unresolved_mask(body: dict) -> str | None:
     """还残留 *** 的位置（对不上原值）：返回提示，调用方拒绝保存。"""
-    for holder, key in _dsn_slots(body):
-        m = _DSN.match(holder.get(key) or "")
-        if m and m["password"] == MASK:
-            return "只读库口令显示为 *** 的那一项对不上原值，请重新填写口令（建议写成 ${VAR}，真实值放 secrets.env）"
+    for env, dbs in _db_maps(body):
+        for name, url in dbs.items():
+            m = _DSN.match(url or "")
+            if m and m["password"] == MASK:
+                where = f"环境 {env} 的" if env else ""
+                return (f"{where}库 {name} 的口令显示为 *** 却对不上原值，请重新填写口令"
+                        "（建议写成 ${VAR}，真实值放 secrets.env）")
     return None

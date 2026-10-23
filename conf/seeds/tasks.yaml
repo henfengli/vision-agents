@@ -1,5 +1,5 @@
 # 任务 = 要做的事：归属（服务 / "*" 通用 / 不写 = 平台任务）+ 形态（agent / builtin）+ 输入 + 触发 + 投递。
-# 子任务写成 "父任务:对象名"，只写和父任务不同的字段。
+# 子任务写成 "父任务:对象名"，只写和父任务不同的字段（比如某个资产的档案）；调用时点名不存在就自动建。
 # ask 是通用入口：任何服务、任何环境直接提问或交代一件事，不用先建任务；要定时、事件、投递、去重时再建正式任务。
 
 ask:
@@ -15,7 +15,7 @@ ask:
 failure-analysis:
   title: Dagster 失败分析
   description: 资产物化失败时分析根因，结论推到钉钉群
-  service: dagster
+  service: vision-dagster
   role: ops_analyst
   envs: [prod, test]
   input:
@@ -23,6 +23,7 @@ failure-analysis:
     asset_key: {type: str, required: true, description: 失败的资产}
     error: {type: text, required: true, description: 报错堆栈}
   triggers:
+    # 在 Dagster 里配 run_failure_sensor，回调 POST /v1/events/dagster：{run_id, asset_key, error, env}
     - id: on-failure
       type: event
       source: dagster
@@ -30,52 +31,44 @@ failure-analysis:
       session: "dagster:{asset_key}:{error_class}:{date}"
       rules:
         - {pattern: "connection.*(refused|timeout|reset)", category: infra, conclusion: 数据库/服务连接失败，检查目标服务存活与网络}
-        - {pattern: "duplicate key|unique constraint|唯一约束", category: data, conclusion: 主键冲突：上游重复投递或任务重复跑}
         - {pattern: "out of memory|oom|memoryerror", category: infra, conclusion: 内存不足：检查资源配额或拆分分区}
     - {id: api, type: api}
   deliver: {channel: default}
   dedup: {key: run_id, window_s: 600}
-  timeout_s: 600
+  timeout_s: 900
   profile:
-    pitfalls: 资产失败先看上游是否完成，多数失败是上游延迟级联
-
-"failure-analysis:dwd_trade_order":
-  extends: failure-analysis
-  profile:
-    code_refs: assets/dwd/trade_order.py（代码目录下）
-    upstream: ods_order、ods_payment（03:00 前到齐）
-    pitfalls: 支付回调乱序时会出现 amount 为负的脏数据，过滤规则在 transform_payment()
+    pitfalls: 资产失败先看上游资产是否完成，多数失败是上游延迟级联；先用 dagster 的 MCP 工具看线上这次运行的日志
 
 data-qa:
   title: 数据口径问答
-  description: 业务方提问指标口径与取数；对话的默认任务
+  description: 业务方提问指标口径与取数
   service: "*"
   role: data_searcher
   input:
     question: {type: text, required: true, description: 问题}
   triggers: [{id: chat, type: chat}, {id: api, type: api}]
-  timeout_s: 180
+  timeout_s: 600
 
 frontend-smoke:
-  title: 看板冒烟测试
-  description: GitLab 部署成功后跑冒烟脚本
-  service: board
+  title: Board 冒烟测试
+  description: GitLab 部署成功后检查报表页面与接口
+  service: vision-board
   role: qa_engineer
   envs: [test, prod]
   input:
     version: {type: str, required: true, description: 部署版本（ref）}
     project: {type: str, description: GitLab 项目}
   triggers:
-    - {id: on-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^board$"}, map: {version: ref, project: project}}
+    - {id: on-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^vision-board$"}, map: {version: ref, project: project}}
     - {id: api, type: api}
   deliver: {channel: default}
   dedup: {key: version, window_s: 1800}
-  timeout_s: 600
+  timeout_s: 900
 
 daily-inspection:
-  title: 看板日常巡检
-  description: 每天早上检查看板数据新鲜度、接口错误率和主机资源
-  service: board
+  title: Board 日常巡检
+  description: 每天早上检查报表数据新鲜度与线上页面
+  service: vision-board
   role: inspector
   envs: [prod, test]
   input:
@@ -84,23 +77,21 @@ daily-inspection:
     - {id: morning, type: schedule, cron: "50 8 * * *", envs: [prod, test], input: {scope: full}}
     - {id: api, type: api}
   deliver: {channel: default}
-  timeout_s: 600
+  timeout_s: 900
 
+# 代码跟踪（部署配置 code_sync.interval_minutes，默认每小时）发现远端有新提交时自动提交它；控制台的"同步"按钮也是它
 code-sync:
   title: 代码同步
-  description: 把服务在某个环境的代码目录切到指定版本；GitLab 部署成功后自动切到刚部署的提交
+  description: 把服务在某个环境的代码目录对齐到跟踪的分支（master），再按变更装依赖、收集静态资源等，重启内核与在跑的进程
   service: "*"
   form: builtin
   handler: code-sync
   input:
-    ref: {type: str, description: 分支 / tag / 提交；不填 = 该环境跟踪的分支（服务 → 环境 → ref）}
+    ref: {type: str, description: 分支 / tag / 提交；不填 = 服务跟踪的分支（服务的 ref）}
+    force: {type: bool, description: 不管依赖文件变没变，所有同步步骤都重跑一遍（重建了 conda 环境之后用）}
   triggers:
     - {id: api, type: api}
-    - {id: board-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^board$"}, service: board, map: {ref: sha}}
-    - {id: dagster-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^dagster$"}, service: dagster, map: {ref: sha}}
-    - {id: config-center-deploy, type: event, source: gitlab, event: deployment, filter: {project: "^config-center$"}, service: config-center, map: {ref: sha}}
-  dedup: {key: ref, window_s: 300}
-  timeout_s: 600
+  timeout_s: 1800
 
 memory-gardener:
   title: 记忆园丁

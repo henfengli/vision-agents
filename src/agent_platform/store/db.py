@@ -3,19 +3,20 @@
 表一览：
 - definitions        服务/角色/任务 + 平台配置的版本化定义（写一次 = 一个新版本，历史全留；
                      删除 = 写一个 deleted 版本，恢复旧版本即复活）
-- api_keys           调用方密钥（只存哈希；可限定服务与环境）
+- api_keys           调用方密钥（只存哈希；只标识身份，不分权限）
 - runs / run_events  运行台账与全过程事件（审计与排障的事实源）；runs 同时是执行队列：
-                     status=queued 的行由 worker 用 FOR UPDATE SKIP LOCKED 认领，heartbeat_at 判断执行者是否还活着
-- approvals          人工审批单（危险命令 / 进程启停）
+                     status=queued 的行由 worker 用 FOR UPDATE SKIP LOCKED 认领，heartbeat_at 判断执行者是否还活着；
+                     recipe 记这次运行用的各定义版本（配方）。过程事件按保留期清理（config.RetentionConfig）
 - service_instances  服务×环境×进程的运行状态（租约、pid、最近退出）
 - knowledge / knowledge_history / recall_hits   记忆（agent 记下的事：fact 事实 / lesson 报错教训 / handoff 交接摘要；
                      时序化、内容历史、召回埋点）。env 为空 = 对该服务所有环境成立
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
 - feedback           反馈（对整次运行或某一步：分数 + 问题类型 + 说明；一人一步一条）
 - replays / replay_items   回归重放：拿被 👎 过的运行用当前定义重跑，并排对比、模型判定有没有改好
+- code_sync_state    代码同步的记账：每个同步步骤上次成功时的文件摘要、每个配置文件已核对过的上游版本、远端最近一次检查
 
 档案（人写的）不在库表里，在服务 / 任务定义的 profile 字段。
-schema_version 记录库结构版本；旧的 cases 表（v7 前的案例）启动时并进 knowledge（kind=lesson）后不再使用。
+schema_version 记录库结构版本。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -52,9 +53,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
     name         TEXT NOT NULL UNIQUE,       -- 调用方身份：写进 runs.caller
     prefix       TEXT NOT NULL,              -- 明文前 8 位，列表里辨认用
     hash         TEXT NOT NULL UNIQUE,       -- sha256(明文)
-    scope        TEXT NOT NULL DEFAULT 'run', -- run：调用与只读；admin：全部
-    services     TEXT[] NOT NULL DEFAULT '{}',  -- 空 = 不限
-    envs         TEXT[] NOT NULL DEFAULT '{}',
     note         TEXT NOT NULL DEFAULT '',
     created_by   TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ DEFAULT now(),
@@ -70,6 +68,8 @@ CREATE TABLE IF NOT EXISTS runs (
     task_version    INT,
     role            TEXT,
     role_version    INT,
+    recipe          JSONB,                   -- 配方：这次运行用的每样定义各是第几版（任务与父任务、角色继承链、
+                                             -- 子代理、服务、平台提示词）+ 模型 + 平台版本
     service         TEXT,                    -- 平台任务为 NULL
     env             TEXT NOT NULL,
     trigger_type    TEXT NOT NULL,           -- api/chat/schedule/event/web/rerun/resume/correction
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS runs (
     input           JSONB NOT NULL DEFAULT '{}',
     memory          JSONB NOT NULL DEFAULT '{}', -- 本次运行的记忆开关覆盖 {recall, save}
     output          JSONB,
-    status          TEXT NOT NULL,           -- queued/awaiting_approval/running/success/failed/cancelled
+    status          TEXT NOT NULL,           -- queued/running/success/failed/cancelled
     resolution      TEXT,                    -- agent/builtin/rule
     error_code      TEXT,
     dedup_key       TEXT,
@@ -101,41 +101,18 @@ CREATE INDEX IF NOT EXISTS idx_runs_service_env ON runs (service, env, created_a
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_dedup ON runs (dedup_key, created_at) WHERE dedup_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idem ON runs (idempotency_key) WHERE idempotency_key IS NOT NULL;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS resume BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS worker TEXT;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_runs_queue ON runs (created_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_runs_role ON runs (role, created_at DESC) WHERE role IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS run_events (
     id         BIGSERIAL PRIMARY KEY,
     run_id     TEXT NOT NULL REFERENCES runs (run_id) ON DELETE CASCADE,
     seq        INT  NOT NULL,
-    kind       TEXT NOT NULL,                -- stage/thought/tool_call/tool_result/approval/artifact/final/error
+    kind       TEXT NOT NULL,                -- stage/model_call/tool_call/tool_result/final/error
     payload    JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE (run_id, seq)
 );
-
-CREATE TABLE IF NOT EXISTS approvals (
-    id           BIGSERIAL PRIMARY KEY,
-    kind         TEXT NOT NULL,              -- command / process
-    run_id       TEXT,
-    title        TEXT NOT NULL,
-    detail       TEXT NOT NULL DEFAULT '',
-    service      TEXT,
-    env          TEXT,
-    task         TEXT,
-    payload      JSONB NOT NULL DEFAULT '{}',  -- 放行后要执行的动作（如进程启停参数）
-    requested_by TEXT NOT NULL DEFAULT '',
-    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/approved/rejected/expired
-    decided_by   TEXT,
-    comment      TEXT,
-    created_at   TIMESTAMPTZ DEFAULT now(),
-    decided_at   TIMESTAMPTZ,
-    expires_at   TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals (status, created_at);
-CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals (run_id);
 
 CREATE TABLE IF NOT EXISTS service_instances (
     service        TEXT NOT NULL,
@@ -173,11 +150,6 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at     TIMESTAMPTZ DEFAULT now(),
     UNIQUE (env, service, key)
 );
-
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact';
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS fingerprint TEXT;
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS category TEXT;
-UPDATE knowledge SET kind='handoff' WHERE kind='fact' AND key LIKE 'session:%';
 CREATE INDEX IF NOT EXISTS idx_knowledge_lesson ON knowledge (service, fingerprint) WHERE kind = 'lesson';
 
 CREATE TABLE IF NOT EXISTS knowledge_history (
@@ -204,18 +176,6 @@ CREATE TABLE IF NOT EXISTS recall_hits (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_recall_hits_entry ON recall_hits (env, entry_id, created_at);
-
--- v7 前的案例表：并进 knowledge（kind=lesson，key = lesson:<指纹>），幂等
-DO $$ BEGIN
-    IF to_regclass('cases') IS NOT NULL THEN
-        INSERT INTO knowledge (env, service, task, kind, fingerprint, category, key, content, source_run,
-                               valid_to, superseded_by, created_at)
-        SELECT env, service, '', 'lesson', fingerprint, category, 'lesson:' || fingerprint, COALESCE(conclusion, ''),
-               source_run, valid_to, superseded_by, created_at
-        FROM cases WHERE service <> '' AND COALESCE(conclusion, '') <> ''
-        ON CONFLICT (env, service, key) DO NOTHING;
-    END IF;
-END $$;
 
 CREATE TABLE IF NOT EXISTS assets (
     id             BIGSERIAL PRIMARY KEY,
@@ -252,6 +212,16 @@ CREATE TABLE IF NOT EXISTS asset_history (
     source     TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE (env, service, task, kind, name, version)
+);
+
+CREATE TABLE IF NOT EXISTS code_sync_state (
+    service    TEXT NOT NULL,
+    scope      TEXT NOT NULL,                -- 环境名；shared 步骤（装依赖）是 python:<解释器>
+    key        TEXT NOT NULL,                -- step:<摘要> / config:<固定路径模板> / remote
+    digest     TEXT NOT NULL DEFAULT '',     -- 步骤：上次成功时 when 文件的内容摘要；配置：已核对过的上游 blob；remote：远端提交
+    detail     JSONB NOT NULL DEFAULT '{}',  -- 步骤：上次结果 {ok, at, run_id, message}；remote：{checked_at}
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (service, scope, key)
 );
 
 CREATE TABLE IF NOT EXISTS feedback (
@@ -306,24 +276,25 @@ _pool: "AsyncConnectionPool | None" = None
 
 
 async def open_db(dsn: str) -> None:
-    """开连接池 + 幂等建表。库里若是 v5 结构（runs 有 task_type 列）直接报错并指向迁移脚本。"""
+    """开连接池 + 幂等建表。"""
     global _dsn, _pool
     _dsn = dsn
     from psycopg_pool import AsyncConnectionPool
     _pool = AsyncConnectionPool(dsn, open=False, min_size=1, max_size=10)
     await _pool.open()
     async with _pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT 1 FROM information_schema.columns WHERE table_name='runs' AND column_name='task_type'")
-        if await cur.fetchone():
-            raise RuntimeError("数据库是 v5 结构：先执行 python scripts/migrate_v5.py（会先备份）再启动 v6")
-        await conn.execute(SCHEMA)
+        async with conn.transaction():
+            await conn.execute(SCHEMA)
+            await conn.execute("INSERT INTO schema_version (version) VALUES (%s) ON CONFLICT DO NOTHING",
+                               (SCHEMA_VERSION,))
+        # 每条单独事务：失败只回滚自己（同一事务里失败会让后续语句全部报 InFailedSqlTransaction）
         for sql in OPTIONAL:
             try:
-                await conn.execute(sql)
+                async with conn.transaction():
+                    await conn.execute(sql)
             except Exception as e:  # noqa: BLE001
-                log.warning("可选能力跳过：%.70s → %s", sql, e)
-        await conn.execute("INSERT INTO schema_version (version) VALUES (%s) ON CONFLICT DO NOTHING", (SCHEMA_VERSION,))
+                log.warning("可选能力跳过（后续依赖它的也跳过）：%.70s → %s", sql, e)
+                break
 
 
 async def close_db() -> None:

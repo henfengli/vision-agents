@@ -1,4 +1,4 @@
-"""执行队列的消费端：runs 表就是队列（替代 Temporal）。
+"""执行队列的消费端：runs 表就是队列。
 
 - 认领：status=queued 的行按创建时间先到先得，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领
 - 唤醒：进入 queued 时 pg_notify('runs_queued')，LISTEN 毫秒级唤醒；5 秒轮询兜底

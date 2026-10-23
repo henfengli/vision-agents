@@ -114,7 +114,8 @@ function NegativeForm({ runId, step, current, onCorrect, onDone }: {
         ))}
       </div>
       <Textarea rows={3} value={comment} onChange={(e) => setComment(e.target.value)}
-        placeholder={step ? "例如：这里应该查 ods 层而不是 dwd 层" : "说说正确的应该是什么，例如：GMV 不扣退款，按支付日统计"} />
+        placeholder={step ? "例如：这里应该查 dws_account_pnl_daily，不是 ods 的原始成交" : "说说正确的应该是什么，例如：收益按交易日统计，不按自然日"}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && valid && !busy) { e.preventDefault(); void submit(); } }} />
       {onCorrect && !step && (
         <Checkbox checked={redo} onChange={setRedo} disabled={!comment.trim()}
           label="按这条意见让 agent 重答" hint="在同一会话开新一轮（纠正），意见会记成人工记忆" />

@@ -11,8 +11,8 @@ class Rejected(ValueError):
       trigger_not_allowed
     - 解析：unknown_task / unknown_service / unknown_env / service_required /
       service_not_allowed / invalid_subtask / invalid_input / invalid_definition
-    - 权限：unauthorized / forbidden
-    - 状态：not_found / conflict / in_use / already_finished / already_decided / not_running
+    - 身份：unauthorized
+    - 状态：not_found / conflict / in_use / already_finished / not_running
     """
 
     def __init__(self, code: str, message: str, status: int = 400, detail: object = None):

@@ -162,7 +162,7 @@ export function CreatableSelect({ value, onChange, options, placeholder = "选�
         <ComboboxInput className={cn(control, "h-8 pl-2.5 pr-12 font-mono text-[12.5px]")} placeholder={placeholder}
           displayValue={(v: string) => v} onChange={(e) => setQuery(e.target.value)} />
         {value && (
-          <button type="button" onClick={() => onChange("")} className="absolute right-7 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-3 hover:text-fg">
+          <button type="button" aria-label="清除" onClick={() => onChange("")} className="absolute right-7 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-3 hover:text-fg">
             <LuX className="size-3.5" />
           </button>
         )}
@@ -272,7 +272,7 @@ export function TagInput({ value, onChange, placeholder, suggestions = [], mono 
         {value.map((v) => (
           <span key={v} className={cn("inline-flex h-5 items-center gap-1 rounded bg-sunken px-1.5 text-xs text-fg", mono && "font-mono")}>
             {v}
-            <button type="button" className="text-fg-3 hover:text-fg" onClick={() => onChange(value.filter((x) => x !== v))}><LuX className="size-3" /></button>
+            <button type="button" aria-label={`移除 ${v}`} className="text-fg-3 hover:text-fg" onClick={() => onChange(value.filter((x) => x !== v))}><LuX className="size-3" /></button>
           </span>
         ))}
         <input className={cn("h-6 min-w-24 flex-1 bg-transparent px-1 text-[13px] outline-none placeholder:text-fg-3", mono && "font-mono text-[12.5px]")}
@@ -294,10 +294,10 @@ export function SearchInput({ value, onChange, placeholder = "搜索…", classN
   return (
     <div className={cn("relative", className)}>
       <LuSearch className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-3" />
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder}
         className={cn(control, "h-7 pl-8 pr-7 text-[12.5px]")} />
       {value && (
-        <button type="button" onClick={() => onChange("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-3 hover:bg-hover hover:text-fg">
+        <button type="button" aria-label="清除搜索" onClick={() => onChange("")} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-fg-3 hover:bg-hover hover:text-fg">
           <LuX className="size-3.5" />
         </button>
       )}

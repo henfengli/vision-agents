@@ -6,7 +6,7 @@
 
 SSE 事件（每条 data 一个 JSON，type 区分）：
     run       {run_id, session_id}             已受理
-    stage / thought / tool_call / tool_result / approval   过程（与运行事件同形）
+    stage / model_call / tool_call / tool_result   过程（与运行事件同形；旧运行里还有 thought）
     final     {status, output}                 结束
     error     {code, message}                  受理失败
 """
@@ -26,7 +26,7 @@ from ..streaming import sse, tail
 
 router = APIRouter(prefix="/v1")
 
-PROCESS_KINDS = {"stage", "thought", "tool_call", "tool_result", "approval"}
+PROCESS_KINDS = {"stage", "thought", "model_call", "tool_call", "tool_result"}
 
 
 async def _accept(body: ChatBody, rt: Runtime, who: Caller):

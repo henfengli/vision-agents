@@ -34,14 +34,25 @@ export interface Ledger {
   updated_at: ISODate;
 }
 
+/** GET …/version-stats：每个版本跑出来的效果（新版本在前；回归重放的运行不算） */
+export interface VersionStat {
+  version: number;
+  runs: number;
+  success: number;
+  failed: number;
+  negative: number;            // 被 👎 过的运行数
+  avg_tokens: number | null;
+  avg_ms: number | null;
+  first_at: ISODate;
+  last_at: ISODate;
+}
+
 // ———————————————————— 身份 / 元信息 ————————————————————
 
+/** 当前调用方：只有身份，不分权限（有效凭据都能做全部操作） */
 export interface Me {
   name: string;
   kind: "key" | "user" | "root" | "system";
-  admin: boolean;
-  services: string[];
-  envs: string[];
 }
 
 export interface ToolInfo {
@@ -80,7 +91,7 @@ export interface Env {
   name: string;          // prod / test / dev
   title: string;
   description: string;
-  protected: boolean;    // 受保护：审批开在"受保护环境"时，这里的危险命令与进程启停要人放行
+  protected: boolean;    // 受保护：只是标记（控制台上醒目显示），不拦任何操作
   color: EnvColor;
 }
 
@@ -89,14 +100,7 @@ export interface EnvsConfig {
   default: string;
 }
 
-/** 运行中途的人工门（危险命令、进程启停）。默认关闭 */
-export interface ApprovalsConfig {
-  danger_patterns: string[];
-  required_in: "off" | "protected" | "all";   // 关闭 / 只在受保护环境 / 所有环境
-  timeout_minutes: number;
-}
-
-export type NotifyEvent = "run_failed" | "run_succeeded" | "approval_requested" | "process_stopped" | "feedback_negative";
+export type NotifyEvent = "run_failed" | "run_succeeded" | "process_stopped" | "feedback_negative" | "config_outdated";
 
 export interface Channel {
   type: "dingtalk" | "webhook";
@@ -133,25 +137,36 @@ export interface ProcessesConfig {
   max_lease_hours: number;
 }
 
+/**
+ * 平台提示词：所有角色共用的系统提示开头 + 平台自己发起的辅助模型调用。
+ * 带占位的几段是 Python str.format 模板：字面花括号写成 {{ }}，保存时服务端校验（422）。
+ */
+export interface PromptsConfig {
+  base: string;              // 每个主 agent 的系统提示开头，后接角色提示词
+  subagent: string;          // 每个子代理的系统提示开头
+  compaction: string;        // 上下文压缩：{messages}
+  distill: string;           // 记忆沉淀：{service} {env} {task} {input} {output}
+  handoff_summary: string;   // 交接摘要：{task} {input} {output}
+  replay_judge: string;      // 回归判定：{task} {where} {input} {old} {issues} {new}
+}
+
 export interface ConfigSections {
   envs: EnvsConfig;
-  approvals: ApprovalsConfig;
   notifications: NotificationsConfig;
   memory: MemoryConfig;
   processes: ProcessesConfig;
+  prompts: PromptsConfig;
 }
 
 export type ConfigSection = keyof ConfigSections;
 export type ConfigEntry<S extends ConfigSection> = ConfigSections[S] & { section: S; version: number; updated_by: string; updated_at: ISODate | null };
 export type Settings = { [S in ConfigSection]: ConfigEntry<S> };
 
+/** API 密钥只标识身份，不分权限 */
 export interface ApiKey {
   id: number;
   name: string;          // 调用方身份：运行记录里的 caller
   prefix: string;
-  scope: "run" | "admin";
-  services: string[];    // 空 = 不限
-  envs: string[];
   note: string;
   created_by: string;
   created_at: ISODate;
@@ -165,6 +180,23 @@ export interface ApiKey {
 export interface ConfigFile {
   canonical: string;     // 服务读的固定路径（每环境一份代码时也写 {env}）
   template: string;      // 每环境一份的真实文件（含 {env}）
+  /** 仓库里和它对应的文件（相对代码目录，如 .env.template）：代码同步发现它变了就标"配置待更新"。空 = 固定路径在代码目录里时就是它自己 */
+  upstream?: string | null;
+}
+
+/** 同步后的一步：when 里的文件自这一步上次成功以来变了才跑 */
+export interface SyncStep {
+  title: string;
+  when: string[];        // 仓库内路径，支持 ** 通配
+  run: string[];         // argv，可写 {python}（该环境的解释器）与 {env}
+  shared: boolean;       // 用同一个解释器的环境共享效果（装依赖）：别的环境对同样的文件内容做过就跳过
+  timeout_s: number;
+}
+
+/** 代码同步：跟踪的分支是服务的 ref（各环境可覆盖） */
+export interface SyncDef {
+  auto: boolean;         // 代码跟踪：定时看远端，有新提交就同步
+  steps: SyncStep[];     // 不写 = 装依赖两步（requirements.txt / pyproject.toml）
 }
 
 export interface ProcessDef {
@@ -175,12 +207,18 @@ export interface ProcessDef {
   lease_hours?: number | null;      // 空 = 平台默认
 }
 
+/**
+ * 只读库：{库名: 连接串}。scheme 决定类型（postgresql / postgres、mysql / mariadb、doris、clickhouse / clickhouses、
+ * mongodb / mongodb+srv）。口令写 ${VAR} 原样回显；直接写的明文口令回显为 ***，原样传回 *** 表示不改。
+ */
+export type Databases = Record<string, string>;
+
 export interface ServiceEnvOverride {
   enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程和内核
   ref?: string | null;          // 该环境跟踪的分支 / tag（代码同步的默认目标）
   python?: string | null;       // 该环境的解释器；空 = 跟随服务的 python
   hosts?: string[] | null;
-  readonly_dsn?: string | null;
+  databases?: Databases;        // 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
   code_paths?: string[] | null;
   urls?: Record<string, string>;  // 按键覆盖服务的 urls
   profile?: Record<string, string>;
@@ -197,14 +235,15 @@ export interface Service extends Ledger {
   code_paths: string[];
   repo: string;          // git 远端：代码同步从这里拉
   ref: string;           // 默认跟踪的分支
-  python: string;        // 项目解释器，可含 {env}（如 /srv/svc/board/venv/{env}/bin/python）；空 = python3
+  python: string;        // 项目解释器，可含 {env}（如 /opt/conda/envs/vision-board/bin/python）；空 = python3
   env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核与进程都带上；不支持 ${VAR}
   /** 有名字的地址：可写 {env} 与 {port:进程名}（如 local: "http://127.0.0.1:{port:server}"）；mcp 配置里用 {url:名字} 引用 */
   urls: Record<string, string>;
   hosts: string[];
-  readonly_dsn: string | null;   // 明文口令回显为 ***，原样传回表示不改
+  databases: Databases;  // 只读库（db_query 查询）；各环境在 envs[env].databases 里按库名覆盖
   configs: ConfigFile[];
   processes: Record<string, ProcessDef>;
+  sync: SyncDef;
   /** 服务自己的 MCP server：{名字: 连接配置}。字符串里可写 {env}、{url:名字}、${VAR}、{platform}、{platform_python} */
   mcp: Record<string, McpConnection>;
   envs: Record<string, ServiceEnvOverride>;
@@ -225,10 +264,83 @@ export interface ServiceView {
   urls: Record<string, string>;   // 该环境的地址（已渲染 {env} / {port:进程名}）
   mcp_servers: string[];          // 服务自己声明的 MCP server（运行在本服务上时工具自动出现）
   hosts: string[];
-  readonly_dsn: string | null;
-  config_files: { canonical: string; path: string; exists: boolean; size: number | null }[];
+  databases: Databases;           // 本环境的只读库（基座 + 覆盖，去掉空值；口令已打码）
+  config_files: { canonical: string; path: string; upstream: string; exists: boolean; size: number | null }[];   // upstream 可能为空
   profile: Record<string, string>;
   git: { branch: string; commit: string; dirty: boolean; committed_at: ISODate } | null;
+}
+
+/** 配置文件的上游状态：仓库里的 upstream 自上次核对以来变了 = pending */
+export interface ConfigUpstream {
+  path: string;
+  canonical: string;
+  upstream: string;
+  pending: boolean;
+  diff?: string;               // 上游自上次核对以来的 unified diff
+  since?: ISODate | null;      // 上次核对的时间
+}
+
+/** GET /v1/services/{s}/envs/{env}/sync */
+export interface SyncStatus {
+  service: string;
+  env: string;
+  enabled: boolean;
+  auto: boolean;
+  repo: string;
+  dir: string;
+  branch: string;
+  head: { commit: string; short: string; subject: string; author: string; committed_at: ISODate } | null;   // 还没克隆时为空
+  remote: { commit: string; checked_at: ISODate } | null;    // 代码跟踪最近一次看远端
+  behind: boolean;
+  steps: {
+    title: string;
+    when: string[];
+    shared: boolean;
+    pending: boolean;          // when 里的文件自上次成功以来变了：下次同步会跑
+    last: { ok: boolean; at: ISODate; run_id: string | null; env: string; code: number; message: string } | null;
+  }[];
+  configs: ConfigUpstream[];
+}
+
+/** POST /v1/services/{s}/sync 的请求体 */
+export interface SyncRequest {
+  envs?: string[];       // 不填 = 服务启用的全部环境
+  force?: boolean;       // 所有同步步骤都重跑（不管依赖文件变没变；重建了 conda 环境之后用）
+}
+
+/** POST /v1/services/{s}/sync 的每一项：一个环境提交一次 code-sync */
+export interface SyncAccepted {
+  env: string;
+  run_id: string | null;
+  status: string;
+  error: { code: string; message: string } | null;
+}
+
+/** GET …/config?path=&raw=true：原文（不打码）+ sha，编辑用 */
+export interface ConfigRaw {
+  path: string;
+  canonical: string;
+  upstream: string | null;
+  exists: boolean;
+  content: string;
+  sha: string;                 // 保存时带回；文件不存在为空串
+  upstream_state: ConfigUpstream | null;
+}
+
+/** PUT …/config */
+export interface ConfigSaved {
+  path: string;
+  sha: string;
+  backup: string | null;       // 旧内容的备份 id；新建文件为空
+  running: string[];           // 本环境在跑的进程：重启后才读到新配置
+}
+
+/** 配置文件的一份备份：replaced_by 在 at 保存之前的内容 */
+export interface ConfigVersion {
+  id: string;
+  at: ISODate;
+  replaced_by: string;
+  size: number;
 }
 
 /** GET /v1/services/{s}/tools：服务自己声明的 MCP 工具（按环境连接） */
@@ -236,7 +348,7 @@ export interface ServiceTools {
   servers: string[];
   loaded: boolean;               // 还没连过（没有运行用到）时为 false
   tools: { name: string; description: string; server: string | null; envs: string[] }[];
-  failed: string[];              // 连不上的连接名，形如 "dagster.dagster@prod"
+  failed: string[];              // 连不上的连接名，形如 "vision-dagster.dagster@prod"
 }
 
 export type InstanceState = "stopped" | "starting" | "running" | "stopping" | "failed";
@@ -354,7 +466,7 @@ export interface Task extends Ledger {
   name: string;                 // 子任务：父任务:对象名
   title: string;
   description: string;
-  service: string | null;       // "board" / "*"（通用）/ null（平台任务）
+  service: string | null;       // "vision-board" / "*"（通用）/ null（平台任务）
   role: string | null;
   form: TaskForm;
   input: Record<string, InputField>;
@@ -369,6 +481,8 @@ export interface Task extends Ledger {
   extends: string | null;
   auto_created: boolean;
   handler?: string | null;      // form=builtin 的处理器名
+  /** 结构化输出（JSON Schema，顶层须是 {"type": "object", …}）：声明了就要求 agent 按它交回，放在 output.data */
+  output_schema?: Record<string, unknown> | null;
 }
 
 export interface TaskSummary extends Task {
@@ -399,13 +513,12 @@ export interface UpcomingFire {
 
 // ———————————————————— 运行 ————————————————————
 
-export type RunStatus =
-  | "queued" | "awaiting_approval" | "running" | "success" | "failed" | "cancelled";
+export type RunStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
 export type Resolution = "agent" | "builtin" | "rule" | null;
 
 export interface RunTrigger {
-  type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay";   // replay = 回归重放产生的运行
+  type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay" | "watch";   // replay = 回归重放产生的运行；watch = 代码跟踪发现远端有新提交
   id: string | null;           // 触发器 id（schedule/event）；replay 时是被重放的原运行
   source: string | null;       // 事件来源
   caller: string;              // 调用身份：API 密钥名 / 控制台用户 / schedule
@@ -429,15 +542,33 @@ export interface RunListItem {
   finished_at: ISODate | null;
 }
 
+/** 定义的某一版 */
+export interface RecipeRef {
+  name: string;
+  version: number;
+}
+
+/** 配方：这次运行用到的每样定义各是第几版，加上模型与平台版本。旧运行没有（null） */
+export interface Recipe {
+  task: RecipeRef & { parent?: RecipeRef };
+  role?: { name: string; lineage: RecipeRef[] };          // 继承链，根在前、自己在后
+  subagents?: { name: string; lineage: RecipeRef[] }[];
+  service?: RecipeRef;
+  prompts?: number;                                       // 平台提示词的版本（设置 → 提示词）
+  model: string;
+  platform: string;                                       // 平台版本，如 "9.0.0"
+}
+
 export interface Run extends RunListItem {
   task_version: number | null;
   role_version: number | null;
+  recipe: Recipe | null;
   replay_of: string | null;    // 回归重放出来的运行：指向被重放的原运行
   input: Record<string, unknown>;
-  output: { answer?: string; error?: string; [k: string]: unknown } | null;
+  /** 声明了 output_schema 的任务：data 是通过校验的结构化结果 */
+  output: { answer?: string; error?: string; data?: Record<string, unknown>; [k: string]: unknown } | null;
   error_code: string | null;
   memory: MemoryOverride;
-  pending_approval: Approval | null;
   context: RunContext;
   feedback: FeedbackEntry[];   // 所有人对整次（step_seq=0）与各步的评价
 }
@@ -451,24 +582,32 @@ export interface RunContext {
   session_runs: { run_id: string; task: string; status: RunStatus; created_at: ISODate }[];
 }
 
+/** model_call 取代了 thought（旧运行里还有 thought，照样显示） */
 export type RunEventKind =
-  | "stage" | "thought" | "tool_call" | "tool_result" | "approval" | "final" | "error";
+  | "stage" | "model_call" | "thought" | "tool_call" | "tool_result" | "final" | "error";
 
 export interface RunEvent {
   seq: number;
   kind: RunEventKind;
   at: ISODate;
   payload: {
-    stage?: string;            // profile/recall/assets/rule/resume/deliver…
+    stage?: string;            // profile/recall/system/output/rule/resume/deliver…
     title?: string;
-    content?: string;
+    content?: string;          // model_call：模型的思考过程（Kimi 的 reasoning；没有时为空）
+    agent?: string;            // 子代理里发生的（model_call / tool_call / tool_result）
+    purpose?: string;          // 平台辅助调用的用途：记忆沉淀 / 交接摘要 / 回归判定
+    model?: string | null;
+    ms?: number | null;
+    queued_ms?: number;        // model_call：ms 里在平台侧等账号配额（并发 / RPM）的部分，不到 0.5 秒不记
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    tool_calls?: string[];
     tool?: string;
     args?: unknown;
     output?: string;
     duration_ms?: number;
-    tokens?: number;
-    approval_id?: number;
-    decision?: "approved" | "rejected";
+    tokens?: number | null;
+    data?: Record<string, unknown>;   // final：结构化结果
     status?: string;
     [k: string]: unknown;
   };
@@ -590,6 +729,7 @@ export interface ReplaySummary {
 export interface ReplaySide {
   task_version: number | null;
   role_version: number | null;
+  recipe: Recipe | null;
   answer: string | null;
 }
 
@@ -656,37 +796,6 @@ export interface SessionDetail extends SessionSummary {
   turns: ChatTurn[];
 }
 
-// ———————————————————— 审批 ————————————————————
-
-/** 运行中途的危险命令 / 进程启停（设置里打开审批才会出现） */
-export type ApprovalKind = "command" | "process";
-
-export interface Approval {
-  id: number;
-  kind: ApprovalKind;
-  run_id: string | null;
-  title: string;
-  detail: string;               // 命令 / 摘要
-  service: string | null;
-  env: string | null;
-  task: string | null;
-  payload: Record<string, unknown>;
-  requested_by: string;
-  status: "pending" | "approved" | "rejected" | "expired";
-  decided_by: string | null;
-  comment: string | null;
-  created_at: ISODate;
-  decided_at: ISODate | null;
-  expires_at: ISODate | null;
-}
-
-export interface ApprovalFilters {
-  status?: "pending" | "decided" | "";
-  kind?: ApprovalKind | "";
-  service?: string;
-  env?: string;
-}
-
 // ———————————————————— 记忆 ————————————————————
 // 档案 = 人写的（服务 / 任务定义的 profile，逐字置顶注入）；记忆 = agent 记下的（这一节）；方法 = 可执行的做法与脚本（assets）。
 
@@ -709,7 +818,7 @@ export interface Knowledge {
   source_run: string | null;    // 空 = 人工录入
   code_ref: { path: string; commit: string } | null;
   status: "active" | "expired" | "superseded";
-  superseded_by: string | null; // 升格进档案后形如 "profile:service:board:conventions"
+  superseded_by: string | null; // 升格进档案后形如 "profile:service:vision-board:conventions"
   feedback_score: number;       // 只罚不奖：≤ 0（被 👎 的运行沉淀或召回过它）
   hits_30d: number;
   last_hit_at: ISODate | null;
@@ -745,7 +854,7 @@ export interface KnowledgePromote {
 
 export interface KnowledgePromoted {
   entry: Knowledge;             // 原条目，已变成 superseded
-  profile: { target: string; key: string };   // target 形如 service:board、service:board@prod、task:data-qa
+  profile: { target: string; key: string };   // target 形如 service:vision-board、service:vision-board@prod、task:data-qa
 }
 
 export type AssetKind = "procedure" | "script" | "query" | "baseline";
@@ -796,7 +905,7 @@ export interface MemoryHealth {
 
 export interface Stats {
   hours: number;
-  totals: { runs: number; success: number; failed: number; running: number; awaiting: number };
+  totals: { runs: number; success: number; failed: number; running: number };
   by_env: Record<string, { runs: number; success: number; failed: number }>;
   series: { t: ISODate; success: number; failed: number; other: number }[];
   top_failures: { task: string; service: string | null; failed: number; last_error: string }[];

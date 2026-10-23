@@ -7,6 +7,11 @@
 两种都绑定到运行的 服务×环境：每个环境一份连接，同名工具合成一个，调用时按 RunScope 路由到本次运行的环境；
 没配该环境的连接就如实返回「不可用」，不会退回到别的环境。
 
+会话常驻（McpSessions）：适配器默认每次工具调用新开一条连接（stdio 就是每次新起一个进程），有状态的 server
+（浏览器：先 navigate 再 snapshot）状态全丢。这里按 会话×连接 保持一条常驻 MCP 会话：同一个会话里的调用
+落在同一条连接上；空闲 30 分钟回收，同时最多 16 条（超了回收最久没用的），连接断了下次调用自动重连。
+取工具列表仍是一次性连接（启动时 / 服务定义变了时）。
+
 平台 MCP 的部署配置（每个 server 可写两个平台字段，其余原样交给适配器）：
 
     mcp_servers:
@@ -26,6 +31,7 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from ... import credentials
@@ -35,6 +41,169 @@ from .. import scope as run_scope
 log = logging.getLogger(__name__)
 
 _PLATFORM_KEYS = ("service", "envs")
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """一条 MCP 连接：连接名（如 dagster@prod、board.api@test）+ 已展开 ${VAR} 的适配器连接配置。"""
+
+    key: str
+    conn: dict
+
+
+# ———————— 常驻会话 ————————
+
+class _Held:
+    """一条常驻 MCP 会话。连接的上下文（anyio 取消域）必须在同一个 task 里进出，所以单独起一个 task 持有它，
+    调用方在别的 task 里直接用 session 发请求。"""
+
+    def __init__(self, conn: dict):
+        self.conn = conn
+        self.session: Any = None
+        self.used = time.monotonic()
+        self.busy = 0
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._error: BaseException | None = None
+        self._task: asyncio.Task | None = None
+
+    @property
+    def alive(self) -> bool:
+        return self.session is not None and self._task is not None and not self._task.done()
+
+    async def open(self, timeout: float) -> None:
+        self._task = asyncio.create_task(self._hold())
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            await self.close()
+            raise RuntimeError(f"连接 MCP server 超时（{timeout:.0f}s）") from None
+        if self.session is None:
+            e = self._error
+            raise RuntimeError(f"连接 MCP server 失败：{type(e).__name__}: {e}" if e else "连接 MCP server 失败")
+
+    async def _hold(self) -> None:
+        from langchain_mcp_adapters.sessions import create_session
+        try:
+            async with create_session(self.conn) as session:
+                await session.initialize()
+                self.session = session
+                self._ready.set()
+                await self._stop.wait()
+        except Exception as e:  # noqa: BLE001 —— 连不上 / 中途断开：记下原因，下次调用重连
+            self._error = e
+        finally:
+            self.session = None
+            self._ready.set()
+
+    async def close(self) -> None:
+        self._stop.set()
+        if self._task is None or self._task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(self._task), 10)
+        except BaseException:  # noqa: BLE001 —— 关不干净就强制取消
+            self._task.cancel()
+
+
+class McpSessions:
+    IDLE_S = 1800
+    MAX = 16
+    CONNECT_S = 60
+
+    def __init__(self) -> None:
+        self._held: dict[tuple[str, str], _Held] = {}
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._reaper: asyncio.Task | None = None
+
+    async def call(self, owner: str, ep: Endpoint, tool: str, args: dict) -> str:
+        """owner = 会话 id：同一个会话对同一条连接的调用共用一条 MCP 会话。"""
+        key = (owner, ep.key)
+        held = await self._get(key, ep)
+        held.busy += 1
+        try:
+            if held.session is None:
+                raise RuntimeError("MCP 连接已断开（下次调用会重连）")
+            result = await held.session.call_tool(tool, args)
+        except Exception:
+            await self._drop(key)            # 连接坏了：扔掉，下次调用重连
+            raise
+        finally:
+            held.busy -= 1
+            held.used = time.monotonic()
+        return result_text(result)
+
+    async def _get(self, key: tuple[str, str], ep: Endpoint) -> _Held:
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            held = self._held.get(key)
+            if held is not None and (not held.alive or held.conn != ep.conn):
+                await self._drop(key)        # 断了，或者连接配置改了（服务定义改了）
+                held = None
+            if held is None:
+                await self._make_room()
+                held = _Held(ep.conn)
+                await held.open(self.CONNECT_S)
+                self._held[key] = held
+                if self._reaper is None or self._reaper.done():
+                    self._reaper = asyncio.create_task(self._reap_forever())
+                log.info("MCP 常驻会话已建立 %s（会话 %s）", key[1], key[0])
+            held.used = time.monotonic()
+            return held
+
+    async def _drop(self, key: tuple[str, str]) -> None:
+        held = self._held.pop(key, None)
+        if held is not None:
+            await held.close()
+
+    async def _make_room(self) -> None:
+        while len(self._held) >= self.MAX:
+            idle = [k for k, h in self._held.items() if not h.busy] or list(self._held)
+            oldest = min(idle, key=lambda k: self._held[k].used)
+            log.info("MCP 常驻会话到上限 %d，回收最久没用的 %s", self.MAX, oldest)
+            await self._drop(oldest)
+
+    async def _reap_forever(self) -> None:
+        while self._held:
+            await asyncio.sleep(60)
+            now = time.monotonic()
+            for key, h in list(self._held.items()):
+                if not h.alive or (not h.busy and now - h.used > self.IDLE_S):
+                    await self._drop(key)
+                    self._locks.pop(key, None)
+
+    async def close(self) -> None:
+        for key in list(self._held):
+            await self._drop(key)
+        if self._reaper is not None:
+            self._reaper.cancel()
+
+    def listing(self) -> list[dict]:
+        now = time.monotonic()
+        return [{"session": o, "connection": c, "alive": h.alive, "idle_s": int(now - h.used)}
+                for (o, c), h in self._held.items()]
+
+
+SESSIONS = McpSessions()        # 进程内唯一；runtime 关闭时 close()
+
+
+def result_text(result: Any) -> str:
+    """MCP 的 CallToolResult → 给模型的文本。图片等二进制只留一句说明。"""
+    parts: list[str] = []
+    for c in getattr(result, "content", None) or []:
+        kind = getattr(c, "type", "")
+        if kind == "text":
+            parts.append(c.text)
+        elif kind == "resource":
+            res = c.resource
+            parts.append(getattr(res, "text", None) or f"[资源 {getattr(res, 'uri', '')}（二进制，未展示）]")
+        elif kind == "resource_link":
+            parts.append(f"[资源链接 {getattr(c, 'uri', '')}]")
+        else:
+            parts.append(f"[{kind or '未知'} 内容（{getattr(c, 'mimeType', '')}），未展示]")
+    if not parts and getattr(result, "structuredContent", None) is not None:
+        parts.append(json.dumps(result.structuredContent, ensure_ascii=False))
+    text = "\n".join(parts)
+    return f"[MCP 报错] {text}" if getattr(result, "isError", False) else text
 
 
 def connections(servers: dict[str, dict]) -> tuple[dict[str, dict], dict[str, tuple[str, str | None, str | None]]]:
@@ -56,16 +225,10 @@ def connections(servers: dict[str, dict]) -> tuple[dict[str, dict], dict[str, tu
     return conns, owners
 
 
-def _text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in content)
-    return str(content)
-
-
-def route(name: str, service: str | None, by_env: dict[str | None, Any], sample: Any, server: str = "") -> Any:
-    """同名工具的各环境版本 → 一个按 RunScope 路由的工具（签名里没有 service/env）。"""
+def route(name: str, service: str | None, by_env: dict[str | None, Endpoint], sample: Any, server: str = "",
+          sessions: McpSessions | None = None) -> Any:
+    """同名工具的各环境连接 → 一个按 RunScope 路由的工具（签名里没有 service/env）。
+    调用走常驻会话：同一个会话里对同一条连接的调用落在同一条 MCP 会话上。"""
     from langchain_core.tools import StructuredTool
 
     envs = sorted(e for e in by_env if e)
@@ -79,11 +242,11 @@ def route(name: str, service: str | None, by_env: dict[str | None, Any], sample:
             return f"[不可用] {name} 只能在运行里调用"
         if service and sc.service != service:
             return f"[不可用] {name} 只用于服务 {service}，本运行是 {sc.service or '平台任务'}"
-        tool = by_env.get(None) if None in by_env else by_env.get(sc.env)
-        if tool is None:
+        ep = by_env.get(None) if None in by_env else by_env.get(sc.env)
+        if ep is None:
             return f"[不可用] {name} 没有配置 {sc.env} 环境的连接（已配置：{'、'.join(envs) or '无'}）"
         try:
-            return _text(await tool.ainvoke(kwargs))
+            return await (sessions or SESSIONS).call(sc.session_id, ep, name, kwargs)
         except Exception as e:  # noqa: BLE001 —— MCP 侧的错误如实交给模型，不炸运行
             return f"[调用失败] {name}：{type(e).__name__}: {str(e)[:500]}"
 
@@ -113,7 +276,7 @@ def _expanded(conn: dict) -> dict:
 
 async def load_routed(conns: dict[str, dict], owners: dict[str, tuple[str, str | None, str | None]]
                       ) -> tuple[list, list[str]]:
-    """逐个连接取工具（一个连不上不影响别的），按名字分组成路由工具。→ (工具, 失败的连接名)。"""
+    """逐个连接取工具清单（一次性连接；一个连不上不影响别的），按名字分组成路由工具。→ (工具, 失败的连接名)。"""
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
     except ImportError:
@@ -141,7 +304,7 @@ async def load_routed(conns: dict[str, dict], owners: dict[str, tuple[str, str |
             if slot["server"] != server:
                 log.warning("MCP 工具 %s 在 %s 与 %s 里重名，只保留前者", t.name, slot["server"], server)
                 continue
-            slot["by_env"][env] = t
+            slot["by_env"][env] = Endpoint(key, ready[key])
     return [route(n, g["service"], g["by_env"], g["sample"], g["server"]) for n, g in grouped.items()], failed
 
 

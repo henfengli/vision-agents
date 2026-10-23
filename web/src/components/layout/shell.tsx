@@ -1,33 +1,30 @@
 /**
- * 应用骨架：左侧导航 + 顶栏（全局环境、搜索、审批、主题）+ 内容区。
+ * 应用骨架：左侧导航（含主题与退出）+ 顶栏（搜索、全局环境视角）+ 内容区。
  */
 import { type ReactNode } from "react";
 import {
   LuActivity, LuBrain, LuChevronsLeft, LuChevronsRight, LuLayoutDashboard, LuListTodo, LuLogOut, LuMessageSquare,
-  LuMonitor, LuMoon, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSun,
+  LuMonitor, LuMoon, LuSearch, LuServer, LuSettings, LuSun,
 } from "react-icons/lu";
 
-import { api, useApprovals, useEnvs, useMeta } from "@/api/hooks";
+import { api, useEnvs, useMeta } from "@/api/hooks";
 import { cn } from "@/lib/cn";
 import { Link, navigate, useActive } from "@/lib/router";
 import { setUi, useNarrow, useUi, type Theme } from "@/lib/store";
 import { Kbd } from "../ui/primitives";
 import { Menu, Tooltip } from "../ui/overlay";
-import { openPalette } from "./palette";
+import { PALETTE_HOTKEY, openPalette } from "./palette";
 
-function NavItem({ to, icon, label, badge, collapsed }: { to: string; icon: ReactNode; label: string; badge?: number; collapsed: boolean }) {
+function NavItem({ to, icon, label, collapsed }: { to: string; icon: ReactNode; label: string; collapsed: boolean }) {
   const active = useActive(to);
   const item = (
-    <Link to={to} className={cn(
+    <Link to={to} aria-label={collapsed ? label : undefined} aria-current={active ? "page" : undefined} className={cn(
       "group relative flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] font-medium transition-colors [&_svg]:size-4 [&_svg]:shrink-0",
       active ? "bg-panel text-fg shadow-[0_0_0_1px_var(--color-line),var(--shadow-card)]" : "text-fg-2 hover:bg-hover hover:text-fg",
       collapsed && "justify-center px-0",
     )}>
       <span className={cn(active ? "text-accent" : "text-fg-3 group-hover:text-fg-2")}>{icon}</span>
       {!collapsed && <span className="flex-1 truncate">{label}</span>}
-      {!!badge && (collapsed
-        ? <span className="absolute right-1 top-1 size-1.5 rounded-full bg-warn" />
-        : <span className="rounded-full bg-warn-soft px-1.5 text-[11px] font-semibold tabular-nums text-warn">{badge}</span>)}
     </Link>
   );
   return collapsed ? <div className="[&>span]:flex"><Tooltip content={label} side="right">{item}</Tooltip></div> : item;
@@ -37,7 +34,6 @@ function Sidebar() {
   const { sidebarCollapsed } = useUi();
   const narrow = useNarrow();
   const collapsed = sidebarCollapsed || narrow;
-  const { data: pending } = useApprovals({ status: "pending" });
   const { data: meta } = useMeta();
   return (
     <aside className={cn("flex h-full shrink-0 flex-col border-r border-line bg-sunken/60 transition-[width] duration-150", collapsed ? "w-[56px]" : "w-[220px]")}>
@@ -45,25 +41,24 @@ function Sidebar() {
         <Logo />
         {!collapsed && <div className="min-w-0 leading-tight">
           <div className="truncate text-[13px] font-semibold tracking-tight text-fg">agent-platform</div>
-          <div className="text-[10.5px] text-fg-3">v{meta?.version ?? "6"}</div>
+          <div className="text-[10.5px] text-fg-3">{meta ? `v${meta.version}` : " "}</div>
         </div>}
       </div>
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
+      <nav aria-label="主导航" className="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
         <NavItem to="/" icon={<LuLayoutDashboard />} label="概览" collapsed={collapsed} />
         <NavItem to="/services" icon={<LuServer />} label="服务" collapsed={collapsed} />
         <NavItem to="/tasks" icon={<LuListTodo />} label="任务" collapsed={collapsed} />
         <NavItem to="/runs" icon={<LuActivity />} label="运行" collapsed={collapsed} />
         <NavItem to="/chat" icon={<LuMessageSquare />} label="对话" collapsed={collapsed} />
-        <NavItem to="/approvals" icon={<LuShieldCheck />} label="审批" badge={pending?.length} collapsed={collapsed} />
         <NavItem to="/memory" icon={<LuBrain />} label="记忆" collapsed={collapsed} />
       </nav>
       <div className="px-2 pb-2">
         <NavItem to="/settings" icon={<LuSettings />} label="设置" collapsed={collapsed} />
       </div>
-      <div className={cn("flex items-center border-t border-line p-2", collapsed ? "justify-center" : "justify-between")}>
-        {!collapsed && <ThemeMenu />}
+      <div className={cn("flex items-center border-t border-line p-2", collapsed ? "flex-col gap-1" : "justify-between")}>
+        <ThemeMenu collapsed={collapsed} />
         {!narrow && <Tooltip content={collapsed ? "展开侧栏" : "收起侧栏"} side="right">
-          <button type="button" onClick={() => setUi({ sidebarCollapsed: !collapsed })}
+          <button type="button" onClick={() => setUi({ sidebarCollapsed: !collapsed })} aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
             className="inline-flex size-7 items-center justify-center rounded-md text-fg-3 hover:bg-hover hover:text-fg">
             {collapsed ? <LuChevronsRight className="size-4" /> : <LuChevronsLeft className="size-4" />}
           </button>
@@ -73,16 +68,22 @@ function Sidebar() {
   );
 }
 
-function ThemeMenu() {
+/** 侧栏底部：当前身份 + 主题 / 个人偏好 / 退出（收起时只剩图标） */
+function ThemeMenu({ collapsed }: { collapsed: boolean }) {
   const { theme } = useUi();
   const { data: meta } = useMeta();
   const icon = theme === "dark" ? <LuMoon /> : theme === "light" ? <LuSun /> : <LuMonitor />;
   const set = (t: Theme) => () => setUi({ theme: t });
-  const logout = async () => { await api.logout().catch(() => undefined); navigate("/login", { replace: true }); };
+  const logout = async () => {
+    if (!navigate("/login", { replace: true })) return;
+    await api.logout().catch(() => undefined);
+  };
+  const name = meta?.me.name ?? "—";
   return (
     <Menu align="start" trigger={
-      <button type="button" className="inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5">
-        {icon}<span className="truncate">{meta?.me.name ?? "—"}</span>
+      <button type="button" title={`${name} · 主题与账户`} aria-label={`${name}：主题、个人偏好与退出`}
+        className={cn("inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5", collapsed ? "w-7 justify-center" : "px-2")}>
+        {icon}{!collapsed && <span className="truncate">{name}</span>}
       </button>
     } items={[
       { label: "浅色", icon: <LuSun />, onClick: set("light") },
@@ -111,9 +112,10 @@ export function EnvSwitcher() {
   const { data: envs } = useEnvs();
   const items = [{ name: "", title: "全部" }, ...(envs ?? [])];
   return (
-    <div className="inline-flex h-7 items-center rounded-md border border-line bg-sunken p-0.5">
+    <div role="group" aria-label="全局环境视角" className="inline-flex h-7 items-center rounded-md border border-line bg-sunken p-0.5">
       {items.map((e) => (
-        <button key={e.name} type="button" onClick={() => setUi({ env: e.name })}
+        <button key={e.name} type="button" onClick={() => setUi({ env: e.name })} aria-pressed={env === e.name}
+          title={e.name ? `只看 ${e.title || e.name}` : "看全部环境"}
           className={cn("h-6 rounded-[5px] px-2.5 text-[12px] font-medium transition-colors",
             env === e.name ? "bg-panel text-fg shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "text-fg-3 hover:text-fg",
             e.name && "font-mono uppercase tracking-wide")}>
@@ -125,23 +127,17 @@ export function EnvSwitcher() {
 }
 
 function Topbar() {
-  const { data: pending } = useApprovals({ status: "pending" });
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line bg-panel/80 px-3 backdrop-blur md:gap-3 md:px-5">
-      <button type="button" onClick={openPalette} aria-label="搜索"
+      <button type="button" onClick={openPalette} aria-label="搜索与命令"
         className="flex h-7 items-center gap-2 rounded-md border border-line bg-sunken px-2.5 text-[12.5px] text-fg-3 transition-colors hover:border-line-strong hover:text-fg-2 md:w-[300px]">
         <LuSearch className="size-3.5" />
-        <span className="hidden flex-1 text-left md:inline">搜索服务、任务、运行…</span>
-        <Kbd className="hidden md:inline-flex">⌘K</Kbd>
+        <span className="hidden flex-1 text-left md:inline">搜索服务、任务、运行、记忆…</span>
+        <Kbd className="hidden md:inline-flex">{PALETTE_HOTKEY}</Kbd>
       </button>
       <div className="flex-1" />
+      <span className="hidden text-[11.5px] text-fg-3 lg:inline">环境视角</span>
       <EnvSwitcher />
-      <Tooltip content={pending?.length ? `${pending.length} 条待审批` : "没有待审批"}>
-        <Link to="/approvals" className="relative inline-flex size-8 items-center justify-center rounded-md text-fg-2 hover:bg-hover hover:text-fg">
-          <LuShieldCheck className="size-4" />
-          {!!pending?.length && <span className="absolute right-1 top-1 flex size-3.5 items-center justify-center rounded-full bg-warn text-[9px] font-bold text-white">{pending.length}</span>}
-        </Link>
-      </Tooltip>
     </header>
   );
 }
@@ -183,7 +179,7 @@ export function PageHeader({ title, description, actions, crumbs, meta, icon }: 
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
         {icon && <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-line bg-panel text-fg-2 shadow-[var(--shadow-card)] [&_svg]:size-5">{icon}</div>}
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
+          <h1 className="truncate text-[19px] font-semibold tracking-tight text-fg" title={typeof title === "string" ? title : undefined}>{title}</h1>
           {description && <div className="mt-0.5 text-[13px] text-fg-3">{description}</div>}
           {meta && <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-fg-3">{meta}</div>}
         </div>

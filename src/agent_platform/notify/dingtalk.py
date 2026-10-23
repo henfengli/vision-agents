@@ -4,7 +4,7 @@
 四种消息形态按场景选择：
 - markdown + card（折叠卡片）：报错分析结论，hash=run_id 聚合，不占配额
 - noticeCard：巡检/周报，支持签收
-- actionCard：审批/详情跳转，按钮带 Run Viewer 链接
+- actionCard：详情跳转，按钮带 Run Viewer 链接
 - text：简单通知
 
 注意：text/markdown 正文超 4000 字符会被中继截断——长内容只发摘要，全文走链接。
@@ -93,7 +93,7 @@ class DingTalkRelay:
 
     async def send_action_card(self, title: str, text: str,
                                btn_title: str, btn_url: str) -> dict:
-        """审批/详情跳转：按钮 actionURL 指向 Run Viewer，交互闭环在页面上完成。"""
+        """详情跳转：按钮 actionURL 指向 Run Viewer，交互闭环在页面上完成。"""
         return await self._send({
             "msgtype": "actionCard",
             "actionCard": {

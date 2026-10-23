@@ -5,10 +5,11 @@
 import { ApiError } from "../client";
 import type {
   FeedbackEntry, FeedbackReason,
-  ApiKey, Approval, Asset, ConfigSection, Instance, Knowledge, Page, ReplayDetail, ReplayFilter, ReplayItem, ReplaySummary, ReplayVerdict,
-  ResolvedRole, RunAccepted, RunListItem, SearchHit, Service, ServiceSummary, ServiceTools, ServiceView, Stats, Task, TaskSummary,
-  ToolInfo, UpcomingFire, Version,
+  ApiKey, Asset, ConfigSection, Instance, Knowledge, Page, ReplayDetail, ReplayFilter, ReplayItem, ReplaySummary, ReplayVerdict,
+  ResolvedRole, RunAccepted, RunEvent, RunListItem, SearchHit, Service, ServiceSummary, ServiceTools, ServiceView, Stats, Task, TaskSummary,
+  ToolInfo, UpcomingFire, Version, VersionStat,
 } from "../types";
+import * as cs from "./codesync";
 import * as db from "./data";
 import { cronNextOf } from "./schedule";
 
@@ -44,7 +45,8 @@ export async function handle(method: string, path: string, query: Q, body: unkno
 const notFound = (what: string) => new ApiError(404, "not_found", `${what} 不存在`);
 const H = db.HOUR;
 const within = (iso: string, hours: number) => Date.now() - new Date(iso).getTime() < hours * H;
-const ME = { name: "lihf", kind: "user" as const, admin: true, services: [], envs: [] };
+/** 控制台登录的身份：只有名字，不分权限 */
+const ME = { name: "liyd", kind: "user" as const };
 const now = () => new Date().toISOString();
 
 // ———————— 版本历史（mock：按当前定义回推几版） ————————
@@ -58,13 +60,14 @@ function versionsOf(key: string, current: Record<string, unknown>): Version[] {
       const def = structuredClone(current);
       if (i < v) {
         if (typeof def.prompt === "string") def.prompt = (def.prompt as string).split("\n").slice(0, Math.max(2, 6 - (v - i))).join("\n");
+        if (typeof def.base === "string") { const lines = (def.base as string).split("\n"); def.base = lines.slice(0, Math.max(3, lines.length - (v - i))).join("\n"); }
         if (typeof def.description === "string" && i < v - 1) def.description = (def.description as string).replace(/：.*$/, "");
         if (Array.isArray(def.tools) && i < v - 1) def.tools = (def.tools as string[]).slice(0, -1);
         if (def.profile && i === 1) def.profile = {};
         if (typeof def.timeout_s === "number") def.timeout_s = 300;
       }
       delete def.version; delete def.updated_by; delete def.updated_at;
-      list.push({ version: i, updated_by: i === 1 ? "seed" : i === v ? String(current.updated_by ?? "lihf") : db.pick(["lihf", "wangzh", "chenyu"]), created_at: new Date(Date.now() - (v - i + 1) * 31 * H).toISOString(), definition: def });
+      list.push({ version: i, updated_by: i === 1 ? "seed" : i === v ? String(current.updated_by ?? "liyd") : db.pick(["liyd", "gaodl", "wangzh"]), created_at: new Date(Date.now() - (v - i + 1) * 31 * H).toISOString(), definition: def });
     }
     history.set(key, list);
   }
@@ -84,12 +87,11 @@ function bump<T extends Ledgered>(key: string, target: T, patch: Partial<T>): T 
 // ———————— 元信息 ————————
 
 const TOOLS: ToolInfo[] = [
-  { name: "py", title: "项目内核", description: "在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: false },
-  { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、工作目录可写、默认断网", group: "core", dangerous: true },
-  { name: "run_code", title: "代码编排", description: "CodeAct：一段 Python 编排多个工具调用", group: "core", dangerous: true },
+  { name: "py", title: "项目内核", description: "在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数、直接调其他工具，变量会话内保留", group: "service", dangerous: false },
+  { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、工作目录可写、默认断网；读写文件也用它", group: "core", dangerous: true },
   { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、配置文件内容、git 状态", group: "service", dangerous: false },
-  { name: "service_ctl", title: "进程启停", description: "启停本服务本环境的进程", group: "service", dangerous: true },
-  { name: "sql_query", title: "只读 SQL", description: "本服务本环境的只读库，自动限时限量", group: "service", dangerous: false },
+  { name: "service_ctl", title: "进程启停", description: "启停本服务本环境声明过的进程（带租约）", group: "service", dangerous: true },
+  { name: "db_query", title: "只读查库", description: "本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件", group: "service", dangerous: false },
   { name: "host_metrics", title: "主机指标", description: "部署主机内存/负载/根盘（Grafana）", group: "service", dangerous: false },
   { name: "save_asset", title: "沉淀方法", description: "把可复用的方法/脚本/查询/基线存入记忆", group: "memory", dangerous: false },
   { name: "notify", title: "发通知", description: "发 markdown 通知到任务的通知渠道", group: "notify", dangerous: false },
@@ -99,7 +101,7 @@ const TOOLS: ToolInfo[] = [
 ];
 
 on("GET", "/v1/meta", () => ({
-  version: "8.0.0", envs: db.envs, default_env: db.settings.envs.default, me: ME,
+  version: "9.0.0", envs: db.envs, default_env: db.settings.envs.default, me: ME,
   channels: Object.keys(db.settings.notifications.channels),
   feedback_reasons: REASONS,
   features: { process_control: "systemd", vector_search: true },
@@ -130,29 +132,42 @@ function urlsOf(s: (typeof db.services)[number], env: string): Record<string, st
 /** 写了 envs 就只在列出的环境可用 */
 const mcpServersIn = (s: (typeof db.services)[number], env: string) => Object.entries(s.mcp ?? {})
   .filter(([, cfg]) => { const per = cfg.envs as Record<string, unknown> | undefined; return !per || !Object.keys(per).length || env in per; }).map(([k]) => k);
-/** 进程启停要不要审批：设置 → 审批 的 required_in */
-const approvalRequired = (env: string) => {
-  const mode = db.settings.approvals.required_in;
-  return mode === "all" || (mode === "protected" && !!db.envs.find((e) => e.name === env)?.protected);
-};
 
-// 只读库口令：占位（${VAR}）原样显示，明文换成 ***；保存时 *** 原样传回表示不改
-const DSN = /^([a-z][\w+.-]*:\/\/[^:/@]*:)(.*)(@[^@]*)$/i;
-const redactDsn = (dsn: string | null | undefined) => {
-  const m = dsn ? DSN.exec(dsn) : null;
-  return !dsn || !m || !m[2] || /^\$\{\w+\}$/.test(m[2]) ? dsn ?? null : `${m[1]}***${m[3]}`;
+// 只读库（与后端 credentials.py 一致）：口令是 ${VAR} 占位就原样显示，明文换成 ***；保存时 *** 原样传回表示不改
+const DSN = /^([a-z][\w+.-]*:\/\/[^:/@]*:)(.*)(@[^@]*)$/is;
+const DB_SCHEMES = ["postgresql", "postgres", "mysql", "mariadb", "doris", "clickhouse", "clickhouses", "mongodb", "mongodb+srv"];
+const redactDsn = (dsn: string) => {
+  const m = DSN.exec(dsn);
+  return !m || !m[2] || /^\$\{\w+\}$/.test(m[2]) || m[2] === "***" ? dsn : `${m[1]}***${m[3]}`;
 };
-const restoreDsn = (next: string | null | undefined, current: string | null | undefined) =>
-  next && current && DSN.exec(next)?.[2] === "***" && redactDsn(current) === next ? current : next ?? null;
+const restoreDsn = (next: string, current: string | undefined) =>
+  next && current && DSN.exec(next)?.[2] === "***" && redactDsn(current) === next ? current : next;
+const redactDbs = (dbs: Record<string, string> | undefined) => Object.fromEntries(Object.entries(dbs ?? {}).map(([k, v]) => [k, v ? redactDsn(v) : v]));
 function redactService<T extends (typeof db.services)[number]>(s: T): T {
-  return { ...s, readonly_dsn: redactDsn(s.readonly_dsn), envs: Object.fromEntries(Object.entries(s.envs).map(([k, o]) => [k, o.readonly_dsn ? { ...o, readonly_dsn: redactDsn(o.readonly_dsn) } : o])) };
+  return { ...s, databases: redactDbs(s.databases), envs: Object.fromEntries(Object.entries(s.envs).map(([k, o]) => [k, o.databases ? { ...o, databases: redactDbs(o.databases) } : o])) };
+}
+function checkDbs(dbs: Record<string, string> | undefined, where: string) {
+  for (const [name, url] of Object.entries(dbs ?? {})) {
+    if (!/^[a-z][a-z0-9_-]{0,30}$/.test(name)) throw new ApiError(422, "invalid_definition", `${where}库名不合法：'${name}'（小写字母开头，可含数字 _ -）`);
+    const scheme = url.includes("://") ? url.split("://")[0].toLowerCase() : "";
+    if (url && !DB_SCHEMES.includes(scheme)) throw new ApiError(422, "invalid_definition", `${where}库 ${name} 的连接串类型不认识：${scheme || "（缺 scheme）"}://（可用：${DB_SCHEMES.map((x) => x + "://").join("、")}）`);
+  }
 }
 function restoreService(body: Partial<Service>, current: (typeof db.services)[number]): Partial<Service> {
   const out = structuredClone(body);
-  if (out.readonly_dsn) out.readonly_dsn = restoreDsn(out.readonly_dsn, current.readonly_dsn);
-  for (const [env, o] of Object.entries(out.envs ?? {})) if (o.readonly_dsn) o.readonly_dsn = restoreDsn(o.readonly_dsn, current.envs[env]?.readonly_dsn);
-  const masked = [out.readonly_dsn, ...Object.values(out.envs ?? {}).map((o) => o.readonly_dsn)].some((d) => d && DSN.exec(d)?.[2] === "***");
-  if (masked) throw new ApiError(422, "invalid_definition", "只读库口令显示为 *** 的那一项对不上原值，请重新填写口令（建议写成 ${VAR}）");
+  if (out.databases) {
+    checkDbs(out.databases, "");
+    out.databases = Object.fromEntries(Object.entries(out.databases).map(([k, v]) => [k, restoreDsn(v, current.databases[k])]));
+  }
+  for (const [env, o] of Object.entries(out.envs ?? {})) {
+    if (!o.databases) continue;
+    checkDbs(o.databases, `环境 ${env} 的`);
+    o.databases = Object.fromEntries(Object.entries(o.databases).map(([k, v]) => [k, restoreDsn(v, current.envs[env]?.databases?.[k])]));
+  }
+  const masked = [...Object.entries(out.databases ?? {}).map(([k, v]) => ["", k, v]),
+    ...Object.entries(out.envs ?? {}).flatMap(([env, o]) => Object.entries(o.databases ?? {}).map(([k, v]) => [env, k, v]))]
+    .find(([, , v]) => v && DSN.exec(v)?.[2] === "***");
+  if (masked) throw new ApiError(422, "invalid_definition", `${masked[0] ? `环境 ${masked[0]} 的` : ""}库 ${masked[1]} 的口令显示为 *** 却对不上原值，请重新填写口令（建议写成 \${VAR}，真实值放 secrets.env）`);
   return out;
 }
 
@@ -185,7 +200,8 @@ on("PATCH", "/v1/services/:name", (p, _q, body) => {
 });
 on("POST", "/v1/services", (_p, _q, body) => {
   if (db.services.some((s) => s.name === body.name)) throw new ApiError(409, "conflict", `服务 ${body.name} 已存在`);
-  const s: Service = { title: "", description: "", root: "", code_paths: [], repo: "", ref: "", python: "", env_vars: {}, urls: {}, hosts: [], readonly_dsn: null, configs: [], processes: {}, mcp: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now() };
+  if (!/^[a-z][a-z0-9._-]{1,40}$/.test(String(body.name ?? ""))) throw new ApiError(422, "invalid_definition", `服务名不合法：'${body.name}'（小写字母开头，可含数字 . _ -，2~41 字符）`);
+  const s: Service = { title: "", description: "", root: "", code_paths: [], repo: "", ref: "", python: "", env_vars: {}, urls: {}, hosts: [], databases: {}, configs: [], processes: {}, sync: db.defaultSync(), mcp: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now() };
   db.services.push(s);
   return serviceSummary(s);
 });
@@ -203,10 +219,11 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
     service: s.name, env: p.env, enabled: envEnabled(s, p.env), python: pythonOf(s, p.env),
     root: render(s.root, p.env), code_paths: (o.code_paths ?? (s.code_paths.length ? s.code_paths : [s.root])).map((x) => render(x, p.env)),
     repo: s.repo, ref, urls: urlsOf(s, p.env), mcp_servers: Object.keys(s.mcp ?? {}), hosts: o.hosts ?? s.hosts,
-    readonly_dsn: redactDsn(o.readonly_dsn ?? s.readonly_dsn),
-    config_files: s.configs.map((c) => ({ canonical: render(c.canonical, p.env), path: render(c.template, p.env), exists: !(s.name === "report-engine" && p.env === "dev"), size: 1200 + c.template.length * 37 })),
+    // 基座 + 环境覆盖（按库名），空串 = 本环境没有这个库
+    databases: redactDbs(Object.fromEntries(Object.entries({ ...s.databases, ...(o.databases ?? {}) }).filter(([, v]) => v))),
+    config_files: cs.viewFiles(s, p.env),
     profile: { ...s.profile, ...(o.profile ?? {}) },
-    git: s.name === "report-engine" ? null : { branch: "HEAD", commit: db.hex(7), dirty: false, committed_at: new Date(Date.now() - 20 * H).toISOString() },
+    git: (() => { const h = cs.headOf(s, p.env); return h ? { branch: ref || "HEAD", commit: h.sha.slice(0, 7), dirty: false, committed_at: h.at } : null; })(),
   };
 });
 
@@ -229,23 +246,40 @@ on("GET", "/v1/services/:name/tools", (p, q): ServiceTools => {
   const failed: string[] = [];
   for (const server of servers) {
     const envs = db.envs.map((e) => e.name).filter((env) => envEnabled(s, env) && mcpServersIn(s, env).includes(server));
-    if (s.name === "dagster" && server === "dagster") tools.push(...DAGSTER_TOOLS.map(([name, description]) => ({ name, description, server, envs })));
+    if (server === "dagster") tools.push(...DAGSTER_TOOLS.map(([name, description]) => ({ name, description, server, envs })));
     else failed.push(...envs.map((env) => `${s.name}.${server}@${env}`));
   }
   return { servers, loaded: true, tools, failed };
 });
+// 配置文件：默认密钥打码；raw=true 原文 + sha + 上游状态（编辑用）。保存带回 sha，期间被改过 409
 on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
-  findService(p.name);
-  const env = p.env;
+  const s = findService(p.name);
   const file = String(q.path || "");
-  return {
-    path: file,
-    content: file.endsWith(".yaml")
-      ? `# ${file}\nrun_coordinator:\n  module: dagster._core.run_coordinator\n  class: QueuedRunCoordinator\n  config:\n    max_concurrent_runs: ${env === "prod" ? 8 : 2}\nstorage:\n  postgres:\n    postgres_url: postgresql://dagster:***@${env}-db:5432/dagster\ntelemetry:\n  enabled: false\n`
-      : file.includes(".env")
-        ? `# ${file}\nNODE_ENV=${env === "prod" ? "production" : env}\nPORT=${env === "prod" ? 8080 : env === "test" ? 8081 : 8082}\nDB_HOST=${env}-db\nDB_PASSWORD=***\nCACHE_TTL=600\n`
-        : `# ${file}\n[server]\nport = ${env === "prod" ? 9080 : 9081}\nprofile = "${env}"\n`,
-  };
+  return q.raw === true || q.raw === "true" ? cs.readRaw(s, p.env, file) : cs.readMasked(s, p.env, file);
+});
+on("PUT", "/v1/services/:name/envs/:env/config", (p, _q, body) =>
+  cs.writeConfig(findService(p.name), p.env, String(body?.path ?? ""), String(body?.content ?? ""), body?.sha, ME.name));
+on("POST", "/v1/services/:name/envs/:env/config/ack", (p, _q, body) => {
+  cs.ackConfig(findService(p.name), p.env, String(body?.path ?? ""), ME.name);
+  return { ok: true };
+});
+on("GET", "/v1/services/:name/envs/:env/config/history", (p, q) => cs.configHistory(findService(p.name), p.env, String(q.path || "")));
+on("GET", "/v1/services/:name/envs/:env/config/history/:id", (p, q) => cs.configVersion(findService(p.name), p.env, String(q.path || ""), p.id));
+
+// 代码同步：状态 / 立即同步（每个环境提交一次 code-sync）
+on("GET", "/v1/services/:name/envs/:env/sync", (p) => cs.status(findService(p.name), p.env));
+on("POST", "/v1/services/:name/sync", (p, _q, body) => {
+  const s = findService(p.name);
+  const envs: string[] = body?.envs?.length ? body.envs : db.envs.map((e) => e.name).filter((e) => envEnabled(s, e));
+  return envs.map((env) => {
+    try {
+      const r = submitRun({ task: "code-sync", service: s.name, env, input: body?.force ? { force: true } : {} }, "web");
+      return { env, run_id: r.run_id, status: r.status, error: null };
+    } catch (e) {
+      const err = e as ApiError;
+      return { env, run_id: null, status: "rejected", error: { code: err.code, message: err.message } };
+    }
+  });
 });
 on("GET", "/v1/services/:name/processes", (p) => {
   const s = findService(p.name);
@@ -257,28 +291,31 @@ for (const action of ["start", "stop", "renew"]) {
     if (!inst) throw notFound("进程");
     const svc = findService(p.name);
     if (action === "start" && !envEnabled(svc, p.env)) throw new ApiError(400, "service_env_disabled", `服务 ${p.name} 在 ${p.env} 环境已停用`);
-    // 只有设置里打开了审批（protected 且环境受保护，或 all）才先建审批单
-    if (action !== "renew" && approvalRequired(p.env)) {
-      const verb = action === "start" ? "启动" : "停止";
-      const a: Approval = { id: Date.now() % 100000, kind: "process", run_id: null, title: `进程${verb} · ${p.name}/${p.proc}@${p.env}`, detail: `${ME.name} 请求在 ${p.env} ${verb} ${p.name}/${p.proc}`, service: p.name, env: p.env, task: null, payload: { service: p.name, env: p.env, process: p.proc, action, hours: body?.hours ?? null, executor: "api", by: ME.name }, requested_by: ME.name, status: "pending", decided_by: null, comment: null, created_at: now(), decided_at: null, expires_at: new Date(Date.now() + db.settings.approvals.timeout_minutes * 60_000).toISOString() };
-      db.approvals.unshift(a);
-      return { instance: inst, approval: a };
-    }
-    perform(inst, action, body?.hours);
-    return { instance: inst, approval: null };
+    if (action === "renew" && inst.state !== "running") throw new ApiError(409, "conflict", `${p.proc}@${p.env} 没在运行，不能续期`);
+    const hours = body?.hours ?? svc.processes[p.proc]?.lease_hours ?? db.settings.processes.default_lease_hours;
+    if (hours > db.settings.processes.max_lease_hours) throw new ApiError(422, "invalid_request", `租约不能超过 ${db.settings.processes.max_lease_hours} 小时（设置 → 进程）`);
+    perform(inst, action, hours);
+    return { instance: inst };
   });
 }
-function perform(inst: Instance, action: string, hours?: number) {
+function perform(inst: Instance, action: string, hours: number) {
   const t = now();
-  const lease = (hours ?? 2) * H;
+  const lease = hours * H;
   if (action === "start") Object.assign(inst, { state: "running", pid: db.between(2000, 39999), started_at: t, started_by: ME.name, lease_until: new Date(Date.now() + lease).toISOString() } satisfies Partial<Instance>);
   if (action === "stop") Object.assign(inst, { state: "stopped", pid: null, started_at: null, lease_until: null, last_exit: { code: 0, at: t } } satisfies Partial<Instance>);
   if (action === "renew") inst.lease_until = new Date(new Date(inst.lease_until ?? t).getTime() + lease).toISOString();
 }
+const LOG_LINES: Record<string, string[]> = {
+  server: ['"GET /report/pnl_daily/ HTTP/1.1" 200 48211', '"GET /static/report/js/chart.js HTTP/1.1" 304 0', "ck query 0.42s: SELECT trade_date, account_id, sum(… FROM dws_account_pnl_daily",
+    '"GET /report/strategy_weekly/ HTTP/1.1" 200 61733', "slow query 2.1s: SELECT … FROM dws_strategy_nav_daily", '"GET /healthz HTTP/1.1" 200 2'],
+  webserver: ["Serving dagster-webserver on http://127.0.0.1:3901 in process 21877", "GraphQL query AssetGraphQuery 182ms", "Loaded code location vision_dagster",
+    "GraphQL query RunsRootQuery 96ms", "GraphQL query AssetMaterializationsQuery 214ms", "GET /server_info 200"],
+};
 on("GET", "/v1/services/:name/envs/:env/processes/:proc/logs", (p) => ({
   lines: Array.from({ length: 60 }, (_, i) => {
     const t = new Date(Date.now() - (60 - i) * 17_000).toISOString().slice(11, 19);
-    return `${t} ${["INFO", "INFO", "INFO", "WARN", "INFO", "DEBUG"][i % 6]} [${p.proc}@${p.env}] ${["request GET /api/metrics/gmv 200 38ms", "cache hit gmv:2026-10-19", "scheduler tick: 3 runs queued", "slow query 1.8s: SELECT … FROM ads_order_daily", "request GET /health 200 2ms", "pool: 4/20 connections in use"][i % 6]}`;
+    const lines = LOG_LINES[p.proc] ?? LOG_LINES.server;
+    return `${t} ${["INFO", "INFO", "INFO", "INFO", "WARN", "INFO"][i % 6]} [${p.name}:${p.env}:${p.proc}] ${lines[i % lines.length]}`;
   }),
 }));
 
@@ -381,13 +418,23 @@ function taskSummary(raw: Task): TaskSummary {
 }
 
 const findTask = (name: string) => db.tasks.find((x) => x.name === name) ?? (() => { throw notFound("任务 " + name); })();
-const blankTask = (body: Partial<Task>): Task => ({ title: "", description: "", service: null, role: null, form: "agent", input: {}, envs: [], triggers: [{ id: "api", type: "api" }], deliver: null, dedup: null, memory: {}, timeout_s: 300, enabled: true, profile: {}, extends: null, auto_created: false, handler: null, ...body, version: 1, updated_by: ME.name, updated_at: now() } as Task);
+const blankTask = (body: Partial<Task>): Task => ({ title: "", description: "", service: null, role: null, form: "agent", input: {}, envs: [], triggers: [{ id: "api", type: "api" }], deliver: null, dedup: null, memory: {}, timeout_s: 300, enabled: true, profile: {}, extends: null, auto_created: false, handler: null, output_schema: null, ...body, version: 1, updated_by: ME.name, updated_at: now() } as Task);
+
+/** 结构化输出的 schema：空 = 不要求；顶层须是 object（真实后端还会按 JSON Schema 规范校验） */
+function checkSchema(body: Partial<Task>) {
+  const s = body.output_schema;
+  if (s === undefined) return;
+  if (s && Object.keys(s).length && s.type !== "object")
+    throw new ApiError(422, "invalid_definition", '结构化输出的 schema 顶层须是 {"type": "object", "properties": …}');
+  if (s && !Object.keys(s).length) body.output_schema = null;
+}
 
 on("GET", "/v1/tasks", (_p, q) => db.tasks.filter((t) => !q.service || t.service === q.service || t.service === "*").map(taskSummary));
 on("GET", "/v1/tasks/:name", (p) => taskSummary(findTask(p.name)));
-on("PATCH", "/v1/tasks/:name", (p, _q, body) => taskSummary(bump("tasks/" + p.name, findTask(p.name), body)));
+on("PATCH", "/v1/tasks/:name", (p, _q, body) => { checkSchema(body); return taskSummary(bump("tasks/" + p.name, findTask(p.name), body)); });
 on("POST", "/v1/tasks", (_p, _q, body) => {
   if (db.tasks.some((t) => t.name === body.name)) throw new ApiError(409, "conflict", `任务 ${body.name} 已存在`);
+  checkSchema(body);
   const t = blankTask(body);
   db.tasks.push(t);
   return taskSummary(t);
@@ -413,6 +460,32 @@ on("POST", "/v1/tasks/:name/subtasks", (p, _q, body) => {
 });
 on("GET", "/v1/tasks/:name/schedule", (p) => firesOf(effective(findTask(p.name))));
 
+// ———————— 每个版本跑出来的效果（任务 / 角色 / 平台提示词；回归重放不算） ————————
+
+function versionStats(versionOf: (r: db.MockRun) => number | null | undefined): VersionStat[] {
+  const groups = new Map<number, db.MockRun[]>();
+  for (const r of db.runs) {
+    const v = versionOf(r);
+    if (v == null || r.trigger.type === "replay") continue;
+    groups.set(v, [...(groups.get(v) ?? []), r]);
+  }
+  const avg = (xs: (number | null)[]) => {
+    const ys = xs.filter((x): x is number => x !== null);
+    return ys.length ? Math.round(ys.reduce((a, b) => a + b, 0) / ys.length) : null;
+  };
+  return [...groups.entries()].sort((a, b) => b[0] - a[0]).map(([version, rs]) => {
+    const at = rs.map((r) => r.created_at).sort();
+    return {
+      version, runs: rs.length, success: rs.filter((r) => r.status === "success").length, failed: rs.filter((r) => r.status === "failed").length,
+      negative: rs.filter((r) => r.feedback.some((f) => f.score < 0)).length,
+      avg_tokens: avg(rs.map((r) => r.tokens)), avg_ms: avg(rs.map((r) => r.duration_ms)), first_at: at[0], last_at: at[at.length - 1],
+    };
+  });
+}
+on("GET", "/v1/tasks/:name/version-stats", (p) => { findTask(p.name); return versionStats((r) => (r.task === p.name ? r.task_version : null)); });
+on("GET", "/v1/roles/:name/version-stats", (p) => { findRole(p.name); return versionStats((r) => (r.role === p.name ? r.role_version : null)); });
+on("GET", "/v1/settings/prompts/version-stats", () => versionStats((r) => r.recipe?.prompts));
+
 // ———————— 版本历史（三种定义 + 设置各节） ————————
 
 for (const [kind, find] of [["services", findService], ["roles", findRole], ["tasks", findTask]] as const) {
@@ -428,8 +501,8 @@ for (const [kind, find] of [["services", findService], ["roles", findRole], ["ta
 // ———————— 运行 ————————
 
 const listItem = (r: db.MockRun): RunListItem => {
-  const { _events, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, error_code: _e, pending_approval: _pa, memory: _m, ...rest } = r;
-  void _events; void _i; void _o; void _c; void _f; void _tv; void _rv; void _e; void _pa; void _m;
+  const { _events, _answer, _output, _error_code, _scenario, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
+  void _events; void _answer; void _output; void _error_code; void _scenario; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
   return rest;
 };
 const findRun = (id: string) => db.runs.find((x) => x.run_id === id) ?? (() => { throw notFound("运行 " + id); })();
@@ -512,8 +585,9 @@ on("GET", "/v1/feedback", (_p, q) => db.runs.flatMap((r) => r.feedback.map((f) =
 
 interface SubmitBody { task?: string | null; service?: string | null; env?: string | null; subtask?: string | null; input?: Record<string, unknown>; session_id?: string | null; memory?: object }
 
-/** POST /v1/runs：task 不填 = 通用入口 ask。提交本身不再有审批（审批只在运行中途的危险命令与进程启停） */
-function submitRun(body: SubmitBody, trigger: string): RunAccepted {
+/** POST /v1/runs：task 不填 = 通用入口 ask。闸门：任务存在且启用、服务与环境启用、环境在任务允许的范围内、必填输入齐全 */
+/** manual：调用方自己把运行收尾（对话的流式回答） */
+function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccepted {
   const [base, inlineSub] = (body.task || "ask").split(":");
   const t = db.tasks.find((x) => x.name === base);
   if (!t) throw new ApiError(404, "unknown_task", `任务 ${base} 不存在`);
@@ -533,6 +607,11 @@ function submitRun(body: SubmitBody, trigger: string): RunAccepted {
   if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${t.name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
   const missing = Object.entries(t.input).filter(([k, f]) => f.required && (input[k] === undefined || input[k] === "")).map(([k]) => k);
   if (missing.length) throw new ApiError(400, "invalid_input", "输入不合法：" + missing.map((k) => `${k} 必填`).join("；"));
+  // 代码同步（内建）：拉取 → 步骤 → 配置上游 → 重启，按 mock 的仓库状态跑；force = 所有步骤都重跑
+  if (t.handler === "code-sync" && svc) {
+    const run = cs.startRun(svc, env, { type: trigger as "web", id: null, source: null, caller: ME.name }, input.force === true || input.force === "true");
+    return { run_id: run.run_id, session_id: run.session_id, status: "queued", output: null, dedup: false, subtask_created: null };
+  }
   const object = body.subtask || inlineSub;
   const name = object ? `${base}:${object}` : base;
   let created: string | null = null;
@@ -546,39 +625,16 @@ function submitRun(body: SubmitBody, trigger: string): RunAccepted {
     run_id, session_id, task: name, task_title: t.title, service: service ?? null, env, role: t.role, status: "running", resolution: null,
     trigger: { type: trigger as "web", id: null, source: null, caller: ME.name },
     summary: String(input.question ?? Object.values(input)[0] ?? t.title), tokens: null, duration_ms: null,
-    created_at: now(), finished_at: null, task_version: t.version, role_version: db.roles.find((r) => r.name === t.role)?.version ?? null,
-    replay_of: null, input, output: null, error_code: null, pending_approval: null, memory: body.memory ?? {},
+    created_at: now(), finished_at: null, task_version: db.tasks.find((x) => x.name === name)?.version ?? t.version,
+    role_version: db.roles.find((r) => r.name === t.role)?.version ?? null, recipe: null,
+    replay_of: null, input, output: null, error_code: null, memory: body.memory ?? {},
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     feedback: [],
   };
+  run.recipe = db.recipeOf(run, 0);
   db.runs.unshift(run);
-  setTimeout(() => Object.assign(run, { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }), 6500);
+  if (!manual) setTimeout(() => Object.assign(run, { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }), 6500);
   return { run_id, session_id, status: "queued", output: null, dedup: false, subtask_created: created };
-}
-
-// ———————— 审批 ————————
-
-on("GET", "/v1/approvals", (_p, q) => db.approvals
-  .filter((a) => (q.status === "pending" ? a.status === "pending" : q.status === "decided" ? a.status !== "pending" : true)
-    && (!q.kind || a.kind === q.kind) && (!q.service || a.service === q.service) && (!q.env || a.env === q.env))
-  .sort((a, b) => (a.status === "pending" && b.status === "pending" ? a.created_at.localeCompare(b.created_at) : (b.decided_at ?? b.created_at).localeCompare(a.decided_at ?? a.created_at))));
-on("GET", "/v1/approvals/:id", (p) => db.approvals.find((x) => x.id === Number(p.id)) ?? (() => { throw notFound("审批单"); })());
-for (const verb of ["approve", "reject"]) {
-  on("POST", `/v1/approvals/:id/${verb}`, (p, _q, body) => {
-    const a = db.approvals.find((x) => x.id === Number(p.id));
-    if (!a) throw notFound("审批单");
-    if (a.status !== "pending") throw new ApiError(409, "already_decided", `已被 ${a.decided_by} 处理（${a.status}）`);
-    const ok = verb === "approve";
-    Object.assign(a, { status: ok ? "approved" : "rejected", decided_by: ME.name, comment: body?.comment || null, decided_at: now() });
-    // 运行中途的审批：放行或拒绝都让运行继续（拒绝时 agent 拿到"被拒绝"的工具结果，自己换路子）
-    const run = a.run_id ? db.runs.find((r) => r.run_id === a.run_id) : null;
-    if (run && run.status === "awaiting_approval") Object.assign(run, { status: "running", _events: undefined });
-    if (a.kind === "process" && ok && a.payload.executor === "api") {
-      const inst = db.instances.find((i) => i.service === a.service && i.env === a.env && i.process === a.payload.process);
-      if (inst) perform(inst, String(a.payload.action), typeof a.payload.hours === "number" ? a.payload.hours : undefined);
-    }
-    return a;
-  });
 }
 
 // ———————— 回归重放 ————————
@@ -592,9 +648,9 @@ function replayItemOf(it: db.MockReplayItem): ReplayItem {
   return {
     id: it.id, source_run: it.source_run, new_run: it.new_run, verdict: it.verdict, reason: it.reason, judged_at: it.judged_at,
     task: src.task, service: src.service, env: src.env, summary: src.summary,
-    before: { task_version: src.task_version, role_version: src.role_version, answer: answerOf(src), status: src.status },
-    after: next ? { task_version: next.task_version, role_version: next.role_version, answer: answerOf(next), status: next.status }
-      : { task_version: null, role_version: null, answer: null, status: null },
+    before: { task_version: src.task_version, role_version: src.role_version, recipe: src.recipe, answer: answerOf(src), status: src.status },
+    after: next ? { task_version: next.task_version, role_version: next.role_version, recipe: next.recipe, answer: answerOf(next), status: next.status }
+      : { task_version: null, role_version: null, recipe: null, answer: null, status: null },
   };
 }
 
@@ -693,12 +749,11 @@ on("POST", "/v1/replays/:id/judge", (p) => {
 
 // ———————— 对话 ————————
 
-const sessions = db.sessionsList();
-on("GET", "/v1/sessions", (_p, q) => sessions
+on("GET", "/v1/sessions", (_p, q) => db.sessionsList()
   .filter((s) => (!q.service || s.service === q.service) && (!q.env || s.env === q.env) && (!q.task || s.task.split(":")[0] === q.task)
     && (!q.q || s.title.includes(String(q.q)) || s.turns.some((t) => t.question.includes(String(q.q)))))
   .map(({ turns: _t, ...s }) => { void _t; return s; }));
-on("GET", "/v1/sessions/:id", (p) => sessions.find((x) => x.session_id === p.id) ?? (() => { throw notFound("会话"); })());
+on("GET", "/v1/sessions/:id", (p) => db.sessionsList().find((x) => x.session_id === p.id) ?? (() => { throw notFound("会话"); })());
 
 // ———————— 记忆 ————————
 
@@ -762,7 +817,7 @@ on("POST", "/v1/knowledge", (_p, _q, body) => {
     db.knowledge.unshift(k);
     return k;
   }
-  if (!String(body.key ?? "").trim()) throw new ApiError(400, "invalid_input", "事实要给 key（如 metric:gmv）");
+  if (!String(body.key ?? "").trim()) throw new ApiError(400, "invalid_input", "事实要给 key（如 metric:account_pnl）");
   if (db.knowledge.some((k) => k.service === body.service && k.env === env && k.key === body.key)) throw new ApiError(409, "conflict", `${body.service}（${where}）已有记忆 ${body.key}，请直接编辑`);
   const k: Knowledge = { ...base, id: Math.max(...db.knowledge.map((x) => x.id)) + 1, kind, key: body.key, content: body.content, fingerprint: null, category: null };
   db.knowledge.unshift(k);
@@ -830,7 +885,24 @@ on("DELETE", "/v1/assets/:id", (p) => Object.assign(findAsset(p.id), { status: "
 
 // ———————— 设置 ————————
 
-const SECTIONS: ConfigSection[] = ["envs", "approvals", "notifications", "memory", "processes"];
+const SECTIONS: ConfigSection[] = ["envs", "notifications", "memory", "processes", "prompts"];
+
+/** 提示词模板段 → 可用占位（与 domain/prompts.PLACEHOLDERS 一致）：去掉 {{ }} 后只能剩认识的 {名字} */
+const PLACEHOLDERS: Record<string, string[]> = {
+  compaction: ["messages"], distill: ["service", "env", "task", "input", "output"],
+  handoff_summary: ["task", "input", "output"], replay_judge: ["task", "where", "input", "old", "issues", "new"],
+};
+function checkPrompts(body: Record<string, unknown>) {
+  for (const key of ["base", "subagent"]) if (!String(body[key] ?? "").trim()) throw new ApiError(422, "invalid_definition", `prompts.${key}：不能为空`);
+  for (const [key, keys] of Object.entries(PLACEHOLDERS)) {
+    const text = String(body[key] ?? "").replaceAll("{{", "").replaceAll("}}", "");
+    const hint = `可用：${keys.map((k) => `{${k}}`).join("、")}；字面花括号写成 {{ }}`;
+    const unknown = [...text.matchAll(/\{([^{}]*)\}/g)].map((m) => m[1]).find((k) => !keys.includes(k));
+    if (unknown !== undefined) throw new ApiError(422, "invalid_definition", `prompts.${key}：占位 '${unknown}' 不认识（${hint}）`);
+    if (/[{}]/.test(text.replace(/\{[^{}]*\}/g, ""))) throw new ApiError(422, "invalid_definition", `prompts.${key}：模板格式不对，有落单的花括号（${hint}）`);
+  }
+  if (!String(body.compaction ?? "").includes("{messages}")) throw new ApiError(422, "invalid_definition", "prompts.compaction：压缩提示必须包含 {messages}（要压缩的历史放在这里）");
+}
 on("GET", "/v1/settings", () => db.settings);
 for (const section of SECTIONS) {
   on("GET", `/v1/settings/${section}`, () => db.settings[section]);
@@ -847,6 +919,7 @@ for (const section of SECTIONS) {
       const missing = (rest.rules as { channel: string }[]).map((r) => r.channel).filter((c) => !(c in rest.channels));
       if (missing.length) throw new ApiError(422, "invalid_definition", `规则引用了不存在的渠道：${[...new Set(missing)].join("、")}`);
     }
+    if (section === "prompts") checkPrompts(rest);
     return bump(`settings/${section}`, target, rest);
   });
   on("GET", `/v1/settings/${section}/versions`, () => versionsOf(`settings/${section}`, db.settings[section] as unknown as Record<string, unknown>));
@@ -864,14 +937,22 @@ on("POST", "/v1/settings/notifications/test", (_p, _q, body) => {
 
 on("GET", "/v1/api-keys", () => db.apiKeys);
 on("POST", "/v1/api-keys", (_p, _q, body) => {
-  if (db.apiKeys.some((k) => k.name === body.name)) throw new ApiError(409, "conflict", `已有名为 ${body.name} 的密钥`);
+  const name = String(body?.name ?? "");
+  if (!/^[\w.-]{2,40}$/.test(name)) throw new ApiError(422, "invalid_request", "密钥名：2–40 个字母、数字、. _ -");
+  if (db.apiKeys.some((k) => k.name === name)) throw new ApiError(409, "conflict", `已有名为 ${name} 的密钥`);
   const token = "ap_" + db.hex(43);
-  const key: ApiKey = { id: Math.max(...db.apiKeys.map((k) => k.id)) + 1, prefix: token.slice(0, 9), created_by: ME.name, created_at: now(), last_used_at: null, revoked_at: null, services: [], envs: [], note: "", expires_at: null, scope: "run", ...body };
+  const key: ApiKey = { id: Math.max(...db.apiKeys.map((k) => k.id)) + 1, name, prefix: token.slice(0, 9), note: String(body?.note ?? ""), created_by: ME.name, created_at: now(), expires_at: body?.expires_at ?? null, last_used_at: null, revoked_at: null };
   db.apiKeys.unshift(key);
   return { ...key, token };
 });
 const findKey = (id: string) => db.apiKeys.find((k) => k.id === Number(id)) ?? (() => { throw notFound("密钥 " + id); })();
-on("PATCH", "/v1/api-keys/:id", (p, _q, body) => Object.assign(findKey(p.id), body));
+/** 只能改备注与过期时间 */
+on("PATCH", "/v1/api-keys/:id", (p, _q, body) => {
+  const k = findKey(p.id);
+  if (body?.note !== undefined) k.note = String(body.note);
+  if (body?.expires_at !== undefined) k.expires_at = body.expires_at;
+  return k;
+});
 on("DELETE", "/v1/api-keys/:id", (p) => Object.assign(findKey(p.id), { revoked_at: findKey(p.id).revoked_at ?? now() }));
 
 // ———————— 统计 / 搜索 ————————
@@ -907,7 +988,7 @@ on("GET", "/v1/stats", (_p, q) => {
     .filter((f) => (!q.env || f.env === q.env) && (!q.service || f.service === q.service)).sort((a, b) => a.at.localeCompare(b.at)).slice(0, 8);
   const stats: Stats = {
     hours,
-    totals: { runs: rs.length, success: rs.filter((r) => r.status === "success").length, failed: rs.filter((r) => r.status === "failed").length, running: db.runs.filter((r) => r.status === "running").length, awaiting: db.approvals.filter((a) => a.status === "pending").length },
+    totals: { runs: rs.length, success: rs.filter((r) => r.status === "success").length, failed: rs.filter((r) => r.status === "failed").length, running: db.runs.filter((r) => r.status === "running" && (!q.env || r.env === q.env) && (!q.service || r.service === q.service)).length },
     by_env: byEnv, series, top_failures: [...failMap.values()].sort((a, b) => b.failed - a.failed).slice(0, 5), upcoming,
     tokens: rs.reduce((n, r) => n + (r.tokens ?? 0), 0),
   };
@@ -937,7 +1018,7 @@ export function handleStream(path: string, body: any, onEvent: (ev: Record<strin
     const chatTasks = db.tasks.filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat" && tr.enabled !== false));
     const task = body.task || last?.task || (chatTasks.find((t) => t.service === body.service) ?? chatTasks.find((t) => t.name === "ask") ?? chatTasks.find((t) => t.service === "*"))?.name;
     if (!task) throw new ApiError(404, "unknown_task", `服务 ${body.service || "—"} 没有可对话的任务（任务需声明 chat 触发）`);
-    accepted = submitRun({ task, subtask: body.subtask, service: body.service, env: body.env, input: { ...(body.input ?? {}), question: body.message }, session_id: body.session_id, memory: body.memory }, "chat");
+    accepted = submitRun({ task, subtask: body.subtask, service: body.service, env: body.env, input: { ...(body.input ?? {}), question: body.message }, session_id: body.session_id, memory: body.memory }, "chat", true);
   } catch (e) {
     const err = e as ApiError;
     setTimeout(() => { onEvent({ type: "error", code: err.code, message: err.message }); onDone(); }, 150);
@@ -945,20 +1026,53 @@ export function handleStream(path: string, body: any, onEvent: (ev: Record<strin
   }
   const q = String(body.message || "");
   const recall = body.memory?.recall !== false;
+  const svc = db.services.find((s) => s.name === body.service);
+  const hasCk = !!svc && Object.keys(svc.databases).length > 0;
+  const days = db.TD.slice(0, 5).reverse();
+  const rows = days.map((d, i) => [d, [412380.55, -86204.1, 233918.4, 157702.25, 301446.9][i], 1190 + (i % 3)] as [string, number, number]);
+  const total = rows.reduce((n, [, v]) => n + v, 0);
+  const sql = `SELECT trade_date, round(sum(realized_pnl + unrealized_pnl), 2) AS pnl, uniqExact(account_id) AS accounts\nFROM dws_account_pnl_daily\nWHERE trade_date >= '${days[0]}'\nGROUP BY trade_date ORDER BY trade_date`;
+  const yuan = (n: number) => (n < 0 ? "-¥" : "¥") + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
   const steps: Record<string, unknown>[] = [
     { type: "run", run_id: accepted.run_id, session_id: accepted.session_id, subtask_created: accepted.subtask_created },
-    ...(recall ? [{ type: "stage", stage: "recall", title: "召回 · 知识 2 条", content: "[历史知识]\n- metric:gmv: GMV = 支付成功订单 total_fee 之和，不含退款\n- metric:total_fee: 单位是分" }] : []),
-    { type: "thought", content: `理解问题：「${q.slice(0, 40)}」。先确认口径，档案约定 GMV 不含退款、金额单位是分。` },
-    { type: "tool_call", tool: "sql_query", args: { sql: "SELECT dt, sum(total_fee)/100.0 AS gmv FROM ads_order_daily\nWHERE dt >= current_date - 7 GROUP BY dt ORDER BY dt" } },
-    { type: "tool_result", tool: "sql_query", output: "| dt | gmv |\n|---|---|\n| 10-13 | 42,180.50 |\n| … | … |\n(7 行)", duration_ms: 640 },
+    ...(recall ? [{ type: "stage", stage: "recall", title: "召回 · 记忆 2 条", content: "[历史记忆]\n- metric:account_pnl: 账户收益 = 已实现 + 浮动，按交易日汇总，单位元\n- table:dws_account_pnl_daily: 一行 = 一个账户一个交易日" }] : []),
+    ...(hasCk ? [
+      { type: "model_call", model: db.MODEL, ms: 4140, input_tokens: 5820, output_tokens: 264, tokens: 6084, tool_calls: ["db_query"],
+        content: `问题是「${q.slice(0, 40)}」。按记忆里的口径，账户收益在 dws_account_pnl_daily，按交易日汇总；先查最近 5 个交易日，数据量小，直接看结果。` },
+      { type: "tool_call", tool: "db_query", args: { query: sql, db: "ck" } },
+      { type: "tool_result", tool: "db_query", output: db.ckOut({ rows: rows.length, cols: ["trade_date", "pnl", "accounts"], preview: rows, ms: 214 }), duration_ms: 240 },
+    ] : [
+      { type: "model_call", model: db.MODEL, ms: 3920, input_tokens: 5310, output_tokens: 233, tokens: 5543, tool_calls: ["py"],
+        content: `问题是「${q.slice(0, 40)}」。${svc?.title ?? "这个服务"}没有登记只读库，配置都在 vision_cfg 的模型里，用 py 在项目内核里只读查 ORM。` },
+      { type: "tool_call", tool: "py", args: { code: "from vision_cfg.models import Strategy, Account, Portfolio\nprint(Strategy.objects.count(), Account.objects.count(), Portfolio.objects.count())" } },
+      { type: "tool_result", tool: "py", output: "38 214 17", duration_ms: 610 },
+    ]),
+    { type: "model_call", model: db.MODEL, ms: 5310, input_tokens: 6580, output_tokens: 412, tokens: 6992, tool_calls: [], content: "结果拿到了，整理成表格回答。" },
   ];
-  const answer = `近 7 天 GMV 合计 **30.6 万元**，日均 4.37 万，较前 7 天 **+3.2%**。\n\n| 日期 | GMV（元） |\n|---|---|\n| 10-13 | 42,180.50 |\n| 10-14 | 44,902.00 |\n| 10-15 | 43,377.20 |\n| 10-16 | 41,068.90 |\n| 10-17 | 45,511.30 |\n| 10-18 | 47,203.60 |\n| 10-19 | 42,355.10 |\n\n口径：支付成功订单 total_fee 之和，不含退款与测试店铺。`;
+  const answer = hasCk
+    ? `最近 5 个交易日账户收益合计 **${yuan(total)}**（已实现 + 浮动，按交易日汇总）：\n\n| 交易日 | 收益 | 账户数 |\n|---|---|---|\n${rows.map(([d, v, n]) => `| ${d} | ${yuan(v)} | ${n.toLocaleString("en-US")} |`).join("\n")}\n\n\`\`\`sql\n${sql}\n\`\`\``
+    : "当前 vision_cfg 里有 **38 个策略、214 个账户、17 个组合**。\n\n依据：`vision_cfg.models` 的 ORM 只读计数（没有改任何配置）。要看某个策略挂在哪些账户上，告诉我策略代码。";
   const timers: number[] = [];
+  const run = db.runs.find((r) => r.run_id === accepted.run_id);
+  const started = Date.now();
+  const recorded: RunEvent[] = [];
   let t = 0;
-  steps.forEach((s) => { t += 500 + Math.random() * 600; timers.push(window.setTimeout(() => onEvent(s), t)); });
+  steps.forEach((s) => {
+    t += 500 + Math.random() * 600;
+    timers.push(window.setTimeout(() => {
+      onEvent(s);
+      const { type, ...payload } = s;
+      if (type !== "run") recorded.push({ seq: recorded.length + 1, kind: type as RunEvent["kind"], at: now(), payload: payload as RunEvent["payload"] });
+    }, t));
+  });
   t += 900;
   timers.push(window.setTimeout(() => {
     onEvent({ type: "final", status: "success", output: { answer } });
+    // 运行详情里看到的就是这次流出来的过程
+    if (run) Object.assign(run, {
+      status: "success", resolution: "agent", duration_ms: Date.now() - started, tokens: 18_619, finished_at: now(),
+      _events: [...recorded, { seq: recorded.length + 1, kind: "final", at: now(), payload: { content: answer } }], _answer: answer,
+    });
     onDone();
   }, t));
   return () => timers.forEach(clearTimeout);

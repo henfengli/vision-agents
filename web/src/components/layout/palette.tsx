@@ -1,11 +1,12 @@
 /**
- * ⌘K 命令面板：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/记忆）。
+ * 命令面板（⌘K / Ctrl K）：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/记忆）。
  * 键盘：↑↓ 选择、Enter 执行、Esc 关闭。
  */
 import { Dialog, DialogPanel } from "@headlessui/react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
-  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuShieldCheck, LuSun,
+  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuCpu, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare,
+  LuMessageSquareText, LuMessageSquareWarning, LuMonitor, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuSun,
 } from "react-icons/lu";
 
 import { api, useEnvs } from "@/api/hooks";
@@ -19,6 +20,8 @@ let open = false;
 const subs = new Set<() => void>();
 const setOpen = (v: boolean) => { open = v; subs.forEach((s) => s()); };
 export const openPalette = () => setOpen(true);
+/** 唤起面板的快捷键（显示用） */
+export const PALETTE_HOTKEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K";
 
 window.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setOpen(!open); }
@@ -42,12 +45,14 @@ export function CommandPalette() {
 
   useEffect(() => { if (!isOpen) { setQ(""); setHits([]); setSel(0); } }, [isOpen]);
   useEffect(() => {
-    if (!q.trim()) { setHits([]); return; }
+    if (!q.trim()) { setHits([]); setLoading(false); return; }
     setLoading(true);
+    let stale = false;
     const id = setTimeout(() => {
-      api.search(q.trim()).then(setHits).catch(() => setHits([])).finally(() => setLoading(false));
+      api.search(q.trim()).then((h) => { if (!stale) setHits(h); }).catch(() => { if (!stale) setHits([]); })
+        .finally(() => { if (!stale) setLoading(false); });
     }, 160);
-    return () => clearTimeout(id);
+    return () => { stale = true; clearTimeout(id); };
   }, [q]);
 
   const commands: Cmd[] = useMemo(() => {
@@ -60,22 +65,25 @@ export function CommandPalette() {
       { id: "nav-failed", label: "失败的运行", hint: "近 24h", icon: <LuActivity />, group: "跳转", run: go("/runs?status=failed&hours=24"), keywords: "failed" },
       { id: "nav-feedback", label: "反馈", hint: "👎 收件箱", icon: <LuMessageSquareWarning />, group: "跳转", run: go("/runs?view=feedback"), keywords: "feedback thumbs" },
       { id: "nav-replays", label: "回归重放", hint: "用当前定义重跑被 👎 的运行", icon: <LuFlaskConical />, group: "跳转", run: go("/runs?view=replays"), keywords: "replay regression eval" },
-      { id: "nav-chat", label: "对话", icon: <LuMessageSquare />, group: "跳转", run: go("/chat"), keywords: "chat" },
-      { id: "nav-approvals", label: "审批", icon: <LuShieldCheck />, group: "跳转", run: go("/approvals"), keywords: "approvals" },
-      { id: "nav-memory", label: "记忆", icon: <LuBrain />, group: "跳转", run: go("/memory"), keywords: "memory knowledge" },
+      { id: "nav-chat", label: "对话", icon: <LuMessageSquare />, group: "跳转", run: go("/chat"), keywords: "chat session 会话" },
+      { id: "nav-memory", label: "记忆", hint: "记忆 · 方法 · 可升格", icon: <LuBrain />, group: "跳转", run: go("/memory"), keywords: "memory knowledge asset 方法" },
       { id: "nav-roles", label: "角色", icon: <LuBot />, group: "跳转", run: go("/settings/roles"), keywords: "roles" },
-      { id: "nav-settings", label: "设置", icon: <LuSettings />, group: "跳转", run: go("/settings"), keywords: "settings admin" },
+      { id: "nav-settings", label: "设置", icon: <LuSettings />, group: "跳转", run: go("/settings"), keywords: "settings" },
       { id: "nav-prefs", label: "个人偏好", icon: <LuSettings />, group: "跳转", run: go("/settings/preferences"), keywords: "preferences theme" },
       { id: "nav-envs", label: "环境设置", icon: <LuLayers />, group: "跳转", run: go("/settings/envs"), keywords: "envs" },
-      { id: "nav-notify", label: "通知设置", icon: <LuBell />, group: "跳转", run: go("/settings/notifications"), keywords: "notifications dingtalk" },
+      { id: "nav-notify", label: "通知设置", icon: <LuBell />, group: "跳转", run: go("/settings/notifications"), keywords: "notifications dingtalk 钉钉" },
+      { id: "nav-mem-settings", label: "记忆设置", icon: <LuBrain />, group: "跳转", run: go("/settings/memory"), keywords: "memory recall" },
+      { id: "nav-procs", label: "进程设置", hint: "租约", icon: <LuCpu />, group: "跳转", run: go("/settings/processes"), keywords: "process lease 租约" },
+      { id: "nav-prompts", label: "提示词", hint: "平台基础约定", icon: <LuMessageSquareText />, group: "跳转", run: go("/settings/prompts"), keywords: "prompts system" },
       { id: "nav-keys", label: "API 密钥", icon: <LuKeyRound />, group: "跳转", run: go("/settings/api-keys"), keywords: "api key token" },
       { id: "act-run", label: "运行一个任务…", icon: <LuPlay />, group: "操作", run: go("/tasks?run=1"), keywords: "run start" },
-      { id: "act-new-chat", label: "新对话", icon: <LuMessageSquare />, group: "操作", run: go("/chat?new=1"), keywords: "new chat ask" },
-      ...[{ name: "", title: "全部" }, ...(envs ?? [])].map((e) => ({
-        id: "env-" + e.name, label: `切换到环境：${e.name || "全部"}`, icon: <LuLayers />, group: "环境", run: () => setUi({ env: e.name }), keywords: "env " + e.name,
+      { id: "act-new-chat", label: "新对话", icon: <LuMessageSquare />, group: "操作", run: go("/chat"), keywords: "new chat ask" },
+      ...[{ name: "", title: "全部环境" }, ...(envs ?? [])].map((e) => ({
+        id: "env-" + e.name, label: `环境视角：${e.name ? `${e.name}（${e.title}）` : "全部环境"}`, icon: <LuLayers />, group: "环境", run: () => setUi({ env: e.name }), keywords: "env " + e.name + " " + e.title,
       })),
       { id: "theme-light", label: "浅色主题", icon: <LuSun />, group: "外观", run: () => setUi({ theme: "light" }), keywords: "theme light" },
       { id: "theme-dark", label: "深色主题", icon: <LuMoon />, group: "外观", run: () => setUi({ theme: "dark" }), keywords: "theme dark" },
+      { id: "theme-system", label: "主题跟随系统", icon: <LuMonitor />, group: "外观", run: () => setUi({ theme: "system" }), keywords: "theme system auto" },
     ];
   }, [envs]);
 
@@ -101,7 +109,7 @@ export function CommandPalette() {
         <DialogPanel className="flex h-fit max-h-[60vh] w-full max-w-[600px] animate-pop flex-col overflow-hidden rounded-xl border border-line bg-raised shadow-[var(--shadow-pop)]">
           <div className="flex items-center gap-2.5 border-b border-line px-4">
             {loading ? <Spinner /> : <LuSearch className="size-4 text-fg-3" />}
-            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索或输入命令…"
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索或输入命令…" aria-label="搜索或输入命令"
               className="h-12 flex-1 bg-transparent text-[14px] text-fg outline-none placeholder:text-fg-3"
               onKeyDown={(e) => {
                 if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(items.length - 1, s + 1)); }
@@ -111,7 +119,7 @@ export function CommandPalette() {
             <Kbd>Esc</Kbd>
           </div>
           <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-1.5">
-            {items.length === 0 && <div className="px-3 py-8 text-center text-[13px] text-fg-3">没有匹配的结果</div>}
+            {items.length === 0 && <div className="px-3 py-8 text-center text-[13px] text-fg-3">{loading ? "搜索中…" : "没有匹配的结果"}</div>}
             {items.map((c, i) => {
               const header = c.group !== lastGroup ? (lastGroup = c.group) : null;
               return (
@@ -131,7 +139,7 @@ export function CommandPalette() {
           <div className="flex items-center gap-3 border-t border-line px-4 py-2 text-[11.5px] text-fg-3">
             <span className="flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd>选择</span>
             <span className="flex items-center gap-1"><Kbd>↵</Kbd>打开</span>
-            <span className="ml-auto">⌘K 随时唤起</span>
+            <span className="ml-auto">{PALETTE_HOTKEY} 随时唤起</span>
           </div>
         </DialogPanel>
       </div>

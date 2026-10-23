@@ -3,7 +3,7 @@
  * 只看 👎：被指出问题的运行自带"错在哪"（问题类型 + 说明），正好当判卷标准；
  * 模型对照"原答案 + 人指出的问题 + 新答案"给出判定。
  *
- * - ReplayList          运行页「回归」标签：重放批次列表
+ * - ReplayList          运行页「回归重放」标签：重放批次列表
  * - ReplayDetailPage    /replays/:id：逐条并排看原答案与新答案、判定与理由；有没判完的每 5 秒刷新
  * - StartReplayDialog   发起：反馈收件箱带上当前筛选，运行详情点名一条
  */
@@ -12,7 +12,7 @@ import { LuArrowUpRight, LuFlaskConical, LuNotebookPen, LuRefreshCw, LuScale, Lu
 
 import { ApiError } from "@/api/client";
 import { api, useReplay, useReplays } from "@/api/hooks";
-import type { ReplayCounts, ReplayFilter, ReplayItem, ReplayRequest, ReplaySide, ReplayVerdict, RunStatus } from "@/api/types";
+import type { Recipe, ReplayCounts, ReplayFilter, ReplayItem, ReplayRequest, ReplaySide, ReplayVerdict, RunStatus } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, REPLAY_VERDICT, RunStatusBadge, VerdictBadge } from "@/components/status";
 import { Button, LinkButton } from "@/components/ui/button";
@@ -25,7 +25,7 @@ import { ago, datetime, shortId } from "@/lib/format";
 import { invalidate, setQueryData, useMutation } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 
-const LIVE: RunStatus[] = ["queued", "running", "awaiting_approval"];
+const LIVE: RunStatus[] = ["queued", "running"];
 const TONE_TEXT: Partial<Record<Tone, string>> = { ok: "text-ok", warn: "text-warn", bad: "text-bad", idle: "text-fg-2", info: "text-info" };
 
 // ———————— 计数 / 选样条件 ————————
@@ -84,7 +84,7 @@ function FilterChips({ filter, className, empty = "全部被 👎 的 agent 运�
   );
 }
 
-// ———————— 列表（运行页「回归」标签） ————————
+// ———————— 列表（运行页「回归重放」标签） ————————
 
 export function ReplayList() {
   const { data, loading, error, refetch } = useReplays({ refetchInterval: 10_000 });
@@ -106,7 +106,7 @@ export function ReplayList() {
               <li key={r.id}>
                 <Link to={`/replays/${r.id}`} className="group block px-4 py-3 hover:bg-hover/70">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className="min-w-0 truncate text-[13.5px] font-medium text-fg group-hover:text-accent">{r.title || `回归重放 #${r.id}`}</span>
+                    <span className="min-w-0 truncate text-[13.5px] font-medium text-fg group-hover:text-accent" title={r.title || undefined}>{r.title || `回归重放 #${r.id}`}</span>
                     <span className="font-mono text-[11.5px] text-fg-3">#{r.id}</span>
                     {r.counts.pending > 0 && <span className="flex items-center gap-1 text-[11.5px] text-info"><Dot tone="info" pulse />判定中</span>}
                     <span className="ml-auto text-[11.5px] text-fg-3">{r.created_by} · <span title={datetime(r.created_at, true)}>{ago(r.created_at)}</span></span>
@@ -127,9 +127,9 @@ export function ReplayList() {
   );
 }
 
-/** /replays 直接回到运行页的「回归」标签 */
+/** /replays 直接回到运行页的「回归重放」标签 */
 export function ReplaysRedirect() {
-  useEffect(() => navigate("/runs?view=replays", { replace: true }), []);
+  useEffect(() => { navigate("/runs?view=replays", { replace: true }); }, []);
   return null;
 }
 
@@ -187,11 +187,11 @@ export function StartReplayDialog({ open, onClose, preset, hint }: { open: boole
             <Input className="w-24" inputMode="numeric" value={limit} onChange={(e) => setLimit(e.target.value.replace(/\D/g, ""))} />
           </Field>
         )}
-        <Field label="标题" help="不填按范围自动生成，如「data-qa · board · 12 条 👎」">
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="口径提示词 v5 回归" />
+        <Field label="标题" help="不填按范围自动生成，如「data-qa · vision-board · 12 条 👎」">
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="data_searcher 提示词 v5 回归" />
         </Field>
         <Field label="这次改了什么" help="写给以后回看的人：改了哪个角色的提示词、哪个任务的档案…">
-          <Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：data_searcher 的提示词补了「GMV 不扣退款，退款单独看 refund_amount」" />
+          <Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：data_searcher 的提示词补了「收益按交易日统计；大结果用 pandas 读文件汇总」" />
         </Field>
       </div>
     </Dialog>
@@ -226,7 +226,7 @@ export function ReplayDetailPage() {
     }
   });
 
-  if (!Number.isFinite(rid)) return <Page><Empty title="回归重放不存在" description="链接可能已失效" action={<LinkButton to="/runs?view=replays">回到回归列表</LinkButton>} /></Page>;
+  if (!Number.isFinite(rid)) return <Page><Empty title="回归重放不存在" description="链接可能已失效" action={<LinkButton to="/runs?view=replays">回到回归重放列表</LinkButton>} /></Page>;
   if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
   if (!r) return <Page wide><Skeleton className="mb-4 h-20" /><Skeleton className="mb-4 h-32" /><Skeleton className="h-96" /></Page>;
 
@@ -237,7 +237,7 @@ export function ReplayDetailPage() {
   return (
     <Page wide>
       <PageHeader
-        crumbs={[{ label: "运行", to: "/runs" }, { label: "回归", to: "/runs?view=replays" }, { label: <span className="font-mono">#{r.id}</span> }]}
+        crumbs={[{ label: "运行", to: "/runs" }, { label: "回归重放", to: "/runs?view=replays" }, { label: <span className="font-mono">#{r.id}</span> }]}
         icon={<LuFlaskConical />}
         title={r.title || `回归重放 #${r.id}`}
         meta={<>
@@ -321,8 +321,42 @@ function ReplayItemCard({ item }: { item: ReplayItem }) {
   );
 }
 
-/** "任务 v3 → v5 · 角色 v2 → v4"：变了的版本高亮 */
+/** 两份配方之间变了什么：任务、父任务、各层角色（含子代理）、服务、平台提示词、模型、平台版本 */
+function recipeChanges(a: Recipe, b: Recipe): { label: string; from: string; to: string }[] {
+  const out: { label: string; from: string; to: string }[] = [];
+  const add = (label: string, x: string | number | null | undefined, y: string | number | null | undefined, v = true) => {
+    if (x === y || (x == null && y == null)) return;
+    const f = (n: string | number | null | undefined) => (n == null ? "—" : v ? `v${n}` : String(n));
+    out.push({ label, from: f(x), to: f(y) });
+  };
+  add("任务", a.task.version, b.task.version);
+  if (a.task.parent || b.task.parent) add(`父任务 ${(b.task.parent ?? a.task.parent)!.name}`, a.task.parent?.version, b.task.parent?.version);
+  const roles = (r: Recipe) => new Map([...(r.role?.lineage ?? []), ...(r.subagents ?? []).flatMap((s) => s.lineage)].map((x) => [x.name, x.version]));
+  const ra = roles(a), rb = roles(b);
+  for (const name of new Set([...ra.keys(), ...rb.keys()])) add(`角色 ${name}`, ra.get(name), rb.get(name));
+  if (a.service || b.service) add(`服务 ${(b.service ?? a.service)!.name}`, a.service?.version, b.service?.version);
+  add("平台提示词", a.prompts, b.prompts);
+  add("模型", a.model, b.model, false);
+  add("平台", a.platform, b.platform);
+  return out;
+}
+
+/** 有配方时列出变了的（"角色 data_searcher v4 → v5 · 平台提示词 v2 → v3"）；旧运行没有配方，退回"任务 v3 → v5 · 角色 v2 → v4" */
 function VersionDelta({ before, after }: { before: ReplaySide; after: ReplaySide }) {
+  if (before.recipe && after.recipe) {
+    const changes = recipeChanges(before.recipe, after.recipe);
+    if (!changes.length) return <span className="shrink-0 text-[11.5px] text-fg-3">配方未变</span>;
+    return (
+      <span className="flex shrink-0 flex-wrap items-center gap-x-1.5 font-mono text-[11.5px] text-fg-2">
+        {changes.map((c, i) => (
+          <span key={c.label} className="flex items-center gap-1.5">
+            {i > 0 && <span className="text-fg-3">·</span>}
+            <span>{c.label} {c.from} → <span className="font-semibold text-accent">{c.to}</span></span>
+          </span>
+        ))}
+      </span>
+    );
+  }
   const part = (label: string, a: number | null, b: number | null) => {
     if (a === null && b === null) return null;
     const changed = b !== null && a !== b;

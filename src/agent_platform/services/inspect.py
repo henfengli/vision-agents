@@ -88,5 +88,5 @@ def view_dict(view: ServiceView) -> dict:
     return {"service": view.service, "env": view.env, "enabled": view.enabled, "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "repo": view.repo, "ref": view.ref,
             "urls": view.urls, "mcp_servers": view.mcp_servers,
-            "hosts": view.hosts, "readonly_dsn": credentials.redact_dsn(view.readonly_dsn),
+            "hosts": view.hosts, "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
             "config_files": config_files(view), "profile": view.profile, "git": git_state(base) if base else None}

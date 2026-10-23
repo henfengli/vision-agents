@@ -1,4 +1,4 @@
-"""任务：要做的事——目标 + 形态 + 输入 + 触发 + 输出。
+"""任务：要做的事——目标 + 形态 + 输入 + 触发 + 输出（可声明结构化输出 output_schema）。
 
 归属三选一：service="board"（专属）/ service="*"（通用，调用时指定服务）/
 service=None（平台任务，不涉及业务服务）。
@@ -183,12 +183,29 @@ class TaskDef(BaseModel):
     extends: str | None = None
     auto_created: bool = False
     handler: str | None = None
+    # 结构化输出（JSON Schema，顶层须是 object）：声明了就要求 agent 最后按它交回结果，
+    # 校验通过的放在运行输出的 output.data（answer 照旧是文字结论）。给服务 / 自动化调用方用。
+    output_schema: dict[str, Any] | None = None
 
     @field_validator("timeout_s")
     @classmethod
     def _timeout_bounds(cls, v: int) -> int:
         if not 1 <= v <= 7200:
             raise ValueError("超时须在 1~7200 秒之间")
+        return v
+
+    @field_validator("output_schema")
+    @classmethod
+    def _schema_valid(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not v:
+            return None
+        if v.get("type") != "object":
+            raise ValueError("结构化输出的 schema 顶层须是 {\"type\": \"object\", \"properties\": …}")
+        import jsonschema
+        try:
+            jsonschema.Draft202012Validator.check_schema(v)
+        except jsonschema.SchemaError as e:
+            raise ValueError(f"不是合法的 JSON Schema：{e.message}") from None
         return v
 
     @field_validator("profile", mode="before")

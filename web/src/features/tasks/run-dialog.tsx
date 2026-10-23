@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { CreatableSelect, Field, Input, SearchSelect, Select, Segmented, Switch, Textarea, objectNameError } from "@/components/ui/form";
 import { Dialog, toast } from "@/components/ui/overlay";
 import { cn } from "@/lib/cn";
+import { seconds } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { navigate } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -68,10 +69,6 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
   const { data: subtasks } = useSubtasks(task && !task.extends ? task.name : "");
   const subtaskOptions = (subtasks ?? []).map((t) => ({ value: t.name.split(":")[1], label: t.name.split(":")[1], hint: t.title || undefined }));
   const envMeta = envs?.find((e) => e.name === env);
-  const { data: settings } = useSettings();
-  /** 审批默认关闭；打开时（设置 → 审批）这个环境的危险命令与进程启停要人放行 */
-  const approvalIn = settings?.approvals.required_in ?? "off";
-  const needsApproval = !!envMeta && (approvalIn === "all" || (approvalIn === "protected" && envMeta.protected));
 
   const submit = useMutation(async () => {
     if (!task) return;
@@ -108,9 +105,9 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
   return (
     <Dialog open={open} onClose={onClose} size="lg" title="运行任务" description="与 API / SDK 调用走同一条提交路径，闸门链、去重全部生效；不选任务就是通用入口「问一下」"
       footer={<>
-        <span className="mr-auto text-xs text-fg-3">{task ? `超时 ${task.timeout_s}s · 结果${deliverLabel(task)}` : ""}</span>
+        <span className="mr-auto text-xs text-fg-3">{task ? `超时 ${seconds(task.timeout_s)} · 结果${deliverLabel(task)}` : ""}</span>
         <Button onClick={onClose}>取消</Button>
-        <Button variant="primary" icon={<LuPlay />} disabled={!task || !env} loading={submit.pending} onClick={() => submit.mutate(undefined)}>运行</Button>
+        <Button variant="primary" icon={<LuPlay />} disabled={!task || !env} loading={submit.pending} onClick={() => void submit.mutate(undefined)}>运行</Button>
       </>}>
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
@@ -144,17 +141,17 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
           </Field>
         </div>
 
-        {needsApproval && (
+        {envMeta?.protected && (
           <div className="flex items-start gap-2 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-[12.5px] text-warn">
             <LuShieldCheck className="mt-0.5 size-4 shrink-0" />
-            <span>{envMeta!.title}{envMeta!.protected ? "是受保护环境" : "环境"}：执行中的危险命令与进程启停会挂起，等人放行后才继续（设置 → 审批）。</span>
+            <span>{envMeta.title}（{envMeta.name}）是受保护环境：本机副本用的是这个环境的配置，查的是这个环境的库，注意别影响线上。</span>
           </div>
         )}
 
         {task && task.form !== "builtin" && (
-          <Field label="对象（子任务，可选）" help="针对某个具体对象运行：带上它的专属档案，知识也归到它名下。输入新名字会继承父任务自动创建。">
+          <Field label="对象（子任务，可选）" help="针对某个具体对象运行：带上它的专属档案，记忆也归到它名下。输入新名字会继承父任务自动创建。">
             <CreatableSelect value={subtask} onChange={setSubtask} options={subtaskOptions} validate={objectNameError}
-              placeholder={`${task.name} 的对象，如 dwd_trade_order`} />
+              placeholder={`${task.name} 的对象，如 ${task.service === "vision-dagster" ? "dws_account_pnl_daily" : "某个资产或报表"}`} />
           </Field>
         )}
 

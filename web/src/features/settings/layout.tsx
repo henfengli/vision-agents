@@ -4,22 +4,22 @@
  */
 import { type ReactNode } from "react";
 import {
-  LuBell, LuBot, LuBrain, LuCpu, LuKeyRound, LuLayers, LuShieldCheck, LuUserCog,
+  LuBell, LuBot, LuBrain, LuCpu, LuKeyRound, LuLayers, LuMessageSquareText, LuUserCog,
 } from "react-icons/lu";
 
 import { Page } from "@/components/layout/shell";
 import { cn } from "@/lib/cn";
-import { Link, useActive } from "@/lib/router";
+import { Link, useActive, useLocation } from "@/lib/router";
 
 const GROUPS: { title: string; hint: string; items: { to: string; label: string; icon: ReactNode }[] }[] = [
   { title: "个人", hint: "只存在这台浏览器", items: [{ to: "/settings/preferences", label: "个人偏好", icon: <LuUserCog /> }] },
   {
     title: "平台", hint: "对所有人生效 · 有版本历史", items: [
       { to: "/settings/envs", label: "环境", icon: <LuLayers /> },
-      { to: "/settings/approvals", label: "审批", icon: <LuShieldCheck /> },
       { to: "/settings/notifications", label: "通知", icon: <LuBell /> },
       { to: "/settings/memory", label: "记忆", icon: <LuBrain /> },
       { to: "/settings/processes", label: "进程", icon: <LuCpu /> },
+      { to: "/settings/prompts", label: "提示词", icon: <LuMessageSquareText /> },
     ],
   },
   {
@@ -31,9 +31,11 @@ const GROUPS: { title: string; hint: string; items: { to: string; label: string;
 ];
 
 function NavLink({ to, label, icon }: { to: string; label: string; icon: ReactNode }) {
-  const active = useActive(to);
+  const { path } = useLocation();
+  // /settings 本身就是个人偏好
+  const active = useActive(to) || (to === "/settings/preferences" && path === "/settings");
   return (
-    <Link to={to} className={cn("flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] transition-colors [&_svg]:size-4",
+    <Link to={to} aria-current={active ? "page" : undefined} className={cn("flex h-8 shrink-0 items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 text-[13px] transition-colors [&_svg]:size-4",
       active ? "bg-panel font-medium text-fg shadow-[0_0_0_1px_var(--color-line)]" : "text-fg-2 hover:bg-hover hover:text-fg")}>
       <span className={active ? "text-accent" : "text-fg-3"}>{icon}</span>{label}
     </Link>
@@ -60,7 +62,7 @@ export function SettingsLayout({ title, description, actions, children, wide }: 
         <div className="min-w-0 flex-1">
           <div className="mb-5 flex flex-wrap items-start gap-3">
             <div className="min-w-0 flex-1">
-              <h1 className="text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
+              <h1 className="min-w-0 truncate text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
               {description && <div className="mt-0.5 max-w-3xl text-[13px] leading-relaxed text-fg-3">{description}</div>}
             </div>
             {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

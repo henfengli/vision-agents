@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...domain import Rejected
-from ..deps import ADMIN, RT, WHO, Caller, Runtime
+from ..deps import RT, WHO, Caller, Runtime
 from ..schemas import SubtaskBody
 from .definitions import task_summaries
 
@@ -24,7 +24,7 @@ async def list_subtasks(name: str, rt: Runtime = RT, _: Caller = WHO):
 
 
 @router.post("/{name}/subtasks", status_code=201)
-async def create_subtask(name: str, body: SubtaskBody, rt: Runtime = RT, who: Caller = ADMIN):
+async def create_subtask(name: str, body: SubtaskBody, rt: Runtime = RT, who: Caller = WHO):
     parent = await rt.registry.task_raw(name)
     if parent is None:
         raise Rejected.not_found(f"任务 {name}")

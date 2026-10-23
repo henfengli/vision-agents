@@ -1,6 +1,6 @@
-# ~/.config/systemd/user/agent-svc@.service —— 用户级部署的业务进程模板单元
+# ~/.config/systemd/user/agent-svc@.service —— 业务进程模板单元（systemd --user）
 # 实例名 = <服务>:<环境>:<进程>。平台写好启动规格，svcrun 在 bwrap 里起业务进程（配置按环境 bind、
-# 别的环境与平台密钥遮蔽、独立 pid 命名空间）。平台用户管理自己的用户单元，不需要 polkit。
+# 别的环境与平台密钥遮蔽、独立 pid 命名空间）。平台用户管理自己的用户单元，不需要 root。
 [Unit]
 Description=agent-platform managed service %i
 

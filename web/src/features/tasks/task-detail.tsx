@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import {
-  LuActivity, LuArrowRight, LuBrain, LuCalendarClock, LuEllipsis, LuGitBranch, LuHistory, LuLayoutDashboard, LuListTodo, LuPencil,
+  LuActivity, LuArrowRight, LuBraces, LuBrain, LuCalendarClock, LuEllipsis, LuGitBranch, LuHistory, LuLayoutDashboard, LuListTodo, LuPencil,
   LuPlay, LuPlus, LuPower, LuScrollText, LuSettings, LuTrash2, LuWebhook, LuZap,
 } from "react-icons/lu";
 
@@ -17,13 +17,13 @@ import { SaveBar } from "@/components/save-bar";
 import { EnvBadge, RoleChip, RunStatusDot, TRIGGER } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
-import { KeyValueEditor, Markdown, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
+import { CodeBlock, KeyValueEditor, Markdown, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
 import { Checkbox, Field, Input, SearchInput, Textarea, objectNameError } from "@/components/ui/form";
 import { Menu, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, Stat } from "@/components/ui/primitives";
 import { describeCron, nextRuns } from "@/lib/cron";
 import { cn } from "@/lib/cn";
-import { ago, dayjs, duration, pct } from "@/lib/format";
+import { ago, dayjs, duration, pct, seconds } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -62,9 +62,11 @@ export function TaskDetailPage() {
       danger: task.enabled, confirmText: task.enabled ? "停用" : "启用",
     });
     if (!ok) return;
-    await api.update("tasks", task.name, { enabled: !task.enabled });
-    toast(task.enabled ? "已停用" : "已启用");
-    invalidate("tasks");
+    try {
+      await api.update("tasks", task.name, { enabled: !task.enabled });
+      toast(task.enabled ? "已停用" : "已启用");
+      invalidate("tasks");
+    } catch (e) { toast.error(task.enabled ? "停用失败" : "启用失败", (e as Error).message); }
   };
 
   const remove = async () => {
@@ -131,7 +133,7 @@ export function TaskDetailPage() {
           {tab === "memory" && <MemoryTab task={task} />}
           {tab === "definition" && (isSub ? <OverridesTab task={task} parent={parent} /> : <TaskDefinitionEditor task={task} onSaved={refetch} />)}
           {tab === "runs" && <TaskRuns name={name} />}
-          {tab === "versions" && <VersionHistory kind="tasks" name={name} onRestored={refetch} />}
+          {tab === "versions" && <VersionHistory kind="tasks" name={name} onRestored={refetch} stats />}
         </>
       )}
       <RunTaskDialog open={runOpen} onClose={() => setRunOpen(false)} task={parentName ?? name} subtask={object ?? undefined} />
@@ -185,8 +187,8 @@ function OverviewTab({ task, onEditProfile }: { task: TaskSummary; onEditProfile
               ["环境", task.envs.length ? <span className="flex flex-wrap gap-1">{task.envs.map((e) => <EnvBadge key={e} env={e} />)}</span> : "全部环境"],
               ["结果", <DeliverText task={task} />],
               ["记忆", <MemoryText task={task} />],
-              ["去重", task.dedup ? <span><code className="font-mono text-[12px]">{task.dedup.key}</code> · {Math.round(task.dedup.window_s / 60)} 分钟窗口</span> : "不去重"],
-              ["超时", `${task.timeout_s} 秒`],
+              ["去重", task.dedup ? <span><code className="font-mono text-[12px]">{task.dedup.key}</code> · {seconds(task.dedup.window_s)}窗口</span> : "不去重"],
+              ["超时", seconds(task.timeout_s)],
             ]} />
           </div>
         </Card>
@@ -203,6 +205,12 @@ function OverviewTab({ task, onEditProfile }: { task: TaskSummary; onEditProfile
             </ul>
           )}
         </Card>
+        {task.output_schema && (
+          <Card>
+            <CardHeader title="结构化输出" icon={<LuBraces />} description="agent 最后按它交回结果，通过校验的放在 output.data" />
+            <div className="p-3"><CodeBlock code={JSON.stringify(task.output_schema, null, 2)} maxHeight={300} /></div>
+          </Card>
+        )}
       </div>
     </div>
   );
@@ -252,7 +260,7 @@ function TriggerRow({ tr }: { tr: Trigger }) {
           {tr.map && <div className="text-xs text-fg-3">字段映射：{Object.entries(tr.map).map(([k, v]) => <code key={k} className="mr-2 font-mono">{k}←{v}</code>)}</div>}
           {!!tr.rules?.length && (
             <div className="overflow-hidden rounded-md border border-line">
-              <div className="border-b border-line bg-sunken/60 px-3 py-1.5 text-[11.5px] text-fg-3">规则先行：命中直接给结论（也记一条 run，resolution=rule），未命中才交给 agent</div>
+              <div className="border-b border-line bg-sunken/60 px-3 py-1.5 text-[11.5px] text-fg-3">规则先行：命中直接给结论（也记一条运行，resolution=rule），未命中才交给 agent</div>
               <Table>
                 <tbody>
                   {tr.rules.map((r, i) => (

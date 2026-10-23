@@ -42,14 +42,14 @@ export function ToolChip({ tool, onRemove }: { tool: string; onRemove?: () => vo
 }
 
 export function RolesPage() {
-  const { data, loading } = useRoles();
+  const { data, loading, error, refetch } = useRoles();
   const { data: tasks } = useTasks();
   const [creating, setCreating] = useState(false);
   return (
     <SettingsLayout title="角色" description={<>谁来做：系统提示 + 工具 + 可委派的子代理。任务指定角色，执行时只拿得到它写明的工具，工具在运行时绑定到该次的服务×环境；服务自己声明的 MCP 工具默认自动带上。{SUBAGENT_HINT}。</>}
       actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建角色</Button>}>
       <Card>
-        {loading ? <SkeletonRows /> : !data?.length ? <Empty icon={<LuBot />} title="还没有角色" /> : (
+        {error && !data ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows /> : !data?.length ? <Empty icon={<LuBot />} title="还没有角色" action={<Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建角色</Button>} /> : (
           <Table>
             <thead><tr><Th>角色</Th><Th>工具</Th><Th>子代理</Th><Th>继承</Th><Th>被任务使用</Th><Th className="text-right">版本</Th></tr></thead>
             <tbody>
@@ -100,8 +100,8 @@ function CreateRoleDialog({ open, onClose, roles }: { open: boolean; onClose: ()
     <Dialog open={open} onClose={onClose} title="新建角色"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <div className="space-y-3.5">
-        <Field label="角色名" required help="小写字母、数字、下划线" error={name && !valid ? "格式不对" : null}><Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="ops_analyst" /></Field>
-        <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="运维分析" /></Field>
+        <Field label="角色名" required help="小写字母开头，可含数字、下划线；创建后不可改" error={name && !valid ? "格式不对：小写字母开头，可含数字、下划线" : null}><Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="report_checker" /></Field>
+        <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="报表核对" /></Field>
         <Field label="继承自（可选）" help="继承父角色的提示词、工具与子代理。写了就替换：子角色写了工具 / 子代理 / 自动带服务工具就整体替换父角色的，没写就跟随；提示词在父角色之后追加">
           <Select value={ext || null} onChange={setExt} placeholder="不继承" options={[{ value: "", label: "不继承" }, ...roles.map((r) => ({ value: r.name, label: r.title || r.name, hint: r.name }))]} />
         </Field>
@@ -155,7 +155,7 @@ export function RoleDetailPage() {
             </div>
           )}
           {tab === "edit" && <RoleEditor role={role} onSaved={refetch} />}
-          {tab === "versions" && <VersionHistory kind="roles" name={name} onRestored={refetch} />}
+          {tab === "versions" && <VersionHistory kind="roles" name={name} onRestored={refetch} stats />}
         </>
       )}
     </SettingsLayout>
@@ -170,7 +170,7 @@ function ToolsCard({ tools, serviceTools }: { tools: string[]; serviceTools: boo
     <Card>
       <CardHeader title="生效的工具" description="运行时绑定到本次的服务×环境，签名里没有服务/环境参数" />
       <ul className="divide-y divide-line">
-        {tools.length === 0 && <li className="px-4 py-3 text-[12.5px] text-fg-3">没有工具（只有总是可用的文件工具）</li>}
+        {tools.length === 0 && <li className="px-4 py-3 text-[12.5px] text-fg-3">没有工具</li>}
         {tools.map((t) => {
           const info = meta?.tools.find((x) => x.name === t);
           const members = isMcpGroup(t) ? mcpOf(t.slice(4)) : [];
@@ -178,7 +178,7 @@ function ToolsCard({ tools, serviceTools }: { tools: string[]; serviceTools: boo
             <li key={t} className="px-4 py-2">
               <div className="flex items-center gap-2">
                 {t === ALL || isMcpGroup(t) ? <ToolChip tool={t} /> : <code className="font-mono text-[12.5px] text-fg">{t}</code>}
-                {info?.dangerous && <Badge tone="warn" icon={<LuTriangleAlert />}>危险</Badge>}
+                {info?.dangerous && <Tooltip content="会改动东西：执行命令、启停进程"><span><Badge tone="warn" icon={<LuTriangleAlert />}>有副作用</Badge></span></Tooltip>}
               </div>
               <div className="mt-0.5 text-[11.5px] text-fg-3">
                 {t === ALL ? "全部内置工具 + 全部平台 MCP 工具"
@@ -275,7 +275,7 @@ function RoleEditor({ role, onSaved }: { role: Role; onSaved: () => void }) {
   const others = (roles ?? []).filter((r) => r.name !== role.name);
   const toolsHint = parent
     ? d.tools.length ? `写了就替换：只用这里选的，不再跟随 ${parent.name}` : `没选 = 跟随 ${parent.name}${parentResolved ? `（${parentResolved.tools.join("、") || "无"}）` : ""}`
-    : "危险工具（⚠）在设置里打开审批后，命中危险模式会挂起等人放行";
+    : "标 ⚠ 的工具会改动东西（执行命令、启停进程），只给需要的角色";
 
   return (
     <div className="grid gap-4 pb-20 xl:grid-cols-[1fr_400px]">
@@ -293,7 +293,7 @@ function RoleEditor({ role, onSaved }: { role: Role; onSaved: () => void }) {
             {d.extends ? (
               <Field label="追加提示词" help={`接在 ${d.extends} 的提示词之后`}><Textarea mono rows={10} value={d.prompt_append} onChange={(e) => setD({ ...d, prompt_append: e.target.value })} /></Field>
             ) : (
-              <Field label="系统提示" help="平台会在它前面自动拼上：服务×环境视图、档案、召回的记忆"><Textarea mono rows={18} value={d.prompt} onChange={(e) => setD({ ...d, prompt: e.target.value })} /></Field>
+              <Field label="系统提示" help={<>前面接平台基础约定（<Link to="/settings/prompts" className="text-accent hover:underline">设置 → 提示词</Link>）；服务×环境视图、档案、召回的记忆由平台另外注入</>}><Textarea mono rows={18} value={d.prompt} onChange={(e) => setD({ ...d, prompt: e.target.value })} /></Field>
             )}
           </div>
         </Card>

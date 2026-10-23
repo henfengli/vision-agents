@@ -1,24 +1,26 @@
 /**
- * 运行详情：主视图是步骤时间线——思考 / 工具调用（参数 + 结果）/ 审批 / 最终答案，逐步 👍👎；
- * 右栏是上下文（输入、执行谱系、注入的档案、召回与沉淀、反馈、同会话运行）。
+ * 运行详情：主视图是步骤时间线——模型调用（带思考过程的可展开；旧运行是"思考"）/ 工具调用（参数 + 结果）/ 最终答案，逐步 👍👎；
+ * 子代理里发生的步骤带子代理标签；查库（db_query，旧运行 sql_query）的查询与结果单独排版。
+ * 右栏是上下文（输入、配方、执行信息、注入的档案、召回与沉淀、反馈、同会话运行）。
  * 进行中的运行 1.5 秒增量刷新；被 👎 过的 agent 运行可以用当前定义重放（回归）。
  */
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import {
   LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
-  LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuShieldCheck, LuSparkles, LuWrench,
+  LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
 import { api, useMeta, useRun, useRunEvents } from "@/api/hooks";
-import type { KnowledgeKind, Run, RunEvent } from "@/api/types";
+import type { KnowledgeKind, RecipeRef, Run, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TriggerBadge } from "@/components/status";
+import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TRIGGER, TriggerBadge } from "@/components/status";
+import { ToolArgs, ToolOutput, summarizeArgs } from "@/components/tool-call";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
 import { Field, Textarea } from "@/components/ui/form";
 import { Dialog, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, DescList, ErrorState, SectionTitle, Skeleton } from "@/components/ui/primitives";
+import { Badge, Card, CardHeader, DescList, ErrorState, Kbd, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
@@ -26,7 +28,9 @@ import { Link, navigate, useParams } from "@/lib/router";
 import { KindBadge } from "../memory/memory";
 import { StartReplayDialog } from "./replays";
 
-const LIVE = new Set(["queued", "running", "awaiting_approval"]);
+const LIVE = new Set(["queued", "running"]);
+/** 思考过程不长的默认展开；长的收着，只露前两行 */
+const SHORT_THOUGHT = 240;
 
 /** 当前用户对整次（step=0）或某一步的评价 */
 function useMine(run: Run) {
@@ -48,7 +52,6 @@ export function RunDetailPage() {
       <Header run={run} />
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-4">
-          {run.pending_approval && <ApprovalBanner run={run} />}
           <Timeline run={run} events={events} live={live} />
         </div>
         <Sidebar run={run} />
@@ -68,9 +71,11 @@ function Header({ run }: { run: Run }) {
       navigate(`/runs/${r.run_id}`);
     } catch (e) { toast.error("纠正失败", (e as Error).message); }
   };
+  const [busy, setBusy] = useState<"cancel" | "again" | null>(null);
   const cancel = async () => {
-    if (!(await confirm({ title: "取消这次运行？", description: "终止执行并落 cancelled 终态；挂起的审批一并拒绝。", danger: true, confirmText: "取消运行" }))) return;
-    try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); }
+    if (!(await confirm({ title: "取消这次运行？", description: "终止执行，运行落 cancelled 终态；已经做完的步骤保留在时间线里。", danger: true, confirmText: "取消运行" }))) return;
+    setBusy("cancel");
+    try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); } finally { setBusy(null); }
   };
   const [correcting, setCorrecting] = useState(false);
   const [replaying, setReplaying] = useState(false);
@@ -80,14 +85,16 @@ function Header({ run }: { run: Run }) {
   /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run，跳过去重） */
   const again = async () => {
     const ok = await confirm(failed
-      ? { title: "断点续跑？", description: "沿用同一个 run id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
-      : { title: "用同样的输入再跑一次？", description: "新开一个 run，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
+      ? { title: "断点续跑？", description: "沿用同一个运行 id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
+      : { title: "用同样的输入再跑一次？", description: "新开一次运行，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
     if (!ok) return;
+    setBusy("again");
     try {
       const r = failed ? await api.resume(run.run_id) : await api.rerun(run.run_id);
       invalidate("runs");
+      toast(failed ? "已从断点续跑" : "已重新提交", { description: shortId(r.run_id) });
       navigate(`/runs/${r.run_id}`);
-    } catch (e) { toast.error("提交失败", (e as Error).message); }
+    } catch (e) { toast.error("提交失败", (e as Error).message); } finally { setBusy(null); }
   };
   return (
     <PageHeader
@@ -117,8 +124,8 @@ function Header({ run }: { run: Run }) {
         {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
         {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
         {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)} title="改完提示词 / 任务定义 / 档案后，用当前定义重跑这条，看 👎 指出的问题改好没有">重放</Button>}
-        {live ? <Button variant="danger-ghost" icon={<LuBan />} onClick={cancel}>取消</Button>
-          : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
+        {live ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消</Button>
+          : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
         <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
         {replayable && <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={{ run_ids: [run.run_id] }} />}
       </>}
@@ -131,59 +138,37 @@ function CorrectDialog({ run, open, onClose }: { run: Run; open: boolean; onClos
   const [text, setText] = useState("");
   const submit = useMutation(async () => {
     try {
-      const r = await api.correct(run.run_id, text);
+      const r = await api.correct(run.run_id, text.trim());
       invalidate("runs");
       onClose();
       setText("");
+      toast("已提交纠正", { description: "在同一会话里开了新一轮" });
       navigate(`/runs/${r.run_id}`);
     } catch (e) { toast.error("提交失败", (e as Error).message); }
   });
+  const go = () => { if (text.trim() && !submit.pending) void submit.mutate(undefined); };
   return (
     <Dialog open={open} onClose={onClose} size="lg" title="纠正这次结论" description="在同一会话里新开一次运行：agent 看到原结论和你的纠正后重答。纠正本身会记成人工记忆。"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!text.trim()} loading={submit.pending} onClick={() => submit.mutate(undefined)}>提交纠正</Button></>}>
+      footer={<>
+        <span className="mr-auto hidden items-center gap-1 text-[11.5px] text-fg-3 sm:flex"><Kbd>Ctrl</Kbd>+<Kbd>Enter</Kbd> 提交</span>
+        <Button onClick={onClose}>取消</Button>
+        <Button variant="primary" disabled={!text.trim()} loading={submit.pending} onClick={go}>提交纠正</Button>
+      </>}>
       {run.output?.answer && <div className="mb-3 max-h-40 overflow-auto rounded-md border border-line bg-sunken/50 p-3 text-[12.5px] text-fg-2"><Markdown text={run.output.answer} /></div>}
-      <Field label="哪里不对" required help="说清楚正确的口径或事实，例如：GMV 不扣退款，退款看 refund_amount">
-        <Textarea autoFocus rows={4} value={text} onChange={(e) => setText(e.target.value)} />
+      <Field label="哪里不对" required help="说清楚正确的口径或事实，例如：账户收益按交易日统计，不按自然日；数据在 ClickHouse 的 dws_account_pnl_daily">
+        <Textarea autoFocus rows={4} value={text} onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go(); } }} />
       </Field>
     </Dialog>
   );
 }
 
-function ApprovalBanner({ run }: { run: Run }) {
-  const a = run.pending_approval!;
-  const [busy, setBusy] = useState<string | null>(null);
-  const decide = async (approve: boolean) => {
-    setBusy(approve ? "a" : "r");
-    try {
-      await (approve ? api.approve(a.id) : api.reject(a.id));
-      toast(approve ? "已放行" : "已拒绝");
-      invalidate("runs"); invalidate("approvals");
-    } catch (e) { toast.error("处理失败", (e as Error).message); } finally { setBusy(null); }
-  };
-  return (
-    <div className="rounded-lg border border-warn/40 bg-warn-soft p-4">
-      <div className="flex items-start gap-3">
-        <LuShieldCheck className="mt-0.5 size-5 shrink-0 text-warn" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-fg">等待审批：{a.title}</div>
-          <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-panel/70 p-2.5 font-mono text-[12px] text-fg">{a.detail}</pre>
-          <div className="mt-2 text-xs text-fg-3">发起 {ago(a.created_at)} · {a.requested_by}{a.expires_at && ` · ${ago(a.expires_at).replace("内", "")}后超时视同拒绝`}</div>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          <Button variant="danger-ghost" loading={busy === "r"} onClick={() => decide(false)}>拒绝</Button>
-          <Button variant="primary" loading={busy === "a"} onClick={() => decide(true)}>放行</Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ———————— 时间线（主视图） ————————
 
-/** 一步：工具调用与它的结果合成一步（参数 + 结果），其余事件各占一步 */
+/** 一步：工具调用与它的结果合成一步（参数 + 结果），其余事件各占一步；model = model_call，thought 只在旧运行里有 */
 interface Step {
   key: string;
-  kind: "stage" | "thought" | "tool" | "approval" | "final" | "error";
+  kind: "stage" | "model" | "thought" | "tool" | "final" | "error";
   at: string;
   seq: number;                 // 0 = 由运行输出补出来的一步（事件里没有），不能单独评价
   call?: RunEvent;
@@ -199,8 +184,10 @@ function buildSteps(run: Run, events: RunEvent[]): Step[] {
       const s: Step = { key: "t" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, call: ev, ev };
       steps.push(s); open.push(s);
     } else if (ev.kind === "tool_result") {
-      const i = open.findIndex((s) => s.call?.payload.tool === ev.payload.tool);
+      const i = open.findIndex((s) => s.call?.payload.tool === ev.payload.tool && s.call?.payload.agent === ev.payload.agent);
       if (i >= 0) { open[i].result = ev; open.splice(i, 1); } else steps.push({ key: "r" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, result: ev, ev });
+    } else if (ev.kind === "model_call") {
+      steps.push({ key: "m" + ev.seq, kind: "model", at: ev.at, seq: ev.seq, ev });
     } else {
       steps.push({ key: ev.kind + ev.seq, kind: ev.kind, at: ev.at, seq: ev.seq, ev });
     }
@@ -221,12 +208,15 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
   const [expandAll, setExpandAll] = useState(false);
   const t0 = run.created_at ? new Date(run.created_at).getTime() : 0;
   const tools = steps.filter((s) => s.kind === "tool").length;
+  const models = steps.filter((s) => s.kind === "model").length;
   const thoughts = steps.filter((s) => s.kind === "thought").length;
   const final = steps.find((s) => s.kind === "final" || s.kind === "error");
+  /** 旧运行只有 thought：照旧数思考 */
+  const counted = thoughts && !models ? `${thoughts} 次思考` : `${models} 次模型调用`;
   return (
     <Card>
       <CardHeader title="执行过程" icon={<LuSparkles />}
-        description={events ? `${thoughts} 次思考 · ${tools} 次工具调用${live ? " · 实时" : ""}` : "加载中"}
+        description={events ? `${counted} · ${tools} 次工具调用${live ? " · 实时" : ""}` : "加载中"}
         actions={<>
           {final && steps.length > 6 && (
             <Button size="xs" variant="ghost" icon={<LuArrowDown />} onClick={() => document.getElementById("step-final")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
@@ -244,7 +234,7 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
           {live && (
             <li className="flex items-center gap-3 py-2 pl-[3px]">
               <span className="relative flex size-[18px] items-center justify-center"><span className="absolute size-2.5 animate-ping rounded-full bg-info/50" /><span className="size-2 rounded-full bg-info" /></span>
-              <span className="text-[12.5px] text-fg-3">{run.status === "awaiting_approval" ? "挂起中：有人放行后继续" : run.status === "queued" ? "排队中…" : "执行中…下一步会实时出现在这里"}</span>
+              <span className="text-[12.5px] text-fg-3">{run.status === "queued" ? "排队中…" : "执行中…下一步会实时出现在这里"}</span>
             </li>
           )}
         </ol>
@@ -253,34 +243,46 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
   );
 }
 
+/** 内容长的阶段：折叠，展开看全文（系统提示；代码同步的拉取、步骤命令与输出、配置上游 diff） */
+const BLOCK_STAGES = new Set(["system", "pull", "sync_step", "config_outdated"]);
+
 const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
   stage: { icon: <LuFlag />, cls: "bg-sunken text-fg-3", label: "阶段" },
+  model: { icon: <LuSparkles />, cls: "bg-accent-soft text-accent", label: "模型调用" },
   thought: { icon: <LuSparkles />, cls: "bg-accent-soft text-accent", label: "思考" },
   tool: { icon: <LuWrench />, cls: "bg-info-soft text-info", label: "工具调用" },
-  approval: { icon: <LuShieldCheck />, cls: "bg-warn-soft text-warn", label: "审批" },
   final: { icon: <LuCircleCheck />, cls: "bg-ok-soft text-ok", label: "最终答案" },
   error: { icon: <LuCircleAlert />, cls: "bg-bad-soft text-bad", label: "出错" },
 };
 
 function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean }) {
   const [open, setOpen] = useState<boolean | null>(null);
-  const expanded = open ?? (expandAll || step.kind === "thought" || step.kind === "error" || step.kind === "approval" || step.kind === "final");
+  const p = step.ev.payload;
+  /** 模型调用：带思考过程的能展开（短的默认展开）；平台辅助调用（记忆沉淀…）用用途当标题 */
+  const thinking = step.kind === "thought" || (step.kind === "model" && !!p.content);
+  const thoughtText = thinking ? String(p.content) : "";
+  const block = step.kind === "stage" && BLOCK_STAGES.has(String(p.stage));
+  const expanded = open ?? (expandAll || (thinking && thoughtText.length <= SHORT_THOUGHT) || step.kind === "error" || step.kind === "final");
   const mine = useMine(run)(step.seq);
   const others = step.seq ? run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0) : [];
-  const rateable = step.seq > 0 && (step.kind === "tool" || step.kind === "thought" || step.kind === "final");
-  const p = step.ev.payload;
+  const rateable = step.seq > 0 && (step.kind === "tool" || step.kind === "model" || step.kind === "thought" || step.kind === "final");
   const meta = STEP_META[step.kind];
   const tool = step.call?.payload.tool ?? step.result?.payload.tool;
+  const agent = step.kind === "tool" ? (step.call ?? step.result)?.payload.agent : p.agent;
   const title = step.kind === "tool"
-    ? <span className="flex items-center gap-2"><span className="shrink-0 text-fg-3">{step.call ? "工具调用" : "工具结果"}</span><code className="shrink-0 font-mono text-[12.5px] font-medium text-fg">{tool}</code><span className="truncate font-normal text-fg-3">{summarizeArgs(step.call?.payload.args)}</span></span>
-    : step.kind === "approval" ? (p.title ?? meta.label)
-      : step.kind === "stage" ? (p.title ?? p.stage)
-        : step.kind === "error" && run.error_code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{run.error_code}</code></span>
-          : meta.label;
+    ? <span className="flex min-w-0 items-center gap-2"><span className="shrink-0 text-fg-3">{step.call ? "工具调用" : "工具结果"}</span><code className="shrink-0 font-mono text-[12.5px] font-medium text-fg">{tool}</code><span className="truncate font-normal text-fg-3" title={summarizeArgs(step.call?.payload.args, tool)}>{summarizeArgs(step.call?.payload.args, tool)}</span></span>
+    : step.kind === "model" ? (p.purpose || (p.content ? "思考" : meta.label))
+        : step.kind === "stage" ? (p.title ?? p.stage)
+          : step.kind === "error" && run.error_code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{run.error_code}</code></span>
+            : meta.label;
   const right = step.kind === "tool" && step.result?.payload.duration_ms !== undefined ? duration(step.result.payload.duration_ms as number)
-    : step.kind === "tool" && !step.result && LIVE.has(run.status) ? "进行中" : p.tokens ? `${num(p.tokens as number)} tok` : null;
-  const collapsible = step.kind !== "stage";
+    : step.kind === "tool" && !step.result && LIVE.has(run.status) ? "进行中"
+      : step.kind === "model" ? (p.ms != null ? duration(p.ms) : null)
+        : step.kind === "stage" && p.duration_ms != null ? duration(p.duration_ms)
+          : p.tokens ? `${num(p.tokens)} tok` : null;
+  const collapsible = step.kind === "stage" ? block : step.kind === "model" ? thinking : true;
   const outcome = step.kind === "final" || step.kind === "error";
+  const data = step.kind === "final" ? p.data ?? run.output?.data : undefined;
   return (
     <li id={outcome ? "step-final" : undefined} className="group relative flex scroll-mt-4 gap-3 pb-1">
       {!last && <span className="absolute left-[11px] top-7 bottom-0 w-px bg-line" />}
@@ -288,8 +290,10 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
       <div className="min-w-0 flex-1 pb-2">
         <div className={cn("flex min-h-7 items-center gap-2 rounded-md px-1.5 text-[13px]", collapsible && "cursor-pointer hover:bg-hover/60")} onClick={() => collapsible && setOpen(!expanded)}>
           {collapsible && <span className="text-fg-3">{expanded ? <LuChevronDown className="size-3.5" /> : <LuChevronRight className="size-3.5" />}</span>}
-          <span className={cn("min-w-0 flex-1 truncate", step.kind === "stage" ? "text-fg-2" : "font-medium text-fg")}>{title}</span>
-          {step.kind === "stage" && p.content && <span className="truncate text-[12px] text-fg-3">{String(p.content)}</span>}
+          {agent && <Badge tone="info" icon={<LuBot />} title={`子代理 ${agent} 里的这一步`}>{agent}</Badge>}
+          <span className={cn("min-w-0 flex-1 truncate", step.kind === "stage" ? "text-fg-2" : "font-medium text-fg")}
+            title={typeof title === "string" ? title : undefined}>{title}</span>
+          {step.kind === "stage" && !block && p.content && <span className="min-w-0 max-w-[45%] truncate text-[12px] text-fg-3" title={String(p.content)}>{String(p.content)}</span>}
           {right && <span className="shrink-0 text-[11.5px] tabular-nums text-fg-3">{right}</span>}
           {step.kind === "final" && <span className="shrink-0" onClick={(e) => e.stopPropagation()}><CopyButton text={String(p.content ?? "")} label="复制" /></span>}
           <span className="w-14 shrink-0 text-right font-mono text-[11px] text-fg-3" title={clock(step.at)}>+{duration(Math.max(0, offset))}</span>
@@ -300,6 +304,12 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
             </span>
           )}
         </div>
+        {step.kind === "model" && <ModelMeta p={p} className={collapsible ? "pl-[30px]" : "pl-1.5"} />}
+        {thinking && !expanded && (
+          <button type="button" onClick={() => setOpen(true)} className="mt-0.5 block w-full pl-[30px] text-left">
+            <span className="line-clamp-2 whitespace-pre-wrap text-[12px] leading-relaxed text-fg-3 hover:text-fg-2">{thoughtText}</span>
+          </button>
+        )}
         {others.length > 0 && (
           <div className="ml-6 mt-1 space-y-2 rounded-md border border-bad/20 bg-bad-soft/40 px-2.5 py-2">
             {others.map((f) => <FeedbackItem key={f.id} entry={f} showStep={false} />)}
@@ -307,15 +317,19 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
         )}
         {expanded && collapsible && (
           <div className="mt-1.5 space-y-2 pl-6">
-            {step.kind === "thought" && <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-fg-2">{String(p.content)}</div>}
-            {step.kind === "final" && (
-              <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
+            {thinking && <div className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-fg-2">{thoughtText}</div>}
+            {block && <CodeBlock code={String(p.content ?? "")} wrap maxHeight={420} />}
+            {/* 内建任务的结果是 JSON（代码同步的拉取、步骤、配置、重启） */}
+            {step.kind === "final" && (run.resolution === "builtin" && String(p.content ?? "").startsWith("{")
+              ? <CodeBlock code={String(p.content)} maxHeight={420} />
+              : <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
             )}
+            {data && <CodeBlock title="结构化结果" code={JSON.stringify(data, null, 2)} maxHeight={320} />}
             {step.kind === "error" && <CodeBlock code={String(p.content)} wrap />}
-            {step.kind === "approval" && <CodeBlock code={String(p.content)} wrap />}
             {step.kind === "tool" && <>
-              {step.call && <ToolArgs args={step.call.payload.args} />}
-              {step.result ? <CodeBlock title="工具结果" code={String(step.result.payload.output ?? "")} maxHeight={260} /> : <div className="text-xs text-fg-3">等待返回…</div>}
+              {step.call && <ToolArgs tool={tool} args={step.call.payload.args} />}
+              {step.result ? <ToolOutput tool={tool} output={String(step.result.payload.output ?? "")} />
+                : <div className="text-xs text-fg-3">{LIVE.has(run.status) ? "等待返回…" : "没有返回（运行在这一步之前结束了）"}</div>}
             </>}
           </div>
         )}
@@ -324,20 +338,21 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
   );
 }
 
-function summarizeArgs(args: unknown): string {
-  if (!args || typeof args !== "object") return args ? String(args) : "";
-  const a = args as Record<string, unknown>;
-  const v = a.command ?? a.sql ?? a.what ?? Object.values(a)[0];
-  return v ? String(v).replace(/\s+/g, " ").slice(0, 90) : "";
-}
-
-function ToolArgs({ args }: { args: unknown }) {
-  if (args && typeof args === "object") {
-    const a = args as Record<string, unknown>;
-    const main = a.command ?? a.sql ?? a.code;
-    if (typeof main === "string") return <CodeBlock title={a.command ? "命令" : a.sql ? "SQL" : "代码"} code={main} maxHeight={220} />;
-  }
-  return <JsonView value={args} maxHeight={200} />;
+/** 模型调用的一行小字：模型 · 排队 · 输入→输出 token · 调了哪些工具 */
+function ModelMeta({ p, className }: { p: RunEvent["payload"]; className?: string }) {
+  const calls = p.tool_calls ?? [];
+  const items: ReactNode[] = [];
+  if (p.model) items.push(<span className="font-mono">{p.model}</span>);
+  if (p.queued_ms) items.push(<span title="耗时里这部分是在平台侧排队等账号配额（同时在途的请求数、每分钟请求数），模型本身没在算">排队 {duration(p.queued_ms)}</span>);
+  if (p.input_tokens != null || p.output_tokens != null) items.push(<span>{num(p.input_tokens)} → {num(p.output_tokens)} tokens</span>);
+  else if (p.tokens) items.push(<span>{num(p.tokens)} tokens</span>);
+  if (calls.length) items.push(<span>调用 {calls.map((c, i) => <Fragment key={i}>{i > 0 && "、"}<code className="font-mono text-fg-2">{c}</code></Fragment>)}</span>);
+  if (!items.length) return null;
+  return (
+    <div className={cn("flex flex-wrap items-center gap-x-1.5 text-[11.5px] tabular-nums text-fg-3", className)}>
+      {items.map((x, i) => <Fragment key={i}>{i > 0 && <span>·</span>}{x}</Fragment>)}
+    </div>
+  );
 }
 
 // ———————— 右栏 ————————
@@ -350,15 +365,14 @@ function Sidebar({ run }: { run: Run }) {
         <CardHeader title="输入" />
         <div className="p-3"><JsonView value={run.input} maxHeight={260} /></div>
       </Card>
+      <RecipeCard run={run} />
       <Card>
-        <CardHeader title="执行谱系" description="run 钉死了当时生效的定义版本" />
+        <CardHeader title="执行信息" />
         <div className="p-4">
           <DescList items={[
-            ["任务", <Link to={`/tasks/${encodeURIComponent(run.task)}?tab=versions`} className="hover:text-accent">{run.task} <span className="text-fg-3">v{run.task_version ?? "—"}</span></Link>],
-            ["角色", run.role ? <Link to={`/settings/roles/${run.role}`} className="flex items-center gap-1 hover:text-accent"><LuBot className="size-3.5 text-fg-3" />{run.role} <span className="text-fg-3">v{run.role_version ?? "—"}</span></Link> : "—"],
             ["触发", run.replay_of
               ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
-              : <span>{run.trigger.type}{run.trigger.id ? ` #${run.trigger.id}` : ""}</span>],
+              : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
             ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
             ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
@@ -410,6 +424,40 @@ function Sidebar({ run }: { run: Run }) {
         </Card>
       )}
     </div>
+  );
+}
+
+/** 配方：这次运行用到的每样定义各是第几版；旧运行没有配方，只有任务与角色版本 */
+function RecipeCard({ run }: { run: Run }) {
+  const r = run.recipe;
+  const v = (n: number | null | undefined) => <span className="text-fg-3">v{n ?? "—"}</span>;
+  const task = (name: string, n: number | null | undefined) =>
+    <Link to={`/tasks/${encodeURIComponent(name)}?tab=versions`} className="hover:text-accent">{name} {v(n)}</Link>;
+  const role = (name: string, n: number | null | undefined) =>
+    <Link to={`/settings/roles/${name}?tab=versions`} className="hover:text-accent">{name} {v(n)}</Link>;
+  /** 继承链：根在前，自己在后 */
+  const chain = (refs: RecipeRef[]) => (
+    <span className="flex flex-wrap items-center gap-x-1">
+      {refs.map((x, i) => <Fragment key={x.name}>{i > 0 && <span className="text-fg-3">→</span>}{role(x.name, x.version)}</Fragment>)}
+    </span>
+  );
+  const items: [ReactNode, ReactNode][] = [];
+  if (!r) {
+    items.push(["任务", task(run.task, run.task_version)], ["角色", run.role ? role(run.role, run.role_version) : "—"]);
+  } else {
+    items.push(["任务", task(r.task.name, r.task.version)]);
+    if (r.task.parent) items.push(["父任务", task(r.task.parent.name, r.task.parent.version)]);
+    items.push(["角色", r.role ? chain(r.role.lineage) : "—"]);
+    if (r.subagents?.length) items.push(["子代理", <div className="space-y-0.5">{r.subagents.map((s) => <div key={s.name}>{chain(s.lineage)}</div>)}</div>]);
+    if (r.service) items.push(["服务", <Link to={`/services/${r.service.name}?tab=versions`} className="hover:text-accent">{r.service.name} {v(r.service.version)}</Link>]);
+    if (r.prompts) items.push(["平台提示词", <Link to="/settings/prompts" className="hover:text-accent">v{r.prompts}</Link>]);
+    items.push(["模型", <span className="font-mono text-[12px]">{r.model}</span>], ["平台", <span className="font-mono text-[12px]">v{r.platform}</span>]);
+  }
+  return (
+    <Card>
+      <CardHeader title="配方" description={r ? "这次运行用到的每样定义各是第几版" : "旧运行没有记配方，只有任务与角色的版本"} />
+      <div className="p-4"><DescList items={items} /></div>
+    </Card>
   );
 }
 

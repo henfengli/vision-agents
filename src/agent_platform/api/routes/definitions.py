@@ -7,6 +7,7 @@
     DELETE /v1/{kind}/{name}                删除（被引用时 409 in_use；删父任务连带子任务）
     GET    /v1/{kind}/{name}/versions       版本历史（新的在前）
     POST   /v1/{kind}/{name}/versions/{v}/restore
+    GET    /v1/{kind}/{name}/version-stats  每个版本的运行效果（仅 roles / tasks）
 
 kind ∈ services / roles / tasks。服务与任务的列表与单个带统计（views.py）。
 定义改了即时生效（定义缓存最多 5 秒），定时触发每轮读最新定义，不需要额外同步。
@@ -21,7 +22,7 @@ from ...domain import Rejected
 from ...store import instances as instances_store
 from ...store import runs
 from .. import views
-from ..deps import ADMIN, RT, WHO, Caller, Runtime
+from ..deps import RT, WHO, Caller, Runtime
 
 router = APIRouter(prefix="/v1")
 
@@ -132,18 +133,18 @@ def _writes(plural: str, kind: str) -> None:
             raise Rejected("invalid_definition", why, 422)
         return body
 
-    async def create(body: dict = Body(...), rt: Runtime = RT, who: Caller = ADMIN):
+    async def create(body: dict = Body(...), rt: Runtime = RT, who: Caller = WHO):
         name = str(body.get("name") or "").strip()
         if not name:
             raise Rejected("invalid_definition", "缺少 name", 422)
         await rt.registry.create(kind, name, await unmasked(rt, name, body), who.name)
         return await _shaped(rt, kind, name)
 
-    async def update(name: str, body: dict = Body(...), rt: Runtime = RT, who: Caller = ADMIN):
+    async def update(name: str, body: dict = Body(...), rt: Runtime = RT, who: Caller = WHO):
         await rt.registry.update(kind, name, await unmasked(rt, name, body), who.name)
         return await _shaped(rt, kind, name)
 
-    async def delete(name: str, rt: Runtime = RT, who: Caller = ADMIN):
+    async def delete(name: str, rt: Runtime = RT, who: Caller = WHO):
         removed = await rt.registry.delete(kind, name, who.name)
         return {"deleted": removed}
 
@@ -155,15 +156,21 @@ def _writes(plural: str, kind: str) -> None:
             history = [{**h, "definition": credentials.redact_service(h["definition"])} for h in history]
         return history
 
-    async def restore(name: str, version: int, rt: Runtime = RT, who: Caller = ADMIN):
+    async def restore(name: str, version: int, rt: Runtime = RT, who: Caller = WHO):
         await rt.registry.restore(kind, name, version, who.name)
         return await _shaped(rt, kind, name)
+
+    async def version_stats(name: str, _: Caller = WHO):
+        """每个版本跑出来的效果：次数、成功 / 失败、被 👎 的运行数、平均 token 与耗时（回归重放不算）。"""
+        return await runs.version_stats(kind, name)
 
     router.add_api_route(f"/{plural}", create, methods=["POST"], status_code=201)
     router.add_api_route(f"/{plural}/{{name}}", update, methods=["PATCH"])
     router.add_api_route(f"/{plural}/{{name}}", delete, methods=["DELETE"])
     router.add_api_route(f"/{plural}/{{name}}/versions", versions, methods=["GET"])
     router.add_api_route(f"/{plural}/{{name}}/versions/{{version}}/restore", restore, methods=["POST"])
+    if kind in ("task", "role"):
+        router.add_api_route(f"/{plural}/{{name}}/version-stats", version_stats, methods=["GET"])
 
 
 for _plural, _kind_name in KINDS.items():

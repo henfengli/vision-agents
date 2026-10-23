@@ -3,7 +3,7 @@
 链路：domain+env → 域包登记的主机列表（domain.yaml 的 hosts 字段）
 → Grafana datasource proxy → Prometheus(node_exporter) → markdown 表。
 
-不让 agent 用 bash curl 查监控的原因（与 sql_query 同理）：
+不让 agent 用 bash curl 查监控的原因（与 db_query 同理）：
 LLM 现场拼命令，审查层只有正则，管不住"该访问哪个地址、什么方法"；
 薄工具把数据源、指标集、输出格式固化，LLM 只能选域和环境。
 

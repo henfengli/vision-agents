@@ -1,12 +1,12 @@
-# ~/.config/systemd/user/agent-platform.service —— 用户级部署（deploy/install-user.sh）：接口 + 控制台 + worker
-# 平台和它启动的业务进程是同一个用户：密钥文件在 agent 沙箱与业务进程里都被遮蔽（hidden_paths），
-# 业务进程有独立 pid 命名空间，读不到平台进程的环境变量。
+# ~/.config/systemd/user/agent-platform.service —— systemd --user 单元（deploy/install-user.sh 装）：接口 + 控制台 + worker
+# 部署配置是 conf/env/prod.yaml。平台和它启动的业务进程是同一个用户：密钥文件在 agent 沙箱与业务进程里
+# 都被遮蔽（hidden_paths），业务进程有独立 pid 命名空间，读不到平台进程的环境变量。
 [Unit]
-Description=agent-platform（用户级）
+Description=agent-platform
 After=network-online.target
 
 [Service]
-Environment=AGENT_ENV=prod-user
+Environment=AGENT_ENV=prod
 Environment=AGENT_CONF=%h/agent-platform/conf
 Environment=AGENT_DATA_DIR=%h/.local/share/agent-platform
 EnvironmentFile=%h/.config/agent-platform/secrets.env
