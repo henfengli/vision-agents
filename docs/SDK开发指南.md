@@ -49,7 +49,7 @@ run = agent.run("failure-analysis", {"run_id": run_id, "asset_key": asset_key, "
 print(run["run_id"], run["subtask_created"])
 ```
 
-模型账号限并发 1、3 RPM，一次 agent 运行通常要几分钟；`ask` 和 `run()`（默认 `wait=True`）会一直等到结束。
+一次 agent 运行要调好几次模型和工具，通常要几十秒到几分钟；`ask` 和 `run()`（默认 `wait=True`）会一直等到结束。
 
 ## API 参考
 
@@ -176,5 +176,5 @@ agent-chat vision-board --resume <会话 id>
 ## 常见问题
 
 - **想看中间过程**：`ask(on_event=...)`，或者事后 `events(run_id)` 拉全量事件。
-- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。并发多了也快不了：模型请求在平台侧排队（并发 1、3 RPM）。
+- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。模型账号并发 3，同时在途的请求超过 3 个时在平台侧排队。
 - **嵌入自己的服务**：直接把 `client.py` 拷进去，类名和方法名随意改，只要不破坏 HTTP 契约。

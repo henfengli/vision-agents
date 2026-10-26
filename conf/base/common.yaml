@@ -8,10 +8,8 @@
 model:
   url: https://api.moonshot.cn/v1
   name: kimi-k2.7-code              # 这把 key 能用的：kimi-k2.7-code、kimi-k2.6（GET /v1/models 可查）
-  # 账号配额（Kimi 按组织限，充值档位决定）：这个账号同时只能有 1 个请求在途、每分钟 3 次。
-  # 平台侧排队（agent 与辅助调用合计），不撞 429；账号升档后按控制台显示的额度改
-  max_concurrency: 1
-  rpm: 3
+  # 账号并发上限：同时在途的请求数（agent 与辅助调用合计），有空位就立刻发；不按分钟限速（rpm 不写 = 不限）
+  max_concurrency: 3
   context_tokens: 400000            # 模型上下文长度：对话历史到 75% 时自动压缩成摘要
   max_retries: 6
   # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索（Kimi 没有嵌入接口）
