@@ -71,14 +71,13 @@ class KernelConfig(BaseModel):
 
 class LimitsConfig(BaseModel):
     """模型生成的代码（项目内核、bash）各自跑在一个 systemd 用户 scope 里，内存超了只杀这个 scope，线上服务不受影响。
-    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设内存总上限）。enabled=false（开发机）时不套 scope。
-    只管内存：CPU 不设上限（slice 的 CPUWeight 低，抢 CPU 时让着线上服务）。
-    内存写百分比 = 占本机物理内存的比例（systemd 的写法），也可以写 64G 这样的绝对值。"""
+    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设内存总上限 64G）。enabled=false（开发机）时不套 scope。
+    只管内存：CPU 不设上限（slice 的 CPUWeight 低，抢 CPU 时让着线上服务）。生产机和测试机内存一样，所有主机用同一组固定值。"""
 
     enabled: bool = False
     slice: str = "agent.slice"
-    kernel_memory: str = "30%"
-    bash_memory: str = "10%"
+    kernel_memory: str = "32G"
+    bash_memory: str = "8G"
     tasks: int = 4096                 # TasksMax：进程 + 线程数（numpy 这类库按核数开线程，核多的机器别设小）
 
 
@@ -107,7 +106,7 @@ class GrafanaConfig(BaseModel):
 
 def _default_hidden() -> list[str]:
     """agent 沙箱里看不到的 home 以外的路径（home 本身在沙箱里整个换成空目录，只挂回需要的目录）：
-    docker 的 socket（能 docker exec 进生产容器、拿到真实配置）。服务声明的配置文件总是遮蔽，不用写在这里。"""
+    docker 的 socket（能 docker exec 进容器改东西、拿到真实配置）。服务声明的配置文件按环境遮蔽，不用写在这里。"""
     return ["/var/run/docker.sock", "/run/docker.sock"]
 
 

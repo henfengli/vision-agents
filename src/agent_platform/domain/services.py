@@ -1,16 +1,17 @@
 """服务：agent 所在主机上实际部署着的一个业务项目（Python 项目）。
 
 一份定义同时服务两件事：
-- agent 看到什么：线上的代码目录、给 agent 用的只读版配置、只读库、日志、主机、档案
-- 项目内核：用该环境的解释器、在该环境的代码目录、带着给 agent 用的只读配置跑一段 Python（py 工具）
+- agent 看到什么：线上的代码目录、配置（生产是给 agent 的只读版，测试是真实的）、只读库、日志、主机、档案
+- 项目内核：用该环境的解释器、在该环境的代码目录、带着该环境的配置跑一段 Python（py 工具）
 
 同机部署：项目部署在哪台主机上，那台主机上就装着管这个环境的 agent 服务（部署配置 env / services）。
 这个服务×环境的运行由它执行，读的是线上那份代码、用的是线上那套解释器。
 平台不改代码、不装依赖、不启停业务进程。
 
 配置文件（configs）写的是项目读配置的路径，比如 ~/deploy/vision-board/vision_board/settings-{env}.py。
-线上那份真实配置 agent 永远看不到：bash 里被遮蔽；项目内核启动时，平台把控制台里填的只读版
+受保护的环境（生产）里真实配置 agent 看不到：bash 里被遮蔽；项目内核启动时，平台把控制台里填的只读版
 （存库，按 服务×环境×路径 带版本）盖在这个路径上，项目代码照常 import、照常连库，连上去的是只读账号。
+不受保护的环境（测试）直接用真实配置：不遮、不替换，提示词要求库只读。生产的配置在测试的运行里照样遮蔽。
 
 "服务×环境"是 agent 实际操作的单位：ServiceDef.view(env) 给出该环境的全部解析结果，
 提示词、工具、页面用的都是这一份。路径可以写 {env}；以 ~ 开头的值展开成平台用户的 home
@@ -142,18 +143,23 @@ class ServiceView(BaseModel):
     mcp_servers: list[str]                   # 服务自己声明的 MCP server（工具在运行里自动出现）
     profile: dict[str, str]
 
-    def prompt_block(self) -> str:
-        """给 agent 的"你在哪"：服务×环境的事实清单（档案另起一块）。"""
+    def prompt_block(self, protected: bool = False) -> str:
+        """给 agent 的"你在哪"：服务×环境的事实清单（档案另起一块）。protected：环境受保护（生产）。"""
         lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env} · 你就在这个环境部署它的那台主机上",
                  f"代码目录：{self.root or '未配置'}（线上实际部署的那份，只读）"]
         if self.code_paths and self.code_paths != [self.root]:
             lines.append("其他代码目录：" + "、".join(p for p in self.code_paths if p != self.root))
         lines.append(f"项目 Python：{self.python}。用 py 工具在这个环境里执行代码：工作目录是代码目录，"
                      "可以直接 import 项目模块、调用项目自己的函数；变量在本会话内保留")
-        if self.config_files:
-            lines.append("配置文件：" + "、".join(c["path"] for c in self.config_files)
-                         + "。py 里读到的是给 agent 的只读版（库是只读账号），线上真实配置你看不到；"
-                           "内容用 service_info(what=config) 读（密钥已打码），bash 里读不到")
+        files = "、".join(c["path"] for c in self.config_files)
+        if protected and files:
+            lines.append(f"配置文件：{files}。py 里读到的是给 agent 的只读版（库是只读账号），线上真实配置你看不到；"
+                         "内容用 service_info(what=config) 读（密钥已打码），bash 里读不到")
+        elif files:
+            lines.append(f"配置文件：{files}。这是本环境项目的真实配置，bash、py 里都能直接读")
+        if not protected:
+            lines.append("数据库只读：项目配置里的库账号可能有写权限，但你只能查，不能改。不要执行 INSERT / UPDATE / DELETE / "
+                         "DDL，不要调用会写库的项目函数（ORM 的 save / delete、迁移、manage.py 的写命令、物化 dagster 资产）")
         if self.databases:
             from urllib.parse import urlsplit
             names = []
@@ -186,9 +192,9 @@ class ServiceDef(BaseModel):
     # 只读库：{库名: 连接串}，scheme 决定类型（postgresql / mysql / mariadb / doris / clickhouse(s) / mongodb）。
     # 口令写 ${VAR}，真实值放 secrets.env；各环境在 envs[env].databases 里按库名覆盖
     databases: dict[str, str] = Field(default_factory=dict)
-    # 项目读的配置文件路径（可写 {env}、~）：真实内容 agent 看不到，内核里盖上控制台填的只读版
+    # 项目读的配置文件路径（可写 {env}、~）。生产：真实内容 agent 看不到，内核里盖上控制台填的只读版；测试：照常读真实的
     configs: list[str] = Field(default_factory=list)
-    # 代码目录里其他含口令、agent 不该看的文件或目录（比如生成出来的 docker-compose.yaml）：只遮蔽，不替换
+    # 代码目录里其他含口令的文件或目录（比如生成出来的 docker-compose.yaml）：生产只遮蔽、不替换；测试不遮
     hidden: list[str] = Field(default_factory=list)
     logs: dict[str, str] = Field(default_factory=dict)   # 日志：{名字: 文件路径 | docker:<容器名>}（logs 工具读）
     # 服务自己的 MCP server：{名字: langchain-mcp-adapters 连接配置}，另可写 envs: {环境: 深合并的覆盖}。
@@ -273,7 +279,7 @@ class ServiceDef(BaseModel):
         return out
 
     def secret_paths(self, envs: list[str]) -> set[str]:
-        """所有环境的配置文件与 hidden：沙箱里一律遮蔽（项目内核再把本环境给 agent 的配置盖上去）。"""
+        """这些环境的配置文件与 hidden（遮蔽哪些见 services/envspec.masked_configs）。envs 为空时是空集。"""
         return {render(c, env) for c in (*self.configs, *self.hidden) for env in envs}
 
 

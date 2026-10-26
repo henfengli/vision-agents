@@ -249,7 +249,7 @@ const BLOCK_STAGES = new Set(["system"]);
 /** 同机部署带来的几种原因码：在出错的那一步下面说一句该去哪儿处理 */
 const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
   wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services）决定" },
-  config_missing: { text: "给 agent 的只读版配置还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
+  config_missing: { text: "受保护的环境要填给 agent 的只读版配置：还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
 };
 
 const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {

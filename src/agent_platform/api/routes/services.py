@@ -1,11 +1,12 @@
 """服务×环境：agent 实际看到的东西、给 agent 用的只读配置、服务自己的 MCP 工具。
 
-    GET  /v1/services/{s}/envs/{env}                         该环境的解析结果（代码目录、解释器、配置各是第几版、日志）
+    GET  /v1/services/{s}/envs/{env}                         该环境的解析结果（是否受保护、代码目录、解释器、配置各是第几版、日志）
     GET  /v1/services/{s}/envs/{env}/config?path=&raw=       读给 agent 的一份配置（默认密钥打码；raw=true 原文，编辑用）
     PUT  /v1/services/{s}/envs/{env}/config                  保存 {path, content}：存成新版本；该环境的内核下次调用时重启
     GET  /v1/services/{s}/envs/{env}/config/history?path=    版本列表；…/history/{version}?path= 某一版的内容
     GET  /v1/services/{s}/tools?reload=                      服务自己声明的 MCP 工具（按环境连接）
 
+给 agent 的只读版只在受保护的环境（生产）用：不受保护的环境（测试）读、存都返回 409 config_not_used。
 配置存库（不是文件）：哪台主机回答这些接口都一样；执行运行的主机起内核前才把它写到本机。
 """
 
@@ -29,17 +30,27 @@ async def _view(rt: Runtime, service: str, env: str) -> ServiceView:
     return view
 
 
+async def _protected(rt: Runtime, env: str) -> None:
+    """给 agent 的只读版只在受保护的环境（生产）用；测试环境直接用项目的真实配置，控制台不读也不存。"""
+    if not (await rt.registry.env(env)).protected:
+        raise Rejected("config_not_used", f"{env} 不是受保护的环境：agent 直接用项目的真实配置，不用填只读版", 409)
+
+
 @router.get("/envs/{env}")
 async def service_env(service: str, env: str, rt: Runtime = RT, _: Caller = WHO):
     view = await _view(rt, service, env)
-    return inspect.view_dict(view, await inspect.config_status(view))
+    protected = (await rt.registry.env(env)).protected
+    configs = await inspect.config_status(view) if protected else [
+        {**c, "version": None, "updated_by": None, "updated_at": None} for c in view.config_files]   # 测试不用只读版
+    return inspect.view_dict(view, configs, protected)
 
 
-# ———————— 给 agent 用的配置 ————————
+# ———————— 给 agent 用的配置（只在受保护的环境） ————————
 
 @router.get("/envs/{env}/config")
 async def service_config(service: str, env: str, path: str, raw: bool = False, rt: Runtime = RT, _: Caller = WHO):
     view = await _view(rt, service, env)
+    await _protected(rt, env)
     c = inspect.config_entry(view, path)
     if not raw:
         return {"path": c["path"], "key": c["key"], "content": await inspect.read_config(view, path)}
@@ -53,6 +64,7 @@ async def service_config(service: str, env: str, path: str, raw: bool = False, r
 async def save_config(service: str, env: str, body: ConfigWrite, rt: Runtime = RT, who: Caller = WHO):
     """存成新版本（内容没变不加版本）。执行运行的主机下次起或用内核时发现版本变了，内核自动重启。"""
     view = await _view(rt, service, env)
+    await _protected(rt, env)
     c = inspect.config_entry(view, body.path)
     saved = await service_configs.save(service, env, c["key"], body.content, by=who.name)
     return {"path": c["path"], "key": c["key"], **saved}

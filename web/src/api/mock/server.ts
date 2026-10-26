@@ -86,9 +86,9 @@ function bump<T extends Ledgered>(key: string, target: T, patch: Partial<T>): T 
 // ———————— 元信息 ————————
 
 const TOOLS: ToolInfo[] = [
-  { name: "py", title: "项目内核", description: "在线上的代码目录和解释器里执行代码（配置换成只读版）：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: true },
+  { name: "py", title: "项目内核", description: "在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: true },
   { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、home 只露代码目录、工作目录可写、默认断网", group: "core", dangerous: true },
-  { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、给 agent 的配置内容、git 状态", group: "service", dangerous: false },
+  { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、配置内容（打码）、git 状态", group: "service", dangerous: false },
   { name: "logs", title: "看日志", description: "读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤", group: "service", dangerous: false },
   { name: "host_status", title: "主机状况", description: "部署主机的负载、内存、磁盘、大进程、docker 容器、nginx", group: "service", dangerous: false },
   { name: "db_query", title: "只读查库", description: "本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件", group: "service", dangerous: false },
@@ -253,6 +253,13 @@ on("DELETE", "/v1/services/:name", (p) => {
 });
 
 // ———————— 给 agent 的只读版配置：存库，按 服务×环境×路径（定义里的写法）带版本 ————————
+// 只在受保护的环境（生产）用；不受保护的环境（测试）直接用项目的真实配置，读、存都 409 config_not_used（与后端一致）
+
+const envProtected = (env: string) => db.envs.find((e) => e.name === env)?.protected ?? false;
+function requireProtected(env: string) {
+  checkEnv(env);
+  if (!envProtected(env)) throw new ApiError(409, "config_not_used", `${env} 不是受保护的环境：agent 直接用项目的真实配置，不用填只读版`);
+}
 
 const byteSize = (text: string) => new TextEncoder().encode(text).length;
 
@@ -289,11 +296,13 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
   const s = findService(p.name);
   checkEnv(p.env);
   const v = viewOf(s, p.env);
+  const prot = envProtected(p.env);
   return {
-    service: s.name, env: p.env, enabled: v.enabled, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
+    service: s.name, env: p.env, enabled: v.enabled, protected: prot, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
     mcp_servers: Object.keys(s.mcp ?? {}), hosts: v.hosts, databases: redactDbs(v.databases), logs: v.logs, profile: v.profile,
+    // 不受保护的环境用真实配置：没有给 agent 的版本
     config_files: v.config_files.map((c) => {
-      const last = lastRow(s.name, p.env, c.key);
+      const last = prot ? lastRow(s.name, p.env, c.key) : undefined;
       return { ...c, version: last?.version ?? null, updated_by: last?.updated_by ?? null, updated_at: last?.updated_at ?? null };
     }),
   };
@@ -302,6 +311,7 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
 // 默认密钥打码（没填时 404）；raw=true 原文 + 版本（编辑用）
 on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
   const s = findService(p.name);
+  requireProtected(p.env);
   const c = configEntry(s, p.env, String(q.path || ""));
   const last = lastRow(s.name, p.env, c.key);
   if (q.raw === true || q.raw === "true") {
@@ -317,6 +327,7 @@ on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
 // 保存 = 新版本（内容没变不加版本）
 on("PUT", "/v1/services/:name/envs/:env/config", (p, _q, body): ConfigSaved => {
   const s = findService(p.name);
+  requireProtected(p.env);
   const c = configEntry(s, p.env, String(body?.path ?? ""));
   const content = String(body?.content ?? "");
   if (byteSize(content) > 1024 * 1024) throw new ApiError(422, "invalid_request", "配置超过 1MB");

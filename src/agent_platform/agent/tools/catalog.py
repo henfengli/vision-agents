@@ -144,8 +144,9 @@ class Toolbox:
 
         async def py(code: str, timeout: int = 120, restart: bool = False) -> str:
             """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是线上这个环境用的那个，工作目录是线上的
-            代码目录，项目读配置的路径上是给 agent 的只读版（库是只读账号），可以直接 import 项目模块、调用项目自己的
-            函数和数据访问层（口径函数、ORM、dagster 资产……），用项目的方式连库。变量在本会话内保留，最后一个表达式的值会显示。
+            代码目录，配置已就位（生产是给 agent 的只读版，测试是项目的真实配置；库都只能查不能改），可以直接 import
+            项目模块、调用项目自己的函数和数据访问层（口径函数、ORM、dagster 资产……），用项目的方式连库。
+            变量在本会话内保留，最后一个表达式的值会显示。
             你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
             要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
@@ -166,8 +167,8 @@ class Toolbox:
                 return f"[失败] {getattr(e, 'message', None) or e}"
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
-            """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件、密钥、home 下其他目录看不到，配置用
-            service_info 读）、只有工作目录可写、调用结束后台进程全灭、内存有上限。默认断网；需要访问本机服务端口
+            """在沙箱里执行 shell 命令：全盘只读（可读服务代码；home 下其他目录、平台密钥看不到；生产环境的配置文件
+            也看不到，配置用 service_info 读）、只有工作目录和 /tmp 可写、调用结束后台进程全灭、内存有上限。默认断网；需要访问本机服务端口
             或内网接口时传 network=true。输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
             r = await asyncio.to_thread(
@@ -177,26 +178,32 @@ class Toolbox:
 
         async def service_info(what: str = "overview", path: str = "") -> str:
             """查看本次运行所在服务×环境。what：overview（目录 / 配置文件 / 日志总览）、
-            config（读本环境给 agent 的一份配置，path 填配置文件路径，密钥已打码）、git（代码目录最近提交）。"""
+            config（读本环境的一份配置，path 填配置文件路径，密钥已打码；生产是给 agent 的只读版，测试是真实配置）、
+            git（代码目录最近提交）。"""
             sc = run_scope.current()
             if sc.view is None:
                 return "[无服务] 本任务是平台任务，不关联业务服务"
             v = sc.view
             if what == "config":
                 try:
-                    return await svc_inspect.read_config(v, path or (v.config_files[0]["path"] if v.config_files else ""))
+                    return await svc_inspect.read_config(v, path or (v.config_files[0]["path"] if v.config_files else ""),
+                                                         protected=sc.protected)
                 except Rejected as e:
                     return f"[失败] {e.message}"
             if what == "git":
                 return "\n\n".join(f"## {p}\n{svc_inspect.git_log(p)}" for p in v.code_paths) or "（未配置代码目录）"
-            lines = [v.prompt_block()]
+            lines = [v.prompt_block(sc.protected)]
             git = svc_inspect.git_state(v.root) if v.root else None
             if git:
                 lines.append(f"- 代码目录当前提交 {git['commit']}（{git['branch']}，{git['committed_at']}）"
                              + ("，有未提交的改动" if git["dirty"] else ""))
-            for c in await svc_inspect.config_status(v):
-                lines.append(f"- 配置 {c['path']}：" + (f"给 agent 的只读版第 {c['version']} 版" if c["version"]
-                                                         else "还没有填给 agent 的只读版（py 起不来）"))
+            if sc.protected:
+                for c in await svc_inspect.config_status(v):
+                    lines.append(f"- 配置 {c['path']}：" + (f"给 agent 的只读版第 {c['version']} 版" if c["version"]
+                                                             else "还没有填给 agent 的只读版（py 起不来）"))
+            else:
+                lines += [f"- 配置 {c['path']}：项目的真实配置" + ("" if os.path.exists(c["path"]) else "（本机上不存在）")
+                          for c in v.config_files]
             return "\n".join(lines)
 
         async def logs(name: str = "", lines: int = 200, grep: str = "", since: str = "") -> str:
@@ -310,9 +317,9 @@ class Toolbox:
 
         if kernels is not None and reg is not None:
             self._add(py, "项目内核", "service", dangerous=True,
-                      summary="在线上的代码目录和解释器里执行代码（配置换成只读版）：import 项目模块、调项目函数，变量会话内保留")
+                      summary="在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留")
         self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录可写、默认断网")
-        self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、给 agent 的配置内容、git 状态")
+        self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置内容（打码）、git 状态")
         self._add(logs, "看日志", "service", summary="读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤")
         self._add(host_status, "主机状况", "service", summary="部署主机的负载、内存、磁盘、大进程、docker 容器、nginx")
         self._add(db_query, "只读查库", "service",

@@ -56,9 +56,9 @@ class SandboxTest(unittest.TestCase):
         self.assertLess(argv.index("/dev/null"), argv.index("/agent/conf"))
 
     def test_limits_wrap_in_user_scope(self):
-        argv = sandbox.limit_argv(["bwrap", "x"], LimitsConfig(enabled=True), memory="30%")
+        argv = sandbox.limit_argv(["bwrap", "x"], LimitsConfig(enabled=True), memory="32G")
         self.assertEqual(argv[:3], ["systemd-run", "--user", "--scope"])
-        self.assertIn("MemoryMax=30%", argv)
+        self.assertIn("MemoryMax=32G", argv)
         self.assertFalse([a for a in argv if a.startswith("CPU")])        # 只限内存，CPU 不限
         self.assertEqual(argv[-2:], ["bwrap", "x"])
         self.assertEqual(sandbox.limit_argv(["x"], LimitsConfig(enabled=False), memory="1G"), ["x"])

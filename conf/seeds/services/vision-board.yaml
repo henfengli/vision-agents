@@ -9,7 +9,8 @@ env_vars: {DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}"}
 hosts: [172.21.0.45]
 databases:
   ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
-# 线上的 settings agent 看不到；py 里盖上控制台填的只读版（库口令换成只读账号；STATIC_ROOT、认证照抄即可）
+# 生产的 settings agent 看不到，py 里盖上控制台填的只读版（库口令换成只读账号；STATIC_ROOT、认证照抄即可）；
+# 测试直接用真实的 settings-test.py，不用填
 configs:
   - ~/deploy/vision-board/vision_board/settings-{env}.py
 logs:

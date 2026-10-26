@@ -25,12 +25,12 @@ kernel:
   max_kernels: 3                    # 同时最多几个（超了回收最久没用的）
 
 # 模型写的代码（项目内核、bash）各跑在一个 systemd 用户 scope 里：内存超了只杀它自己，不波及线上服务。
-# 只管内存（百分比 = 占本机物理内存，也可写 64G）；CPU 不设上限。
-# 生产 / 测试主机打开（prod.yaml）；全部 scope 和平台本身在 agent.slice 里，内存总上限在 deploy/user/agent.slice
+# 只管内存，CPU 不设上限。生产机和测试机内存一样，所有主机用同一组固定值。
+# 生产 / 测试主机打开（prod.yaml）；全部 scope 和平台本身在 agent.slice 里，内存总上限 64G（deploy/user/agent.slice）
 limits:
   enabled: false
-  kernel_memory: 30%                # 每个项目内核
-  bash_memory: 10%                  # 每条 bash 命令
+  kernel_memory: 32G                # 每个项目内核
+  bash_memory: 8G                   # 每条 bash 命令
   tasks: 4096                       # 每个 scope 的进程 + 线程数（numpy 等按核数开线程，别设小）
 
 # 没有 bwrap 时拒绝执行模型写的代码（开发机可以关）
@@ -38,7 +38,8 @@ require_sandbox: true
 
 # 沙箱里 home 整个是空的，只挂回代码目录、conda 环境、方法目录。项目运行要用到 home 下别的目录（只读）时写这里
 # home_allow: [~/.local/lib]
-# 沙箱里额外遮蔽的路径（home 以外的；存在的才遮）。不写 = docker 的 socket。服务声明的 configs / hidden 总是遮蔽
+# 沙箱里额外遮蔽的路径（home 以外的；存在的才遮）。不写 = docker 的 socket。
+# 服务声明的 configs / hidden 不用写在这里：生产的运行里都遮，测试的运行里只遮生产的（平台配置 envs 的 protected）
 # hidden_paths: [/var/run/docker.sock, /run/docker.sock]
 
 # 可选的后台链路追踪：OTLP/HTTP 导出到任意兼容后端（Jaeger、Tempo、各家 APM）。

@@ -97,7 +97,7 @@ export function EnvsSettingsPage() {
                             className={cn("size-5 rounded-full ring-offset-2 ring-offset-panel", COLOR_DOT[c], e.color === c && "ring-2 ring-accent")} />
                         ))}
                       </div>
-                      <Tooltip content="只是标记：控制台上醒目显示（环境徽标带盾牌、运行前提示），不拦任何操作">
+                      <Tooltip content="受保护：agent 看不到项目的真实配置，用控制台填的只读版（只读账号），bash 里遮蔽。不受保护：直接用项目的真实配置，文件只读，提示词要求库只读。都不拦任何操作">
                         <span><Switch checked={e.protected} onChange={(v) => patch({ protected: v })} label={<span className="text-[12.5px]">受保护</span>} /></span>
                       </Tooltip>
                       <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-fg-2">
@@ -113,7 +113,11 @@ export function EnvsSettingsPage() {
                 );
               })}
             </div>
-            <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">受保护只是标记：环境徽标带盾牌、运行任务时提醒一句，不拦任何操作。请求不带环境时用「默认」的那个。</div>
+            <div className="space-y-1 border-t border-line px-4 py-2.5 text-[12px] text-fg-3">
+              <div><b className="font-medium text-fg-2">受保护</b>（如生产）：agent 看不到项目的真实配置，用控制台填的只读版（只读账号，在服务页「配置 → 配置文件」里填），bash 里遮蔽。</div>
+              <div><b className="font-medium text-fg-2">不受保护</b>（如测试）：直接用项目的真实配置，文件只读，提示词要求库只读；受保护环境的配置照样遮蔽。</div>
+              <div>两种都不拦任何操作（没有审批）；受保护的环境徽标带盾牌、运行任务时提醒一句。请求不带环境时用「默认」的那个。</div>
+            </div>
           </Card>
           <Card>
             <CardHeader title="各服务的启用情况" description="点服务名去服务页修改（服务 → 环境 → 启用）" />

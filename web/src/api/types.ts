@@ -91,7 +91,11 @@ export interface Env {
   name: string;          // prod / test
   title: string;
   description: string;
-  protected: boolean;    // 受保护：只是标记（控制台上醒目显示），不拦任何操作
+  /**
+   * 受保护（生产）：agent 看不到项目的真实配置，用控制台填的只读版（只读账号），bash 里遮蔽。
+   * 不受保护（测试）：直接用项目的真实配置，文件只读，提示词要求库只读。两种都不拦任何操作（没有审批）
+   */
+  protected: boolean;
   color: EnvColor;
 }
 
@@ -207,9 +211,12 @@ export interface Service extends Ledger {
   urls: Record<string, string>;
   hosts: string[];
   databases: Databases;  // 只读库（db_query 查询）；各环境在 envs[env].databases 里按库名覆盖
-  /** 项目读的配置文件路径（绝对路径，可写 ~、{env}）：真实内容平台不读不显示，项目内核里盖上控制台填的只读版 */
+  /**
+   * 项目读的配置文件路径（绝对路径，可写 ~、{env}）。受保护的环境（生产）：真实内容平台不读不显示，
+   * 项目内核里盖上控制台填的只读版；不受保护的环境（测试）：agent 直接用真实配置
+   */
   configs: string[];
-  /** 代码目录里其他含口令的文件或目录：对 agent 只遮蔽，不替换 */
+  /** 代码目录里其他含口令的文件或目录：生产只遮蔽、不替换；测试不遮 */
   hidden: string[];
   /** 日志：{名字: 文件路径 | docker:<容器名>}，可写 {env}、~ */
   logs: Record<string, string>;
@@ -220,11 +227,11 @@ export interface Service extends Ledger {
   enabled: boolean;
 }
 
-/** 服务×环境视图里的一个配置文件：给 agent 的只读版填到第几版 */
+/** 服务×环境视图里的一个配置文件：给 agent 的只读版填到第几版（只在受保护的环境有版本） */
 export interface ConfigFileStatus {
   key: string;                 // 定义里的写法（含 {env}）；内容按它存库
   path: string;                // 渲染后的路径
-  version: number | null;      // null = 还没有填给 agent 的版本（py 起不来）
+  version: number | null;      // 受保护的环境：null = 还没填（py 起不来）；不受保护的环境总是 null（用真实配置，不用填）
   updated_by: string | null;
   updated_at: ISODate | null;
 }
@@ -237,6 +244,7 @@ export interface ServiceView {
   service: string;
   env: string;
   enabled: boolean;
+  protected: boolean;    // 环境受保护（生产）= 要填给 agent 的只读版；否则（测试）直接用项目的真实配置
   python: string;        // 该环境的解释器（已渲染）
   root: string;
   code_paths: string[];
@@ -249,7 +257,7 @@ export interface ServiceView {
   config_files: ConfigFileStatus[];
 }
 
-/** GET …/config?path=&raw=true：给 agent 的只读版原文 + 版本，编辑用 */
+/** GET …/config?path=&raw=true：给 agent 的只读版原文 + 版本，编辑用。读、存都只在受保护的环境；不受保护的环境返回 409 config_not_used */
 export interface ConfigRaw {
   path: string;
   key: string;

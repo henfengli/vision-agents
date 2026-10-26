@@ -58,10 +58,14 @@ class ServiceViewTest(unittest.TestCase):
 
     def test_prompt_block_points_to_kernel_and_logs(self):
         svc = ServiceDef.model_validate({"configs": ["/c/.env"], "logs": {"app": "/c/a.log"}})
-        block = svc.view("b", "prod").prompt_block()
-        self.assertIn("py 工具", block)
-        self.assertIn("只读版", block)
-        self.assertIn("logs 工具", block)
+        prod = svc.view("b", "prod").prompt_block(protected=True)
+        self.assertIn("py 工具", prod)
+        self.assertIn("只读版", prod)
+        self.assertIn("logs 工具", prod)
+        test = svc.view("b", "test").prompt_block(protected=False)
+        self.assertIn("真实配置", test)                  # 测试：真实配置 + 提示词要求库只读
+        self.assertIn("数据库只读", test)
+        self.assertNotIn("只读版", test)
 
 
 class RegistryTest(unittest.TestCase):
@@ -105,7 +109,8 @@ class RegistryTest(unittest.TestCase):
 
 
 class EnvSpecTest(unittest.TestCase):
-    """项目内核的规格：给 agent 的配置写到本机再 bind 到项目读的路径，别的环境的配置与 hidden 遮蔽，home 白名单。"""
+    """项目内核与 bash 的规格：生产把给 agent 的配置 bind 到项目读的路径、所有配置与 hidden 遮蔽；
+    测试直接用真实配置、只遮生产的；home 白名单。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -121,42 +126,63 @@ class EnvSpecTest(unittest.TestCase):
             "python": "/opt/conda/envs/vision-board/bin/python",
         }, "test"))
         self.code = code
-        self.s = settings(str(self.root / "data"), env="test", services=["vision-board"])
+        self.key = f"{code}/conf/settings-{{env}}.py"
+        self.s = settings(str(self.root / "data"))          # 开发机：什么环境都执行
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _spec(self, rows: dict):
-        async def current(service, env, key):
-            return rows.get((service, env, key))
+    def _spec(self, rows: dict, env: str):
+        async def current(service, e, key):
+            return rows.get((service, e, key))
         with mock.patch.object(envspec.service_configs, "current", current):
-            return run(envspec.runtime_spec(self.reg, self.s, "vision-board", "test"))
+            return run(envspec.runtime_spec(self.reg, self.s, "vision-board", env))
 
-    def test_agent_config_is_bound_over_the_real_one(self):
-        key = f"{self.code}/conf/settings-{{env}}.py"
-        spec = self._spec({("vision-board", "test", key): {"version": 3, "content": "DB='readonly'\n"}})
+    def test_prod_binds_agent_config_over_the_real_one(self):
+        spec = self._spec({("vision-board", "prod", self.key): {"version": 3, "content": "DB='readonly'\n"}}, "prod")
         (src, dst), = spec["binds"]
-        self.assertEqual(dst, f"{self.code}/conf/settings-test.py")
+        self.assertEqual(dst, f"{self.code}/conf/settings-prod.py")
         self.assertEqual(Path(src).read_text(), "DB='readonly'\n")
         self.assertTrue(src.startswith(self.s.agent_conf_dir))
-        self.assertIn(f"{self.code}/conf/settings-prod.py", spec["hidden"])
+        self.assertIn(f"{self.code}/conf/settings-test.py", spec["hidden"])
         self.assertIn(f"{self.code}/compose.yaml", spec["hidden"])
         self.assertNotIn(dst, spec["hidden"])
         self.assertIn(str(self.code), spec["allow"])
         self.assertIn("/opt/conda", spec["allow"])                   # conda 环境连同 conda 根目录
-        changed = self._spec({("vision-board", "test", key): {"version": 4, "content": "DB='readonly2'\n"}})
+        changed = self._spec({("vision-board", "prod", self.key): {"version": 4, "content": "DB='readonly2'\n"}}, "prod")
         self.assertNotEqual(spec["digest"], changed["digest"])        # 配置换了版本，内核要重启
 
-    def test_missing_agent_config_refuses(self):
+    def test_prod_without_agent_config_refuses(self):
         with self.assertRaises(Rejected) as cm:
-            self._spec({})
+            self._spec({}, "prod")
         self.assertEqual(cm.exception.code, "config_missing")
+
+    def test_test_env_uses_the_real_config(self):
+        spec = self._spec({}, "test")                                  # 不用填只读版
+        self.assertEqual(spec["binds"], [])
+        self.assertFalse(spec["protected"])
+        self.assertNotIn(f"{self.code}/conf/settings-test.py", spec["hidden"])
+        self.assertNotIn(f"{self.code}/compose.yaml", spec["hidden"])
+        self.assertIn(f"{self.code}/conf/settings-prod.py", spec["hidden"])   # 生产的配置照样遮
+        self.assertIn(self.s.agent_conf_dir, spec["hidden"])
+
+    def test_bash_sandbox_masks_by_env(self):
+        prod, _ = run(envspec.sandbox_paths(self.reg, self.s, "prod"))
+        test, _ = run(envspec.sandbox_paths(self.reg, self.s, "test"))
+        settings_test, settings_prod = f"{self.code}/conf/settings-test.py", f"{self.code}/conf/settings-prod.py"
+        self.assertTrue({settings_test, settings_prod, f"{self.code}/compose.yaml"} <= set(prod))
+        self.assertIn(settings_prod, test)
+        self.assertNotIn(settings_test, test)
+        self.assertNotIn(f"{self.code}/compose.yaml", test)
+        dagster_env = os.path.expanduser("~/deploy/vision-dagster/.env")   # 没有 {env}：测试机上就是测试那份
+        self.assertIn(dagster_env, prod)
+        self.assertNotIn(dagster_env, test)
 
     def test_other_env_or_service_refuses(self):
         for kw in ({"env": "prod"}, {"env": "test", "services": ["vision-dagster"]}):
             self.s = settings(str(self.root / "data"), **kw)
             with self.assertRaises(Rejected) as cm:
-                self._spec({})
+                self._spec({}, "test")
             self.assertEqual(cm.exception.code, "wrong_env")
 
 

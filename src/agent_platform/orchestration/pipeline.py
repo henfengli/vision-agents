@@ -154,7 +154,7 @@ class Pipeline:
             parts.append(profile)
             await runs.log_event(spec.run_id, "stage", {"stage": "profile", "title": "档案", "content": profile})
         if view:
-            parts.append(view.prompt_block())
+            parts.append(view.prompt_block((await d.registry.env(spec.env)).protected))
 
         if spec.recall and spec.service:
             memory = await d.registry.config("memory")
@@ -345,10 +345,10 @@ async def _view(d: Deps, spec: RunSpec):
 
 
 async def _scope(d: Deps, spec: RunSpec, tools: list[str], extra: tuple = ()) -> run_scope.RunScope:
-    """沙箱的遮蔽与 home 白名单见 services/envspec.sandbox_paths：所有服务所有环境的配置文件都遮
-    （board 的运行里同样读不到 dagster 的配置）；项目内核在此基础上把本环境给 agent 的配置 bind 上去。"""
+    """沙箱的遮蔽与 home 白名单见 services/envspec.sandbox_paths：生产的运行里所有服务所有环境的配置文件都遮
+    （board 的运行里同样读不到 dagster 的配置），测试的运行里只遮生产的；项目内核在生产再把给 agent 的配置 bind 上去。"""
     env = await d.registry.env(spec.env)
-    hidden, allow = await envspec.sandbox_paths(d.registry, d.settings)
+    hidden, allow = await envspec.sandbox_paths(d.registry, d.settings, spec.env)
     return run_scope.RunScope(
         run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),

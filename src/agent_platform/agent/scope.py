@@ -22,7 +22,7 @@ class RunScope:
     session_id: str
     task: str
     env: str
-    protected: bool                      # 目标环境标为受保护（生产）：只是个标记，提示词里提醒 agent 谨慎
+    protected: bool                      # 目标环境受保护（生产）：配置用只读版、真实配置遮蔽；否则（测试）用真实配置
     service: str | None = None
     view: ServiceView | None = None      # 服务×环境视图（平台任务为空）
     caller: str = ""

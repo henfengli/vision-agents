@@ -1,7 +1,7 @@
 """服务×环境的只读观察：给 agent 的配置、git 状态、接口返回的形状。API（服务页）与 agent 工具（service_info）共用。
 
-读配置只允许读该服务该环境声明过的路径——路径来自定义，不来自请求。读到的是给 agent 的只读版（存库），
-线上真实配置平台不读、不显示。
+读配置只允许读该服务该环境声明过的路径——路径来自定义，不来自请求。受保护的环境（生产）读到的是给 agent 的只读版
+（存库），线上真实配置平台不读、不显示；不受保护的环境（测试）agent 读的是本机上的真实配置（打码）。
 """
 
 from __future__ import annotations
@@ -31,13 +31,23 @@ async def config_status(view: ServiceView) -> list[dict]:
             for c in view.config_files]
 
 
-async def read_config(view: ServiceView, path: str, mask_secrets: bool = True) -> str:
+async def read_config(view: ServiceView, path: str, mask_secrets: bool = True, *, protected: bool = True) -> str:
+    """protected（生产）：读给 agent 的只读版（存库）。不受保护（测试）：读本机上项目的真实配置文件
+    （agent 工具在部署主机上执行，读得到）。"""
     c = config_entry(view, path)
-    row = await service_configs.current(view.service, view.env, c["key"])
-    if row is None:
-        raise Rejected("not_found", f"{c['path']} 在 {view.env} 还没有填给 agent 的只读版", 404)
-    text = row["content"][:MAX_CONFIG_CHARS]
-    if len(row["content"]) > MAX_CONFIG_CHARS:
+    if protected:
+        row = await service_configs.current(view.service, view.env, c["key"])
+        if row is None:
+            raise Rejected("not_found", f"{c['path']} 在 {view.env} 还没有填给 agent 的只读版", 404)
+        content = row["content"]
+    else:
+        try:
+            with open(c["path"], encoding="utf-8", errors="replace") as f:
+                content = f.read(MAX_CONFIG_CHARS + 1)
+        except OSError as e:
+            raise Rejected("not_found", f"读不到 {c['path']}：{e.strerror or e}", 404) from e
+    text = content[:MAX_CONFIG_CHARS]
+    if len(content) > MAX_CONFIG_CHARS:
         text += "\n…[超过 256KB，已截断]"
     return mask(text) if mask_secrets else text
 
@@ -81,10 +91,12 @@ def git_log(path: str, n: int = 10) -> str:
     return _git(path, "log", f"-{n}", "--format=%h %cs %an %s") or "（不是 git 仓库或无提交）"
 
 
-def view_dict(view: ServiceView, configs: list[dict]) -> dict:
+def view_dict(view: ServiceView, configs: list[dict], protected: bool) -> dict:
     """API 的 ServiceView 形状：定义解析的结果 + 给 agent 的配置各是第几版（存库）。
+    protected：环境受保护（生产）= 要填给 agent 的只读版；不受保护（测试）直接用真实配置，configs 的版本都是空。
     代码目录、git 这些只有部署主机上看得到的不在这里（控制台可能由另一台主机回答），agent 运行时用 service_info 看。"""
-    return {"service": view.service, "env": view.env, "enabled": view.enabled, "python": view.python,
+    return {"service": view.service, "env": view.env, "enabled": view.enabled, "protected": protected,
+            "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "urls": view.urls, "mcp_servers": view.mcp_servers,
             "hosts": view.hosts, "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
             "logs": view.logs, "profile": view.profile, "config_files": configs}

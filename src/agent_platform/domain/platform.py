@@ -2,7 +2,7 @@
 
 分四节，每节一份文档（definitions 表 kind=config，name=节名）：
 
-- envs           有哪些环境、默认环境、哪些受保护
+- envs           有哪些环境、默认环境、哪些受保护（受保护 = agent 用只读版配置，见 EnvDef.protected）
 - notifications  通知：渠道（钉钉 / Webhook）+ 规则（什么事件、什么范围、发到哪个渠道）
 - memory         记忆默认行为：召回、沉淀、条数
 - prompts        平台提示词：基础约定、子代理约定、上下文压缩、记忆沉淀、交接摘要、回归判定（domain/prompts.py）
@@ -30,7 +30,9 @@ class EnvDef(BaseModel):
     name: str
     title: str = ""
     description: str = ""
-    protected: bool = False        # 受保护：只是标记（控制台上醒目显示），不拦任何操作
+    # 受保护（生产）：agent 看不到项目的真实配置——项目内核里盖上控制台填的只读版（只读账号），bash 里遮蔽。
+    # 不受保护（测试）：直接用项目的真实配置，文件系统照样只读，提示词要求库只读。不拦任何操作
+    protected: bool = False
     color: EnvColor = "gray"
 
     @field_validator("name")

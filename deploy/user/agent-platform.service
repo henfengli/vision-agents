@@ -1,6 +1,6 @@
 # ~/.config/systemd/user/agent-platform.service —— systemd --user 单元（deploy/install-user.sh 装）：接口 + 控制台 + worker
 # 同机部署：跑在部署线上项目的那个用户下。部署配置是 conf/env/prod.yaml + ~/.config/agent-platform/local.yaml。
-# 模型写的代码（项目内核、bash）在 bwrap 沙箱里、各自一个 systemd 用户 scope（agent.slice 下，限内存），看不到真实配置与密钥。
+# 模型写的代码（项目内核、bash）在 bwrap 沙箱里（文件只读，看不到平台密钥和生产的真实配置）、各自一个 systemd 用户 scope（agent.slice 下，限内存）。
 [Unit]
 Description=agent-platform
 After=network-online.target

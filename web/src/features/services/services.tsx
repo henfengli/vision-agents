@@ -25,7 +25,7 @@ export function ServicesPage() {
   const list = (data ?? []).filter((s) => !q || (s.name + s.title + s.description).toLowerCase().includes(q.toLowerCase()));
   return (
     <Page>
-      <PageHeader title="服务" description="线上部署着的业务项目。agent 服务和项目装在同一台主机上，按 服务×环境 读线上代码、用只读配置跑项目代码、查只读库、看日志。"
+      <PageHeader title="服务" description="线上部署着的业务项目。agent 服务和项目装在同一台主机上，按 服务×环境 读线上代码、跑项目代码（生产用给 agent 的只读版配置，测试用真实配置）、查只读库、看日志。"
         actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} />
       <div className="mb-4 flex items-center gap-2">
         <SearchInput value={q} onChange={setQ} placeholder="筛选服务…" className="w-64" />

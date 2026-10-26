@@ -1,8 +1,9 @@
 /**
- * 给 agent 的只读版配置（服务×环境）：服务定义里声明的每个配置路径，在这个环境给 agent 填一份内容。
+ * 给 agent 的只读版配置（服务×环境）：只有受保护的环境（生产）要填。服务定义里声明的每个配置路径，在这个环境给 agent 填一份内容。
  * 项目内核启动时平台把它盖在那个路径上——agent 的项目代码照常 import、照常连库，连上去的是只读账号；
  * 线上那份真实配置平台不读、不显示。内容存库、每次保存一个新版本（内容没变不加版本）。
  * 历史里每一版都能看、和当前版对比、载入编辑器再保存（= 恢复）。
+ * 不受保护的环境（测试）直接用项目的真实配置：这里只列出路径，不能填（接口返回 409 config_not_used）。
  */
 import { useEffect, useState } from "react";
 import { LuCircleAlert, LuFileText, LuGitCompare, LuHistory, LuInfo, LuRefreshCw, LuTriangleAlert } from "react-icons/lu";
@@ -19,7 +20,7 @@ import { ago, bytes, datetime } from "@/lib/format";
 import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { useLeaveGuard } from "@/lib/router";
 
-/** 一个配置路径的状态徽标：给 agent 填到第几版 / 未填 */
+/** 一个配置路径的状态徽标：给 agent 填到第几版 / 未填。只用在受保护的环境（不受保护的不用填） */
 export function ConfigStatusBadges({ file }: { file: ConfigFileStatus }) {
   return file.version != null
     ? <Badge tone="ok" title={`${file.updated_by ?? ""} 更新于 ${datetime(file.updated_at)}`}>已填第 {file.version} 版</Badge>
@@ -40,12 +41,15 @@ export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSu
   const dagster = (files ?? []).some((f) => f.path.endsWith("dagster.yaml"));
 
   if (error) return <Card><ErrorState error={error} onRetry={refetch} /></Card>;
+  // 受不受保护决定这一页是编辑器还是只列路径：没加载完先占位，免得闪一下另一种
+  if (!view) return <Card><SkeletonRows rows={3} /></Card>;
+  if (!view.protected) return <RealConfigList env={env} files={view.config_files} onOpenDefinition={onOpenDefinition} />;
   return (
     <div className="space-y-4">
       <div className="flex gap-2.5 rounded-lg border border-info/30 bg-info-soft/40 px-4 py-3 text-[12.5px] leading-relaxed text-fg-2">
         <LuInfo className="mt-0.5 size-4 shrink-0 text-info" />
         <div className="space-y-1">
-          <div>这里填的是 agent 的项目内核在这个路径上读到的内容：py 里项目代码照常 import 配置、照常连库。<b className="font-medium text-fg">线上那份真实配置平台不读、不显示</b>，agent 在 bash 里也看不到。</div>
+          <div>{env} 是受保护的环境，这里填的是 agent 的项目内核在这个路径上读到的内容：py 里项目代码照常 import 配置、照常连库。<b className="font-medium text-fg">线上那份真实配置平台不读、不显示</b>，agent 在 bash 里也看不到。</div>
           <div>照抄线上的配置，把库口令换成只读账号。{dagster && <>dagster.yaml 里不要写运行存储（run / event_log / schedule storage）的连接：项目内核不该连 Dagster 自己的库。</>}还没填的路径，py 工具在 {env} 起不来。</div>
         </div>
       </div>
@@ -74,6 +78,35 @@ export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSu
         </Card>
         {active && <ConfigEditor key={`${env}|${active.key}`} svc={svc} env={env} file={active} />}
       </div>
+    </div>
+  );
+}
+
+/** 不受保护的环境（测试）：agent 直接用项目的真实配置，只列出路径 */
+function RealConfigList({ env, files, onOpenDefinition }: { env: string; files: ConfigFileStatus[]; onOpenDefinition: () => void }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2.5 rounded-lg border border-info/30 bg-info-soft/40 px-4 py-3 text-[12.5px] leading-relaxed text-fg-2">
+        <LuInfo className="mt-0.5 size-4 shrink-0 text-info" />
+        <div>
+          {env} 不是受保护的环境。测试环境<b className="font-medium text-fg">直接用项目的真实配置</b>：bash、py 里都能读到原文，不用在这里填。文件照样只读（只有工作目录和 /tmp 可写），数据库只读靠提示词约束。只有受保护的环境（生产）才要填给 agent 的只读版。
+        </div>
+      </div>
+      <Card>
+        <CardHeader title="配置文件" icon={<LuFileText />} description={`${env} 用项目的真实配置，文件只读`} />
+        {!files.length ? (
+          <Empty title="没有声明配置文件" description="在服务定义的「配置文件」里写项目读配置的路径（可写 ~、{env}）" action={<Button size="sm" onClick={onOpenDefinition}>去声明</Button>} />
+        ) : (
+          <ul className="divide-y divide-line">
+            {files.map((f) => (
+              <li key={f.key} className="px-4 py-2.5">
+                <div className="truncate font-mono text-[12.5px] text-fg" title={f.path}>{f.path}</div>
+                {f.key !== f.path && <div className="mt-0.5 truncate text-[11px] text-fg-3">定义里写作 <span className="font-mono">{f.key}</span></div>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
     </div>
   );
 }

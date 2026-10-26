@@ -4,8 +4,8 @@
 envs:
   default: test                       # 请求不带 env 时打到测试环境：生产必须显式指定
   items:
-    - {name: prod, title: 国内生产, protected: true, color: red, description: 线上生产部署；agent 装在生产主机上，读线上代码、用只读账号}
-    - {name: test, title: 国内测试, color: amber, description: 线上测试部署；agent 装在测试主机上}
+    - {name: prod, title: 国内生产, protected: true, color: red, description: 线上生产部署；agent 装在生产主机上，读线上代码；受保护：真实配置看不到，用控制台填的只读版}
+    - {name: test, title: 国内测试, color: amber, description: 线上测试部署；agent 装在测试主机上，直接用项目的真实配置，库只读靠提示词约束}
 
 notifications:
   channels:

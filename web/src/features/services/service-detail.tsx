@@ -1,6 +1,7 @@
 /**
  * 服务详情：先选环境（服务×环境是 agent 实际操作的单位），再看线上的代码目录与解释器、
- * 给 agent 的配置、日志、任务、运行、记忆；「配置」tab 填本环境给 agent 的只读版配置（?tab=config&env=）
+ * 配置、日志、任务、运行、记忆；「配置」tab 填本环境给 agent 的只读版配置（?tab=config&env=；只有受保护的环境要填，
+ * 不受保护的直接用项目的真实配置）
  * 与结构化编辑服务定义（&part=definition），「版本」看历史与 diff。
  */
 import { useState } from "react";
@@ -47,6 +48,8 @@ export function ServiceDetailPage() {
   const [runOpen, setRunOpen] = useState(false);
   const allEnvs = envs ?? [];
   const env = search.env || (allEnvs.find((e) => e.name === globalEnv) ?? allEnvs.find((e) => !e.protected) ?? allEnvs[0])?.name || "test";
+  /** 受保护（生产）要填给 agent 的只读版；不受保护（测试）直接用真实配置 */
+  const envProtected = !!allEnvs.find((e) => e.name === env)?.protected;
   const tab = (search.tab as TabKey) || "overview";
   const { data: tasks } = useTasks(name);
 
@@ -140,7 +143,8 @@ export function ServiceDetailPage() {
             <div className="flex flex-wrap items-center gap-3">
               <Segmented value={search.part === "definition" ? "definition" : "files"} onChange={(v) => setSearch({ part: v === "files" ? undefined : v })}
                 options={[{ value: "files", label: "配置文件", icon: <LuFileText /> }, { value: "definition", label: "服务定义", icon: <LuSettings /> }]} />
-              <span className="text-xs text-fg-3">{search.part === "definition" ? "代码目录、配置文件路径、日志、MCP、环境、档案…保存即新版本" : `${env} 给 agent 的只读版配置：项目内核在这些路径上读到的就是它`}</span>
+              <span className="text-xs text-fg-3">{search.part === "definition" ? "代码目录、配置文件路径、日志、MCP、环境、档案…保存即新版本"
+                : envProtected ? `${env} 给 agent 的只读版配置：项目内核在这些路径上读到的就是它` : `${env} 直接用项目的真实配置，不用填`}</span>
             </div>
             {search.part === "definition"
               ? <ServiceConfigEditor svc={svc} onSaved={refetch} />
@@ -232,13 +236,17 @@ function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
           {view.config_files.map((f) => (
             <div key={f.key} className="flex min-w-0 flex-wrap items-center gap-1.5">
               <span className="min-w-0 truncate font-mono text-[12px] text-fg" title={f.path}>{f.path}</span>
-              <ConfigStatusBadges file={f} />
-              {f.version != null && <button type="button" onClick={() => onPeek(f.key)} className="text-[11.5px] text-accent hover:underline">查看</button>}
+              {view.protected && <ConfigStatusBadges file={f} />}
+              {view.protected && f.version != null && <button type="button" onClick={() => onPeek(f.key)} className="text-[11.5px] text-accent hover:underline">查看</button>}
             </div>
           ))}
-          <button type="button" onClick={onOpenConfig} className="flex items-center gap-1 text-[11.5px] text-fg-3 hover:text-accent">
-            <LuPencilLine className="size-3" />给 agent 的只读版在「配置 → 配置文件」里填；线上真实配置平台不读
-          </button>
+          {view.protected ? (
+            <button type="button" onClick={onOpenConfig} className="flex items-center gap-1 text-[11.5px] text-fg-3 hover:text-accent">
+              <LuPencilLine className="size-3" />受保护的环境：给 agent 的只读版在「配置 → 配置文件」里填；线上真实配置平台不读
+            </button>
+          ) : (
+            <div className="text-[11.5px] text-fg-3">直接用项目的真实配置：bash、py 里都能读，不用填</div>
+          )}
         </div>
       ) : <span className="text-fg-3">未声明（可在「配置 → 服务定义」里写项目读配置的路径）</span>],
       ["只读库", <DbList databases={view.databases ?? {}} empty={<span className="text-fg-3">未配置（db_query 不可用）</span>} />],

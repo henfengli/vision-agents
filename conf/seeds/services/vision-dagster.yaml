@@ -10,12 +10,12 @@ python: ~/miniconda3/envs/vision-dagster/bin/python
 databases:
   ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
   # doris: "doris://${DORIS_RO_USER}:${DORIS_RO_PASSWORD}@<FE 地址>:9030/<库>"     # .env.template 里新增的 doris 接口
-# 项目读的配置：线上的真实内容 agent 看不到；py 里盖上控制台填的只读版（库用只读账号；dagster.yaml 里不要写
-# 运行存储的连接，内核不该连 Dagster 自己的库）
+# 项目读的配置。生产：真实内容 agent 看不到，py 里盖上控制台填的只读版（库用只读账号；dagster.yaml 里不要写
+# 运行存储的连接，内核不该连 Dagster 自己的库）。测试：直接用真实配置，不用填
 configs:
   - ~/deploy/vision-dagster/.env
   - ~/deploy/vision-dagster/dagster.yaml
-# 生成出来的 compose 文件里有环境变量和口令：只遮蔽
+# 生成出来的 compose 文件里有环境变量和口令：生产只遮蔽（不替换），测试不遮
 hidden:
   - ~/deploy/vision-dagster/docker-compose.yaml
 # 线上的日志：docker 容器（logs 工具读；平台用户要能用 docker）。【占位】容器名按 docker ps 改

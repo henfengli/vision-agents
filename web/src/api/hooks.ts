@@ -39,6 +39,8 @@ export const api = {
   service: (name: string) => get<ServiceSummary>(`/v1/services/${enc(name)}`),
   serviceEnv: (name: string, env: string) => get<ServiceView>(`/v1/services/${enc(name)}/envs/${enc(env)}`),
   // —— 给 agent 的只读版配置（存库、带版本）：path 填定义里的写法或渲染后的路径 ——
+  // 只在受保护的环境（生产）用：不受保护的环境（测试）读、存都返回 409 config_not_used，历史照常
+
   /** 密钥打码后的内容；还没填时 404 */
   serviceConfig: (name: string, env: string, path: string) =>
     get<ConfigMasked>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),

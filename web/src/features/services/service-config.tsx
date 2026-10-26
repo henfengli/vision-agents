@@ -208,16 +208,16 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="configs" icon={<LuFileText />} title="配置文件" description={<>项目读配置的路径（绝对路径，可写 ~、{"{env}"}）。线上那份真实配置平台不读、不显示，agent 也看不到（bash 里被遮蔽）；项目内核启动时，平台把控制台里填的只读版盖在这个路径上——在服务页「配置 → 配置文件」里按环境填。</>}>
+        <Section id="configs" icon={<LuFileText />} title="配置文件" description={<>项目读配置的路径（绝对路径，可写 ~、{"{env}"}）。<b className="font-medium text-fg-2">受保护的环境（生产）</b>：真实配置平台不读、不显示，agent 也看不到（bash 里被遮蔽）；项目内核启动时，平台把控制台里填的只读版盖在这个路径上——在服务页「配置 → 配置文件」里按环境填。<b className="font-medium text-fg-2">不受保护的环境（测试）</b>：agent 直接用项目的真实配置，不用填。</>}>
           <div className="space-y-4">
             <PathListEditor value={draft.configs} onChange={(v) => set("configs", v)} placeholder="~/deploy/xxx/xxx/settings-{env}.py" addLabel="添加配置文件"
               empty="没有声明配置文件：项目内核用线上代码目录里的默认配置" />
             {draft.configs.some((c) => c.trim() && !c.includes("{env}")) && allEnvs.length > 1 && (
-              <div className="text-xs text-fg-3">没写 {"{env}"} 的路径各环境相同；给 agent 的只读版仍按环境分开填。</div>
+              <div className="text-xs text-fg-3">没写 {"{env}"} 的路径各环境相同；给 agent 的只读版仍按受保护的环境分开填。</div>
             )}
             <div className="border-t border-line pt-3">
               <div className="mb-2 flex items-center gap-1.5 text-[12.5px] font-medium text-fg"><LuEyeOff className="size-3.5 text-fg-3" />只遮蔽的文件</div>
-              <div className="mb-2 text-xs text-fg-3">代码目录里其他含口令、agent 不该看的文件或目录（比如生成出来的 docker-compose.yaml）：bash 和项目内核里都遮蔽，不替换内容。</div>
+              <div className="mb-2 text-xs text-fg-3">代码目录里其他含口令、agent 不该看的文件或目录（比如生成出来的 docker-compose.yaml）：受保护的环境（生产）的运行里 bash 和项目内核都遮蔽，不替换内容；测试的运行里不遮。</div>
               <PathListEditor value={draft.hidden} onChange={(v) => set("hidden", v)} placeholder="~/deploy/xxx/docker-compose.yaml" addLabel="添加遮蔽的文件"
                 empty="没有要额外遮蔽的文件" />
             </div>

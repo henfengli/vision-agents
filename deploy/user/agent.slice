@@ -1,12 +1,12 @@
 # ~/.config/systemd/user/agent.slice —— 平台和它起的项目内核、bash 都在这个 slice 里（deploy/install-user.sh 装）。
-# 只保证线上主机的内存安全：内存总上限按本机物理内存的比例算，超了只在 slice 里杀进程，同机的线上服务不受影响。
+# 只保证线上主机的内存安全：平台、项目内核、bash 合计最多 64G，超了只在 slice 里杀进程，同机的线上服务不受影响。
+# 生产机和测试机内存一样，所有主机用同一个值；单个内核 32G、单条 bash 8G 在部署配置 limits 里。
 # CPU 不设上限；CPUWeight 低于默认的 100，只在线上服务也要 CPU 时让着它们。
-# 【占位】MemoryMax 按这台主机线上服务的实际占用改（百分比或 128G 这样的绝对值都行），改完重跑安装脚本。
 [Unit]
 Description=agent-platform（平台、项目内核、bash 的内存总上限）
 
 [Slice]
-MemoryMax=40%
+MemoryMax=64G
 MemorySwapMax=0
 CPUWeight=20
 TasksMax=16384

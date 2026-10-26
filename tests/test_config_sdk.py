@@ -28,7 +28,7 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(s.require_sandbox)
         self.assertEqual((s.env, s.services), ("", []))
         self.assertEqual(s.model.max_concurrency, 3)
-        self.assertEqual(s.limits.kernel_memory, "30%")
+        self.assertEqual((s.limits.kernel_memory, s.limits.bash_memory), ("32G", "8G"))
         self.assertEqual(s.model.tokens, ["x"])                 # prod 的差异合并进 common 了
         self.assertFalse(s.otel.enabled)
         self.assertEqual(s.retention.checkpoints_days, 30)

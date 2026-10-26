@@ -59,8 +59,8 @@ const TD = tradingDays(12);
 // ———————— 环境（conf/seeds/settings.yaml） ————————
 
 export const envs: Env[] = [
-  { name: "prod", title: "国内生产", description: "线上生产部署；agent 装在生产主机上，读线上代码、用只读账号", protected: true, color: "red" },
-  { name: "test", title: "国内测试", description: "线上测试部署；agent 装在测试主机上", protected: false, color: "amber" },
+  { name: "prod", title: "国内生产", description: "线上生产部署；agent 装在生产主机上，读线上代码；受保护：真实配置看不到，用控制台填的只读版", protected: true, color: "red" },
+  { name: "test", title: "国内测试", description: "线上测试部署；agent 装在测试主机上，直接用项目的真实配置，库只读靠提示词约束", protected: false, color: "amber" },
 ];
 
 // ———————— 服务（conf/seeds/services/*.yaml） ————————
@@ -153,6 +153,7 @@ export const services: Service[] = [
 ];
 
 // ———————— 给 agent 的只读版配置（存库，按 服务×环境×路径 带版本） ————————
+// 只有受保护的环境（生产）要填；测试环境直接用项目的真实配置，这里没有它的版本
 
 /** 一个版本；同一个键下旧的在前 */
 export interface ConfigRow { version: number; content: string; updated_by: string; updated_at: string }
@@ -226,14 +227,10 @@ AUTH_APP_CODE = "mock-${env}-a7c03e"
     [boardSettings("prod"), 4 * DAY, "gaodl"],
     [boardSettings("prod", { chrome: true }), 3 * HOUR, "liyd"],
   ]);
-  seedConfig("vision-board", "test", board, [[boardSettings("test", { chrome: true }), 6 * DAY, "liyd"]]);
   // dagster 生产的 .env：30 小时前 gaodl 补了 doris 接口
   seedConfig("vision-dagster", "prod", "~/deploy/vision-dagster/.env", [[dagsterEnv("prod"), 8 * DAY, "gaodl"], [dagsterEnv("prod", true), 30 * HOUR, "gaodl"]]);
   seedConfig("vision-dagster", "prod", "~/deploy/vision-dagster/dagster.yaml", [[DAGSTER_YAML, 8 * DAY, "gaodl"]]);
-  seedConfig("vision-dagster", "test", "~/deploy/vision-dagster/.env", [[dagsterEnv("test", true), 2 * DAY, "gaodl"]]);
-  seedConfig("vision-dagster", "test", "~/deploy/vision-dagster/dagster.yaml", [[DAGSTER_YAML, 2 * DAY, "gaodl"]]);
   seedConfig("vision-web", "prod", "~/deploy/vision-web/vision_web/settings-{env}.py", [[webSettings("prod"), 5 * DAY, "liyd"]]);
-  // vision-web 的国内测试还没填：py 在那里起不来（config_missing）
 }
 
 // ———————— 角色（conf/seeds/roles.yaml） ————————
@@ -249,7 +246,7 @@ export const roles: Role[] = [
   },
   {
     name: "ops_analyst", title: "运维分析", description: "报错定位与根因分析：看线上日志与主机、读代码、在项目环境里复现、查库",
-    prompt: "你是运维分析工程师，就在出问题的服务的部署主机上。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 看线上现场：logs 看应用 / nginx / 容器日志（先 grep error|exception|traceback），host_status 看内存、磁盘、\n   容器状态；服务有自己的工具（如 dagster 的运行记录）时先用它；\n3. 读相关代码和本环境的配置，定位出错的步骤；用 py 直接调用出错的函数复现（库是只读账号，写库的步骤会失败，\n   这是预期的）；数据假设要验证时委派给 data_searcher；\n4. 确认可以安全重跑时（档案或任务说明允许），用服务工具在线上重跑（如 dagster 的 reexecute_run），并跟踪结果；\n5. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
+    prompt: "你是运维分析工程师，就在出问题的服务的部署主机上。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 看线上现场：logs 看应用 / nginx / 容器日志（先 grep error|exception|traceback），host_status 看内存、磁盘、\n   容器状态；服务有自己的工具（如 dagster 的运行记录）时先用它；\n3. 读相关代码和本环境的配置，定位出错的步骤；用 py 直接调用出错的函数复现。只复现读的部分：生产的库是只读账号，\n   写库的步骤会失败，这是预期的；测试用的是真实配置，账号能写，写库的步骤一律跳过不调；数据假设要验证时委派给 data_searcher；\n4. 确认可以安全重跑时（档案或任务说明允许），用服务工具在线上重跑（如 dagster 的 reexecute_run），并跟踪结果；\n5. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
     tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "host_metrics", "save_asset", "notify"],
     subagents: ["data_searcher"], service_tools: null,
     extends: null, prompt_append: "", version: 6, ...by("gaodl", 3 * DAY),
@@ -384,7 +381,8 @@ const PROMPTS: PromptsConfig = {
 - 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里；服务代码只读，用 bash 直接读原路径（cat / grep / sed -n）。
 - 要跑项目自己的代码（import 项目模块、调口径函数、用项目的数据访问层取数、复现某个函数的报错），用 py：它就在本环境的项目 Python 里，配置已就位，变量在会话内保留。不要在 bash 里自己拼环境去跑项目代码。
 - py 里可以直接调用你的其他工具（同名函数，如 db_query("select …")、service_info(what="config")，返回文本）：要批量、循环地调工具时写进一段 py，中间结果不必进对话。
-- 配置文件（各环境的配置、密钥文件）在 bash 里被遮蔽、读到的是空文件；本环境的配置用 service_info(what=config) 读，密钥已打码。
+- 不论哪个环境，数据库都只读：只查不改，不要执行写入、删除、建表改表，也不要调用会写库的项目函数。生产环境格外谨慎：只读排查，不要起会改数据或跑调度的进程。
+- 配置文件怎么读见 [运行环境]：生产环境给你的是只读版，真实配置在 bash 里读到的是空文件；测试环境是项目的真实配置。service_info(what=config) 读本环境的配置，密钥已打码。
 - 脚本先写进工作目录、跑通，再用 save_asset 收编成方法；以后同类运行会自动召回。
 - 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。`,
   subagent: `你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
@@ -544,7 +542,7 @@ function hostStatusOut(r: Pick<Run, "env" | "service" | "created_at">): string {
   const at = r.created_at;
   const lines = [
     prod ? "负载 3.41 / 2.87 / 2.52（32 核），已运行 41.3 天" : dagster ? "负载 1.08 / 0.94 / 0.90（16 核），已运行 12.6 天" : "负载 0.62 / 0.55 / 0.48（8 核），已运行 87.2 天",
-    prod ? "内存 已用 88.4G / 125.6G（可用 37.2G），swap 已用 0.3G" : dagster ? "内存 已用 21.7G / 62.8G（可用 41.1G），swap 已用 0.0G" : "内存 已用 9.8G / 15.6G（可用 5.8G），swap 已用 1.2G",
+    prod ? "内存 已用 88.4G / 125.6G（可用 37.2G），swap 已用 0.3G" : dagster ? "内存 已用 21.7G / 125.6G（可用 103.9G），swap 已用 0.0G" : "内存 已用 9.8G / 125.6G（可用 115.8G），swap 已用 0.0G",
     prod ? "磁盘 /：已用 81.4G / 100.0G（81%）" : "磁盘 /：已用 42.0G / 100.0G（42%）",
     `磁盘 ${HOME}：已用 ${prod ? "612.3G / 1024.0G（59%）" : "188.5G / 500.0G（37%）"}`,
     ["占内存最多的进程（RSS KB）：", "    PID USER         RSS %CPU     ELAPSED COMMAND",
@@ -660,11 +658,13 @@ const ASK: Record<string, Scenario[]> = {
     {
       q: "本环境 settings 里 STATIC_ROOT 和 CRONTAB_COMMAND_PREFIX 配的是什么？",
       plans: (r) => [
-        { think: "配置文件在 bash 里读不到，用 service_info(what=config) 读本环境给 agent 的 settings（密钥打码）。",
+        { think: r.env === "prod"
+            ? "生产的配置在 bash 里读不到，用 service_info(what=config) 读本环境给 agent 的只读版 settings（密钥打码）。"
+            : "测试环境用的是项目的真实配置，bash 里也读得到；用 service_info(what=config) 读，密钥会打码。",
           calls: [{ tool: "service_info", args: { what: "config", path: `${HOME}/deploy/vision-board/vision_board/settings-${r.env}.py` }, ms: 30,
-            output: `# 给 agent 的只读版：照抄线上的 vision_board/settings-${r.env}.py，库口令换成只读账号\nSTATIC_ROOT = "${HOME}/deploy/vision-board/static"\nCRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\nCLICKHOUSE = {"host": "${r.env === "prod" ? "172.168.0.125" : "172.24.17.66"}", "port": 8123, "user": "board_ro", "password": ***}` }] },
+            output: `${r.env === "prod" ? "# 给 agent 的只读版：照抄线上的 vision_board/settings-prod.py，库口令换成只读账号" : "# 国内测试的 settings"}\nSTATIC_ROOT = "${HOME}/deploy/vision-board/static"\nCRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\nCLICKHOUSE = {"host": "${r.env === "prod" ? "172.168.0.125" : "172.24.17.66"}", "port": 8123, "user": "${r.env === "prod" ? "board_ro" : "board"}", "password": ***}` }] },
       ],
-      answer: (r) => `${r.env} 环境的 settings（\`vision_board/settings-${r.env}.py\`）：\n\n- \`STATIC_ROOT = "${HOME}/deploy/vision-board/static"\`：nginx 从这里出静态资源；\n- \`CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\`：定时任务按本环境的配置跑。\n\n读到的是控制台里填的给 agent 的只读版（照抄线上，库口令换成只读账号）。按档案，不要执行 \`manage.py crontab add\`，会改线上的定时任务。`,
+      answer: (r) => `${r.env} 环境的 settings（\`vision_board/settings-${r.env}.py\`）：\n\n- \`STATIC_ROOT = "${HOME}/deploy/vision-board/static"\`：nginx 从这里出静态资源；\n- \`CRONTAB_COMMAND_PREFIX = "DJANGO_SETTINGS_MODULE=vision_board.settings-${r.env}"\`：定时任务按本环境的配置跑。\n\n${r.env === "prod" ? "读到的是控制台里填的给 agent 的只读版（照抄线上，库口令换成只读账号）" : "读到的是本环境项目的真实配置（密钥已打码）；里面的库账号能写，我只查不改"}。按档案，不要执行 \`manage.py crontab add\`，会改线上的定时任务。`,
     },
     {
       q: "报表页今天有没有 5xx？看一下线上日志",
@@ -697,7 +697,7 @@ const ASK: Record<string, Scenario[]> = {
         { think: "项目自带测试用 py 在项目内核里跑 pytest。",
           calls: [{ tool: "py", args: { code: `import pytest\npytest.main(["-q", "vision_dagster_tests/test_pnl.py"])` }, ms: 5400, output: ".......                                                                  [100%]\n7 passed in 3.42s\nExitCode.OK" }] },
       ],
-      answer: () => "`vision_dagster_tests/test_pnl.py` 7 个用例**全部通过**（3.4 秒）。跑在线上的代码目录里，用的是本环境的解释器，配置是给 agent 的只读版。",
+      answer: (r) => `\`vision_dagster_tests/test_pnl.py\` 7 个用例**全部通过**（3.4 秒）。跑在线上的代码目录里，用的是本环境的解释器，${r.env === "prod" ? "配置是给 agent 的只读版" : "配置是本环境项目的真实配置"}。`,
     },
     {
       q: "这台机器内存还够吗？dagster 的容器都正常吗？",
@@ -707,22 +707,20 @@ const ASK: Record<string, Scenario[]> = {
       ],
       answer: (r) => r.env === "prod"
         ? "够用：内存已用 88.4G / 125.6G，还有 37G 可用，没有用 swap；负载 3.4（32 核）。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。根盘 81%，接近 80% 的告警线，建议清理旧镜像（`docker image prune`，要运维确认）。"
-        : "够用：内存已用 21.7G / 62.8G，负载 1.1（16 核），根盘 42%。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。",
+        : "够用：内存已用 21.7G / 125.6G，负载 1.1（16 核），根盘 42%。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。",
     },
   ],
   "vision-web": [
     {
       q: "策略 alpha_mm_03 挂在哪些账户上？",
       plans: (r) => [
-        { think: "配置在 vision_cfg 的模型里，用 py 直接查 ORM（只读）。",
+        { think: r.env === "test"
+            ? "配置在 vision_cfg 的模型里，用 py 直接查 ORM。测试环境用的是项目的真实配置，库账号能写：只查，不调 save() / delete()。"
+            : "配置在 vision_cfg 的模型里，用 py 直接查 ORM（只读）。",
           calls: [{ tool: "py", args: { code: `from vision_cfg.models import Strategy\ns = Strategy.objects.get(code="alpha_mm_03")\nprint(list(s.accounts.values_list("code", "name", "status")))` }, ms: 880,
-            output: r.env === "test"
-              ? `[失败] vision-web 在 test 还没有填给 agent 用的配置 ${HOME}/deploy/vision-web/vision_web/settings-test.py：到控制台 服务 → 配置文件 里填一份只读账号的版本`
-              : "[('A003', '做市三号', 'active'), ('A011', '做市主账户', 'active'), ('A016', '做市备用', 'paused')]" }] },
+            output: "[('A003', '做市三号', 'active'), ('A011', '做市主账户', 'active'), ('A016', '做市备用', 'paused')]" }] },
       ],
-      answer: (r) => r.env === "test"
-        ? "test 环境的项目内核起不来：vision-web 在 test 还没有填给 agent 的只读版 settings（`vision_web/settings-test.py`），py 连不上库，查不了。\n\n请在控制台 **服务 → vision-web → 配置 → 配置文件** 里给 test 填一份（照抄线上的 settings，库换成只读账号）；或者先在 prod 上问。"
-        : "策略 **alpha_mm_03** 挂在 3 个账户上：\n\n| 账户 | 名称 | 状态 |\n|---|---|---|\n| A003 | 做市三号 | 启用 |\n| A011 | 做市主账户 | 启用 |\n| A016 | 做市备用 | 暂停 |\n\n依据：`vision_cfg.models.Strategy.accounts`（只读查询，没有改任何配置）。",
+      answer: () => "策略 **alpha_mm_03** 挂在 3 个账户上：\n\n| 账户 | 名称 | 状态 |\n|---|---|---|\n| A003 | 做市三号 | 启用 |\n| A011 | 做市主账户 | 启用 |\n| A016 | 做市备用 | 暂停 |\n\n依据：`vision_cfg.models.Strategy.accounts`（只读查询，没有改任何配置）。",
     },
     {
       q: "vision_cfg 里组合（Portfolio）有哪些字段？",
