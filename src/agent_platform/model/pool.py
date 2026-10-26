@@ -1,9 +1,9 @@
 """模型连接：OpenAI 兼容协议（现在接的是 Kimi）。三件事集中在这里：
 
 - 多 token 逐请求轮换（RotatingTokenAuth）
-- 账号配额排队（Quota / SharedQuota）：同时在途的请求数（model.max_concurrency，流式响应读完才算结束）和每分钟
-  请求数（model.rpm）。agent 的模型调用和平台的辅助调用共用一份；几个节点共用一个账号时经库排队（SharedQuota），
-  到点再发，不撞 429；撞了也由 SDK 按 max_retries 退避重试
+- 账号并发上限（Quota / SharedQuota）：同时在途的请求数（model.max_concurrency，流式响应读完才算结束）。
+  有空位就立刻发，不按分钟限速。agent 的模型调用和平台的辅助调用共用一份；prod、test 两边共用一个账号时
+  经库共用这几个名额（SharedQuota）；撞了 429 由 SDK 按 max_retries 退避重试
 - ModelPool：平台自己发起的辅助调用（记忆沉淀、交接摘要、回归判定）；带 run_id 的调用结束后交给 on_call
   记一条 model_call 事件（耗时、token），运行详情里看得到
 
@@ -16,7 +16,6 @@ import asyncio
 import itertools
 import logging
 import time
-from collections import deque
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable
 
@@ -45,24 +44,16 @@ async def _noop() -> None:
 
 
 class Quota:
-    """账号配额（进程内）：同时在途最多 concurrency 个请求，任意 60 秒内最多 rpm 次请求；<=0 表示不限。
-    先占在途名额再等分钟窗口。acquire 返回归还名额的函数：响应读完（流式读完）或出错时调用。"""
+    """账号并发上限（进程内）：同时在途最多 concurrency 个请求；<=0 表示不限。
+    acquire 返回归还名额的函数：响应读完（流式读完）或出错时调用。"""
 
-    def __init__(self, rpm: int, concurrency: int):
-        self.rpm = rpm
+    def __init__(self, concurrency: int):
         self.concurrency = concurrency
         self._slots = asyncio.Semaphore(concurrency) if concurrency > 0 else None
-        self._sent: deque[float] = deque()
-        self._lock = asyncio.Lock()
 
     async def acquire(self) -> Release:
         t0 = time.monotonic()
         release = await self._slot()
-        try:
-            await self._window()
-        except BaseException:
-            await release()
-            raise
         if (acc := queue_wait.get()) is not None:
             acc[0] += (time.monotonic() - t0) * 1000
         return release
@@ -76,28 +67,13 @@ class Quota:
             self._slots.release()
         return release
 
-    async def _window(self) -> None:
-        if self.rpm <= 0:
-            return
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                while self._sent and now - self._sent[0] >= 60:
-                    self._sent.popleft()
-                if len(self._sent) < self.rpm:
-                    self._sent.append(now)
-                    return
-                await asyncio.sleep(60 - (now - self._sent[0]) + 0.05)
-
 
 _LOCK_BASE = 0x41474E00            # 在途名额：PG 会话级 advisory lock，键 = 基数 + 名额号
-_RPM_LOCK = 0x41474DFF             # 分钟窗口：事务级 advisory lock 串行化计数
 
 
 class SharedQuota(Quota):
-    """所有节点共用的账号配额（经共用的库）：
-    - 在途名额：每个名额一把会话级 advisory lock，抢到的请求独占一条连接到响应读完；进程挂了连接断了锁就放了
-    - 分钟窗口：model_requests 表记最近 60 秒的请求时刻，计数在事务级 advisory lock 下做"""
+    """prod、test 两边共用的账号并发上限（经共用的库）：每个名额一把会话级 advisory lock，
+    抢到的请求独占一条连接到响应读完；进程挂了连接断了锁就放了。名额都占着时每 0.2 秒再试。"""
 
     async def _slot(self) -> Release:
         if self.concurrency <= 0:
@@ -114,29 +90,13 @@ class SharedQuota(Quota):
                         async def release(conn=conn) -> None:
                             await conn.close()          # 断开即释放会话级锁
                         return release
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.2)
         except BaseException:
             await conn.close()
             raise
 
-    async def _window(self) -> None:
-        if self.rpm <= 0:
-            return
-        from ..store import db
-        while True:
-            async with db.pool().connection() as conn, conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_RPM_LOCK,))
-                await conn.execute("DELETE FROM model_requests WHERE at < clock_timestamp() - interval '60 seconds'")
-                cur = await conn.execute(
-                    "SELECT count(*), COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(at)), 0) FROM model_requests")
-                count, oldest_age = await cur.fetchone()
-                if count < self.rpm:
-                    await conn.execute("INSERT INTO model_requests DEFAULT VALUES")
-                    return
-            await asyncio.sleep(max(0.2, 60 - float(oldest_age) + 0.05))
 
-
-_quotas: dict[tuple[int, int], Quota] = {}
+_quotas: dict[int, Quota] = {}
 _shared = False
 
 
@@ -148,10 +108,10 @@ def share_quota_via_db() -> None:
 
 
 def quota(cfg: ModelConfig) -> Quota:
-    """进程内共用一份（agent 与辅助调用一起算）；开了 share_quota_via_db 就是所有节点共用。"""
-    key = (cfg.rpm, cfg.max_concurrency)
+    """进程内共用一份（agent 与辅助调用一起算）；开了 share_quota_via_db 就是 prod、test 两边共用。"""
+    key = cfg.max_concurrency
     if key not in _quotas:
-        _quotas[key] = (SharedQuota if _shared else Quota)(*key)
+        _quotas[key] = (SharedQuota if _shared else Quota)(key)
     return _quotas[key]
 
 

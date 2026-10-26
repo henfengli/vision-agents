@@ -1,12 +1,12 @@
 """服务×环境：agent 实际看到的东西、给 agent 用的只读配置、服务自己的 MCP 工具。
 
-    GET  /v1/services/{s}/envs/{env}                         该环境的解析结果（代码目录、解释器、配置、日志、节点与它上报的 git）
-    GET  /v1/services/{s}/envs/{env}/config?path=&raw=       读给 agent 的一份配置（默认密钥打码；raw=true 原文 + sha，编辑用）
-    PUT  /v1/services/{s}/envs/{env}/config                  保存 {path, content, sha}：存成新版本；该环境的内核下次调用时重启
+    GET  /v1/services/{s}/envs/{env}                         该环境的解析结果（代码目录、解释器、配置各是第几版、日志）
+    GET  /v1/services/{s}/envs/{env}/config?path=&raw=       读给 agent 的一份配置（默认密钥打码；raw=true 原文，编辑用）
+    PUT  /v1/services/{s}/envs/{env}/config                  保存 {path, content}：存成新版本；该环境的内核下次调用时重启
     GET  /v1/services/{s}/envs/{env}/config/history?path=    版本列表；…/history/{version}?path= 某一版的内容
     GET  /v1/services/{s}/tools?reload=                      服务自己声明的 MCP 工具（按环境连接）
 
-配置存库（不是文件）：哪个节点回答这些接口都一样；执行运行的节点起内核前才把它写到本机。
+配置存库（不是文件）：哪台主机回答这些接口都一样；执行运行的主机起内核前才把它写到本机。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...domain import Rejected, ServiceView
-from ...services import inspect, nodestatus
+from ...services import inspect
 from ...store import service_configs
 from ..deps import RT, WHO, Caller, Runtime
 from ..schemas import ConfigWrite
@@ -32,7 +32,7 @@ async def _view(rt: Runtime, service: str, env: str) -> ServiceView:
 @router.get("/envs/{env}")
 async def service_env(service: str, env: str, rt: Runtime = RT, _: Caller = WHO):
     view = await _view(rt, service, env)
-    return inspect.view_dict(view, await inspect.config_status(view), await nodestatus.for_view(rt.settings, view))
+    return inspect.view_dict(view, await inspect.config_status(view))
 
 
 # ———————— 给 agent 用的配置 ————————
@@ -45,16 +45,16 @@ async def service_config(service: str, env: str, path: str, raw: bool = False, r
         return {"path": c["path"], "key": c["key"], "content": await inspect.read_config(view, path)}
     row = await service_configs.current(service, env, c["key"])
     return {"path": c["path"], "key": c["key"], "exists": row is not None, "content": row["content"] if row else "",
-            "sha": row["sha"] if row else "", "version": row["version"] if row else None,
+            "version": row["version"] if row else None,
             "updated_by": row["updated_by"] if row else None, "updated_at": row["updated_at"] if row else None}
 
 
 @router.put("/envs/{env}/config")
 async def save_config(service: str, env: str, body: ConfigWrite, rt: Runtime = RT, who: Caller = WHO):
-    """存成新版本（内容没变不加版本）。执行运行的节点下次起或用内核时发现版本变了，内核自动重启。"""
+    """存成新版本（内容没变不加版本）。执行运行的主机下次起或用内核时发现版本变了，内核自动重启。"""
     view = await _view(rt, service, env)
     c = inspect.config_entry(view, body.path)
-    saved = await service_configs.save(service, env, c["key"], body.content, by=who.name, base_sha=body.sha)
+    saved = await service_configs.save(service, env, c["key"], body.content, by=who.name)
     return {"path": c["path"], "key": c["key"], **saved}
 
 

@@ -5,7 +5,7 @@
 import { ApiError } from "../client";
 import type {
   FeedbackEntry, FeedbackReason,
-  ApiKey, Asset, ConfigRaw, ConfigSaved, ConfigSection, Knowledge, NodeInfo, Page, ReplayDetail, ReplayFilter, ReplayItem, ReplaySummary, ReplayVerdict,
+  ApiKey, Asset, ConfigRaw, ConfigSaved, ConfigSection, Knowledge, Page, ReplayDetail, ReplayFilter, ReplayItem, ReplaySummary, ReplayVerdict,
   ResolvedRole, RunAccepted, RunEvent, RunListItem, SearchHit, Service, ServiceSummary, ServiceTools, ServiceView, Stats, Task, TaskSummary,
   ToolInfo, UpcomingFire, Version, VersionStat,
 } from "../types";
@@ -100,15 +100,11 @@ const TOOLS: ToolInfo[] = [
   { name: "browser_take_screenshot", title: "browser_take_screenshot", description: "截图当前页面（@playwright/mcp）", group: "mcp", dangerous: false, server: "browser" },
 ];
 
-/** 回答请求的节点（控制台所在的那台） */
-const ANSWERING_NODE = "prod";
-
 on("GET", "/v1/meta", () => ({
   version: "9.0.0", envs: db.envs, default_env: db.settings.envs.default, me: ME,
   channels: Object.keys(db.settings.notifications.channels),
   feedback_reasons: REASONS,
   features: { vector_search: true },
-  node: ANSWERING_NODE,
   tools: TOOLS,
   event_sources: [
     { name: "dagster", title: "Dagster", notes: "在 Dagster 里配 run_failure_sensor 回调 POST /v1/events/dagster", events: [{ name: "run_failure", title: "运行失败", fields: ["run_id", "asset_key", "error", "env", "subtask", "job"] }] },
@@ -116,42 +112,6 @@ on("GET", "/v1/meta", () => ({
     { name: "webhook", title: "通用 Webhook", notes: "事件名放请求头 X-Event 或请求体 event", events: [{ name: "*", title: "任意事件", fields: [] }] },
   ],
 }));
-
-// ———————— 节点：在线 = 3 分钟内有心跳 ————————
-
-const ONLINE_MS = 180_000;
-/** 还在跑的节点每分钟写一次心跳：读的时候给它续上 */
-function nodesNow(): db.MockNode[] {
-  const t = Date.now();
-  for (const n of db.nodes) {
-    if (n._alive && t - new Date(n.heartbeat_at).getTime() > 50_000) n.heartbeat_at = new Date(t - (3 + Math.floor(Math.random() * 40)) * 1000).toISOString();
-    n.online = t - new Date(n.heartbeat_at).getTime() < ONLINE_MS;
-  }
-  return db.nodes;
-}
-const findNode = (name: string) => nodesNow().find((n) => n.name === name);
-const publicNode = ({ _alive, ...n }: db.MockNode): NodeInfo => { void _alive; return n; };
-
-on("GET", "/v1/nodes", () => [...nodesNow()].sort((a, b) => a.name.localeCompare(b.name)).map(publicNode));
-on("DELETE", "/v1/nodes/:name", (p) => {
-  const i = db.nodes.findIndex((n) => n.name === p.name);
-  if (i < 0) throw notFound("节点 " + p.name);
-  db.nodes.splice(i, 1);
-  return undefined;
-});
-
-/** 服务×环境部署的节点不在线时的拒绝理由（与后端 submitter._node 一致）；在线或不限节点返回 null */
-function nodeRejection(service: string, env: string, nodeName: string): string | null {
-  if (!nodeName) return null;
-  const n = findNode(nodeName);
-  if (n?.online) return null;
-  const seen = n ? `最近一次心跳 ${n.heartbeat_at}` : "从来没有上线过";
-  return `${service} 在 ${env} 部署在节点 ${nodeName}，那台主机上的 agent 服务不在线（${seen}）`;
-}
-function checkNode(service: string, env: string, nodeName: string) {
-  const why = nodeRejection(service, env, nodeName);
-  if (why) throw new ApiError(503, "node_offline", why);
-}
 
 // ———————— 服务 ————————
 
@@ -173,7 +133,7 @@ function viewOf(s: Svc, env: string) {
   const rawRoot = o.root != null ? o.root : s.root;
   const codePaths = o.code_paths ?? (s.code_paths.length ? s.code_paths : rawRoot ? [rawRoot] : []);
   return {
-    enabled: envEnabled(s, env), node: db.nodeOf(s, env), root: render(rawRoot, env), code_paths: codePaths.map((p) => render(p, env)),
+    enabled: envEnabled(s, env), root: render(rawRoot, env), code_paths: codePaths.map((p) => render(p, env)),
     python: pythonOf(s, env), urls: urlsOf(s, env), hosts: o.hosts ?? s.hosts,
     // 基座 + 环境覆盖（按库名 / 日志名），空串 = 本环境没有
     databases: Object.fromEntries(Object.entries({ ...s.databases, ...(o.databases ?? {}) }).filter(([, v]) => v)),
@@ -254,14 +214,10 @@ function serviceSummary(s: Svc): ServiceSummary {
   const health: ServiceSummary["health"] = {};
   for (const e of db.envs) {
     const rs = db.runs.filter((r) => r.service === s.name && r.env === e.name);
-    const nodeName = db.nodeOf(s, e.name);
-    const node = nodeName ? findNode(nodeName) : undefined;
     const last = rs[0];
     health[e.name] = {
       enabled: envEnabled(s, e.name),
       python: pythonOf(s, e.name),
-      node: nodeName || null,
-      node_online: node ? node.online : nodeName ? null : true,
       runs_24h: rs.filter((r) => within(r.created_at, 24)).length,
       failed_24h: rs.filter((r) => within(r.created_at, 24) && r.status === "failed").length,
       last_run: last ? { run_id: last.run_id, status: last.status, created_at: last.created_at } : null,
@@ -283,7 +239,7 @@ on("POST", "/v1/services", (_p, _q, body) => {
   if (db.services.some((s) => s.name === body.name)) throw new ApiError(409, "conflict", `服务 ${body.name} 已存在`);
   if (!/^[a-z][a-z0-9._-]{1,40}$/.test(String(body.name ?? ""))) throw invalid(`服务名不合法：'${body.name}'（小写字母开头，可含数字 . _ -，2~41 字符）`);
   const s: Service = {
-    title: "", description: "", node: "", root: "", code_paths: [], python: "", env_vars: {}, urls: {}, hosts: [], databases: {},
+    title: "", description: "", root: "", code_paths: [], python: "", env_vars: {}, urls: {}, hosts: [], databases: {},
     configs: [], hidden: [], logs: {}, mcp: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now(),
   };
   db.services.push(s);
@@ -298,16 +254,6 @@ on("DELETE", "/v1/services/:name", (p) => {
 
 // ———————— 给 agent 的只读版配置：存库，按 服务×环境×路径（定义里的写法）带版本 ————————
 
-/** 内容摘要（和后端一样是 16 位十六进制） */
-function sha(text: string): string {
-  let a = 0x811c9dc5, b = 0x5bd1e995;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    a = Math.imul(a ^ c, 16777619);
-    b = Math.imul(b ^ c, 2246822519);
-  }
-  return (a >>> 0).toString(16).padStart(8, "0") + (b >>> 0).toString(16).padStart(8, "0");
-}
 const byteSize = (text: string) => new TextEncoder().encode(text).length;
 
 /** 打码（与后端 services/inspect.mask 一致）：键像密钥的 key: value / KEY=value 行，值换成 *** */
@@ -343,32 +289,24 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
   const s = findService(p.name);
   checkEnv(p.env);
   const v = viewOf(s, p.env);
-  const node = v.node ? findNode(v.node) : undefined;
-  const local = node?.info.services?.[`${s.name}@${p.env}`];
   return {
     service: s.name, env: p.env, enabled: v.enabled, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
     mcp_servers: Object.keys(s.mcp ?? {}), hosts: v.hosts, databases: redactDbs(v.databases), logs: v.logs, profile: v.profile,
     config_files: v.config_files.map((c) => {
       const last = lastRow(s.name, p.env, c.key);
-      return {
-        ...c, version: last?.version ?? null, updated_by: last?.updated_by ?? null, updated_at: last?.updated_at ?? null,
-        sha: last ? sha(last.content) : "", present: local?.configs[c.key] ?? null,
-      };
+      return { ...c, version: last?.version ?? null, updated_by: last?.updated_by ?? null, updated_at: last?.updated_at ?? null };
     }),
-    node: v.node ? { name: v.node, online: !!node?.online, heartbeat_at: node?.heartbeat_at ?? null, host: node?.host ?? null } : null,
-    root_exists: local?.root_exists ?? null, python_ok: local?.python_ok ?? null, git: local?.git ?? null,
-    reported_at: node && local ? node.heartbeat_at : null,
   };
 });
 
-// 默认密钥打码（没填时 404）；raw=true 原文 + sha + 版本（编辑用）
+// 默认密钥打码（没填时 404）；raw=true 原文 + 版本（编辑用）
 on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
   const s = findService(p.name);
   const c = configEntry(s, p.env, String(q.path || ""));
   const last = lastRow(s.name, p.env, c.key);
   if (q.raw === true || q.raw === "true") {
     const raw: ConfigRaw = {
-      path: c.path, key: c.key, exists: !!last, content: last?.content ?? "", sha: last ? sha(last.content) : "",
+      path: c.path, key: c.key, exists: !!last, content: last?.content ?? "",
       version: last?.version ?? null, updated_by: last?.updated_by ?? null, updated_at: last?.updated_at ?? null,
     };
     return raw;
@@ -376,7 +314,7 @@ on("GET", "/v1/services/:name/envs/:env/config", (p, q) => {
   if (!last) throw new ApiError(404, "not_found", `${c.path} 在 ${p.env} 还没有填给 agent 的只读版`);
   return { path: c.path, key: c.key, content: mask(last.content) };
 });
-// 保存 = 新版本（内容没变不加版本）；带回打开时的 sha，期间被别人改过 409
+// 保存 = 新版本（内容没变不加版本）
 on("PUT", "/v1/services/:name/envs/:env/config", (p, _q, body): ConfigSaved => {
   const s = findService(p.name);
   const c = configEntry(s, p.env, String(body?.path ?? ""));
@@ -384,12 +322,10 @@ on("PUT", "/v1/services/:name/envs/:env/config", (p, _q, body): ConfigSaved => {
   if (byteSize(content) > 1024 * 1024) throw new ApiError(422, "invalid_request", "配置超过 1MB");
   const rows = cfgRows(s.name, p.env, c.key);
   const last = rows[rows.length - 1];
-  const base = body?.sha;
-  if (base !== null && base !== undefined && (last ? sha(last.content) : "") !== base) throw new ApiError(409, "conflict", `${c.key} 在你打开之后被改过，刷新后再改`);
-  if (last && last.content === content) return { path: c.path, key: c.key, version: last.version, sha: sha(content), changed: false };
+  if (last && last.content === content) return { path: c.path, key: c.key, version: last.version, changed: false };
   const version = (last?.version ?? 0) + 1;
   db.agentConfigs.set(cfgKey(s.name, p.env, c.key), [...rows, { version, content, updated_by: ME.name, updated_at: now() }]);
-  return { path: c.path, key: c.key, version, sha: sha(content), changed: true };
+  return { path: c.path, key: c.key, version, changed: true };
 });
 on("GET", "/v1/services/:name/envs/:env/config/history", (p, q) => {
   const s = findService(p.name);
@@ -613,9 +549,8 @@ for (const [kind, find] of [["services", findService], ["roles", findRole], ["ta
 // ———————— 运行 ————————
 
 const listItem = (r: db.MockRun): RunListItem => {
-  // 列表不带 node（与后端 _LIST_COLS 一致），详情才有
-  const { _events, _answer, _output, _error_code, _scenario, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, node: _n, ...rest } = r;
-  void _events; void _answer; void _output; void _error_code; void _scenario; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro; void _n;
+  const { _events, _answer, _output, _error_code, _scenario, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
+  void _events; void _answer; void _output; void _error_code; void _scenario; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
   return rest;
 };
 const findRun = (id: string) => db.runs.find((x) => x.run_id === id) ?? (() => { throw notFound("运行 " + id); })();
@@ -720,9 +655,6 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
   if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${t.name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
   const missing = Object.entries(t.input).filter(([k, f]) => f.required && (input[k] === undefined || input[k] === "")).map(([k]) => k);
   if (missing.length) throw new ApiError(400, "invalid_input", "输入不合法：" + missing.map((k) => `${k} 必填`).join("；"));
-  // 运行只在服务×环境部署的节点上执行：那个节点不在线就不受理（否则会一直排队）
-  const node = svc ? db.nodeOf(svc, env) : "";
-  if (svc) checkNode(svc.name, env, node);
   const object = body.subtask || inlineSub;
   const name = object ? `${base}:${object}` : base;
   let created: string | null = null;
@@ -733,7 +665,7 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
   const run_id = db.hex(12);
   const session_id = body.session_id || run_id;
   const run: db.MockRun = {
-    run_id, session_id, task: name, task_title: t.title, service: service ?? null, env, role: t.role, node: node || null, status: "running", resolution: null,
+    run_id, session_id, task: name, task_title: t.title, service: service ?? null, env, role: t.role, status: "running", resolution: null,
     trigger: { type: trigger as "web", id: null, source: null, caller: ME.name },
     summary: String(input.question ?? Object.values(input)[0] ?? t.title), tokens: null, duration_ms: null,
     created_at: now(), finished_at: null, task_version: db.tasks.find((x) => x.name === name)?.version ?? t.version,
@@ -843,7 +775,7 @@ on("POST", "/v1/replays", (_p, _q, body) => {
     const task = src && db.tasks.find((t) => t.name === src.task.split(":")[0]);
     const svc = src?.service ? db.services.find((s) => s.name === src.service) : undefined;
     const why = !src ? `运行 ${runId} 不存在` : !task ? `任务 ${src.task} 已不存在` : !task.enabled ? `任务 ${task.name} 已停用`
-      : svc && !envEnabled(svc, src.env) ? `服务 ${svc.name} 在 ${src.env} 环境已停用` : svc ? nodeRejection(svc.name, src.env, db.nodeOf(svc, src.env)) : null;
+      : svc && !envEnabled(svc, src.env) ? `服务 ${svc.name} 在 ${src.env} 环境已停用` : null;
     if (why || !src) { Object.assign(item, { verdict: "error", reason: why, judged_at: now() }); continue; }
     const run = db.replayRunOf(src, now(), "running", ME.name);
     db.runs.unshift(run);

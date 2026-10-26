@@ -16,7 +16,7 @@ import { ServiceDetailPage } from "./features/services/service-detail";
 import { ServicesPage } from "./features/services/services";
 import { ApiKeysPage } from "./features/settings/api-keys";
 import {
-  EnvsSettingsPage, MemorySettingsPage, NodesSettingsPage, NotificationsSettingsPage, PromptsSettingsPage,
+  EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, PromptsSettingsPage,
 } from "./features/settings/platform";
 import { PreferencesPage } from "./features/settings/preferences";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
@@ -44,7 +44,6 @@ const routes: RouteDef[] = [
   { path: "/settings/notifications", component: NotificationsSettingsPage },
   { path: "/settings/memory", component: MemorySettingsPage },
   { path: "/settings/prompts", component: PromptsSettingsPage },
-  { path: "/settings/nodes", component: NodesSettingsPage },
   { path: "/settings/roles", component: RolesPage },
   { path: "/settings/roles/:name", component: RoleDetailPage },
   { path: "/settings/api-keys", component: ApiKeysPage },

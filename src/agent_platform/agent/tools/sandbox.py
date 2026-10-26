@@ -94,13 +94,12 @@ def bwrap_argv(argv: list[str], *, scratch: str, hidden=(), allow=(), binds=(), 
     return args + ["--", *argv]
 
 
-def limit_argv(argv: list[str], limits: LimitsConfig | None, *, memory: str, cpu: str) -> list[str]:
-    """套一个 systemd 用户 scope：内存（不换 swap）、CPU、进程数各有上限，超了只杀这一个 scope。"""
+def limit_argv(argv: list[str], limits: LimitsConfig | None, *, memory: str) -> list[str]:
+    """套一个 systemd 用户 scope：内存（不换 swap）和进程数有上限，超了只杀这一个 scope。CPU 不限。"""
     if limits is None or not limits.enabled:
         return argv
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--slice={limits.slice}",
-            "-p", f"MemoryMax={memory}", "-p", "MemorySwapMax=0", "-p", f"CPUQuota={cpu}",
-            "-p", f"TasksMax={limits.tasks}", "--", *argv]
+            "-p", f"MemoryMax={memory}", "-p", "MemorySwapMax=0", "-p", f"TasksMax={limits.tasks}", "--", *argv]
 
 
 def scope_env(env: dict[str, str], limits: LimitsConfig | None) -> dict[str, str]:
@@ -118,4 +117,4 @@ def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False, hidden
             raise SandboxUnavailable("没有 bwrap（bubblewrap），按部署配置 require_sandbox 拒绝执行")
         return argv
     inner = bwrap_argv(argv, scratch=scratch_dir, hidden=hidden, allow=allow, net=allow_net, pid1=True)
-    return limit_argv(inner, limits, memory=limits.bash_memory if limits else "", cpu=limits.bash_cpu if limits else "")
+    return limit_argv(inner, limits, memory=limits.bash_memory if limits else "")

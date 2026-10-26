@@ -79,7 +79,7 @@ daily-inspection:
   deliver: {channel: default}
   timeout_s: 900
 
-# 每个服务×环境各跑一次，落在该服务×环境部署的节点上（读的是那台主机上线上的代码目录）
+# 每个服务×环境各跑一次，由部署它的那台主机上的 agent 服务执行（读的是那台主机上线上的代码目录）
 memory-gardener:
   title: 记忆园丁
   description: 夜间维护：记忆里引用的代码在线上代码目录里改过了，就标为过期

@@ -71,7 +71,6 @@ class ConfigWrite(BaseModel):
 
     path: str = Field(description="配置文件：定义里的写法或渲染后的路径")
     content: str
-    sha: str | None = Field(None, description="打开时读到的 sha（还没有版本传空串）；期间被别人改过返回 409。不传则不检查")
 
 
 class KnowledgeCreate(BaseModel):

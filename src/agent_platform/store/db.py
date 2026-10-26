@@ -6,11 +6,9 @@
 - api_keys           调用方密钥（只存哈希；只标识身份，不分权限）
 - runs / run_events  运行台账与全过程事件（审计与排障的事实源）；runs 同时是执行队列：
                      status=queued 的行由 worker 用 FOR UPDATE SKIP LOCKED 认领，heartbeat_at 判断执行者是否还活着；
-                     recipe 记这次运行用的各定义版本（配方）；node 是该在哪个节点执行（服务×环境部署在哪），
-                     worker 只认领 node 为空或等于自己的行。过程事件按保留期清理（config.RetentionConfig）
-- nodes              节点（每台主机上的平台进程）：心跳 + 上报的本机状态（各服务×环境的代码目录、git、解释器、配置路径）
+                     recipe 记这次运行用的各定义版本（配方）；每台主机上的 worker 只认领自己负责的环境（和服务）的行。
+                     过程事件按保留期清理（config.RetentionConfig）
 - service_configs    给 agent 用的只读版配置：服务×环境×路径，每次保存一个新版本
-- model_requests     模型请求的分钟窗口（所有节点共用一个 RPM 配额）
 - knowledge / knowledge_history / recall_hits   记忆（agent 记下的事：fact 事实 / lesson 报错教训 / handoff 交接摘要；
                      时序化、内容历史、召回埋点）。env 为空 = 对该服务所有环境成立
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
@@ -90,7 +88,6 @@ CREATE TABLE IF NOT EXISTS runs (
     tokens          INT,
     duration_ms     INT,
     resume          BOOLEAN NOT NULL DEFAULT false,  -- 下次认领时从 checkpoint 接着跑
-    node            TEXT,                    -- 该在哪个节点执行；NULL = 哪个节点都行（平台任务、单机部署）
     worker          TEXT,                    -- 认领它的 worker（主机:pid）
     heartbeat_at    TIMESTAMPTZ,             -- 执行中每 20 秒刷新；停了就是执行进程没了
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -104,9 +101,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_service_env ON runs (service, env, created_a
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_dedup ON runs (dedup_key, created_at) WHERE dedup_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idem ON runs (idempotency_key) WHERE idempotency_key IS NOT NULL;
-ALTER TABLE runs ADD COLUMN IF NOT EXISTS node TEXT;
 DROP INDEX IF EXISTS idx_runs_queue;
-CREATE INDEX IF NOT EXISTS idx_runs_queue_node ON runs (node, created_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_runs_queue_env ON runs (env, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_runs_role ON runs (role, created_at DESC) WHERE role IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -119,15 +115,6 @@ CREATE TABLE IF NOT EXISTS run_events (
     UNIQUE (run_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS nodes (
-    name         TEXT PRIMARY KEY,           -- 部署配置的 node
-    host         TEXT NOT NULL DEFAULT '',   -- 主机名
-    version      TEXT NOT NULL DEFAULT '',   -- 平台版本
-    started_at   TIMESTAMPTZ,
-    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    info         JSONB NOT NULL DEFAULT '{}' -- 本机状态：{services: {"服务@环境": {...}}, host: {...}}
-);
-
 CREATE TABLE IF NOT EXISTS service_configs (
     service    TEXT NOT NULL,
     env        TEXT NOT NULL,
@@ -138,11 +125,6 @@ CREATE TABLE IF NOT EXISTS service_configs (
     created_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (service, env, path, version)
 );
-
-CREATE TABLE IF NOT EXISTS model_requests (
-    at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-);
-CREATE INDEX IF NOT EXISTS idx_model_requests_at ON model_requests (at);
 
 DROP TABLE IF EXISTS service_instances;
 DROP TABLE IF EXISTS code_sync_state;

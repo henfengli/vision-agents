@@ -47,17 +47,17 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
                  trigger_type: str, trigger_id: str | None, trigger_source: str | None, caller: str | None,
                  summary: str, input_data: dict, memory: dict | None = None, status: str = "queued",
                  dedup_key: str | None = None, idempotency_key: str | None = None,
-                 output: dict | None = None, resolution: str | None = None, node: str | None = None) -> None:
-    """output + resolution 只在规则先行命中时预先给出（结论在提交时就有了）。node：该在哪个节点执行。"""
+                 output: dict | None = None, resolution: str | None = None) -> None:
+    """output + resolution 只在规则先行命中时预先给出（结论在提交时就有了）。"""
     async with db.pool().connection() as conn:
         await conn.execute(
             "INSERT INTO runs (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,"
-            " caller, summary, input, memory, status, dedup_key, idempotency_key, output, resolution, node)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " caller, summary, input, memory, status, dedup_key, idempotency_key, output, resolution)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,
              (caller or "").strip() or trigger_type, summary[:300], json.dumps(input_data, ensure_ascii=False, default=str),
              json.dumps(memory or {}), status, dedup_key or None, idempotency_key or None,
-             json.dumps(output, ensure_ascii=False) if output is not None else None, resolution, node or None))
+             json.dumps(output, ensure_ascii=False) if output is not None else None, resolution))
         if status == "queued":
             await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
@@ -72,16 +72,21 @@ async def enqueue(run_id: str, *, resume: bool = False) -> None:
         await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
 
-async def claim_next(worker: str, node: str = "") -> str | None:
+async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str, ...] = ()) -> str | None:
     """认领最早的一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。
-    node 非空：只认领不限节点（node IS NULL）或落在本节点的；空（单机）：什么都认领。"""
-    where = "status='queued'" + (" AND (node IS NULL OR node=%s)" if node else "")
-    params = (worker, node) if node else (worker,)
+    env 非空：只认领这个环境的；services 非空：再限这几个服务（平台任务不限）。都空（开发机）：什么都认领。"""
+    where, params = ["status='queued'"], [worker]
+    if env:
+        where.append("env=%s")
+        params.append(env)
+    if services:
+        where.append("(service IS NULL OR service = ANY(%s))")
+        params.append(list(services))
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "UPDATE runs SET status='running', worker=%s, heartbeat_at=now(),"
             " started_at=COALESCE(started_at, now())"
-            f" WHERE run_id = (SELECT run_id FROM runs WHERE {where} ORDER BY created_at"
+            f" WHERE run_id = (SELECT run_id FROM runs WHERE {' AND '.join(where)} ORDER BY created_at"
             "                 FOR UPDATE SKIP LOCKED LIMIT 1)"
             " RETURNING run_id", params)
         row = await cur.fetchone()

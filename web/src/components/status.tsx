@@ -1,5 +1,5 @@
 /**
- * 领域徽标：运行状态、环境、触发类型、部署节点、回归判定——全站一致的颜色与措辞。
+ * 领域徽标：运行状态、环境、触发类型、回归判定——全站一致的颜色与措辞。
  */
 import { type ReactNode } from "react";
 import {
@@ -11,8 +11,7 @@ import {
 import type { Env, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
 import { useEnvs } from "@/api/hooks";
 import { cn } from "@/lib/cn";
-import { ago } from "@/lib/format";
-import { Badge, Dot, type Tone } from "./ui/primitives";
+import { Badge, type Tone } from "./ui/primitives";
 import { Tooltip } from "./ui/overlay";
 
 export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone; icon: ReactNode }> = {
@@ -88,27 +87,6 @@ export function ResolutionTag({ resolution }: { resolution: Resolution }) {
   if (!resolution || resolution === "agent") return null;
   const m = { rule: { label: "规则", icon: <LuZap /> }, builtin: { label: "内建", icon: <LuTerminal /> } }[resolution];
   return <Badge tone="accent" icon={m.icon}>{m.label}</Badge>;
-}
-
-/**
- * 部署节点：名字 + 在线点。online=null 表示写了节点但它从来没上线过；name 为空 = 不限节点（单机部署）。
- * heartbeatAt 给了就在提示里带上最近一次心跳。
- */
-export function NodeChip({ name, online, heartbeatAt, host, className }: {
-  name: string | null | undefined; online: boolean | null | undefined; heartbeatAt?: string | null; host?: string | null; className?: string;
-}) {
-  if (!name) return <span className={cn("text-[12px] text-fg-3", className)}>不限节点</span>;
-  const state = online ? "在线" : online === false ? "离线" : "从未上线";
-  const hint = [`节点 ${name} · ${state}`, host && `主机 ${host}`, heartbeatAt && `最近心跳 ${ago(heartbeatAt)}`].filter(Boolean).join(" · ");
-  return (
-    <Tooltip content={hint}>
-      <span className={cn("inline-flex min-w-0 items-center gap-1.5 font-mono text-[12px]", online ? "text-fg-2" : "text-bad", className)}>
-        <Dot tone={online ? "ok" : online === false ? "bad" : "idle"} />
-        <span className="truncate">{name}</span>
-        {!online && <span className="shrink-0 font-sans text-[11px]">{state}</span>}
-      </span>
-    </Tooltip>
-  );
 }
 
 /** 回归重放的判定：fixed 绿 / same 琥珀 / worse 红 / unclear、error 灰 / null 判定中 */

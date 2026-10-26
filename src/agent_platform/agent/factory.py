@@ -279,7 +279,7 @@ async def _record(run_id: str, ev: dict, started: dict[str, tuple[float, float]]
         event = {**who, "model": meta.get("ls_model_name"), "ms": int((time.monotonic() - t0) * 1000) if t0 else None,
                  "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
                  "tokens": n or None, "tool_calls": calls}
-        # ms 里有多少是在等账号配额（并发 / RPM）。按本次执行累计算：同时有几个子代理在调模型时是近似值
+        # ms 里有多少是在等账号的并发名额。按本次执行累计算：同时有几个子代理在调模型时是近似值
         if event["ms"] is not None and (queued := min(int(waited[0] - w0), event["ms"])) >= 500:
             event["queued_ms"] = queued
         # 思考：思考模型的 reasoning_content；没有时用调工具前说的话（不调工具的那次是最终回答，在 final 里）

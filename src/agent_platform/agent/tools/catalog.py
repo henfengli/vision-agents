@@ -4,7 +4,7 @@
 
 所有工具从 RunScope 取"当前服务×环境"，签名里没有 service/env：
 py 在本服务本环境的项目内核里执行，db_query 只能查本服务本环境登记的只读库，
-logs 只能读本服务本环境声明过的日志。同机部署：执行运行的节点就是这个服务×环境部署的主机，
+logs 只能读本服务本环境声明过的日志。同机部署：执行运行的 agent 服务就装在这个服务×环境部署的主机上，
 logs / host_status 看到的就是线上那台机器。
 
 工具集刻意收敛：读写文件用 bash（工作目录可写，服务代码只读），编排多个工具用 py（内核里直接调），
@@ -149,7 +149,7 @@ class Toolbox:
             你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
             要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
-            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）；内存和 CPU 有上限。restart=true 清空变量重新开始。"""
+            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）；内存有上限。restart=true 清空变量重新开始。"""
             sc = run_scope.current()
             if kernels is None or reg is None or sc.view is None:
                 return "[不可用] 本运行没有关联业务服务，没有项目内核"
@@ -167,7 +167,7 @@ class Toolbox:
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件、密钥、home 下其他目录看不到，配置用
-            service_info 读）、只有工作目录可写、调用结束后台进程全灭、内存和 CPU 有上限。默认断网；需要访问本机服务端口
+            service_info 读）、只有工作目录可写、调用结束后台进程全灭、内存有上限。默认断网；需要访问本机服务端口
             或内网接口时传 network=true。输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
             r = await asyncio.to_thread(

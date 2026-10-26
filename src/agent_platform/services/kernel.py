@@ -5,12 +5,12 @@
 - 给 agent 的只读配置 bind 到项目读配置的路径，线上真实配置被盖住；别的环境的配置遮蔽——
   项目代码按原样读配置、连库（只读账号），import 项目模块、调项目自己的函数（口径函数、ORM、dagster 资产…）
 - 沙箱里 home 是空的，只挂回代码目录、conda 环境、方法目录；看不到 docker、systemd 用户总线、同用户的其他进程
-- 每个内核一个 systemd 用户 scope（部署配置 limits）：内存、CPU、进程数有上限，超了只杀这个内核
+- 每个内核一个 systemd 用户 scope（部署配置 limits）：内存、进程数有上限，超了只杀这个内核
 - 变量跨调用保留：同一会话里上一轮加载的 DataFrame 下一轮还在；restart 清空
 - 驱动脚本只用标准库，业务环境里不用额外装东西
 - 文件系统只读，scratch（和 bash 共用的工作区）可写，/tmp 是独立 tmpfs；网络照常（要连库）
 - 空闲超时回收；同时存在的内核有上限，超了先回收最久没用的
-- 规格的 digest（解释器、配置版本、环境变量）变了就重启：配置可能是在别的节点的控制台上改的
+- 规格的 digest（解释器、配置版本、环境变量）变了就重启：配置是在控制台上改的（可能由另一台主机上的 agent 服务回答）
 
 协议（驱动在子进程里把 fd 0/1 挪走，业务代码和子进程的输出不会混进协议）：
 - 宿 → 内核（原 stdin）：一行 JSON {"id", "code", "timeout", "tools"}
@@ -298,7 +298,7 @@ class KernelManager:
             argv = bwrap_argv(argv, scratch=self._scratch, hidden=sorted(masks), allow=spec.get("allow") or (),
                               binds=binds, workdir=workdir, net=True)
             lim = self._limits
-            argv = limit_argv(argv, lim, memory=lim.kernel_memory if lim else "", cpu=lim.kernel_cpu if lim else "")
+            argv = limit_argv(argv, lim, memory=lim.kernel_memory if lim else "")
             env = scope_env(env, lim)
         elif self._require:
             raise KernelError("没有 bwrap（bubblewrap），按部署配置 require_sandbox 不起项目内核")

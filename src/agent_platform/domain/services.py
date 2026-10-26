@@ -4,8 +4,8 @@
 - agent 看到什么：线上的代码目录、给 agent 用的只读版配置、只读库、日志、主机、档案
 - 项目内核：用该环境的解释器、在该环境的代码目录、带着给 agent 用的只读配置跑一段 Python（py 工具）
 
-同机部署：每个环境的项目部署在某台主机上，那台主机上装着平台的一个节点（envs.<环境>.node）。
-这个服务×环境的运行只在那个节点上执行，读的是线上那份代码、用的是线上那套解释器。
+同机部署：项目部署在哪台主机上，那台主机上就装着管这个环境的 agent 服务（部署配置 env / services）。
+这个服务×环境的运行由它执行，读的是线上那份代码、用的是线上那套解释器。
 平台不改代码、不装依赖、不启停业务进程。
 
 配置文件（configs）写的是项目读配置的路径，比如 ~/deploy/vision-board/vision_board/settings-{env}.py。
@@ -103,7 +103,6 @@ class EnvOverride(BaseModel):
     """按环境覆盖：只写和基座不同的部分。enabled=false 表示该服务在这个环境不接收运行。"""
 
     enabled: bool = True
-    node: str | None = None                   # 这个环境部署在哪个节点（部署配置的 node）；不写跟随服务的 node
     root: str | None = None                   # 这个环境的代码目录（不写跟随服务的 root）
     hosts: list[str] | None = None
     databases: dict[str, str] = Field(default_factory=dict)   # 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
@@ -131,7 +130,6 @@ class ServiceView(BaseModel):
     env: str
     title: str
     enabled: bool
-    node: str                                # 部署在哪个节点；空 = 不限（单机部署）
     root: str
     code_paths: list[str]
     python: str
@@ -146,8 +144,7 @@ class ServiceView(BaseModel):
 
     def prompt_block(self) -> str:
         """给 agent 的"你在哪"：服务×环境的事实清单（档案另起一块）。"""
-        lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env}"
-                 + (f" · 部署在节点 {self.node}（就是你所在的这台主机）" if self.node else ""),
+        lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env} · 你就在这个环境部署它的那台主机上",
                  f"代码目录：{self.root or '未配置'}（线上实际部署的那份，只读）"]
         if self.code_paths and self.code_paths != [self.root]:
             lines.append("其他代码目录：" + "、".join(p for p in self.code_paths if p != self.root))
@@ -179,7 +176,6 @@ class ServiceView(BaseModel):
 class ServiceDef(BaseModel):
     title: str = ""
     description: str = ""
-    node: str = ""                            # 默认部署节点；一般按环境写在 envs.<环境>.node
     root: str = ""                            # 线上的代码目录（各环境可在 envs 里覆盖）
     code_paths: list[str] = Field(default_factory=list)
     python: str = ""                          # 项目解释器（可写 {env}、~）；空 = python3
@@ -238,7 +234,6 @@ class ServiceDef(BaseModel):
         logs = {k: render(v, env) for k, v in {**self.logs, **o.logs}.items() if v}
         return ServiceView(
             service=name, env=env, title=self.title or name, enabled=self.enabled and o.enabled,
-            node=o.node if o.node is not None else self.node,
             root=root, code_paths=[render(p, env) for p in code_paths],
             python=python, env_vars={k: render(v, env, python=python) for k, v in self.env_vars.items()},
             urls=self.urls_for(env), hosts=o.hosts if o.hosts is not None else self.hosts,

@@ -2,10 +2,11 @@
 
 submit 的顺序就是它的全部逻辑：
 
-    幂等键命中？→ 解析任务 → 解析服务 → 解析环境 → 校验输入 → 闸门链 → 任务去重 → 部署节点在线？
-    → （点名的子任务不存在就按父任务建）→ 建台账行（queued，记下该在哪个节点执行，叫醒 worker）
+    幂等键命中？→ 解析任务 → 解析服务 → 解析环境 → 校验输入 → 闸门链 → 任务去重
+    → （点名的子任务不存在就按父任务建）→ 建台账行（queued，叫醒 worker）
 
 建行之后的事都由 worker 从台账行出发（pipeline.build_spec）：新提交、续跑、重跑、重放走的是同一段代码。
+哪台主机执行看台账行的环境（和服务）：管这个环境的 agent 服务认领；它没在跑时运行就排着，起来后接着执行。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import psycopg
 from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef
 from ..domain.tasks import check_task_name
 from ..registry import Registry
-from ..store import db, nodes, runs
+from ..store import db, runs
 from . import gates
 
 log = logging.getLogger(__name__)
@@ -76,7 +77,6 @@ class Submitter:
             if hit := await runs.find_dedup(dedup_key, task.dedup.window_s):
                 return Accepted.of(hit, dedup=True)
 
-        node = await self._node(service, env) if not rule else None
         created = await self._create_subtask(task_name, base, caller) if to_create else None
 
         run_id = uuid.uuid4().hex[:16]
@@ -86,7 +86,7 @@ class Submitter:
                 env=env, trigger_type=trigger.type, trigger_id=trigger.id, trigger_source=trigger.source,
                 caller=trigger.caller or caller.name, summary=_summary(input_data, task.title or task_name),
                 input_data=input_data, memory=req.memory.model_dump(exclude_none=True),
-                dedup_key=dedup_key, idempotency_key=idempotency_key, node=node,
+                dedup_key=dedup_key, idempotency_key=idempotency_key,
                 output={"answer": rule["conclusion"], **rule} if rule else None, resolution="rule" if rule else None)
         except psycopg.errors.UniqueViolation:
             # 同一个幂等键的并发提交（多个 worker 同时触发同一次定时、调用方重试）：返回先到的那条
@@ -123,20 +123,6 @@ class Submitter:
             raise
         log.info("按父任务 %s 自动建子任务 %s（%s）", base, name, caller.name)
         return name
-
-    async def _node(self, service: str | None, env: str) -> str | None:
-        """服务×环境部署在哪个节点：运行只在那里执行。那个节点不在线就不受理（否则会一直排队）。"""
-        if not service:
-            return None
-        view = await self._reg.service_view(service, env)
-        if view is None or not view.node:
-            return None
-        node = await nodes.get(view.node)
-        if node is None or not node["online"]:
-            seen = f"最近一次心跳 {node['heartbeat_at']}" if node else "从来没有上线过"
-            raise Rejected("node_offline", f"{service} 在 {env} 部署在节点 {view.node}，那台主机上的 agent 服务"
-                                           f"不在线（{seen}）", 503)
-        return view.node
 
     async def _resolve_service(self, task_name: str, task: TaskDef, requested: str | None) -> str | None:
         """专属任务：服务就是任务的服务（请求里写了别的 → 拒绝）；通用任务：请求必须给；平台任务：没有服务。"""
@@ -178,13 +164,12 @@ class Submitter:
         if entry is None:
             raise Rejected("unknown_task", f"任务 {old['task']} 已不存在")
         await gates.check_switches(self._reg, task_name=old["task"], task=entry.spec, service=old["service"], env=old["env"])
-        node = await self._node(old["service"], old["env"])
         run_id = uuid.uuid4().hex[:16]
         session_id = req.session_id or run_id
         await runs.create(run_id=run_id, session_id=session_id, task=old["task"], role=entry.spec.role,
                           service=old["service"], env=old["env"], trigger_type=trigger.type, trigger_id=trigger.id,
                           trigger_source=None, caller=trigger.caller, summary=_summary(req.input, old["summary"]),
-                          input_data=req.input, memory=req.memory.model_dump(exclude_none=True), node=node)
+                          input_data=req.input, memory=req.memory.model_dump(exclude_none=True))
         return Accepted(run_id, session_id, "queued")
 
     async def resume(self, run_id: str, caller: Caller) -> Accepted:

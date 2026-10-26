@@ -80,38 +80,7 @@ export interface Meta {
   channels: string[];    // 通知渠道名（任务投递、notify 工具可选）
   feedback_reasons: { value: FeedbackReason; label: string }[];
   features: { vector_search: boolean };
-  node: string;          // 回答这个请求的节点（空 = 单机部署）
   me: Me;
-}
-
-// ———————— 节点：每台部署主机上的平台进程（共用一个库、一个控制台） ————————
-
-/** 代码目录的 git 状态（节点在部署主机上看到的） */
-export interface GitState {
-  branch: string;
-  commit: string;
-  subject: string;
-  dirty: boolean;
-  committed_at: ISODate;
-}
-
-/** 节点上报的一个 服务×环境 的本机状况 */
-export interface NodeServiceStatus {
-  root_exists: boolean;
-  python_ok: boolean;
-  git: GitState | null;
-  configs: Record<string, boolean>;   // 定义里的配置路径（key）→ 在这台主机上存不存在
-}
-
-/** GET /v1/nodes 的一项：在线 = 3 分钟内有心跳 */
-export interface NodeInfo {
-  name: string;
-  host: string;
-  version: string;
-  started_at: ISODate | null;
-  heartbeat_at: ISODate;
-  online: boolean;
-  info: { services?: Record<string, NodeServiceStatus> };   // 键形如 "vision-board@prod"
 }
 
 // ———————————————————— 平台配置（设置 → 平台） ————————————————————
@@ -201,8 +170,8 @@ export interface ApiKey {
 }
 
 // ———————————————————— 服务 ————————————————————
-// 同机部署：每个环境的项目部署在某台主机上，那台主机上装着平台的一个节点（envs.<环境>.node）。
-// 运行只在那个节点上执行，读的是线上那份代码、用的是线上那套解释器；平台不改代码、不装依赖、不启停业务进程。
+// 同机部署：项目部署在哪台主机上，那台主机上就装着管这个环境的 agent 服务（它的部署配置写 env / services）。
+// 运行由它执行，读的是线上那份代码、用的是线上那套解释器；平台不改代码、不装依赖、不启停业务进程。
 
 /**
  * 只读库：{库名: 连接串}。scheme 决定类型（postgresql / postgres、mysql / mariadb、doris、clickhouse / clickhouses、
@@ -213,7 +182,6 @@ export type Databases = Record<string, string>;
 /** 按环境覆盖：只写和基座不同的部分 */
 export interface ServiceEnvOverride {
   enabled?: boolean;            // false = 该服务在这个环境不接收运行、不起项目内核
-  node?: string | null;         // 这个环境部署在哪个节点；不写跟随服务的 node
   root?: string | null;         // 这个环境的代码目录；不写跟随服务的 root
   hosts?: string[] | null;
   databases?: Databases;        // 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
@@ -231,7 +199,6 @@ export interface Service extends Ledger {
   name: string;
   title: string;
   description: string;
-  node: string;          // 默认部署节点；一般按环境写在 envs.<环境>.node
   root: string;          // 线上的代码目录（可写 {env}、~；~ 是部署用户的 home，平台和项目是同一个用户）
   code_paths: string[];
   python: string;        // 项目解释器（线上用的那个），可写 {env}、~；空 = python3
@@ -253,18 +220,19 @@ export interface Service extends Ledger {
   enabled: boolean;
 }
 
-/** 服务×环境视图里的一个配置文件：给 agent 的只读版填到第几版、部署主机上这个路径在不在 */
+/** 服务×环境视图里的一个配置文件：给 agent 的只读版填到第几版 */
 export interface ConfigFileStatus {
   key: string;                 // 定义里的写法（含 {env}）；内容按它存库
   path: string;                // 渲染后的路径
   version: number | null;      // null = 还没有填给 agent 的版本（py 起不来）
   updated_by: string | null;
   updated_at: ISODate | null;
-  sha: string;
-  present: boolean | null;     // 部署主机上这个路径存不存在（节点上报）；null = 还没上报
 }
 
-/** GET /v1/services/{s}/envs/{env}：服务×环境的解析结果 + 部署节点与它上报的本机状况 */
+/**
+ * GET /v1/services/{s}/envs/{env}：服务×环境的解析结果 + 给 agent 的配置各是第几版。
+ * 代码目录、git 这些只有部署主机上看得到的不在这里（控制台可能由另一台主机回答），agent 运行时用 service_info 看。
+ */
 export interface ServiceView {
   service: string;
   env: string;
@@ -279,20 +247,14 @@ export interface ServiceView {
   logs: Record<string, string>;   // 本环境的日志：{名字: 渲染后的路径 | docker:<容器>}
   profile: Record<string, string>;
   config_files: ConfigFileStatus[];
-  node: { name: string; online: boolean; heartbeat_at: ISODate | null; host: string | null } | null;   // 没写节点（单机部署）为空
-  root_exists: boolean | null;    // 以下四项是部署节点上报的；没上报为 null
-  python_ok: boolean | null;
-  git: GitState | null;
-  reported_at: ISODate | null;
 }
 
-/** GET …/config?path=&raw=true：给 agent 的只读版原文 + sha，编辑用 */
+/** GET …/config?path=&raw=true：给 agent 的只读版原文 + 版本，编辑用 */
 export interface ConfigRaw {
   path: string;
   key: string;
   exists: boolean;             // false = 还没填
   content: string;
-  sha: string;                 // 保存时带回；还没有版本为空串
   version: number | null;
   updated_by: string | null;
   updated_at: ISODate | null;
@@ -310,7 +272,6 @@ export interface ConfigSaved {
   path: string;
   key: string;
   version: number;
-  sha: string;
   changed: boolean;
 }
 
@@ -341,14 +302,12 @@ export interface ServiceTools {
 export interface ServiceEnvHealth {
   enabled: boolean;
   python: string;               // 该环境的解释器
-  node: string | null;          // 部署节点；null = 不限（单机部署）
-  node_online: boolean | null;  // null = 写了节点但它从来没上线过
   runs_24h: number;
   failed_24h: number;
   last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
 }
 
-/** 服务列表项：带每个环境的健康汇总与部署节点 */
+/** 服务列表项：带每个环境的健康汇总 */
 export interface ServiceSummary extends Service {
   task_count: number;
   health: Record<string, ServiceEnvHealth>;
@@ -531,7 +490,6 @@ export interface Recipe {
 }
 
 export interface Run extends RunListItem {
-  node: string | null;         // 该在哪个节点执行（服务×环境部署在哪）；null = 哪个节点都行（平台任务、单机部署）
   task_version: number | null;
   role_version: number | null;
   recipe: Recipe | null;
@@ -570,7 +528,7 @@ export interface RunEvent {
     purpose?: string;          // 平台辅助调用的用途：记忆沉淀 / 交接摘要 / 回归判定
     model?: string | null;
     ms?: number | null;
-    queued_ms?: number;        // model_call：ms 里在平台侧等账号配额（并发 / RPM）的部分，不到 0.5 秒不记
+    queued_ms?: number;        // model_call：ms 里在平台侧等账号并发名额的部分，不到 0.5 秒不记
     input_tokens?: number | null;
     output_tokens?: number | null;
     tool_calls?: string[];

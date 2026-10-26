@@ -1,17 +1,16 @@
 /**
  * 平台配置四节：环境、通知、记忆、提示词。对所有人生效，每次保存是一个新版本，可对比、可恢复。
  * 每页同一个套路：读当前配置 → 本地草稿 → 底部保存条 → PUT 整节。
- * 另有只读的「节点」：每台部署主机上的平台进程、心跳与它上报的本机状况。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { LuGitCommitHorizontal, LuHistory, LuPlus, LuRefreshCw, LuSend, LuServer, LuTrash2 } from "react-icons/lu";
+import { LuHistory, LuPlus, LuSend, LuTrash2 } from "react-icons/lu";
 
-import { api, useMeta, useNodes, useServices, useSettings, useTasks } from "@/api/hooks";
+import { api, useMeta, useServices, useSettings, useTasks } from "@/api/hooks";
 import type {
-  Channel, ConfigSection, ConfigSections, EnvColor, NodeInfo, NodeServiceStatus, NotifyEvent, NotifyRule, PromptsConfig, ServiceSummary,
+  Channel, ConfigSection, ConfigSections, EnvColor, NotifyEvent, NotifyRule, PromptsConfig,
 } from "@/api/types";
 import { SaveBar } from "@/components/save-bar";
-import { EnvBadge, NodeChip } from "@/components/status";
+import { EnvBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
@@ -246,153 +245,6 @@ export function MemorySettingsPage() {
         </Card>
       )}
     </SectionPage>
-  );
-}
-
-// ———————— 节点（只读） ————————
-
-interface Placement { service: string; env: string }
-
-/** 服务定义里各服务×环境写的部署节点（来自服务列表的 health）：节点名 → 部署在它上面的服务×环境 */
-function placements(services: ServiceSummary[] | undefined): Map<string, Placement[]> {
-  const map = new Map<string, Placement[]>();
-  for (const s of services ?? []) for (const [env, h] of Object.entries(s.health)) {
-    if (h.node) map.set(h.node, [...(map.get(h.node) ?? []), { service: s.name, env }]);
-  }
-  return map;
-}
-
-export function NodesSettingsPage() {
-  const { data: nodes, error, loading, fetching, refetch } = useNodes();
-  const { data: services } = useServices();
-  const { data: meta } = useMeta();
-  const assigned = useMemo(() => placements(services), [services]);
-  const known = new Set((nodes ?? []).map((n) => n.name));
-  const never = [...assigned.entries()].filter(([name]) => !known.has(name));
-  const remove = async (n: NodeInfo) => {
-    const ok = await confirm({
-      title: `去掉节点 ${n.name}？`,
-      description: "只是从列表里去掉这条记录，主机下线、不再用了才这么做；还在跑的节点下一次心跳会再出现。部署在它上面的服务×环境照样不接收运行，要换节点去服务定义里改。",
-      confirmText: "去掉", danger: true,
-    });
-    if (!ok) return;
-    try {
-      await api.removeNode(n.name);
-      toast(`已去掉节点 ${n.name}`);
-      invalidate("nodes");
-      invalidate("services");
-    } catch (e) { toast.error("去掉失败", (e as Error).message); }
-  };
-  return (
-    <SettingsLayout title="节点"
-      description={<>每台部署主机上装着平台的一个节点，所有节点共用一个库、一个控制台。服务×环境的运行只在它部署的节点上执行（服务 → 配置 → 环境 → 部署节点）。节点每分钟写一次心跳、上报本机状况（代码目录、git、解释器、配置路径）；<b className="font-medium text-fg-2">3 分钟没有心跳算离线</b>，部署在离线节点上的服务×环境不接收新运行（node_offline）。</>}
-      actions={<Button variant="ghost" icon={<LuRefreshCw className={cn(fetching && "animate-spin")} />} onClick={() => refetch()}>刷新</Button>}>
-      {error && !nodes ? <Card><ErrorState error={error} onRetry={refetch} /></Card> : loading ? <Skeleton className="h-64" /> : !nodes?.length ? (
-        <Card><Empty icon={<LuServer />} title="还没有节点上线" description="在部署主机上装好平台（deploy/install-user.sh），部署配置里写好 node，启动后一分钟内就会出现在这里" /></Card>
-      ) : (
-        <div className="space-y-4">
-          {nodes.map((n) => <NodeCard key={n.name} node={n} self={meta?.node === n.name} assigned={assigned.get(n.name) ?? []} onRemove={() => remove(n)} />)}
-          {never.length > 0 && (
-            <Card>
-              <CardHeader title="从来没有上线过的节点" description="服务定义里写了这些节点，但它们一次心跳都没有：部署在上面的服务×环境不接收运行。检查节点名有没有写错、那台主机上的平台装好没有。" />
-              <ul className="divide-y divide-line">
-                {never.map(([name, list]) => (
-                  <li key={name} className="flex flex-wrap items-center gap-3 px-4 py-2.5">
-                    <NodeChip name={name} online={null} />
-                    <span className="flex flex-wrap gap-1.5">{list.map((p) => <PlacementLink key={`${p.service}@${p.env}`} p={p} />)}</span>
-                  </li>
-                ))}
-              </ul>
-            </Card>
-          )}
-        </div>
-      )}
-    </SettingsLayout>
-  );
-}
-
-function PlacementLink({ p }: { p: Placement }) {
-  return (
-    <Link to={`/services/${p.service}?env=${p.env}`} className="inline-flex items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[12px] hover:border-accent hover:text-accent">
-      <span className="font-mono">{p.service}</span><EnvBadge env={p.env} />
-    </Link>
-  );
-}
-
-/** 一个服务×环境上报的问题；都正常返回空 */
-function problemsOf(r: NodeServiceStatus): string[] {
-  const missing = Object.values(r.configs ?? {}).filter((x) => !x).length;
-  return [!r.root_exists && "代码目录不存在", !r.python_ok && "解释器不可用", missing > 0 && `${missing} 个配置路径不存在`].filter((x): x is string => !!x);
-}
-
-function NodeCard({ node, self, assigned, onRemove }: { node: NodeInfo; self: boolean; assigned: Placement[]; onRemove: () => void }) {
-  const reported = node.info.services ?? {};
-  const keys = [...new Set([...assigned.map((p) => `${p.service}@${p.env}`), ...Object.keys(reported)])].sort();
-  const isAssigned = (key: string) => assigned.some((p) => `${p.service}@${p.env}` === key);
-  return (
-    <Card className={cn(!node.online && "border-bad/30")}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line px-4 py-3">
-        <span className={cn("size-2 shrink-0 rounded-full", node.online ? "bg-ok" : "bg-bad")} aria-hidden />
-        <span className="font-mono text-[14px] font-semibold text-fg">{node.name}</span>
-        {self && <Badge tone="accent" title="回答这个页面请求的就是它">本节点</Badge>}
-        {node.online ? <Badge tone="ok">在线</Badge> : <Badge tone="bad">离线</Badge>}
-        <span className="font-mono text-[12px] text-fg-3">{node.host || "—"}</span>
-        <span className="text-[12px] text-fg-3">v{node.version || "—"}</span>
-        <span className="ml-auto text-[12px] text-fg-3" title={datetime(node.heartbeat_at, true)}>
-          最近心跳 {ago(node.heartbeat_at)}{node.started_at && <> · 启动于 <span title={datetime(node.started_at, true)}>{ago(node.started_at)}</span></>}
-        </span>
-        {!node.online && (
-          <Tooltip content="主机下线、不再用了才去掉；还在跑的节点下一次心跳会再出现">
-            <Button size="xs" variant="danger-ghost" icon={<LuTrash2 />} onClick={onRemove}>去掉</Button>
-          </Tooltip>
-        )}
-      </div>
-      {!node.online && (
-        <div className="border-b border-line bg-bad-soft/40 px-4 py-2 text-[12.5px] text-bad">
-          {ago(node.heartbeat_at)}起没有心跳：部署在它上面的服务×环境不接收新运行。到那台主机上看 <code className="font-mono">systemctl --user status agent-platform</code>；下面是它最后一次上报的状况。
-        </div>
-      )}
-      {!keys.length ? (
-        <div className="px-4 py-4 text-[12.5px] text-fg-3">没有服务×环境部署在这个节点上（服务定义里没有哪个环境写了 node: {node.name}）。</div>
-      ) : (
-        <Table>
-          <thead><tr><Th>服务×环境</Th><Th>当前提交</Th><Th>本机状况</Th></tr></thead>
-          <tbody>
-            {keys.map((key) => {
-              const [service, env] = key.split("@");
-              const r = reported[key];
-              const problems = r ? problemsOf(r) : [];
-              return (
-                <Tr key={key}>
-                  <Td className="whitespace-nowrap">
-                    <PlacementLink p={{ service, env }} />
-                    {!isAssigned(key) && <div className="mt-0.5 text-[11px] text-warn">定义里已不在这个节点</div>}
-                  </Td>
-                  <Td className="max-w-[420px]">
-                    {r?.git ? (
-                      <div className="min-w-0">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <LuGitCommitHorizontal className="size-3.5 shrink-0 text-fg-3" />
-                          <code className="font-mono text-[12px] font-medium text-fg">{r.git.commit}</code>
-                          <span className="min-w-0 truncate text-[12.5px] text-fg-2" title={r.git.subject}>{r.git.subject}</span>
-                          {r.git.dirty && <Badge tone="warn" title="代码目录里有未提交的改动">未提交改动</Badge>}
-                        </div>
-                        <div className="text-[11px] text-fg-3"><span className="font-mono">{r.git.branch}</span> · 提交于 {ago(r.git.committed_at)}</div>
-                      </div>
-                    ) : <span className="text-[12px] text-fg-3">{r ? "不是 git 仓库" : "—"}</span>}
-                  </Td>
-                  <Td>
-                    {!r ? <span className="text-[12px] text-fg-3">没有上报（这台主机上的节点还没看到这份定义）</span>
-                      : problems.length ? <span className="flex flex-wrap gap-1">{problems.map((p) => <Badge key={p} tone="bad">{p}</Badge>)}</span>
-                        : <span className="text-[12px] text-ok">代码目录、解释器、配置路径都在</span>}
-                  </Td>
-                </Tr>
-              );
-            })}
-          </tbody>
-        </Table>
-      )}
-    </Card>
   );
 }
 

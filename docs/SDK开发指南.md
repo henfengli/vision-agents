@@ -49,7 +49,7 @@ run = agent.run("failure-analysis", {"run_id": run_id, "asset_key": asset_key, "
 print(run["run_id"], run["subtask_created"])
 ```
 
-模型账号限并发 1、3 RPM，一次 agent 运行通常要几分钟；`ask` 和 `run()`（默认 `wait=True`）会一直等到结束。
+一次 agent 运行要多次调模型和工具，可能要几分钟；`ask` 和 `run()`（默认 `wait=True`）会一直等到结束。
 
 ## API 参考
 
@@ -159,7 +159,6 @@ except AgentError as e:
 | `service_disabled` / `service_env_disabled` / `task_disabled` | 停用 | 控制台启用，或换环境 |
 | `env_not_allowed` | 任务不能在这个环境跑 | 换环境 |
 | `trigger_not_allowed` | 任务没开放 API 调用 | 在任务定义里加 `api` 触发 |
-| `node_offline` | 这个环境所在节点的 agent 服务没在线（HTTP 503，超过 3 分钟没心跳） | 稍后重试；持续出现就找平台负责人看那台机器上的 `agent-platform` |
 | `unknown_task` / `unknown_service` / `unknown_env` | 名字写错 | — |
 | `run_failed` / `run_cancelled` | `ask` 的运行没有成功结束 | 去控制台看运行详情 |
 
@@ -177,5 +176,7 @@ agent-chat vision-board --resume <会话 id>
 ## 常见问题
 
 - **想看中间过程**：`ask(on_event=...)`，或者事后 `events(run_id)` 拉全量事件。
-- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。并发多了也快不了：模型请求在平台侧排队（并发 1、3 RPM）。
+- **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。并发多了也快不了：模型账号同时只放 3 个请求，
+  prod、test 所有调用共用，多出来的在平台侧排队。
+- **运行一直 `queued`**：负责这个环境的 agent 服务没在跑，平台照常受理，等它起来后接着执行。持续出现就找平台负责人看那台机器上的 `agent-platform`。
 - **嵌入自己的服务**：直接把 `client.py` 拷进去，类名和方法名随意改，只要不破坏 HTTP 契约。

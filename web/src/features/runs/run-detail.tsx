@@ -248,8 +248,7 @@ const BLOCK_STAGES = new Set(["system"]);
 
 /** 同机部署带来的几种原因码：在出错的那一步下面说一句该去哪儿处理 */
 const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
-  node_offline: { text: "这个服务×环境部署的节点不在线（那台主机上的 agent 服务没有心跳）", to: () => "/settings/nodes", link: "看节点" },
-  wrong_node: { text: "运行落到了别的节点上：服务×环境只在它部署的节点上执行，检查服务定义里各环境的部署节点", to: (r) => `/services/${r.service}?tab=config&part=definition`, link: "看服务定义" },
+  wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services）决定" },
   config_missing: { text: "给 agent 的只读版配置还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
 };
 
@@ -357,7 +356,7 @@ function ModelMeta({ p, className }: { p: RunEvent["payload"]; className?: strin
   const calls = p.tool_calls ?? [];
   const items: ReactNode[] = [];
   if (p.model) items.push(<span className="font-mono">{p.model}</span>);
-  if (p.queued_ms) items.push(<span title="耗时里这部分是在平台侧排队等账号配额（同时在途的请求数、每分钟请求数），模型本身没在算">排队 {duration(p.queued_ms)}</span>);
+  if (p.queued_ms) items.push(<span title="耗时里这部分是在平台侧排队等账号的并发名额（同时在途的请求数，生产和测试共用），模型本身没在算">排队 {duration(p.queued_ms)}</span>);
   if (p.input_tokens != null || p.output_tokens != null) items.push(<span>{num(p.input_tokens)} → {num(p.output_tokens)} tokens</span>);
   else if (p.tokens) items.push(<span>{num(p.tokens)} tokens</span>);
   if (calls.length) items.push(<span>调用 {calls.map((c, i) => <Fragment key={i}>{i > 0 && "、"}<code className="font-mono text-fg-2">{c}</code></Fragment>)}</span>);
@@ -388,9 +387,6 @@ function Sidebar({ run }: { run: Run }) {
               ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
               : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
             ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
-            ["执行节点", run.node
-              ? <Link to="/settings/nodes" className="font-mono text-[12px] hover:text-accent" title="服务×环境部署在这个节点上，运行只在这里执行">{run.node}</Link>
-              : <span className="text-fg-3">不限（{run.service ? "单机部署" : "平台任务"}）</span>],
             ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
             ["开始", datetime(run.created_at, true)],

@@ -1,4 +1,4 @@
-"""服务×环境视图、闸门、内核规格：{env} 与 ~ 渲染、按环境启用与节点、给 agent 的配置就位与遮蔽。"""
+"""服务×环境视图、闸门、内核规格：{env} 与 ~ 渲染、按环境启用、给 agent 的配置就位与遮蔽、只在负责的主机上起内核。"""
 
 import asyncio
 import os
@@ -26,12 +26,12 @@ class ServiceViewTest(unittest.TestCase):
         self.assertEqual(v.config_files, [{"key": "/srv/b/settings-{env}.py", "path": "/srv/b/settings-test.py"}])
         self.assertEqual(v.logs, {"app": "/srv/b/test.log", "web": "docker:b-web"})
 
-    def test_env_overrides_node_root_and_logs(self):
+    def test_env_overrides_root_and_logs(self):
         svc = ServiceDef.model_validate({"root": "/srv/b", "logs": {"app": "/srv/b/a.log", "nginx": "/var/log/n.log"},
                                          "envs": {"prod": {"node": "p1", "root": "/data/b", "logs": {"nginx": ""}}}})
-        prod, test = svc.view("b", "prod"), svc.view("b", "test")
-        self.assertEqual((prod.node, prod.root, list(prod.logs)), ("p1", "/data/b", ["app"]))
-        self.assertEqual((test.node, test.root), ("", "/srv/b"))
+        prod, test = svc.view("b", "prod"), svc.view("b", "test")      # 旧定义里的 node 读进来时忽略
+        self.assertEqual((prod.root, list(prod.logs)), ("/data/b", ["app"]))
+        self.assertEqual(test.root, "/srv/b")
 
     def test_old_config_shape_is_read(self):
         svc = ServiceDef.model_validate({"configs": [{"canonical": "/c/{env}/.env", "template": "/t/{env}/.env"}]})
@@ -87,7 +87,6 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(board["root"], "~/deploy/vision-board")          # 库里存原样，用时才展开 ~
         self.assertEqual(view.config_files[0]["path"],
                          os.path.expanduser("~/deploy/vision-board/vision_board/settings-prod.py"))
-        self.assertEqual((view.node, run(self.reg.service_view("vision-board", "test")).node), ("prod", "test-board"))
         channels = run(self.reg.store.get("config", "notifications"))["definition"]["channels"]
         self.assertEqual(channels["default"]["token"], "${DINGTALK_ACCESS_TOKEN}")
 
@@ -122,7 +121,7 @@ class EnvSpecTest(unittest.TestCase):
             "python": "/opt/conda/envs/vision-board/bin/python",
         }, "test"))
         self.code = code
-        self.s = settings(str(self.root / "data"), node="test-board")
+        self.s = settings(str(self.root / "data"), env="test", services=["vision-board"])
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -153,11 +152,12 @@ class EnvSpecTest(unittest.TestCase):
             self._spec({})
         self.assertEqual(cm.exception.code, "config_missing")
 
-    def test_wrong_node_refuses(self):
-        self.s = settings(str(self.root / "data"), node="prod")
-        with self.assertRaises(Rejected) as cm:
-            self._spec({})
-        self.assertEqual(cm.exception.code, "wrong_node")
+    def test_other_env_or_service_refuses(self):
+        for kw in ({"env": "prod"}, {"env": "test", "services": ["vision-dagster"]}):
+            self.s = settings(str(self.root / "data"), **kw)
+            with self.assertRaises(Rejected) as cm:
+                self._spec({})
+            self.assertEqual(cm.exception.code, "wrong_env")
 
 
 if __name__ == "__main__":

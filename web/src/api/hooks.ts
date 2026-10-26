@@ -6,7 +6,7 @@ import { del, get, patch, post, put } from "./client";
 import type {
   ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigMasked, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
   ConfigVersion, ConfigVersionContent, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters,
-  MemoryHealth, Meta, NodeInfo, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
+  MemoryHealth, Meta, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
   RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire,
   Version, VersionStat,
 } from "./types";
@@ -42,10 +42,11 @@ export const api = {
   /** 密钥打码后的内容；还没填时 404 */
   serviceConfig: (name: string, env: string, path: string) =>
     get<ConfigMasked>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),
-  /** 原文 + sha，编辑用：保存带回打开时的 sha（还没有版本传空串），期间被别人改过返回 409 conflict */
+  /** 原文 + 版本，编辑用 */
   configRaw: (name: string, env: string, path: string) =>
     get<ConfigRaw>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path, raw: true }),
-  saveConfig: (name: string, env: string, body: { path: string; content: string; sha: string }) =>
+  /** 保存 = 新版本；内容没变不加版本（changed=false） */
+  saveConfig: (name: string, env: string, body: { path: string; content: string }) =>
     put<ConfigSaved>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, body),
   configHistory: (name: string, env: string, path: string) =>
     get<ConfigVersion[]>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history`, { path }),
@@ -53,10 +54,6 @@ export const api = {
     get<ConfigVersionContent>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history/${version}`, { path }),
   /** 服务自己声明的 MCP 工具；reload=true 强制重连（改了 MCP 服务端之后） */
   serviceTools: (name: string, reload = false) => get<ServiceTools>(`/v1/services/${enc(name)}/tools`, { reload: reload || undefined }),
-
-  // —— 节点：各主机上的平台进程（心跳、上报的本机状况）；下线的可以去掉 ——
-  nodes: () => get<NodeInfo[]>("/v1/nodes"),
-  removeNode: (name: string) => del<void>(`/v1/nodes/${enc(name)}`),
 
   roles: () => get<Role[]>("/v1/roles"),
   role: (name: string) => get<Role>(`/v1/roles/${enc(name)}`),
@@ -132,7 +129,6 @@ export const useMeta = () => useQuery(["meta"], api.meta, { staleTime: 60_000 })
 export const useServices = (o?: QueryOptions) => useQuery(["services"], api.services, o);
 export const useService = (name: string) => useQuery(["services", name], () => api.service(name));
 export const useServiceEnv = (name: string, env: string) => useQuery(["services", name, "env", env], () => api.serviceEnv(name, env), { enabled: !!env });
-export const useNodes = (o?: QueryOptions) => useQuery(["nodes"], api.nodes, { refetchInterval: 30_000, ...o });
 export const useConfigRaw = (name: string, env: string, path: string) =>
   useQuery(["services", name, "config", env, path], () => api.configRaw(name, env, path), { enabled: !!env && !!path });
 export const useConfigHistory = (name: string, env: string, path: string, enabled = true) =>

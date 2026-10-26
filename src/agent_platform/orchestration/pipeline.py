@@ -306,8 +306,8 @@ class Pipeline:
 
 
 async def _gardener(d: Deps, spec: RunSpec) -> dict:
-    """本运行的 服务×环境：记忆里引用的代码改过的标为过期。运行落在该服务×环境部署的节点上，读的是线上的代码目录。
-    没指定服务时（单机部署）扫所有服务。"""
+    """本运行的 服务×环境：记忆里引用的代码改过的标为过期。运行由该环境、部署了该服务的那台主机上的 agent 服务执行，
+    读的是线上的代码目录。没指定服务时（开发机）扫所有服务。"""
     services = [s for s in await d.registry.services() if not spec.service or s.name == spec.service]
     return {"env": spec.env, **await run_gardener(spec.env, {s.name: s.spec.view(s.name, spec.env).code_paths
                                                               for s in services})}

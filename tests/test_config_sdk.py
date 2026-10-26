@@ -26,19 +26,25 @@ class ConfigTest(unittest.TestCase):
             s = config.load_settings("prod")
         self.assertTrue(s.limits.enabled)
         self.assertTrue(s.require_sandbox)
-        self.assertEqual(s.node, "")
+        self.assertEqual((s.env, s.services), ("", []))
+        self.assertEqual(s.model.max_concurrency, 3)
+        self.assertEqual(s.limits.kernel_memory, "30%")
         self.assertEqual(s.model.tokens, ["x"])                 # prod 的差异合并进 common 了
         self.assertFalse(s.otel.enabled)
         self.assertEqual(s.retention.checkpoints_days, 30)
         self.assertEqual(s.profile, "prod")
 
-    def test_local_overlay_sets_node(self):
+    def test_local_overlay_sets_env_and_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / "local.yaml"
-            local.write_text("node: prod\nlisten: {host: 0.0.0.0}\n")
+            local.write_text("env: test\nservices: [vision-board]\nlisten: {host: 0.0.0.0}\n")
             with mock.patch.dict(os.environ, SECRETS), mock.patch.object(config, "LOCAL_CONF", local):
                 s = config.load_settings("prod")
-        self.assertEqual((s.node, s.listen.host, s.listen.port), ("prod", "0.0.0.0", 8100))
+        self.assertEqual((s.env, s.services, s.listen.host, s.listen.port), ("test", ["vision-board"], "0.0.0.0", 8100))
+        self.assertTrue(s.serves("vision-board", "test"))
+        self.assertTrue(s.serves(None, "test"))                  # 平台任务按环境算
+        self.assertFalse(s.serves("vision-dagster", "test"))     # 另一台测试机上的
+        self.assertFalse(s.serves("vision-board", "prod"))
 
     def test_extends_merges_parent(self):
         with tempfile.TemporaryDirectory() as tmp:

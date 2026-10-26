@@ -1,12 +1,12 @@
 /**
- * 服务详情：先选环境（服务×环境是 agent 实际操作的单位），再看它部署在哪个节点、线上的代码目录与提交、
+ * 服务详情：先选环境（服务×环境是 agent 实际操作的单位），再看线上的代码目录与解释器、
  * 给 agent 的配置、日志、任务、运行、记忆；「配置」tab 填本环境给 agent 的只读版配置（?tab=config&env=）
  * 与结构化编辑服务定义（&part=definition），「版本」看历史与 diff。
  */
 import { useState } from "react";
 import {
-  LuBrain, LuCircleAlert, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuGitCommitHorizontal, LuHistory, LuListTodo,
-  LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuServerOff, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
+  LuBrain, LuCircleAlert, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuHistory, LuListTodo,
+  LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
 } from "react-icons/lu";
 
 import { api, useEnvs, useRuns, useService, useServiceEnv, useServiceTools, useTasks } from "@/api/hooks";
@@ -14,15 +14,15 @@ import type { ServiceEnvOverride, ServiceSummary, ServiceView } from "@/api/type
 import { Page, PageHeader } from "@/components/layout/shell";
 import { DbList } from "@/components/databases";
 import { LogList } from "@/components/logs";
-import { EnvBadge, NodeChip } from "@/components/status";
+import { EnvBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
-import { Button, LinkButton } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown, Mono, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
 import { Segmented, Switch } from "@/components/ui/form";
 import { Drawer, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime } from "@/lib/format";
+import { ago } from "@/lib/format";
 import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { Link, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -94,13 +94,11 @@ export function ServiceDetailPage() {
           {allEnvs.map((e) => {
             const h = svc?.health[e.name];
             const off = h?.enabled === false;
-            const nodeDown = !off && !!h?.node && h.node_online !== true;
             return (
               <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })}
-                title={off ? "该服务在此环境已停用" : nodeDown ? `部署节点 ${h!.node} 不在线` : h?.node ? `部署在节点 ${h.node}` : undefined}
+                title={off ? "该服务在此环境已停用" : undefined}
                 className={cn("flex h-7 items-center gap-2 rounded-md px-3 text-[12.5px] transition-colors", env === e.name ? "bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "hover:bg-hover", off && "opacity-55")}>
                 <EnvBadge env={e.name} /><span className={cn(env === e.name ? "text-fg" : "text-fg-3", off && "line-through")}>{e.title}</span>
-                {nodeDown && <LuServerOff className="size-3.5 text-bad" aria-label={`部署节点 ${h!.node} 不在线`} />}
                 {svc && !off && !!h?.failed_24h && (
                   <span className="size-1.5 rounded-full bg-bad" title={`近 24 小时失败 ${h.failed_24h} 次`} aria-label={`近 24 小时失败 ${h.failed_24h} 次`} />
                 )}
@@ -108,7 +106,7 @@ export function ServiceDetailPage() {
             );
           })}
         </div>
-        <span className="text-xs text-fg-3">部署节点、代码目录、配置文件、只读库、日志、记忆都按所选环境解析</span>
+        <span className="text-xs text-fg-3">代码目录、配置文件、只读库、日志、记忆都按所选环境解析</span>
       </div>
 
       <Tabs className="mb-5" value={tab} onChange={(v) => setSearch({ tab: v === "overview" ? undefined : v })} tabs={[
@@ -142,7 +140,7 @@ export function ServiceDetailPage() {
             <div className="flex flex-wrap items-center gap-3">
               <Segmented value={search.part === "definition" ? "definition" : "files"} onChange={(v) => setSearch({ part: v === "files" ? undefined : v })}
                 options={[{ value: "files", label: "配置文件", icon: <LuFileText /> }, { value: "definition", label: "服务定义", icon: <LuSettings /> }]} />
-              <span className="text-xs text-fg-3">{search.part === "definition" ? "代码目录、配置文件路径、日志、MCP、环境与节点、档案…保存即新版本" : `${env} 给 agent 的只读版配置：项目内核在这些路径上读到的就是它`}</span>
+              <span className="text-xs text-fg-3">{search.part === "definition" ? "代码目录、配置文件路径、日志、MCP、环境、档案…保存即新版本" : `${env} 给 agent 的只读版配置：项目内核在这些路径上读到的就是它`}</span>
             </div>
             {search.part === "definition"
               ? <ServiceConfigEditor svc={svc} onSaved={refetch} />
@@ -161,19 +159,11 @@ function RunsTab({ service, env }: { service: string; env: string }) {
   return <Card><RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]} /></Card>;
 }
 
-/** 节点上报的布尔状况：true 不显示，false 标红，null = 还没上报 */
-function Reported({ ok, bad }: { ok: boolean | null; bad: string }) {
-  if (ok === false) return <Badge tone="bad">{bad}</Badge>;
-  if (ok === null) return <Badge tone="idle">节点未上报</Badge>;
-  return null;
-}
-
 function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void; onOpenTools: () => void; onOpenConfig: () => void }) {
   const { data: view } = useServiceEnv(svc.name, env);
   const { data: recent } = useRuns({ service: svc.name, env, limit: 8 });
   const [peek, setPeek] = useState<string | null>(null);
   const h = svc.health[env];
-  const down = view?.node && !view.node.online;
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
       <div className="min-w-0 space-y-4">
@@ -181,16 +171,6 @@ function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc:
           <div className="flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-[13px] text-warn">
             <LuPower className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 环境已停用：不接收运行、不起项目内核、定时暂停。</span>
             <Button size="sm" onClick={onOpenEnvs}>去启用</Button>
-          </div>
-        )}
-        {down && h?.enabled !== false && (
-          <div className="flex items-center gap-3 rounded-lg border border-bad/30 bg-bad-soft/60 px-4 py-3 text-[13px] text-bad">
-            <LuServerOff className="size-4 shrink-0" />
-            <span className="flex-1">
-              {svc.name} 在 {env} 部署在节点 <span className="font-mono">{view.node!.name}</span>，{view.node!.heartbeat_at ? `它最近一次心跳在 ${ago(view.node!.heartbeat_at)}` : "它从来没有上线过"}：
-              这个服务×环境的新运行会被拒收（node_offline）。下面的代码目录、提交、解释器是它最后一次上报的。
-            </span>
-            <LinkButton to="/settings/nodes" size="sm">看节点</LinkButton>
           </div>
         )}
         <Card>
@@ -228,48 +208,22 @@ function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc:
   );
 }
 
-/** 服务×环境视图：部署节点 → 代码与解释器 → 配置 → 库、日志、地址、工具 */
+/** 服务×环境视图：代码与解释器 → 配置 → 库、日志、地址、工具 */
 function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
   svc: ServiceSummary; view: ServiceView; onOpenTools: () => void; onOpenConfig: () => void; onPeek: (path: string) => void;
 }) {
   const extraPaths = view.code_paths.filter((p) => p !== view.root);
-  const git = view.git;
   return (
     <DescList items={[
-      ["部署节点", view.node ? (
-        <div>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <NodeChip name={view.node.name} online={view.node.online} heartbeatAt={view.node.heartbeat_at} host={view.node.host} />
-            {view.node.host && <span className="font-mono text-[11.5px] text-fg-3">{view.node.host}</span>}
-          </div>
-          <div className="mt-0.5 text-[11.5px] text-fg-3">
-            {view.node.heartbeat_at ? `最近心跳 ${ago(view.node.heartbeat_at)}` : "从来没有上线过"} · 这个服务×环境的运行只在这里执行
-          </div>
-        </div>
-      ) : <span className="text-fg-3">不限（单机部署：哪个节点都能执行）</span>],
       ["代码目录", (
         <div className="space-y-0.5">
-          <div className="flex flex-wrap items-center gap-1.5"><Mono copy>{view.root || "未配置"}</Mono><Reported ok={view.root_exists} bad="主机上不存在" /></div>
+          <Mono copy>{view.root || "未配置"}</Mono>
           {extraPaths.map((p) => <Mono key={p}>{p}</Mono>)}
         </div>
       )],
-      ["当前提交", git ? (
-        <div>
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <LuGitCommitHorizontal className="size-3.5 shrink-0 text-fg-3" />
-            <code className="font-mono text-[12px] font-medium text-fg">{git.commit}</code>
-            <span className="min-w-0 truncate text-[12.5px] text-fg-2" title={git.subject}>{git.subject}</span>
-            {git.dirty && <Badge tone="warn" title="代码目录里有未提交的改动（线上被直接改过）">有未提交的改动</Badge>}
-          </div>
-          <div className="mt-0.5 text-[11.5px] text-fg-3">
-            <span className="font-mono">{git.branch}</span> · 提交于 <span title={datetime(git.committed_at, true)}>{ago(git.committed_at)}</span>
-            {view.reported_at && <> · 节点上报于 {ago(view.reported_at)}</>}
-          </div>
-        </div>
-      ) : <span className="text-fg-3">{view.reported_at ? "不是 git 仓库" : "节点还没上报"}</span>],
       ["解释器", (
         <div>
-          <div className="flex flex-wrap items-center gap-1.5"><Mono copy>{view.python}</Mono><Reported ok={view.python_ok} bad="不可用（py 起不来）" /></div>
+          <Mono copy>{view.python}</Mono>
           <div className="mt-0.5 text-[11.5px] text-fg-3">py 工具（项目内核）用线上这个解释器</div>
         </div>
       )],
@@ -395,7 +349,7 @@ export const PROFILE_LABEL: Record<string, string> = {
   upstream: "上游依赖", downstream: "下游影响", runbook: "运维备注",
 };
 
-// ———————— 环境：服务在每个环境是否启用、部署在哪个节点、覆盖了什么 ————————
+// ———————— 环境：服务在每个环境是否启用、覆盖了什么 ————————
 
 function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void }) {
   const { data: envs } = useEnvs();
@@ -421,7 +375,7 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
   };
   return (
     <Card>
-      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行、能起项目内核；运行只在这个环境部署的节点上执行，节点不在线时新运行会被拒收。节点、代码目录、解释器、只读库、日志、地址、档案的环境差异在「配置 → 服务定义 → 环境」里改。" icon={<LuLayers />} />
+      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行、能起项目内核。代码目录、解释器、只读库、日志、地址、档案的环境差异在「配置 → 服务定义 → 环境」里改。" icon={<LuLayers />} />
       <ul className="divide-y divide-line">
         {(envs ?? []).map((e) => {
           const o = svc.envs[e.name] ?? {};
@@ -429,7 +383,7 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
           const on = h?.enabled !== false;
           const has = (v: unknown) => !!v && (typeof v !== "object" || Object.keys(v as object).length > 0);
           const overrides = [
-            has(o.node) && "节点", has(o.root) && "代码目录", has(o.python) && "解释器", has(o.hosts) && "主机", has(o.databases) && "只读库",
+            has(o.root) && "代码目录", has(o.python) && "解释器", has(o.hosts) && "主机", has(o.databases) && "只读库",
             has(o.code_paths) && "其他代码目录", has(o.logs) && "日志", has(o.urls) && "地址", has(o.profile) && "档案",
           ].filter(Boolean);
           return (
@@ -440,8 +394,7 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
                   {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">已停用</Badge>}
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-fg-3">
-                  <span className="flex items-center gap-1">部署在 <NodeChip name={h?.node} online={h?.node_online} /></span>
-                  <span>· {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"}</span>
+                  <span>{overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"}</span>
                   <span>· 近 24h {h?.runs_24h ?? 0} 次运行</span>
                 </div>
                 {h?.python && <div className="mt-0.5 truncate font-mono text-[11.5px] text-fg-3" title="该环境的解释器">{h.python}</div>}
@@ -455,7 +408,7 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
       </ul>
       {!svc.enabled && <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">服务整体已停用（右上角菜单），各环境开关暂不生效。</div>}
       <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">
-        环境本身（有哪些、谁受保护）在 <Link to="/settings/envs" className="text-accent hover:underline">设置 → 环境</Link>；各节点在不在线在 <Link to="/settings/nodes" className="text-accent hover:underline">设置 → 节点</Link>。
+        环境本身（有哪些、谁受保护）在 <Link to="/settings/envs" className="text-accent hover:underline">设置 → 环境</Link>。
       </div>
     </Card>
   );

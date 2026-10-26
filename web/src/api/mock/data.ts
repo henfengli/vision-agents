@@ -6,11 +6,11 @@
  * 运行、记忆、方法、反馈、回归重放围绕这三个项目编：Dagster 资产（成交 → 持仓 → 账户收益 → 策略报表）、
  * Django 报表（vision-board）、配置管理（vision-web 的 vision_cfg），数据在 ClickHouse（库名 ck）。
  *
- * 同机部署：每台部署主机上一个平台节点——prod（172.24.16.100，三个服务的国内生产都在这台）、
- * test-dagster（172.24.24.136）、test-board（172.21.0.45，board 与 web 的国内测试；约 2 小时前掉线）。
+ * 同机部署：每台部署主机上一个 agent 服务，部署配置里写它管哪个环境——生产主机 172.24.16.100（三个服务的国内生产都在这台）、
+ * 测试主机 172.24.24.136（dagster 的国内测试）和 172.21.0.45（board 与 web 的国内测试）。
  */
 import type {
-  ApiKey, Asset, ChatTurn, Env, FeedbackReason, GitState, Knowledge, NodeInfo, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
+  ApiKey, Asset, ChatTurn, Env, FeedbackReason, Knowledge, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
   Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, Trigger,
 } from "../types";
 
@@ -74,7 +74,7 @@ export const services: Service[] = [
   {
     name: "vision-dagster", title: "Vision Dagster",
     description: "Vision 的数据编排（Dagster）：资产、调度、传感器；docker 部署，国内生产 / 测试各一套",
-    node: "", root: "~/deploy/vision-dagster", code_paths: [],
+    root: "~/deploy/vision-dagster", code_paths: [],
     python: "~/miniconda3/envs/vision-dagster/bin/python",
     env_vars: {}, urls: {}, hosts: [],
     databases: { ck: CK_TEST },
@@ -88,8 +88,8 @@ export const services: Service[] = [
       },
     },
     envs: {
-      prod: { node: "prod", hosts: ["172.24.16.100"], urls: { deployed: "https://vision-dagster-prod.ipa.zs:9902" }, databases: { ck: CK_PROD } },
-      test: { node: "test-dagster", hosts: ["172.24.24.136"], urls: { deployed: "https://vision-dagster-test.ipa.zs:9901" } },
+      prod: { hosts: ["172.24.16.100"], urls: { deployed: "https://vision-dagster-prod.ipa.zs:9902" }, databases: { ck: CK_PROD } },
+      test: { hosts: ["172.24.24.136"], urls: { deployed: "https://vision-dagster-test.ipa.zs:9901" } },
     },
     profile: {
       env_notes: "线上是 docker 部署（docker-compose.template.yaml 生成 docker-compose.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。*.india 模板是印度部署的，不用",
@@ -103,7 +103,7 @@ export const services: Service[] = [
   {
     name: "vision-board", title: "Vision Board",
     description: "Vision 报表展示系统（Django）：报表页面与离线 HTML 导出；nginx + 源码服务",
-    node: "", root: "~/deploy/vision-board", code_paths: [],
+    root: "~/deploy/vision-board", code_paths: [],
     python: "~/miniconda3/envs/vision-board/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}" },
     urls: {}, hosts: ["172.21.0.45"],
@@ -116,8 +116,8 @@ export const services: Service[] = [
     },
     mcp: {},
     envs: {
-      prod: { node: "prod", hosts: ["172.24.16.100"], urls: { site: "https://vision-board.moon-prod.ipa.zs/" }, databases: { ck: CK_PROD } },
-      test: { node: "test-board", urls: { site: "https://vision-board.ipa.zs/" } },
+      prod: { hosts: ["172.24.16.100"], urls: { site: "https://vision-board.moon-prod.ipa.zs/" }, databases: { ck: CK_PROD } },
+      test: { hosts: ["172.21.0.45"], urls: { site: "https://vision-board.ipa.zs/" } },
     },
     profile: {
       conventions: "每个环境一份 settings：vision_board/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_board.settings-{环境}；manage.py 命令都按它的配置走",
@@ -132,7 +132,7 @@ export const services: Service[] = [
   {
     name: "vision-web", title: "Vision Web",
     description: "Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）",
-    node: "", root: "~/deploy/vision-web", code_paths: [],
+    root: "~/deploy/vision-web", code_paths: [],
     python: "~/miniconda3/envs/vision-web/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}" },
     urls: {}, hosts: [],
@@ -141,7 +141,7 @@ export const services: Service[] = [
     hidden: [],
     logs: { nginx_access: "/var/log/nginx/access.log", nginx_error: "/var/log/nginx/error.log" },
     mcp: {},
-    envs: { prod: { node: "prod" }, test: { node: "test-board" } },
+    envs: {},
     profile: {
       conventions: "每个环境一份 settings：vision_web/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_web.settings-{环境}",
       no_go: "只读查看配置，不通过页面或 manage.py 改任何配置数据",
@@ -150,53 +150,6 @@ export const services: Service[] = [
     },
     enabled: true, version: 3, ...by("liyd", 6 * DAY),
   },
-];
-
-/** 服务×环境部署在哪个节点（与后端 ServiceDef.view 一致：环境里写了就用环境的，否则服务的；空 = 不限） */
-export const nodeOf = (s: Service, env: string): string => (s.envs[env]?.node ?? s.node) || "";
-
-// ———————— 节点：每台部署主机上的平台进程（心跳 + 上报的本机状况） ————————
-
-export interface MockNode extends NodeInfo {
-  _alive: boolean;             // 还在跑：server.ts 每次读都给它续上心跳
-}
-
-const git = (branch: string, commit: string, subject: string, dirty: boolean, msAgo: number): GitState =>
-  ({ branch, commit, subject, dirty, committed_at: iso(msAgo) });
-
-/** 各服务×环境线上代码目录的 git 状态（部署节点上报） */
-const GIT: Record<string, GitState> = {
-  "vision-dagster@prod": git("master", "8d02b7f", "feat: 成交回报接入子账户", false, 12 * DAY),
-  "vision-dagster@test": git("master", "c41e9a2", "fix: account_pnl_daily 先映射子账户", false, 20 * HOUR),
-  "vision-board@prod": git("master", "5e6f7a8", "chore: 升级 Django 4.2.16，加 django-crontab", false, 26 * HOUR),
-  "vision-board@test": git("master", "e5f6a7b", "feat: 离线 HTML 导出改用 Chrome headless", true, 5 * HOUR),
-  "vision-web@prod": git("master", "9c8b7a6", "feat: 组合配置加风控参数", false, 6 * DAY),
-  "vision-web@test": git("develop", "3b1f0e2", "wip: 组合风控参数页面", false, 3 * DAY),
-};
-
-/** 节点上报的：部署在它上面的每个服务×环境的代码目录、解释器、git、配置路径在不在 */
-function reported(node: string): NonNullable<NodeInfo["info"]["services"]> {
-  const out: NonNullable<NodeInfo["info"]["services"]> = {};
-  for (const s of services) for (const e of envs) {
-    if (nodeOf(s, e.name) !== node) continue;
-    const key = `${s.name}@${e.name}`;
-    out[key] = {
-      root_exists: true,
-      python_ok: key !== "vision-web@test",          // 测试机上还没建 vision-web 的 conda 环境
-      git: GIT[key] ?? null,
-      configs: Object.fromEntries(s.configs.map((c) => [c, true])),
-    };
-  }
-  return out;
-}
-
-/** test-board 约 2 小时前掉线：心跳停在那时，上报的状况也停在那时 */
-export const OFFLINE_SINCE = 2 * HOUR + 7 * MIN;
-
-export const nodes: MockNode[] = [
-  { name: "prod", host: "nmg-saturn-home1", version: PLATFORM, started_at: iso(3 * DAY + 2 * HOUR), heartbeat_at: iso(20_000), online: true, info: { services: reported("prod") }, _alive: true },
-  { name: "test-board", host: "nmg-venus-web1", version: PLATFORM, started_at: iso(9 * DAY), heartbeat_at: iso(OFFLINE_SINCE), online: false, info: { services: reported("test-board") }, _alive: false },
-  { name: "test-dagster", host: "nmg-saturn-test1", version: PLATFORM, started_at: iso(26 * HOUR), heartbeat_at: iso(35_000), online: true, info: { services: reported("test-dagster") }, _alive: true },
 ];
 
 // ———————— 给 agent 的只读版配置（存库，按 服务×环境×路径 带版本） ————————
@@ -408,7 +361,7 @@ export const tasks: Task[] = [
     triggers: [{ id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" } }, trig.api()],
     deliver: { channel: "default" }, timeout_s: 900, version: 3, ...by("liyd", 3 * DAY),
   },
-  // 每个服务×环境各跑一次，落在该服务×环境部署的节点上（读的是那台主机上线上的代码目录）
+  // 每个服务×环境各跑一次，由部署它的那台主机上的 agent 服务执行（读的是那台主机上线上的代码目录）
   {
     ...taskBase, name: "memory-gardener", title: "记忆园丁", description: "夜间维护：记忆里引用的代码在线上代码目录里改过了，就标为过期",
     service: "*", role: null, form: "builtin", handler: "memory-gardener", input: {},
@@ -581,10 +534,14 @@ const csvOf = (r: Run, n = 0) => `${SCRATCH}/queries/${r.run_id}/${r.created_at.
 /** 线上的代码目录（三个服务的 root 都是 ~/deploy/<服务>，各环境在各自的主机上） */
 const codeDir = (r: Run) => `${HOME}/deploy/${r.service}`;
 
-/** host_status 的输出（与 services/hostlocal.host_status 一致）：按部署节点给一份像样的 */
-function hostStatusOut(node: string | null, at: string): string {
-  const prod = node === "prod";
-  const dagster = node === "test-dagster";
+/**
+ * host_status 的输出（与 services/hostlocal.host_status 一致）：按运行所在的部署主机给一份像样的。
+ * 生产都在 172.24.16.100；测试的 dagster 在 172.24.24.136，board / web 在 172.21.0.45。
+ */
+function hostStatusOut(r: Pick<Run, "env" | "service" | "created_at">): string {
+  const prod = r.env === "prod";
+  const dagster = !prod && r.service === "vision-dagster";
+  const at = r.created_at;
   const lines = [
     prod ? "负载 3.41 / 2.87 / 2.52（32 核），已运行 41.3 天" : dagster ? "负载 1.08 / 0.94 / 0.90（16 核），已运行 12.6 天" : "负载 0.62 / 0.55 / 0.48（8 核），已运行 87.2 天",
     prod ? "内存 已用 88.4G / 125.6G（可用 37.2G），swap 已用 0.3G" : dagster ? "内存 已用 21.7G / 62.8G（可用 41.1G），swap 已用 0.0G" : "内存 已用 9.8G / 15.6G（可用 5.8G），swap 已用 1.2G",
@@ -719,7 +676,7 @@ const ASK: Record<string, Scenario[]> = {
           calls: [{ tool: "logs", args: { name: "app", lines: 1000, grep: "error|exception|traceback" }, ms: 120,
             output: `[${HOME}/deploy/vision-board/vision-board.log] 最后 1000 行里匹配 'error|exception|traceback' 的 2 行\n${TD[0]} 14:02:10,882 ERROR report.strategy clickhouse query timeout after 30s: SELECT … FROM dws_strategy_nav_daily\n${TD[0]} 14:03:01,417 ERROR report.export chrome headless exited with code 1` }] },
         { think: "查询超时和导出失败在同一时间，看看主机当时是不是资源吃紧。",
-          calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut("prod", iso(0)) }] },
+          calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut({ env: "prod", service: "vision-board", created_at: iso(0) }) }] },
       ],
       answer: () => `今天有 **3 次 5xx**，都在 ${TD[0]} 14:02~14:03：\n\n| 时间 | 请求 | 状态 |\n|---|---|---|\n| 14:02:11 | /report/strategy_weekly/ | 502 |\n| 14:02:19 | /report/strategy_weekly/ | 502 |\n| 14:03:02 | /report/export/?fmt=html | 504 |\n\n应用日志里同一时刻是 **ClickHouse 查询超时**（dws_strategy_nav_daily，30 秒）和一次 Chrome 导出退出。主机内存还有 37G 可用、根盘 81%，不是资源问题；更可能是 CK 那会儿慢。之后没有再出现。`,
     },
@@ -746,7 +703,7 @@ const ASK: Record<string, Scenario[]> = {
       q: "这台机器内存还够吗？dagster 的容器都正常吗？",
       plans: (r) => [
         { think: "看部署主机的现状：负载、内存、磁盘、大进程、docker 容器。",
-          calls: [{ tool: "host_status", args: {}, ms: 240, output: hostStatusOut(r.node, r.created_at) }] },
+          calls: [{ tool: "host_status", args: {}, ms: 240, output: hostStatusOut(r) }] },
       ],
       answer: (r) => r.env === "prod"
         ? "够用：内存已用 88.4G / 125.6G，还有 37G 可用，没有用 swap；负载 3.4（32 核）。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。根盘 81%，接近 80% 的告警线，建议清理旧镜像（`docker image prune`，要运维确认）。"
@@ -838,7 +795,7 @@ function inspectionPlans(r: Run): Plan[] {
       calls: [{ tool: "logs", args: { name: "app", lines: 2000, grep: "error|exception|traceback" }, ms: 140,
         output: `[${codeDir(r)}/vision-board.log] 最后 2000 行里匹配 'error|exception|traceback' 的 1 行\n${TD[0]} 07:12:44,019 ERROR report.strategy slow query 2.8s: SELECT … FROM dws_strategy_nav_daily` }] },
     { think: "只有一条慢查询，和周报页慢对得上。最后看主机资源。",
-      calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut(r.node, r.created_at) }] },
+      calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut(r) }] },
   ];
 }
 const inspectionAnswer = () => "巡检完成：**6 项正常，2 项关注**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，应用日志里有对应的慢查询，建议看 `report/strategy.py`\n- ⚠️ 根盘 81%（阈值 80%），较上周 +5%，建议清理旧日志与 docker 镜像\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓";
@@ -868,14 +825,10 @@ function makeRun(): MockRun {
   const task = tasks.find((x) => x.name === taskName)!;
   const base = task.extends ? tasks.find((x) => x.name === task.extends)! : task;
   const ago = Math.floor(Math.pow(rand(), 1.6) * 72 * HOUR) + between(1, 20) * MIN;
-  let env = base.envs.length ? pick(base.envs) : base.service === null ? "prod" : pick(["prod", "test", "test"]);
+  const env = base.envs.length ? pick(base.envs) : base.service === null ? "prod" : pick(["prod", "test", "test"]);
   const service = base.service === "*"
     ? (base.name === "data-qa" ? pick(["vision-board", "vision-board", "vision-board", "vision-dagster"]) : pick(["vision-board", "vision-dagster", "vision-web"]))
     : base.service;
-  // 运行落在服务×环境部署的节点上：test-board 掉线之后，board / web 的国内测试不再有新运行（提交时就被拒，node_offline）
-  const svc = services.find((x) => x.name === service);
-  if (svc && nodes.find((n) => n.name === nodeOf(svc, env))?._alive === false && ago < OFFLINE_SINCE + 5 * MIN) env = "prod";
-  const node = svc ? nodeOf(svc, env) || null : null;
   const s = rand();
   let status: RunStatus = s < 0.82 ? "success" : s < 0.94 ? "failed" : "cancelled";
   if (ago < 25 * MIN && rand() < 0.5) status = "running";
@@ -910,7 +863,7 @@ function makeRun(): MockRun {
   const ruleHit = base.name === "failure-analysis" && /connection.*(refused|timeout|reset)/i.test(err) && rand() < 0.8;
   const summary = String(input.question ?? (input.asset_key ? `${input.asset_key} 物化失败` : input.version ? `部署 ${String(input.version).slice(0, 8)}` : base.name === "daily-inspection" ? "定时巡检" : base.title));
   const run: MockRun = {
-    run_id: hex(12), session_id: "", task: taskName, task_title: base.title, service, env, role: base.role, node,
+    run_id: hex(12), session_id: "", task: taskName, task_title: base.title, service, env, role: base.role,
     status: ruleHit ? "success" : status, resolution: ruleHit ? "rule" : status === "running" ? null : base.form === "builtin" ? "builtin" : "agent",
     trigger: trigger as Run["trigger"], summary, tokens: ruleHit || base.form === "builtin" ? 0 : between(6_000, 96_000),
     duration_ms: ruleHit ? between(40, 300) : duration, created_at: iso(ago),
@@ -1151,7 +1104,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
     return (run._events = out);
   }
   if (run.task === "memory-gardener") {
-    push("stage", { stage: "execute", title: "内建处理器 memory-gardener", content: `校验 ${run.service} 在 ${run.env} 的记忆引用的代码（${codeDir(run)}，节点 ${run.node ?? "—"}）` }, 800);
+    push("stage", { stage: "execute", title: "内建处理器 memory-gardener", content: `校验 ${run.service} 在 ${run.env} 的记忆引用的代码（${codeDir(run)}）` }, 800);
     if (run.status === "running") return (run._events = out);
     if (run.status === "failed") {
       push("error", { title: "internal_error", content: `git -C ${codeDir(run)} 超时（5 秒）` }, 6000);
@@ -1174,8 +1127,8 @@ export function eventsOf(run: MockRun): RunEvent[] {
     const input = context;
     const output = 80 + Math.round(r() * 520);
     context += output + 600 + Math.round(r() * 1400);
-    // 账号限 3 RPM：每分钟第 4 次起要排队，耗时里大头是排队
-    const queued = r() < 0.35 ? 8000 + Math.round(r() * 48000) : 0;
+    // 账号的并发名额（3 个，生产和测试共用）占满时要排队：大约一成调用要等 1~8 秒
+    const queued = r() < 0.1 ? 1000 + Math.round(r() * 7000) : 0;
     const ms = 1600 + Math.round(r() * 6800) + queued;
     push("model_call", { ...(agent ? { agent } : {}), model: MODEL, ms, ...(queued ? { queued_ms: queued } : {}), input_tokens: input, output_tokens: output, tokens: input + output, tool_calls: calls, ...(content ? { content } : {}) }, ms);
   };
@@ -1198,7 +1151,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
   emit(plansOf(run));
   if (run.status === "running") return (run._events = out);
   if (run.status === "failed") {
-    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（账号 RPM 上限 3，重试 6 次后放弃）" }, 800);
+    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（重试 6 次后放弃）" }, 800);
     return (run._events = out);
   }
   if (run.status === "cancelled") {
@@ -1293,7 +1246,7 @@ export const knowledge: Knowledge[] = [
   kn(11, "vision-dagster", "prod", "failure-analysis:dws_account_pnl_daily", `session:dagster:dws_account_pnl_daily:DagsterExecutionStepExecutionError:${TD[1]}:summary`, "## 结论\n上游 dwd_position_daily 晚到\n\n## 被否方案\n- 代码回归（近 3 次提交与报错无关）\n\n## 当前约束\n- 不在 py 里手工物化生产资产；要重跑用 dagster 的 reexecute_run\n\n## 未决问题\n- 是否把调度改成依赖上游分区", 3, { kind: "handoff" }),
   kn(12, "vision-board", "", "data-qa", "metric:turnover_v1", "换手率 = 成交额 / 期末持仓市值（2026-08 之前的旧口径）。", 0, { status: "superseded", superseded_by: "metric:turnover" }),
   kn(13, "vision-board", "", "data-qa:account_pnl", "metric:pnl_currency", "跨币种账户的收益先按当日中间价折成人民币再汇总。", 7),
-  kn(14, "vision-board", "test", "data-qa", "fact:test-board-host", "国内测试的 vision-board 部署在 172.21.0.45（节点 test-board），和 vision-web 的国内测试在同一台。", 3),
+  kn(14, "vision-board", "test", "data-qa", "fact:test-board-host", "国内测试的 vision-board 部署在 172.21.0.45，和 vision-web 的国内测试在同一台。", 3),
   kn(15, "vision-board", "", "data-qa", "metric:turnover", "换手率 = 成交额 / 期初与期末持仓市值的均值；2026-08 之前的报表仍按期末市值算。", 16),
   kn(16, "vision-board", "", "data-qa:account_pnl", "metric:pnl_fee", "账户收益已扣手续费与印花税。", 0, { status: "superseded", superseded_by: "profile:service:vision-board:conventions", source_run: null }),
   // 教训：同类报错再出现时按指纹精确命中

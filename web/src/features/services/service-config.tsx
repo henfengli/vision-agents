@@ -1,6 +1,6 @@
 /**
  * 服务定义的结构化编辑器：基本信息 / 只读库 / 配置文件 / 日志 / 地址 / MCP / 环境覆盖 / 档案。
- * 同机部署：定义里写的是线上的代码目录、解释器、配置路径与日志，各环境部署在哪个节点在「环境」里写。
+ * 同机部署：定义里写的是线上的代码目录、解释器、配置路径与日志，各环境不同的部分在「环境」里写。
  * 本地草稿 + 未保存提示条；保存 = 新版本，5 秒内热生效。
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -8,7 +8,7 @@ import {
   LuDatabase, LuEyeOff, LuFileText, LuGlobe, LuLayers, LuPlug, LuPlus, LuScrollText, LuSettings, LuTrash2,
 } from "react-icons/lu";
 
-import { api, useEnvs, useNodes } from "@/api/hooks";
+import { api, useEnvs } from "@/api/hooks";
 import type { McpConnection, Service, ServiceEnvOverride, ServiceSummary } from "@/api/types";
 import { DatabasesEditor, DatabasesHint } from "@/components/databases";
 import { LogsEditor, logsError } from "@/components/logs";
@@ -16,7 +16,7 @@ import { SaveBar } from "@/components/save-bar";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor, type KvSuggestion } from "@/components/ui/data";
-import { CreatableSelect, Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
+import { Field, Input, Switch, TagInput, Textarea } from "@/components/ui/form";
 import { toast } from "@/components/ui/overlay";
 import { Card, CardHeader } from "@/components/ui/primitives";
 import { databasesError } from "@/lib/db";
@@ -30,11 +30,11 @@ export const PROFILE_SUGGESTIONS: KvSuggestion[] = [
 ];
 
 /** mcp 单独编辑（每个 server 一段 JSON 文本，保存时才解析），不放进草稿 */
-type Draft = Pick<Service, "title" | "description" | "node" | "root" | "code_paths" | "python" | "env_vars" | "urls" | "hosts" | "databases" | "configs" | "hidden" | "logs" | "envs" | "profile">;
+type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "python" | "env_vars" | "urls" | "hosts" | "databases" | "configs" | "hidden" | "logs" | "envs" | "profile">;
 
 function toDraft(s: ServiceSummary): Draft {
   return structuredClone({
-    title: s.title, description: s.description, node: s.node ?? "", root: s.root, code_paths: s.code_paths, python: s.python ?? "",
+    title: s.title, description: s.description, root: s.root, code_paths: s.code_paths, python: s.python ?? "",
     env_vars: s.env_vars ?? {}, urls: s.urls ?? {}, hosts: s.hosts, databases: s.databases ?? {}, configs: s.configs ?? [], hidden: s.hidden ?? [],
     logs: s.logs ?? {}, envs: s.envs, profile: s.profile,
   });
@@ -137,7 +137,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
   const [mcpRows, setMcpRows] = useState<McpRow[]>(() => toMcpRows(svc.mcp));
   const [mcpBase, setMcpBase] = useState<McpRow[]>(mcpRows);
   const { data: envs } = useEnvs();
-  const { data: nodes } = useNodes();
   useEffect(() => {
     setDraft(toDraft(svc));
     const rows = toMcpRows(svc.mcp);
@@ -160,7 +159,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
     setMcpRows([...mcpRows, { id: ++mcpRowId, name, text: JSON.stringify(MCP_TEMPLATES[kind], null, 2) }]);
   };
   const discard = () => { setDraft(toDraft(svc)); setMcpRows(mcpBase); };
-  const nodeOptions = (nodes ?? []).map((n) => ({ value: n.name, label: n.name, hint: `${n.host}${n.online ? "" : " · 离线"}` }));
 
   const save = useMutation(async () => {
     try {
@@ -191,9 +189,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
             <Field label="显示名"><Input value={draft.title} onChange={(e) => set("title", e.target.value)} /></Field>
             <Field label="代码目录" help="线上部署的代码，agent 只读；可写 {env}、~"><Input mono value={draft.root} placeholder="~/deploy/xxx" onChange={(e) => set("root", e.target.value)} /></Field>
             <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={draft.description} onChange={(e) => set("description", e.target.value)} /></Field>
-            <Field label="部署节点" help="一般按环境写在「环境」里；这里是没写时的默认。空 = 不限（单机部署）">
-              <CreatableSelect value={draft.node} onChange={(v) => set("node", v)} options={nodeOptions} placeholder="按环境写" createLabel="用这个名字" />
-            </Field>
             <Field label="其他代码目录" help="回车添加；缺省 = 代码目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="~/deploy/xxx-lib" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
             <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="172.24.16.100" /></Field>
             <Field label="项目 Python" help={`${PYTHON_HELP}；可按环境覆盖`}>
@@ -268,7 +263,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="envs" icon={<LuLayers />} title="环境" description="服务在每个环境是否启用、部署在哪个节点，以及和基座不同的部分（只写差异）。这个服务×环境的运行只在它部署的节点上执行。">
+        <Section id="envs" icon={<LuLayers />} title="环境" description="服务在每个环境是否启用，以及和基座不同的部分（只写差异）。">
           <div className="space-y-3">
             {allEnvs.map((e) => {
               const o: ServiceEnvOverride = draft.envs[e.name] ?? {};
@@ -289,10 +284,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                     <div className="ml-auto"><Switch size="sm" checked={o.enabled !== false} onChange={(v) => setO({ enabled: v ? undefined : false })} label={<span className="text-[12px]">{o.enabled === false ? "该环境停用" : "启用"}</span>} /></div>
                   </div>
                   {o.enabled !== false && <div className="grid gap-3 md:grid-cols-2">
-                    <Field label="部署节点" help="这个环境的项目部署在哪台主机上（那台主机上平台节点的名字）">
-                      <CreatableSelect value={o.node ?? ""} onChange={(v) => setO({ node: v || undefined })} options={nodeOptions}
-                        placeholder={draft.node || "不限（单机部署）"} createLabel="用这个名字" />
-                    </Field>
                     <Field label="代码目录" help="这个环境的代码目录不同时才写">
                       <Input mono value={o.root ?? ""} onChange={(ev) => setO({ root: ev.target.value.trim() || undefined })} placeholder={draft.root || "~/deploy/xxx"} />
                     </Field>

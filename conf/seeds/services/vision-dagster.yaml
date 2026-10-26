@@ -1,6 +1,6 @@
 title: Vision Dagster
 description: Vision 的数据编排（Dagster）：资产、调度、传感器；docker 部署，国内生产 / 测试各一套
-# 同机部署：agent 装在各环境的部署主机上（节点名见部署配置 node），读的是线上的代码目录。
+# 同机部署：agent 装在各环境的部署主机上（那台机器的 local.yaml 写 env / services），读的是线上的代码目录。
 # 【占位，按实际改】代码目录、conda 环境、容器名；~ 是部署用户（平台和项目是同一个用户）的 home
 root: ~/deploy/vision-dagster
 # 线上跑在 docker 里，宿主上用不了镜像里的环境：py 工具要在宿主上另有一个装了项目依赖的环境
@@ -35,13 +35,11 @@ mcp:
     envs: {prod: {}, test: {}}
 envs:
   prod:
-    node: prod
     hosts: [172.24.16.100]
     urls: {deployed: "https://vision-dagster-prod.ipa.zs:9902"}
     databases:
       ck: "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default"
   test:
-    node: test-dagster
     hosts: [172.24.24.136]
     urls: {deployed: "https://vision-dagster-test.ipa.zs:9901"}
 profile:

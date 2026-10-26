@@ -1,13 +1,13 @@
 """部署配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），再深合并本机的
-~/.config/agent-platform/local.yaml（不进仓库：节点名、数据库地址、监听这类每台机器不同的值）；${VAR} 从环境变量插值。
+~/.config/agent-platform/local.yaml（不进仓库：负责的业务环境、数据库地址、监听这类每台机器不同的值）；${VAR} 从环境变量插值。
 
-这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、节点、沙箱与资源上限。
+这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、负责的环境、沙箱与资源上限。
 服务/角色/任务与平台配置（环境、通知、记忆、提示词）都是数据，存库、在控制台编辑；
 conf/seeds/ 只在库里还没有对应对象时播种一次。
-AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test）无关。
+AGENT_ENV 只决定读哪份部署配置（开发机 / 线上主机），与业务环境（prod/test）无关。
 
-同机部署：平台装在业务项目所在的主机上（生产机一份、测试机一份……），各节点共用一个 PostgreSQL 和同一套控制台。
-服务在每个环境部署在哪个节点写在服务定义里（envs.<环境>.node）；一个节点只执行落在自己身上的运行。
+同机部署：生产机上一个 agent 服务管 prod，测试机上的管 test，共用一个 PostgreSQL 和同一套控制台。
+每个 agent 服务只执行自己那个环境（local.yaml 的 env）的运行；test 的项目分在两台机器上，各装一个，用 services 分。
 """
 
 from __future__ import annotations
@@ -39,10 +39,9 @@ class ModelConfig(BaseModel):
     url: str
     name: str
     tokens: list[str]
-    max_concurrency: int = 10             # 同时在途的模型请求上限（账号并发；所有节点所有调用合计，流式读完才算结束）；0 = 不限
+    max_concurrency: int = 3              # 账号同时在途的模型请求上限（prod、test 所有调用合计，流式读完才算结束）；0 = 不限
     embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
     context_tokens: int = 400_000         # 模型上下文长度：对话历史到它的 75% 时压缩成摘要
-    rpm: int = 0                          # 每分钟最多发几次请求（所有节点所有调用合计，经共用的库排队）；0 = 不限
     max_retries: int = 6                  # 限流 / 网关错误的重试次数（指数退避）
     stream_usage: bool = True             # 流式响应里要 token 用量（stream_options.include_usage）；网关不支持就关掉
 
@@ -71,16 +70,16 @@ class KernelConfig(BaseModel):
 
 
 class LimitsConfig(BaseModel):
-    """模型生成的代码（项目内核、bash）各自跑在一个 systemd 用户 scope 里，超了只在 scope 里被杀，生产服务不受影响。
-    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设总上限）。enabled=false（开发机）时不套 scope。"""
+    """模型生成的代码（项目内核、bash）各自跑在一个 systemd 用户 scope 里，内存超了只杀这个 scope，线上服务不受影响。
+    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设内存总上限）。enabled=false（开发机）时不套 scope。
+    只管内存：CPU 不设上限（slice 的 CPUWeight 低，抢 CPU 时让着线上服务）。
+    内存写百分比 = 占本机物理内存的比例（systemd 的写法），也可以写 64G 这样的绝对值。"""
 
     enabled: bool = False
     slice: str = "agent.slice"
-    kernel_memory: str = "2G"
-    kernel_cpu: str = "200%"          # CPUQuota：100% = 一个核
-    bash_memory: str = "1G"
-    bash_cpu: str = "100%"
-    tasks: int = 256                  # TasksMax：进程 + 线程数
+    kernel_memory: str = "30%"
+    bash_memory: str = "10%"
+    tasks: int = 4096                 # TasksMax：进程 + 线程数（numpy 这类库按核数开线程，核多的机器别设小）
 
 
 class OtelConfig(BaseModel):
@@ -97,7 +96,7 @@ class RetentionConfig(BaseModel):
     run_events_days: int = 90       # 运行的过程事件；被 👎 过的运行不清（回归重放要用）
     checkpoints_days: int = 30      # 会话的 LangGraph checkpoint：最后一轮结束这么久后清掉，之后不能再续跑
     recall_hits_days: int = 90      # 召回埋点
-    scratch_days: int = 7           # 工作目录（db_query 的结果文件、agent 写的临时文件），按本节点清
+    scratch_days: int = 7           # 工作目录（db_query 的结果文件、agent 写的临时文件），每台主机清自己的
 
 
 class GrafanaConfig(BaseModel):
@@ -118,8 +117,10 @@ class Settings(BaseModel):
     model: ModelConfig
     root_token: str                            # 引导密钥：首次登录与创建 API 密钥用
     public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用；必须是用户实际访问的地址
-    # 本节点的名字（服务定义 envs.<环境>.node 引用它）。空 = 单机：执行所有运行，不看服务部署在哪
-    node: str = ""
+    # 这个 agent 服务负责哪个业务环境（prod / test，和 AGENT_ENV 无关）：只执行这个环境的运行。空 = 所有环境（开发机）
+    env: str = ""
+    # 同一个环境的项目分在几台主机上时（test：dagster 一台、board 一台），写这台主机上部署了哪些服务。空 = 该环境全部服务
+    services: list[str] = Field(default_factory=list)
     listen: ListenConfig = ListenConfig()
     data_dir: str = Field(default_factory=_default_data_dir)
     worker: WorkerConfig = WorkerConfig()
@@ -132,6 +133,10 @@ class Settings(BaseModel):
     grafana: GrafanaConfig | None = None
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
     hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
+
+    def serves(self, service: str | None, env: str) -> bool:
+        """这个服务×环境的运行归不归这个 agent 服务执行。平台任务（没有服务）按环境算。"""
+        return (not self.env or env == self.env) and (not self.services or not service or service in self.services)
 
     @property
     def scratch_dir(self) -> str:

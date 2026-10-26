@@ -4,7 +4,7 @@
   再只读 bind 到项目读配置的那个路径——线上真实配置被盖住，项目代码 import 到的是只读版
 - 遮蔽：所有服务所有环境的配置文件路径、给 agent 的配置在本机的落地目录、docker socket（部署配置 hidden_paths）
 - home 白名单：沙箱里 home 是空的，只挂回 代码目录、解释器所在的 conda 环境、方法目录、home_allow
-- digest：解释器 + 配置版本 + 环境变量；变了内核自动重启（配置可能是在别的节点的控制台上改的）
+- digest：解释器 + 配置版本 + 环境变量；变了内核自动重启（配置是在控制台改的，存库）
 """
 
 from __future__ import annotations
@@ -54,14 +54,16 @@ def python_dirs(python: str) -> list[str]:
     return out
 
 
-def check_node(settings: Settings, view: ServiceView) -> None:
-    if settings.node and view.node and view.node != settings.node:
-        raise Rejected("wrong_node", f"{view.service} 在 {view.env} 部署在节点 {view.node}，"
-                                     f"这里是节点 {settings.node}：这个运行不该在这里执行")
+def check_serves(settings: Settings, view: ServiceView) -> None:
+    """兜底：认领时已经按环境（和 services）过滤了，这里防止别的路径在错的主机上起内核。"""
+    if not settings.serves(view.service, view.env):
+        raise Rejected("wrong_env", f"这台主机上的 agent 服务负责 {settings.env or '所有环境'}"
+                                    f"{'（' + '、'.join(settings.services) + '）' if settings.services else ''}，"
+                                    f"不执行 {view.service} 在 {view.env} 的运行")
 
 
 async def sandbox_paths(registry: Registry, settings: Settings) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """bash 沙箱：(遮蔽, home 下挂回的目录)。遮蔽所有服务所有环境的配置文件；挂回本节点各服务的代码目录
+    """bash 沙箱：(遮蔽, home 下挂回的目录)。遮蔽所有服务所有环境的配置文件；挂回本主机负责的各服务的代码目录
     （跨服务排查要能读别的服务的代码）与方法目录。"""
     envs = (await registry.envs()).names
     hidden = set(settings.hidden_paths) | {settings.agent_conf_dir}
@@ -70,7 +72,7 @@ async def sandbox_paths(registry: Registry, settings: Settings) -> tuple[tuple[s
         hidden |= s.spec.secret_paths(envs)
         for env in envs:
             v = s.spec.view(s.name, env)
-            if v.enabled and (not settings.node or not v.node or v.node == settings.node):
+            if v.enabled and settings.serves(s.name, env):
                 allow |= {p for p in (v.root, *v.code_paths) if p}
     return tuple(sorted(hidden)), tuple(sorted(allow))
 
@@ -83,7 +85,7 @@ async def runtime_spec(registry: Registry, settings: Settings, service: str, env
     view = await registry.service_view(service, env)
     if not view.enabled:
         raise Rejected("service_env_disabled", f"服务 {service} 在 {env} 环境已停用")
-    check_node(settings, view)
+    check_serves(settings, view)
     binds, versions = [], []
     for c in view.config_files:
         row = await service_configs.current(service, env, c["key"])

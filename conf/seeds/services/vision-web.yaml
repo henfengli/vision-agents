@@ -1,6 +1,7 @@
 title: Vision Web
 description: Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）
-# 【占位，按实际改】部署在哪台主机（node）、代码目录、conda 环境、settings 后缀、日志路径
+# 【占位，按实际改】代码目录、conda 环境、settings 后缀、日志路径；测试环境部署在哪台主机
+# （那台主机上的 agent 服务 local.yaml 的 services 里要有 vision-web）
 root: ~/deploy/vision-web
 python: ~/miniconda3/envs/vision-web/bin/python
 env_vars: {DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}"}
@@ -12,11 +13,6 @@ configs:
 logs:
   nginx_access: /var/log/nginx/access.log
   nginx_error: /var/log/nginx/error.log
-envs:
-  prod:
-    node: prod
-  test:
-    node: test-board
 profile:
   conventions: 每个环境一份 settings：vision_web/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_web.settings-{环境}
   no_go: 只读查看配置，不通过页面或 manage.py 改任何配置数据

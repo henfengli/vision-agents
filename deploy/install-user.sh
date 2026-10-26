@@ -5,7 +5,7 @@
 #   bash deploy/install-user.sh
 # 平台自己的 Python 要 ≥ 3.11：自动找 python3.13/3.12/3.11、~/miniforge3 ~/miniconda3 ~/anaconda3 的 python3；
 # 也可以 PYTHON=/path/to/python3 指定。部署配置用 conf/env/prod.yaml（AGENT_ENV=prod）+ 本机的
-# ~/.config/agent-platform/local.yaml（节点名等），说明见 docs/部署指南.md。
+# ~/.config/agent-platform/local.yaml（这台负责哪个环境等），说明见 docs/部署指南.md。
 set -euo pipefail
 
 [ "$(id -u)" -ne 0 ] || { echo "请用普通用户执行（平台跑在该用户的 systemd --user 里）"; exit 1; }
@@ -60,7 +60,7 @@ command -v git >/dev/null || echo "!! 缺少 git：看不到代码目录的提�
 CG="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
 if [ -r "$CG" ] && ! grep -qw memory "$CG"; then
   echo "!! systemd 没有把 memory 控制器委派给用户：内核与 bash 的内存上限不生效。"
-  echo "   请管理员加 /etc/systemd/system/user@.service.d/delegate.conf：[Service] Delegate=cpu memory pids，然后 systemctl daemon-reload"
+  echo "   请管理员加 /etc/systemd/system/user@.service.d/delegate.conf：[Service] Delegate=memory pids cpu，然后 systemctl daemon-reload"
 fi
 command -v systemd-run >/dev/null || echo "!! 没有 systemd-run：资源上限（limits）用不了，在 local.yaml 里设 limits.enabled: false"
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q '=yes'; then
@@ -69,8 +69,8 @@ if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q '=yes'; then
 fi
 [ -f "$SECRETS_DIR/secrets.env" ] || \
   echo "!! 请创建 $SECRETS_DIR/secrets.env（chmod 600）：AGENT_ROOT_TOKEN、AGENT_DB_HOST、AGENT_DB_PASSWORD、MODEL_TOKEN_A …"
-grep -qs '^node:' "$SECRETS_DIR/local.yaml" || \
-  echo "!! 请在 $SECRETS_DIR/local.yaml 写本节点的名字（node: prod / test-dagster …，和服务定义 envs.<环境>.node 一致）"
+grep -qs '^env:' "$SECRETS_DIR/local.yaml" || \
+  echo "!! 请在 $SECRETS_DIR/local.yaml 写这台负责的环境（env: prod 或 env: test；测试机再写 services: [本机部署的服务]）"
 command -v docker >/dev/null && ! docker ps >/dev/null 2>&1 && \
   echo "!! 本用户用不了 docker：服务定义里 docker:<容器> 的日志读不到"
 

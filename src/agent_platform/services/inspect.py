@@ -25,9 +25,9 @@ def config_entry(view: ServiceView, path: str) -> dict:
 
 
 async def config_status(view: ServiceView) -> list[dict]:
-    """[{key, path, version, updated_by, updated_at, sha}]，version 为 None = 还没有填给 agent 的版本。"""
+    """[{key, path, version, updated_by, updated_at}]，version 为 None = 还没有填给 agent 的版本。"""
     current = await service_configs.versions(view.service, view.env)
-    return [{**c, **(current.get(c["key"]) or {"version": None, "updated_by": None, "updated_at": None, "sha": ""})}
+    return [{**c, **(current.get(c["key"]) or {"version": None, "updated_by": None, "updated_at": None})}
             for c in view.config_files]
 
 
@@ -81,17 +81,10 @@ def git_log(path: str, n: int = 10) -> str:
     return _git(path, "log", f"-{n}", "--format=%h %cs %an %s") or "（不是 git 仓库或无提交）"
 
 
-def view_dict(view: ServiceView, configs: list[dict], node: dict | None) -> dict:
-    """API 的 ServiceView 形状。node：部署节点的心跳与它上报的本服务×环境状态（代码目录、git、解释器、配置路径）。"""
-    local = ((node or {}).get("info") or {}).get("services", {}).get(f"{view.service}@{view.env}") or {}
-    present = local.get("configs") or {}
+def view_dict(view: ServiceView, configs: list[dict]) -> dict:
+    """API 的 ServiceView 形状：定义解析的结果 + 给 agent 的配置各是第几版（存库）。
+    代码目录、git 这些只有部署主机上看得到的不在这里（控制台可能由另一台主机回答），agent 运行时用 service_info 看。"""
     return {"service": view.service, "env": view.env, "enabled": view.enabled, "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "urls": view.urls, "mcp_servers": view.mcp_servers,
             "hosts": view.hosts, "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
-            "logs": view.logs, "profile": view.profile,
-            "config_files": [{**c, "present": present.get(c["key"])} for c in configs],
-            "node": {"name": view.node, "online": bool(node and node["online"]),
-                     "heartbeat_at": node["heartbeat_at"] if node else None, "host": node["host"] if node else None}
-            if view.node else None,
-            "root_exists": local.get("root_exists"), "python_ok": local.get("python_ok"),
-            "git": local.get("git"), "reported_at": node["heartbeat_at"] if node and local else None}
+            "logs": view.logs, "profile": view.profile, "config_files": configs}

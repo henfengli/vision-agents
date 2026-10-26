@@ -1,7 +1,6 @@
-"""后台维护：周期性地把"到时间了的事"办掉。随 worker 进程运行，每分钟一轮。各节点各跑一份，都是幂等的。
+"""后台维护：周期性地把"到时间了的事"办掉。随 worker 进程运行，每分钟一轮。每台主机各跑一份，都是幂等的。
 
-- 本节点心跳 + 本机状态（各服务×环境的代码目录、git、解释器、配置路径）写进 nodes 表
-- 心跳停了的运行（执行进程崩溃 / 被杀，不论在哪个节点）标为失败，详情页可续跑
+- 心跳停了的运行（执行进程崩溃 / 被杀，不论在哪台主机）标为失败，详情页可续跑
 - 每 6 小时按保留期清一次数据（过程事件、会话 checkpoint、召回埋点；部署配置 retention）和本机的工作目录
 """
 
@@ -14,8 +13,6 @@ import shutil
 import time
 
 from ..config import Settings
-from ..registry import Registry
-from ..services import nodestatus
 from ..store import retention, runs
 
 log = logging.getLogger(__name__)
@@ -25,14 +22,13 @@ PURGE_EVERY_S = 6 * 3600
 
 
 class Maintenance:
-    def __init__(self, settings: Settings, registry: Registry):
+    def __init__(self, settings: Settings):
         self._s = settings
-        self._reg = registry
         self._purged_at = 0.0
 
     async def run_forever(self) -> None:
         while True:
-            for job in (self.report, self._recover_orphans, self._purge):
+            for job in (self._recover_orphans, self._purge):
                 await self._safely(job)
             await asyncio.sleep(60)
 
@@ -41,9 +37,6 @@ class Maintenance:
             await job()
         except Exception:  # noqa: BLE001 —— 一项失败不影响其余，下一轮再来
             log.exception("维护任务 %s 失败", getattr(job, "__name__", job))
-
-    async def report(self) -> None:
-        await nodestatus.report(self._reg, self._s)
 
     async def _recover_orphans(self) -> None:
         for run_id in await runs.orphaned(ORPHAN_AFTER_S):

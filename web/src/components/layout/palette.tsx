@@ -5,7 +5,7 @@
 import { Dialog, DialogPanel } from "@headlessui/react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
-  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuCpu, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare,
+  LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare,
   LuMessageSquareText, LuMessageSquareWarning, LuMonitor, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuSun,
 } from "react-icons/lu";
 
@@ -74,7 +74,6 @@ export function CommandPalette() {
       { id: "nav-notify", label: "通知设置", icon: <LuBell />, group: "跳转", run: go("/settings/notifications"), keywords: "notifications dingtalk 钉钉" },
       { id: "nav-mem-settings", label: "记忆设置", icon: <LuBrain />, group: "跳转", run: go("/settings/memory"), keywords: "memory recall" },
       { id: "nav-prompts", label: "提示词", hint: "平台基础约定", icon: <LuMessageSquareText />, group: "跳转", run: go("/settings/prompts"), keywords: "prompts system" },
-      { id: "nav-nodes", label: "节点", hint: "各部署主机上的平台节点", icon: <LuCpu />, group: "跳转", run: go("/settings/nodes"), keywords: "nodes host heartbeat 主机 心跳 在线" },
       { id: "nav-keys", label: "API 密钥", icon: <LuKeyRound />, group: "跳转", run: go("/settings/api-keys"), keywords: "api key token" },
       { id: "act-run", label: "运行一个任务…", icon: <LuPlay />, group: "操作", run: go("/tasks?run=1"), keywords: "run start" },
       { id: "act-new-chat", label: "新对话", icon: <LuMessageSquare />, group: "操作", run: go("/chat"), keywords: "new chat ask" },

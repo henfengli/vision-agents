@@ -56,11 +56,12 @@ class SandboxTest(unittest.TestCase):
         self.assertLess(argv.index("/dev/null"), argv.index("/agent/conf"))
 
     def test_limits_wrap_in_user_scope(self):
-        argv = sandbox.limit_argv(["bwrap", "x"], LimitsConfig(enabled=True), memory="1G", cpu="100%")
+        argv = sandbox.limit_argv(["bwrap", "x"], LimitsConfig(enabled=True), memory="30%")
         self.assertEqual(argv[:3], ["systemd-run", "--user", "--scope"])
-        self.assertIn("MemoryMax=1G", argv)
+        self.assertIn("MemoryMax=30%", argv)
+        self.assertFalse([a for a in argv if a.startswith("CPU")])        # 只限内存，CPU 不限
         self.assertEqual(argv[-2:], ["bwrap", "x"])
-        self.assertEqual(sandbox.limit_argv(["x"], LimitsConfig(enabled=False), memory="1G", cpu="1%"), ["x"])
+        self.assertEqual(sandbox.limit_argv(["x"], LimitsConfig(enabled=False), memory="1G"), ["x"])
 
     def test_no_bwrap_refuses_when_required(self):
         with mock.patch.object(sandbox, "has_bwrap", return_value=False):

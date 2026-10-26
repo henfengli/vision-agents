@@ -1,10 +1,10 @@
 """装配：把各层组件接成一个可运行的整体。API 进程与 worker 进程用同一份装配。
 
     数据库 → 定义 / 配置（播种）→ 通知 → 项目内核 → 工具 → agent 工厂
-    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 维护循环与节点心跳）
+    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 维护循环）
 
-同机部署：每台主机一个节点（部署配置 node），共用一个库。各节点都跑定时（幂等键保证只建一条）和维护，
-执行队列只认领落在本节点的运行。模型配额（并发 + RPM）经库在所有节点之间共用。
+同机部署：生产机、测试机上各一个 agent 服务，共用一个库。每台都跑定时（幂等键保证只建一条）和维护，
+执行队列只认领本机负责的环境（部署配置 env / services）的运行。模型账号的并发上限经库在各台之间共用。
 """
 
 from __future__ import annotations
@@ -56,13 +56,13 @@ class Runtime:
     _background: list[asyncio.Task] = field(default_factory=list)
 
     async def start_worker(self) -> None:
-        """在本进程里跑执行队列、定时和维护循环（API 与 worker 同进程）。先报一次到，提交端才知道本节点在线。"""
-        maintenance = Maintenance(self.settings, self.registry)
-        await maintenance.report()
+        """在本进程里跑执行队列、定时和维护循环（API 与 worker 同进程）。"""
+        maintenance = Maintenance(self.settings)
         pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,
                                  on_finished=self.replayer.on_finished))
-        self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs, self.settings.node)
+        self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs,
+                                 self.settings.env, self.settings.services)
         self.executor.start()
         self._background += [asyncio.create_task(self.scheduler.run_forever()),
                              asyncio.create_task(maintenance.run_forever())]
@@ -88,7 +88,7 @@ async def _record_model_call(run_id: str, payload: dict) -> None:
 async def assemble(settings: Settings) -> Runtime:
     observability.setup(settings.otel)
     await db.open_db(settings.db_dsn)
-    model_pool_mod.share_quota_via_db()          # 几个节点共用一个模型账号：并发与 RPM 在库里排队
+    model_pool_mod.share_quota_via_db()          # prod、test 共用一个模型账号：并发上限经库共用
     for d in (settings.scratch_dir, settings.assets_dir, settings.agent_conf_dir):
         os.makedirs(d, exist_ok=True)
     os.chmod(settings.agent_conf_dir, 0o700)

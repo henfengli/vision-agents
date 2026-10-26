@@ -11,17 +11,15 @@ from ..store import knowledge as knowledge_store
 from ..store import runs
 
 
-def service_summary(entry: Entry, envs: list[EnvDef], health: dict, nodes: dict[str, dict], task_count: int) -> dict:
-    """Service + 每个环境的健康汇总与部署节点。定义里的只读库口令不回显（redact_service）。"""
+def service_summary(entry: Entry, envs: list[EnvDef], health: dict, task_count: int) -> dict:
+    """Service + 每个环境的健康汇总。定义里的只读库口令不回显（redact_service）。"""
     per_env = {}
     for e in envs:
         env = e.name
         view = entry.spec.view(entry.name, env)
         h = health.get((entry.name, env), {})
-        node = nodes.get(view.node) if view.node else None
         per_env[env] = {
-            "enabled": view.enabled, "python": view.python, "node": view.node or None,
-            "node_online": node["online"] if node else (None if view.node else True),
+            "enabled": view.enabled, "python": view.python,
             "runs_24h": h.get("runs_24h", 0), "failed_24h": h.get("failed_24h", 0), "last_run": h.get("last_run"),
         }
     return {**credentials.redact_service(entry.dump()), "task_count": task_count, "health": per_env}

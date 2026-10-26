@@ -1,5 +1,5 @@
 /**
- * 服务列表：每个项目一张卡——各环境部署在哪个节点（在不在线）、运行健康、任务数。
+ * 服务列表：每个项目一张卡——各环境的运行健康、任务数。
  */
 import { useState } from "react";
 import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuScrollText, LuServer } from "react-icons/lu";
@@ -7,7 +7,7 @@ import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuScrollText, LuServer } from
 import { api, useEnvs, useServices } from "@/api/hooks";
 import type { ServiceSummary } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, NodeChip, RUN_STATUS } from "@/components/status";
+import { EnvBadge, RUN_STATUS } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { Field, Input, SearchInput, Textarea } from "@/components/ui/form";
 import { Dialog, toast } from "@/components/ui/overlay";
@@ -25,7 +25,7 @@ export function ServicesPage() {
   const list = (data ?? []).filter((s) => !q || (s.name + s.title + s.description).toLowerCase().includes(q.toLowerCase()));
   return (
     <Page>
-      <PageHeader title="服务" description="线上部署着的业务项目。每个环境的部署主机上装着平台的一个节点：agent 就在那台主机上，按 服务×环境 读线上代码、用只读配置跑项目代码、查只读库、看日志。"
+      <PageHeader title="服务" description="线上部署着的业务项目。agent 服务和项目装在同一台主机上，按 服务×环境 读线上代码、用只读配置跑项目代码、查只读库、看日志。"
         actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} />
       <div className="mb-4 flex items-center gap-2">
         <SearchInput value={q} onChange={setQ} placeholder="筛选服务…" className="w-64" />
@@ -34,7 +34,7 @@ export function ServicesPage() {
       {error && !data ? <Card><ErrorState error={error} onRetry={refetch} /></Card> : loading ? (
         <div className="grid gap-4 md:grid-cols-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-52 rounded-lg" />)}</div>
       ) : list.length === 0 ? (
-        <Card><Empty icon={<LuServer />} title={q ? "没有匹配的服务" : "还没有服务"} description="服务 = 一个部署在装了平台节点的主机上的项目" action={!q && <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} /></Card>
+        <Card><Empty icon={<LuServer />} title={q ? "没有匹配的服务" : "还没有服务"} description="服务 = 一个和 agent 服务部署在同一台主机上的项目" action={!q && <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} /></Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">{list.map((s) => <ServiceCard key={s.name} s={s} />)}</div>
       )}
@@ -87,9 +87,6 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
                 <span className="text-[11.5px] text-fg-3">次/24h</span>
                 {!!h?.failed_24h && <span className="ml-auto text-[11.5px] font-medium text-bad">{h.failed_24h} 失败</span>}
               </div>
-              <div className="mt-1 min-w-0 text-[11.5px]">
-                <NodeChip name={h?.node} online={h?.node_online} className="text-[11.5px]" />
-              </div>
             </Link>
           );
         })}
@@ -112,7 +109,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
     try {
       await api.create("services", { name, title: title || name, root, code_paths: root ? [root] : [], description });
       invalidate("services");
-      toast("服务已创建", { description: "接着配置各环境的部署节点、解释器、配置文件路径、日志与档案" });
+      toast("服务已创建", { description: "接着配置各环境的解释器、配置文件路径、日志与档案" });
       onClose();
       navigate(`/services/${name}?tab=config&part=definition`);
     } catch (e) {
@@ -120,7 +117,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
     }
   });
   return (
-    <Dialog open={open} onClose={onClose} title="新建服务" description="先填基本信息，创建后在「配置 → 服务定义」里补全各环境的部署节点、解释器、配置文件、日志和档案"
+    <Dialog open={open} onClose={onClose} title="新建服务" description="先填基本信息，创建后在「配置 → 服务定义」里补全各环境的解释器、配置文件、日志和档案"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <form className="space-y-3.5" onSubmit={(e) => { e.preventDefault(); if (valid && !create.pending) void create.mutate(undefined); }}>
         <div className="grid grid-cols-2 gap-3">
