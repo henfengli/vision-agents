@@ -2,7 +2,7 @@
 name = "agent-platform"
 # 版本唯一出处是 src/agent_platform/__init__.py 的 __version__（发版只改那一处）
 dynamic = ["version"]
-description = "给同机部署的业务项目提供 agent 能力：API 调用、对话、定时与事件触发、按环境启停服务"
+description = "和业务项目同机部署的 agent 服务：API 调用、对话、定时与事件触发，多节点共用一套 PG 与控制台"
 requires-python = ">=3.11"
 dependencies = [
     "langchain>=1.4,<2.0",        # create_agent + 中间件（补齐悬空工具调用、上下文压缩）；agent/factory.py 是唯一用它装配的地方

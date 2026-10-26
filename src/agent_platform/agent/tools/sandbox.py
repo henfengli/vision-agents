@@ -1,34 +1,41 @@
-"""沙箱：bubblewrap 包装子进程（无容器拿到内核级隔离）。
+"""沙箱：bubblewrap 包装模型写的代码（bash 命令、项目内核），外面再套一个 systemd 用户 scope 限资源。
 
-威胁模型：内网可信用户 + 防误操作（不是对抗性代码），
-bwrap 的 namespace 隔离足够；bwrap 不可用时退化直接执行并记警告。
+同机部署时平台和线上项目是同一个用户，能读到的东西很多（真实配置、~/.ssh、docker、systemd 用户总线），
+所以沙箱按"能看到什么"白名单来做：
 
-策略：全盘只读、仅 scratch 可写、默认断网（--unshare-net）；
-内网 API 访问由调用方显式选择放网。
-遮蔽（hidden）：所有服务所有环境声明过的配置文件、平台密钥、运行用户的凭据、进程启动规格目录——
-"全盘只读"不等于"全盘可读"：配置内容只能经 service_info 读本环境、且密钥打码。
+- 全盘只读（--ro-bind / /）
+- home 整个换成空目录，只挂回需要的目录（只读）：代码目录、解释器所在的 conda 环境、方法目录，
+  部署配置 home_allow 里额外写的；工作目录（scratch）可写
+- /run/user/<uid> 换成空目录：碰不到 systemd 用户总线（否则能 systemctl --user 停平台自己）
+- 遮蔽：docker 的 socket、所有服务所有环境声明的配置文件（文件换成 /dev/null，目录换成空目录）
+- 项目内核再把本环境给 agent 的只读配置 bind 到项目读的路径上
+- 独立 pid 命名空间：看不到同用户的其他进程，读不到它们的 /proc/<pid>/environ、/proc/<pid>/root
+- bash 默认断网；项目内核联网（要连库）
 
-进程生命期（关键，别删这两个 flag）：
---unshare-pid + --as-pid-1 让命令本身做 pid namespace 的 init——
-调用结束（正常返回 / 超时强杀 / worker 崩溃经 --die-with-parent）
-内核 SIGKILL 整个命名空间，`&`/nohup/setsid 起的后台服务必死，
-不可能泄漏成"断网不可达但占着内存"的僵尸。少了它俩：
---die-with-parent 的 pdeathsig 只到直接子进程（bash），孙进程收不到
-（bubblewrap#529）；也没有 pid ns 兜底，后台进程会活下来。
-注意语义变化：沙箱内 ps 只见本调用进程；跨调用起服务本就连不上
-（net ns 每次调用独立），唯一能用的模式是单次调用内起服务+验证。
+进程生命期（关键，别删）：bash 用 --unshare-pid + --as-pid-1，命令本身是 pid 命名空间的 init，
+调用结束（正常返回 / 超时强杀 / worker 崩溃经 --die-with-parent）整个命名空间被 SIGKILL，
+`&` / nohup / setsid 起的后台进程必死。
+
+没有 bwrap 时：require_sandbox（默认）直接拒绝执行；只有开发机关掉它，退化成直接执行。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 
-from ...services.svcrun import mask_args
+from ...config import LimitsConfig
 
 log = logging.getLogger(__name__)
 
 _HAS_BWRAP: bool | None = None
+# 不带进沙箱的环境变量（systemd-run 要用它们找用户总线，进了沙箱就没用了）
+_DROP_ENV = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+
+
+class SandboxUnavailable(RuntimeError):
+    pass
 
 
 def has_bwrap() -> bool:
@@ -36,28 +43,79 @@ def has_bwrap() -> bool:
     if _HAS_BWRAP is None:
         _HAS_BWRAP = shutil.which("bwrap") is not None
         if not _HAS_BWRAP:
-            log.warning("bubblewrap 不可用：子进程无沙箱隔离（仅 systemd 加固兜底）")
+            log.warning("bubblewrap 不可用：模型写的代码没有沙箱隔离")
     return _HAS_BWRAP
 
 
-def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False, hidden: tuple[str, ...] = ()) -> list[str]:
-    """给命令行套 bwrap 沙箱；不可用时原样返回（退化不失效，但进程
-    清理与隔离保证全部消失——生产必须装 bwrap，install-user.sh 会检查告警）。"""
-    if not has_bwrap():
-        return argv
-    args = [
-        "bwrap",
-        "--ro-bind", "/", "/",              # 全盘只读
-        *mask_args(hidden),                 # 配置文件与密钥遮蔽（在 scratch 挂载之前，不会盖住工作区）
-        "--bind", scratch_dir, scratch_dir,  # 仅 scratch 可写
-        "--dev", "/dev",
-        "--proc", "/proc",
-        "--tmpfs", "/tmp",
-        "--die-with-parent",                # 父进程死则沙箱内全灭（无孤儿）
-        "--unshare-pid",                    # 独立 pid ns：ns init 死则全 ns 收 SIGKILL
-        "--as-pid-1",                       # 命令即 init：调用结束 = 后台进程全灭
-        "--new-session",
-    ]
-    if not allow_net:
+def mask_args(paths) -> list[str]:
+    """遮蔽一组路径的 bwrap 参数（不存在的跳过）：目录换成空目录，文件换成 /dev/null。"""
+    args: list[str] = []
+    for p in sorted(set(paths)):
+        if os.path.isdir(p):
+            args += ["--tmpfs", p]
+        elif os.path.exists(p):
+            args += ["--ro-bind", "/dev/null", p]
+    return args
+
+
+def _under(path: str, base: str) -> bool:
+    base = base.rstrip("/" + os.sep)
+    return path == base or path.startswith(base + "/") or path.startswith(base + os.sep)
+
+
+def bwrap_argv(argv: list[str], *, scratch: str, hidden=(), allow=(), binds=(), workdir: str | None = None,
+               net: bool = True, pid1: bool = False) -> list[str]:
+    """allow：home 下要挂回的目录（只读，home 外的本来就看得见）；binds：[(宿主上的源, 沙箱里的路径)] 只读。"""
+    home = os.path.expanduser("~")
+    hide_home = home not in ("", "/") and os.path.isdir(home)
+    args = ["bwrap", "--ro-bind", "/", "/"]
+    allowed = sorted({os.path.normpath(p) for p in allow if p and os.path.exists(p)}, key=len)
+    if hide_home:
+        args += ["--tmpfs", home]
+        for p in allowed:
+            if _under(p, home) and not any(_under(p, q) and p != q for q in allowed):
+                args += ["--ro-bind", p, p]
+    if hasattr(os, "getuid") and os.path.isdir(f"/run/user/{os.getuid()}"):
+        args += ["--tmpfs", f"/run/user/{os.getuid()}"]
+    visible = [m for m in hidden if not hide_home or not _under(m, home) or any(_under(m, p) for p in allowed)]
+    args += mask_args(visible)
+    for src, dst in binds:
+        args += ["--ro-bind", src, dst]
+    args += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--bind", scratch, scratch,
+             "--die-with-parent", "--unshare-pid", "--new-session"]
+    for k in _DROP_ENV:
+        args += ["--unsetenv", k]
+    if pid1:
+        args.append("--as-pid-1")
+    if not net:
         args.append("--unshare-net")
-    return args + ["--"] + argv
+    if workdir:
+        args += ["--chdir", workdir]
+    return args + ["--", *argv]
+
+
+def limit_argv(argv: list[str], limits: LimitsConfig | None, *, memory: str, cpu: str) -> list[str]:
+    """套一个 systemd 用户 scope：内存（不换 swap）、CPU、进程数各有上限，超了只杀这一个 scope。"""
+    if limits is None or not limits.enabled:
+        return argv
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--slice={limits.slice}",
+            "-p", f"MemoryMax={memory}", "-p", "MemorySwapMax=0", "-p", f"CPUQuota={cpu}",
+            "-p", f"TasksMax={limits.tasks}", "--", *argv]
+
+
+def scope_env(env: dict[str, str], limits: LimitsConfig | None) -> dict[str, str]:
+    """systemd-run 要从环境变量找到用户总线；进 bwrap 时再去掉（--unsetenv）。"""
+    if limits is None or not limits.enabled:
+        return env
+    return {**env, **{k: os.environ[k] for k in _DROP_ENV if k in os.environ}}
+
+
+def wrap_argv(argv: list[str], scratch_dir: str, allow_net: bool = False, hidden=(), allow=(), *,
+              limits: LimitsConfig | None = None, require: bool = True) -> list[str]:
+    """bash 命令：断网（可放开）、命令即 init。没有 bwrap 时 require=True 抛 SandboxUnavailable，否则原样返回。"""
+    if not has_bwrap():
+        if require:
+            raise SandboxUnavailable("没有 bwrap（bubblewrap），按部署配置 require_sandbox 拒绝执行")
+        return argv
+    inner = bwrap_argv(argv, scratch=scratch_dir, hidden=hidden, allow=allow, net=allow_net, pid1=True)
+    return limit_argv(inner, limits, memory=limits.bash_memory if limits else "", cpu=limits.bash_cpu if limits else "")

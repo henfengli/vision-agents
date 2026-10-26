@@ -4,7 +4,8 @@
 
 所有工具从 RunScope 取"当前服务×环境"，签名里没有 service/env：
 py 在本服务本环境的项目内核里执行，db_query 只能查本服务本环境登记的只读库，
-service_ctl 只能启停本服务本环境声明过的进程。
+logs 只能读本服务本环境声明过的日志。同机部署：执行运行的节点就是这个服务×环境部署的主机，
+logs / host_status 看到的就是线上那台机器。
 
 工具集刻意收敛：读写文件用 bash（工作目录可写，服务代码只读），编排多个工具用 py（内核里直接调），
 不另设文件工具和代码编排工具。
@@ -14,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -24,6 +24,7 @@ from ... import credentials
 from ...config import Settings
 from ...domain import Rejected
 from ...notify import Message, Notifier
+from ...services import envspec, hostlocal
 from ...services import inspect as svc_inspect
 from ...services.kernel import KernelError, KernelManager, kernel_key
 from ...store import assets as assets_store
@@ -54,10 +55,10 @@ class ToolInfo:
 
 
 class Toolbox:
-    def __init__(self, settings: Settings, notifier: Notifier | None, controller: Any = None,
+    def __init__(self, settings: Settings, notifier: Notifier | None, registry: Any = None,
                  mcp_tools: list | None = None, kernels: KernelManager | None = None):
         self._s = settings
-        self._ctl = controller
+        self._reg = registry
         self._notifier = notifier
         self._kernels = kernels
         self._mcp = {t.name: t for t in (mcp_tools or [])}
@@ -139,23 +140,23 @@ class Toolbox:
     # —— 实现 ——
 
     def _register(self) -> None:
-        s, ctl, toolbox, kernels = self._s, self._ctl, self, self._kernels
+        s, reg, toolbox, kernels = self._s, self._reg, self, self._kernels
 
         async def py(code: str, timeout: int = 120, restart: bool = False) -> str:
-            """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是该环境的，工作目录是部署目录，
-            本环境的配置文件已在项目读的路径上，可以直接 import 项目模块、调用项目自己的函数和数据访问层
-            （口径函数、ORM、dagster 资产……），用项目的方式连只读库。变量在本会话内保留，最后一个表达式的值会显示。
+            """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是线上这个环境用的那个，工作目录是线上的
+            代码目录，项目读配置的路径上是给 agent 的只读版（库是只读账号），可以直接 import 项目模块、调用项目自己的
+            函数和数据访问层（口径函数、ORM、dagster 资产……），用项目的方式连库。变量在本会话内保留，最后一个表达式的值会显示。
             你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
             要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
-            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）。restart=true 清空变量重新开始。"""
+            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）；内存和 CPU 有上限。restart=true 清空变量重新开始。"""
             sc = run_scope.current()
-            if kernels is None or ctl is None or sc.view is None:
+            if kernels is None or reg is None or sc.view is None:
                 return "[不可用] 本运行没有关联业务服务，没有项目内核"
             key = kernel_key(sc.session_id, sc.service, sc.env)
             try:
-                spec = await ctl.runtime_spec(sc.service, sc.env)
-                if restart or not kernels.alive(key):
+                spec = await envspec.runtime_spec(reg, s, sc.service, sc.env)
+                if restart or not kernels.alive(key, spec["digest"]):
                     # 文件类方法（沉淀的脚本）的目录放上 sys.path：内核里直接 import，不用复制一遍
                     methods = await assets_store.search_active(sc.env, sc.service, sc.task.split(":")[0], limit=20)
                     spec["method_paths"] = [m["path"] for m in methods if m.get("path")]
@@ -165,73 +166,58 @@ class Toolbox:
                 return f"[失败] {getattr(e, 'message', None) or e}"
 
         async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
-            """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件与密钥被遮蔽，配置用 service_info 读）、
-            只有工作目录可写、调用结束后台进程全灭。默认断网；需要访问本机服务端口或内网接口时传 network=true。
-            输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
+            """在沙箱里执行 shell 命令：全盘只读（可读服务代码；配置文件、密钥、home 下其他目录看不到，配置用
+            service_info 读）、只有工作目录可写、调用结束后台进程全灭、内存和 CPU 有上限。默认断网；需要访问本机服务端口
+            或内网接口时传 network=true。输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
-            r = await asyncio.to_thread(bash_mod.run_command, command, max(1, min(timeout, 600)),
-                                        s.scratch_dir, None, network, sc.hidden)
+            r = await asyncio.to_thread(
+                bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir, allow_net=network,
+                hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox)
             return bash_mod.format_result(r)
 
         async def service_info(what: str = "overview", path: str = "") -> str:
-            """查看本次运行所在服务×环境。what：overview（目录/配置文件/进程总览）、
-            config（读本环境的一个配置文件，path 填文件路径，密钥已打码）、git（代码目录最近提交）。"""
+            """查看本次运行所在服务×环境。what：overview（目录 / 配置文件 / 日志总览）、
+            config（读本环境给 agent 的一份配置，path 填配置文件路径，密钥已打码）、git（代码目录最近提交）。"""
             sc = run_scope.current()
             if sc.view is None:
                 return "[无服务] 本任务是平台任务，不关联业务服务"
             v = sc.view
             if what == "config":
                 try:
-                    return svc_inspect.read_config(v, path or (v.config_files[0]["path"] if v.config_files else ""))
+                    return await svc_inspect.read_config(v, path or (v.config_files[0]["path"] if v.config_files else ""))
                 except Rejected as e:
                     return f"[失败] {e.message}"
             if what == "git":
                 return "\n\n".join(f"## {p}\n{svc_inspect.git_log(p)}" for p in v.code_paths) or "（未配置代码目录）"
             lines = [v.prompt_block()]
-            for c in svc_inspect.config_files(v):
-                lines.append(f"- 配置 {c['path']} → {c['canonical']}：{'存在' if c['exists'] else '缺失'}"
-                             + (f"，{c['size']} 字节" if c['size'] is not None else ""))
-            if ctl is not None and v.processes:
-                for inst in await ctl.list(v.service):
-                    if inst["env"] == v.env:
-                        lines.append(f"- 进程 {inst['process']}：{inst['state']}"
-                                     + (f"，端口 {inst['port']}" if inst["port"] else "")
-                                     + (f"，租约到 {inst['lease_until']}" if inst["lease_until"] else ""))
+            git = svc_inspect.git_state(v.root) if v.root else None
+            if git:
+                lines.append(f"- 代码目录当前提交 {git['commit']}（{git['branch']}，{git['committed_at']}）"
+                             + ("，有未提交的改动" if git["dirty"] else ""))
+            for c in await svc_inspect.config_status(v):
+                lines.append(f"- 配置 {c['path']}：" + (f"给 agent 的只读版第 {c['version']} 版" if c["version"]
+                                                         else "还没有填给 agent 的只读版（py 起不来）"))
             return "\n".join(lines)
 
-        async def service_ctl(action: str, process: str = "", lines: int = 100) -> str:
-            """启停本服务在本环境的进程（本机副本，用该环境的配置起）。action：status / start / stop / restart / logs。
-            process 为进程名（只有一个进程时可省略）。只是跑一段项目代码用 py，需要长驻（起 webserver 看页面、
-            让别的工具连它）才起进程。启动带租约，到期自动停止。"""
+        async def logs(name: str = "", lines: int = 200, grep: str = "", since: str = "") -> str:
+            """读本服务本环境线上的日志（服务定义里声明过的：应用日志、nginx、docker 容器……）。name 不填列出有哪些。
+            lines：最后多少行（最多 2000）；grep：按正则过滤（不分大小写，在最后 lines 行里找）；
+            since：只对 docker 日志有效，如 30m、2h。看报错先 grep error|exception|traceback。"""
             sc = run_scope.current()
-            if ctl is None or sc.view is None:
-                return "[不可用] 本运行没有可操作的服务进程"
-            procs = list(sc.view.processes)
-            if not procs:
-                return f"[无进程] 服务 {sc.service} 没有声明可启停的进程"
-            process = process or (procs[0] if len(procs) == 1 else "")
-            if process not in procs:
-                return f"[参数] process 须为 {'、'.join(procs)} 之一"
-            try:
-                if action == "status":
-                    i = await ctl.get(sc.service, sc.env, process)
-                    return json.dumps(i, ensure_ascii=False)
-                if action == "logs":
-                    return "\n".join(await ctl.logs(sc.service, sc.env, process, lines)) or "（无日志）"
-                if action not in ("start", "stop", "restart"):
-                    return "[参数] action 须为 status/start/stop/restart/logs"
-                if action in ("start", "restart"):
-                    await ctl.ensure_startable(sc.service, sc.env)
-                by = f"run:{sc.run_id}"
-                if action in ("stop", "restart"):
-                    await ctl.stop(sc.service, sc.env, process, by=by)
-                if action in ("start", "restart"):
-                    await ctl.start(sc.service, sc.env, process, by=by)
-                i = await ctl.get(sc.service, sc.env, process)
-                return f"{action} 完成：{i['state']}" + (f"，端口 {i['port']}" if i["port"] else "") \
-                    + (f"，租约到 {i['lease_until']}" if i["lease_until"] else "")
-            except Rejected as e:
-                return f"[失败] {e.message}"
+            available = sc.view.logs if sc.view else {}
+            if not available:
+                return f"[未配置] 服务 {sc.service or '—'} 在 {sc.env} 没有声明日志（服务定义 → logs）"
+            if not name:
+                return "可读的日志：\n" + "\n".join(f"- {k}：{t}" for k, t in available.items())
+            if name not in available:
+                return f"[参数] name 须为 {'、'.join(available)} 之一"
+            return await asyncio.to_thread(hostlocal.read_log, available[name], lines=lines, grep=grep, since=since)
+
+        async def host_status() -> str:
+            """本服务本环境部署主机（就是你所在的这台）的现状：负载、内存、磁盘、占内存最多的进程、docker 容器、nginx。"""
+            sc = run_scope.current()
+            paths = [sc.view.root] if sc.view and sc.view.root else []
+            return await asyncio.to_thread(hostlocal.host_status, paths)
 
         async def db_query(query: str, db: str = "") -> str:
             """查本服务本环境登记的只读库（库名与类型见 [运行环境]）。query：一条 SQL（PostgreSQL / MySQL / MariaDB /
@@ -322,13 +308,13 @@ class Toolbox:
                 return f"[失败] 发送出错：{type(e).__name__}: {str(e)[:200]}"
             return f"已发送到渠道 {channel}"
 
-        if kernels is not None and ctl is not None:
-            self._add(py, "项目内核", "service",
-                      summary="在本服务本环境的项目 Python 里执行代码：import 项目模块、调项目函数、直接调其他工具，变量会话内保留")
-        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、工作目录可写、默认断网；读写文件也用它")
-        self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置文件内容、git 状态")
-        if ctl is not None and ctl.backend != "off":
-            self._add(service_ctl, "进程启停", "service", dangerous=True, summary="启停本服务本环境声明过的进程（带租约）")
+        if kernels is not None and reg is not None:
+            self._add(py, "项目内核", "service", dangerous=True,
+                      summary="在线上的代码目录和解释器里执行代码（配置换成只读版）：import 项目模块、调项目函数，变量会话内保留")
+        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录可写、默认断网")
+        self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、给 agent 的配置内容、git 状态")
+        self._add(logs, "看日志", "service", summary="读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤")
+        self._add(host_status, "主机状况", "service", summary="部署主机的负载、内存、磁盘、大进程、docker 容器、nginx")
         self._add(db_query, "只读查库", "service",
                   summary="本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件")
         if s.grafana is not None:

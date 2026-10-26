@@ -16,18 +16,29 @@ from agent_platform import config
 sys.path.insert(0, str(REPO / "sdk"))
 from agent_client import client as sdk  # noqa: E402
 
-SECRETS = {k: "x" for k in ("AGENT_DB_PASSWORD", "AGENT_ROOT_TOKEN", "MODEL_TOKEN_A")}
+SECRETS = {k: "x" for k in ("AGENT_DB_PASSWORD", "AGENT_DB_HOST", "AGENT_ROOT_TOKEN", "MODEL_TOKEN_A")}
+NO_LOCAL = Path(tempfile.gettempdir()) / "agent-platform-no-local.yaml"
 
 
 class ConfigTest(unittest.TestCase):
     def test_prod_profile(self):
-        with mock.patch.dict(os.environ, SECRETS):
+        with mock.patch.dict(os.environ, SECRETS), mock.patch.object(config, "LOCAL_CONF", NO_LOCAL):
             s = config.load_settings("prod")
-        self.assertEqual(s.process_control.backend, "systemd")
+        self.assertTrue(s.limits.enabled)
+        self.assertTrue(s.require_sandbox)
+        self.assertEqual(s.node, "")
         self.assertEqual(s.model.tokens, ["x"])                 # prod 的差异合并进 common 了
         self.assertFalse(s.otel.enabled)
         self.assertEqual(s.retention.checkpoints_days, 30)
         self.assertEqual(s.profile, "prod")
+
+    def test_local_overlay_sets_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "local.yaml"
+            local.write_text("node: prod\nlisten: {host: 0.0.0.0}\n")
+            with mock.patch.dict(os.environ, SECRETS), mock.patch.object(config, "LOCAL_CONF", local):
+                s = config.load_settings("prod")
+        self.assertEqual((s.node, s.listen.host, s.listen.port), ("prod", "0.0.0.0", 8100))
 
     def test_extends_merges_parent(self):
         with tempfile.TemporaryDirectory() as tmp:

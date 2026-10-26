@@ -4,11 +4,11 @@
  */
 import { del, get, patch, post, put } from "./client";
 import type {
-  ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
-  ConfigVersion, Instance, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters, MemoryHealth, Meta,
-  Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem, RunRequest, SearchHit, ServiceSummary,
-  ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, SyncAccepted, SyncRequest, SyncStatus, TaskSummary, UpcomingFire, Version,
-  VersionStat,
+  ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigMasked, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
+  ConfigVersion, ConfigVersionContent, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters,
+  MemoryHealth, Meta, NodeInfo, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
+  RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire,
+  Version, VersionStat,
 } from "./types";
 import { useQuery, type QueryOptions } from "../lib/query";
 
@@ -38,34 +38,25 @@ export const api = {
   services: () => get<ServiceSummary[]>("/v1/services"),
   service: (name: string) => get<ServiceSummary>(`/v1/services/${enc(name)}`),
   serviceEnv: (name: string, env: string) => get<ServiceView>(`/v1/services/${enc(name)}/envs/${enc(env)}`),
+  // —— 给 agent 的只读版配置（存库、带版本）：path 填定义里的写法或渲染后的路径 ——
+  /** 密钥打码后的内容；还没填时 404 */
   serviceConfig: (name: string, env: string, path: string) =>
-    get<{ path: string; content: string }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),
-  // —— 配置文件编辑（原文不打码）：保存带回打开时的 sha，期间被改过返回 409 conflict ——
+    get<ConfigMasked>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path }),
+  /** 原文 + sha，编辑用：保存带回打开时的 sha（还没有版本传空串），期间被别人改过返回 409 conflict */
   configRaw: (name: string, env: string, path: string) =>
     get<ConfigRaw>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, { path, raw: true }),
   saveConfig: (name: string, env: string, body: { path: string; content: string; sha: string }) =>
     put<ConfigSaved>(`/v1/services/${enc(name)}/envs/${enc(env)}/config`, body),
-  /** 已按上游核对过，不用改 */
-  ackConfig: (name: string, env: string, path: string) =>
-    post<{ ok: true }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/ack`, { path }),
   configHistory: (name: string, env: string, path: string) =>
     get<ConfigVersion[]>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history`, { path }),
-  configVersion: (name: string, env: string, path: string, id: string) =>
-    get<{ id: string; content: string }>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history/${enc(id)}`, { path }),
-  // —— 代码同步 ——
-  syncStatus: (name: string, env: string) => get<SyncStatus>(`/v1/services/${enc(name)}/envs/${enc(env)}/sync`),
-  /** 立即同步：每个环境提交一次 code-sync；envs 不给 = 服务启用的全部环境；force = 所有同步步骤都重跑 */
-  syncNow: (name: string, body: SyncRequest = {}) => post<SyncAccepted[]>(`/v1/services/${enc(name)}/sync`, {
-    ...(body.envs?.length ? { envs: body.envs } : {}), ...(body.force ? { force: true } : {}),
-  }),
-  processes: (name: string) => get<Instance[]>(`/v1/services/${enc(name)}/processes`),
+  configVersion: (name: string, env: string, path: string, version: number) =>
+    get<ConfigVersionContent>(`/v1/services/${enc(name)}/envs/${enc(env)}/config/history/${version}`, { path }),
   /** 服务自己声明的 MCP 工具；reload=true 强制重连（改了 MCP 服务端之后） */
   serviceTools: (name: string, reload = false) => get<ServiceTools>(`/v1/services/${enc(name)}/tools`, { reload: reload || undefined }),
-  /** 返回动作执行后的实例状态 */
-  processAction: (name: string, env: string, proc: string, action: "start" | "stop" | "renew", hours?: number) =>
-    post<{ instance: Instance }>(`/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/${action}`, hours ? { hours } : {}),
-  processLogs: (name: string, env: string, proc: string) =>
-    get<{ lines: string[] }>(`/v1/services/${enc(name)}/envs/${enc(env)}/processes/${enc(proc)}/logs`),
+
+  // —— 节点：各主机上的平台进程（心跳、上报的本机状况）；下线的可以去掉 ——
+  nodes: () => get<NodeInfo[]>("/v1/nodes"),
+  removeNode: (name: string) => del<void>(`/v1/nodes/${enc(name)}`),
 
   roles: () => get<Role[]>("/v1/roles"),
   role: (name: string) => get<Role>(`/v1/roles/${enc(name)}`),
@@ -141,9 +132,7 @@ export const useMeta = () => useQuery(["meta"], api.meta, { staleTime: 60_000 })
 export const useServices = (o?: QueryOptions) => useQuery(["services"], api.services, o);
 export const useService = (name: string) => useQuery(["services", name], () => api.service(name));
 export const useServiceEnv = (name: string, env: string) => useQuery(["services", name, "env", env], () => api.serviceEnv(name, env), { enabled: !!env });
-export const useProcesses = (name: string) => useQuery(["services", name, "processes"], () => api.processes(name), { refetchInterval: 10_000 });
-export const useSyncStatus = (name: string, env: string) =>
-  useQuery(["services", name, "sync", env], () => api.syncStatus(name, env), { enabled: !!env, refetchInterval: 15_000 });
+export const useNodes = (o?: QueryOptions) => useQuery(["nodes"], api.nodes, { refetchInterval: 30_000, ...o });
 export const useConfigRaw = (name: string, env: string, path: string) =>
   useQuery(["services", name, "config", env, path], () => api.configRaw(name, env, path), { enabled: !!env && !!path });
 export const useConfigHistory = (name: string, env: string, path: string, enabled = true) =>

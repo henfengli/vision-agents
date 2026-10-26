@@ -1,29 +1,28 @@
 /**
- * 服务详情：先选环境（服务×环境是 agent 实际操作的单位），再看进程、配置文件、代码同步、
- * 任务、运行、记忆；「配置」tab 按原文编辑本环境的配置文件（?tab=config&env=，通知里的链接）
+ * 服务详情：先选环境（服务×环境是 agent 实际操作的单位），再看它部署在哪个节点、线上的代码目录与提交、
+ * 给 agent 的配置、日志、任务、运行、记忆；「配置」tab 填本环境给 agent 的只读版配置（?tab=config&env=）
  * 与结构化编辑服务定义（&part=definition），「版本」看历史与 diff。
  */
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
-  LuBrain, LuCircleAlert, LuCircleStop, LuClock, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuHistory, LuListTodo,
-  LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
+  LuBrain, LuCircleAlert, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuGitCommitHorizontal, LuHistory, LuListTodo,
+  LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuServerOff, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
 } from "react-icons/lu";
 
-import {
-  api, useEnvs, useMeta, useProcesses, useRuns, useService, useServiceEnv, useServiceTools, useSettings, useSyncStatus, useTasks,
-} from "@/api/hooks";
-import type { Instance, ServiceEnvOverride, ServiceSummary, ServiceView } from "@/api/types";
+import { api, useEnvs, useRuns, useService, useServiceEnv, useServiceTools, useTasks } from "@/api/hooks";
+import type { ServiceEnvOverride, ServiceSummary, ServiceView } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { DbList } from "@/components/databases";
-import { EnvBadge, InstanceBadge } from "@/components/status";
+import { LogList } from "@/components/logs";
+import { EnvBadge, NodeChip } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
-import { Button } from "@/components/ui/button";
+import { Button, LinkButton } from "@/components/ui/button";
 import { CodeBlock, Markdown, Mono, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
-import { Input, Segmented, Switch } from "@/components/ui/form";
+import { Segmented, Switch } from "@/components/ui/form";
 import { Drawer, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, bytes, datetime, until } from "@/lib/format";
+import { ago, datetime } from "@/lib/format";
 import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { Link, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -32,12 +31,11 @@ import { ServiceAvatar } from "../overview/overview";
 import { RunMiniList, RunsTable } from "../runs/runs-table";
 import { RunTaskDialog } from "../tasks/run-dialog";
 import { TasksTable, taskRowsOf } from "../tasks/tasks";
-import { ConfigFilesView } from "./config-files";
+import { ConfigFilesView, ConfigStatusBadges } from "./config-files";
 import { ServiceConfigEditor } from "./service-config";
-import { SyncPanel } from "./service-sync";
 
 type TabKey = "overview" | "envs" | "tasks" | "runs" | "memory" | "tools" | "config" | "versions";
-/** 「配置」tab 的两部分：本环境的配置文件（默认）/ 服务定义 */
+/** 「配置」tab 的两部分：本环境给 agent 的配置文件（默认）/ 服务定义 */
 type ConfigPart = "files" | "definition";
 
 export function ServiceDetailPage() {
@@ -78,7 +76,7 @@ export function ServiceDetailPage() {
         description={svc?.description}
         meta={svc && <>
           <span className="font-mono">{svc.name}</span>
-          <span className="flex items-center gap-1 font-mono"><LuFolder className="size-3.5" />{svc.root || "未配置部署目录"}</span>
+          <span className="flex items-center gap-1 font-mono"><LuFolder className="size-3.5" />{svc.root || "未配置代码目录"}</span>
           <span>v{svc.version} · {svc.updated_by} 更新于 {ago(svc.updated_at)}</span>
         </>}
         actions={<>
@@ -94,19 +92,23 @@ export function ServiceDetailPage() {
         <span className="text-xs text-fg-3">环境</span>
         <div className="inline-flex rounded-lg border border-line bg-sunken p-0.5">
           {allEnvs.map((e) => {
-            const off = svc?.health[e.name]?.enabled === false;
+            const h = svc?.health[e.name];
+            const off = h?.enabled === false;
+            const nodeDown = !off && !!h?.node && h.node_online !== true;
             return (
-              <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })} title={off ? "该服务在此环境已停用" : undefined}
+              <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })}
+                title={off ? "该服务在此环境已停用" : nodeDown ? `部署节点 ${h!.node} 不在线` : h?.node ? `部署在节点 ${h.node}` : undefined}
                 className={cn("flex h-7 items-center gap-2 rounded-md px-3 text-[12.5px] transition-colors", env === e.name ? "bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "hover:bg-hover", off && "opacity-55")}>
                 <EnvBadge env={e.name} /><span className={cn(env === e.name ? "text-fg" : "text-fg-3", off && "line-through")}>{e.title}</span>
-                {svc && !off && !!svc.health[e.name]?.failed_24h && (
-                  <span className="size-1.5 rounded-full bg-bad" title={`近 24 小时失败 ${svc.health[e.name].failed_24h} 次`} aria-label={`近 24 小时失败 ${svc.health[e.name].failed_24h} 次`} />
+                {nodeDown && <LuServerOff className="size-3.5 text-bad" aria-label={`部署节点 ${h!.node} 不在线`} />}
+                {svc && !off && !!h?.failed_24h && (
+                  <span className="size-1.5 rounded-full bg-bad" title={`近 24 小时失败 ${h.failed_24h} 次`} aria-label={`近 24 小时失败 ${h.failed_24h} 次`} />
                 )}
               </button>
             );
           })}
         </div>
-        <span className="text-xs text-fg-3">配置文件、只读库、进程、记忆都按所选环境解析</span>
+        <span className="text-xs text-fg-3">部署节点、代码目录、配置文件、只读库、日志、记忆都按所选环境解析</span>
       </div>
 
       <Tabs className="mb-5" value={tab} onChange={(v) => setSearch({ tab: v === "overview" ? undefined : v })} tabs={[
@@ -140,11 +142,11 @@ export function ServiceDetailPage() {
             <div className="flex flex-wrap items-center gap-3">
               <Segmented value={search.part === "definition" ? "definition" : "files"} onChange={(v) => setSearch({ part: v === "files" ? undefined : v })}
                 options={[{ value: "files", label: "配置文件", icon: <LuFileText /> }, { value: "definition", label: "服务定义", icon: <LuSettings /> }]} />
-              <span className="text-xs text-fg-3">{search.part === "definition" ? "进程、配置文件声明、代码同步、MCP、档案…保存即新版本" : `${env} 环境的真实配置文件，按原文编辑；上游变了会提示待更新`}</span>
+              <span className="text-xs text-fg-3">{search.part === "definition" ? "代码目录、配置文件路径、日志、MCP、环境与节点、档案…保存即新版本" : `${env} 给 agent 的只读版配置：项目内核在这些路径上读到的就是它`}</span>
             </div>
             {search.part === "definition"
               ? <ServiceConfigEditor svc={svc} onSaved={refetch} />
-              : <ConfigFilesView svc={svc} env={env} onOpenProcesses={() => setSearch({ tab: undefined, part: undefined })} onOpenDefinition={() => setSearch({ part: "definition" })} />}
+              : <ConfigFilesView svc={svc} env={env} onOpenDefinition={() => setSearch({ part: "definition" })} />}
           </div>}
           {tab === "versions" && <VersionHistory kind="services" name={svc.name} onRestored={refetch} />}
         </>
@@ -159,50 +161,50 @@ function RunsTab({ service, env }: { service: string; env: string }) {
   return <Card><RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]} /></Card>;
 }
 
+/** 节点上报的布尔状况：true 不显示，false 标红，null = 还没上报 */
+function Reported({ ok, bad }: { ok: boolean | null; bad: string }) {
+  if (ok === false) return <Badge tone="bad">{bad}</Badge>;
+  if (ok === null) return <Badge tone="idle">节点未上报</Badge>;
+  return null;
+}
+
 function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void; onOpenTools: () => void; onOpenConfig: () => void }) {
   const { data: view } = useServiceEnv(svc.name, env);
   const { data: recent } = useRuns({ service: svc.name, env, limit: 8 });
+  const [peek, setPeek] = useState<string | null>(null);
   const h = svc.health[env];
+  const down = view?.node && !view.node.online;
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
       <div className="min-w-0 space-y-4">
         {h && !h.enabled && svc.enabled && (
           <div className="flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-[13px] text-warn">
-            <LuPower className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 环境已停用：不接收运行、不启动进程、定时暂停。</span>
+            <LuPower className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 环境已停用：不接收运行、不起项目内核、定时暂停。</span>
             <Button size="sm" onClick={onOpenEnvs}>去启用</Button>
           </div>
         )}
-        <Processes svc={svc} env={env} />
-        <ConfigFiles svc={svc} env={env} files={view?.config_files} onEdit={onOpenConfig} />
+        {down && h?.enabled !== false && (
+          <div className="flex items-center gap-3 rounded-lg border border-bad/30 bg-bad-soft/60 px-4 py-3 text-[13px] text-bad">
+            <LuServerOff className="size-4 shrink-0" />
+            <span className="flex-1">
+              {svc.name} 在 {env} 部署在节点 <span className="font-mono">{view.node!.name}</span>，{view.node!.heartbeat_at ? `它最近一次心跳在 ${ago(view.node!.heartbeat_at)}` : "它从来没有上线过"}：
+              这个服务×环境的新运行会被拒收（node_offline）。下面的代码目录、提交、解释器是它最后一次上报的。
+            </span>
+            <LinkButton to="/settings/nodes" size="sm">看节点</LinkButton>
+          </div>
+        )}
         <Card>
-          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} />
-          <RunMiniList runs={recent?.items} limit={8} />
+          <CardHeader title="服务×环境视图" description={`agent 在 ${env} 里看到的就是这些：它就在部署主机上，读的是线上的代码目录`} />
+          <div className="p-4">
+            {!view ? <Skeleton className="h-48" /> : <ViewList svc={svc} view={view} onOpenTools={onOpenTools} onOpenConfig={onOpenConfig} onPeek={setPeek} />}
+          </div>
         </Card>
       </div>
       <div className="min-w-0 space-y-4">
         <Card>
-          <CardHeader title="服务×环境视图" description={`agent 在 ${env} 里看到的就是这些`} />
-          <div className="p-4">
-            {!view ? <Skeleton className="h-32" /> : (
-              <DescList items={[
-                ["部署目录", <Mono copy>{view.root}</Mono>],
-                ["代码目录", <div className="space-y-0.5">{view.code_paths.map((p) => <Mono key={p}>{p}</Mono>)}</div>],
-                ["解释器", <div><Mono copy>{view.python}</Mono><div className="mt-0.5 text-[11.5px] text-fg-3">py 工具的项目内核、进程 cmd 里的 {"{python}"} 都用它</div></div>],
-                ["地址", Object.keys(view.urls ?? {}).length ? <UrlList urls={view.urls} /> : <span className="text-fg-3">未配置</span>],
-                ["服务工具", (view.mcp_servers ?? []).length ? (
-                  <button type="button" onClick={onOpenTools} className="flex flex-wrap items-center gap-1 text-left hover:text-accent">
-                    {view.mcp_servers.map((m) => <Badge key={m} tone="outline" icon={<LuPlug />} className="font-mono">{m}</Badge>)}
-                    <span className="text-[11.5px] text-fg-3">MCP，运行里自动带上</span>
-                  </button>
-                ) : <span className="text-fg-3">无（可在「配置 → MCP」声明）</span>],
-                ["主机", view.hosts.length ? <span className="font-mono text-[12px]">{view.hosts.join("、")}</span> : <span className="text-fg-3">未登记（host_metrics 不可用）</span>],
-                ["只读库", <DbList databases={view.databases ?? {}} empty={<span className="text-fg-3">未配置（db_query 不可用）</span>} />],
-                ["代码仓库", view.repo ? <div><Mono copy>{view.repo}</Mono>{view.ref && <div className="mt-0.5 text-[11.5px] text-fg-3">跟踪 <span className="font-mono">{view.ref}</span></div>}</div> : <span className="text-fg-3">未配置（不能同步代码）</span>],
-              ]} />
-            )}
-          </div>
+          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} />
+          <RunMiniList runs={recent?.items} limit={8} />
         </Card>
-        {view?.repo && <SyncPanel service={svc.name} env={env} dirty={view.git?.dirty} onOpenConfig={onOpenConfig} />}
         <Card>
           <CardHeader title="服务档案" description={`置顶逐字注入该服务在 ${env} 的每次运行`} icon={<LuScrollText />} />
           <div className="p-4">
@@ -221,7 +223,92 @@ function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc:
           </div>
         </Card>
       </div>
+      <ConfigPeek service={svc.name} env={env} path={peek} onClose={() => setPeek(null)} />
     </div>
+  );
+}
+
+/** 服务×环境视图：部署节点 → 代码与解释器 → 配置 → 库、日志、地址、工具 */
+function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
+  svc: ServiceSummary; view: ServiceView; onOpenTools: () => void; onOpenConfig: () => void; onPeek: (path: string) => void;
+}) {
+  const extraPaths = view.code_paths.filter((p) => p !== view.root);
+  const git = view.git;
+  return (
+    <DescList items={[
+      ["部署节点", view.node ? (
+        <div>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <NodeChip name={view.node.name} online={view.node.online} heartbeatAt={view.node.heartbeat_at} host={view.node.host} />
+            {view.node.host && <span className="font-mono text-[11.5px] text-fg-3">{view.node.host}</span>}
+          </div>
+          <div className="mt-0.5 text-[11.5px] text-fg-3">
+            {view.node.heartbeat_at ? `最近心跳 ${ago(view.node.heartbeat_at)}` : "从来没有上线过"} · 这个服务×环境的运行只在这里执行
+          </div>
+        </div>
+      ) : <span className="text-fg-3">不限（单机部署：哪个节点都能执行）</span>],
+      ["代码目录", (
+        <div className="space-y-0.5">
+          <div className="flex flex-wrap items-center gap-1.5"><Mono copy>{view.root || "未配置"}</Mono><Reported ok={view.root_exists} bad="主机上不存在" /></div>
+          {extraPaths.map((p) => <Mono key={p}>{p}</Mono>)}
+        </div>
+      )],
+      ["当前提交", git ? (
+        <div>
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <LuGitCommitHorizontal className="size-3.5 shrink-0 text-fg-3" />
+            <code className="font-mono text-[12px] font-medium text-fg">{git.commit}</code>
+            <span className="min-w-0 truncate text-[12.5px] text-fg-2" title={git.subject}>{git.subject}</span>
+            {git.dirty && <Badge tone="warn" title="代码目录里有未提交的改动（线上被直接改过）">有未提交的改动</Badge>}
+          </div>
+          <div className="mt-0.5 text-[11.5px] text-fg-3">
+            <span className="font-mono">{git.branch}</span> · 提交于 <span title={datetime(git.committed_at, true)}>{ago(git.committed_at)}</span>
+            {view.reported_at && <> · 节点上报于 {ago(view.reported_at)}</>}
+          </div>
+        </div>
+      ) : <span className="text-fg-3">{view.reported_at ? "不是 git 仓库" : "节点还没上报"}</span>],
+      ["解释器", (
+        <div>
+          <div className="flex flex-wrap items-center gap-1.5"><Mono copy>{view.python}</Mono><Reported ok={view.python_ok} bad="不可用（py 起不来）" /></div>
+          <div className="mt-0.5 text-[11.5px] text-fg-3">py 工具（项目内核）用线上这个解释器</div>
+        </div>
+      )],
+      ["配置文件", view.config_files.length ? (
+        <div className="space-y-1.5">
+          {view.config_files.map((f) => (
+            <div key={f.key} className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="min-w-0 truncate font-mono text-[12px] text-fg" title={f.path}>{f.path}</span>
+              <ConfigStatusBadges file={f} />
+              {f.version != null && <button type="button" onClick={() => onPeek(f.key)} className="text-[11.5px] text-accent hover:underline">查看</button>}
+            </div>
+          ))}
+          <button type="button" onClick={onOpenConfig} className="flex items-center gap-1 text-[11.5px] text-fg-3 hover:text-accent">
+            <LuPencilLine className="size-3" />给 agent 的只读版在「配置 → 配置文件」里填；线上真实配置平台不读
+          </button>
+        </div>
+      ) : <span className="text-fg-3">未声明（可在「配置 → 服务定义」里写项目读配置的路径）</span>],
+      ["只读库", <DbList databases={view.databases ?? {}} empty={<span className="text-fg-3">未配置（db_query 不可用）</span>} />],
+      ["日志", <LogList logs={view.logs ?? {}} empty={<span className="text-fg-3">未配置（logs 工具不可用）</span>} />],
+      ["地址", Object.keys(view.urls ?? {}).length ? <UrlList urls={view.urls} /> : <span className="text-fg-3">未配置</span>],
+      ["服务工具", (view.mcp_servers ?? []).length ? (
+        <button type="button" onClick={onOpenTools} className="flex flex-wrap items-center gap-1 text-left hover:text-accent">
+          {view.mcp_servers.map((m) => <Badge key={m} tone="outline" icon={<LuPlug />} className="font-mono">{m}</Badge>)}
+          <span className="text-[11.5px] text-fg-3">MCP，运行里自动带上</span>
+        </button>
+      ) : <span className="text-fg-3">无（可在「配置 → MCP」声明）</span>],
+      ["主机", view.hosts.length ? <span className="font-mono text-[12px]">{view.hosts.join("、")}</span> : <span className="text-fg-3">未登记（host_metrics 不可用；host_status 照常）</span>],
+      ...(svc.hidden?.length ? [["遮蔽", <span className="text-[12px] text-fg-3">另有 {svc.hidden.length} 个含口令的文件对 agent 遮蔽</span>] as [string, React.ReactNode]] : []),
+    ]} />
+  );
+}
+
+/** 给 agent 的只读版（密钥打码后）：只读查看 */
+function ConfigPeek({ service, env, path, onClose }: { service: string; env: string; path: string | null; onClose: () => void }) {
+  const { data, error } = useQuery(["services", service, "config-masked", env, path], () => api.serviceConfig(service, env, path!), { enabled: !!path });
+  return (
+    <Drawer open={!!path} onClose={onClose} title={data?.path ?? path ?? ""} subtitle={`${service} · ${env} · 给 agent 的只读版（敏感值已打码）`} width="w-[720px]">
+      <div className="p-4">{error ? <ErrorState error={error} /> : data ? <CodeBlock code={data.content} maxHeight={9999} /> : <Skeleton className="h-64" />}</div>
+    </Drawer>
   );
 }
 
@@ -269,7 +356,7 @@ function ToolsTab({ svc, onOpenConfig }: { svc: ServiceSummary; onOpenConfig: ()
         actions={servers.length > 0 && <Button size="sm" icon={<LuRefreshCw />} loading={reloading} onClick={reload}>重新连接</Button>} />
       {error ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={4} /> : !servers.length ? (
         <Empty icon={<LuPlug />} title="这个服务没有声明 MCP"
-          description="在「配置 → MCP」里加一个 server（名字 + 连接配置），这里就会列出它的工具；比如 dagster 服务接上 Dagster 的运行记录与日志。"
+          description="在「配置 → MCP」里加一个 server（名字 + 连接配置），这里就会列出它的工具；比如 dagster 服务接上线上 Dagster 的运行记录、日志与重跑。"
           action={<Button size="sm" onClick={onOpenConfig}>去配置</Button>} />
       ) : (
         <>
@@ -308,11 +395,10 @@ export const PROFILE_LABEL: Record<string, string> = {
   upstream: "上游依赖", downstream: "下游影响", runbook: "运维备注",
 };
 
-// ———————— 环境：服务在每个环境是否启用、覆盖了什么 ————————
+// ———————— 环境：服务在每个环境是否启用、部署在哪个节点、覆盖了什么 ————————
 
 function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void }) {
   const { data: envs } = useEnvs();
-  const [refs, setRefs] = useState<Record<string, string>>({});
   const save = async (env: string, patch: Partial<ServiceEnvOverride>, message: string) => {
     const merged: ServiceEnvOverride = { ...(svc.envs[env] ?? {}), ...patch };
     for (const k of Object.keys(merged) as (keyof ServiceEnvOverride)[]) if (merged[k] === undefined) delete merged[k];
@@ -328,27 +414,24 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
   const toggle = async (env: string, enabled: boolean) => {
     const ok = await confirm({
       title: enabled ? `在 ${env} 启用 ${svc.name}？` : `在 ${env} 停用 ${svc.name}？`,
-      description: enabled ? "启用后该环境立即接收运行，定时恢复，可以按需起进程。" : "停用后：该环境的新运行全部拒收（原因码 service_env_disabled），定时暂停，进程与项目内核不能启动；其它环境不受影响。",
+      description: enabled ? "启用后该环境立即接收运行，定时恢复。" : "停用后：该环境的新运行全部拒收（原因码 service_env_disabled），定时暂停，项目内核不能启动；其它环境不受影响。",
       confirmText: enabled ? "启用" : "停用", danger: !enabled,
     });
     if (ok) await save(env, { enabled: enabled ? undefined : false }, enabled ? `${env} 已启用` : `${env} 已停用`);
   };
-  const saveRef = async (env: string) => {
-    if (!(env in refs)) return;
-    const value = refs[env].trim();
-    setRefs((r) => { const n = { ...r }; delete n[env]; return n; });
-    if (value === (svc.envs[env]?.ref ?? "")) return;
-    await save(env, { ref: value || undefined }, value ? `${env} 跟踪 ${value}` : `${env} 跟随基座分支`);
-  };
   return (
     <Card>
-      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行、能起进程和项目内核；跟踪 = 代码同步的默认分支。主机、只读库、解释器、地址、档案的环境差异在「配置」里改。" icon={<LuLayers />} />
+      <CardHeader title="各环境" description="服务×环境是 agent 实际操作的单位。启用 = 接收运行、能起项目内核；运行只在这个环境部署的节点上执行，节点不在线时新运行会被拒收。节点、代码目录、解释器、只读库、日志、地址、档案的环境差异在「配置 → 服务定义 → 环境」里改。" icon={<LuLayers />} />
       <ul className="divide-y divide-line">
         {(envs ?? []).map((e) => {
           const o = svc.envs[e.name] ?? {};
           const h = svc.health[e.name];
           const on = h?.enabled !== false;
-          const overrides = [o.hosts && "主机", o.databases && Object.keys(o.databases).length && "只读库", o.code_paths && "代码目录", o.python && "解释器", o.urls && Object.keys(o.urls).length && "地址", o.profile && Object.keys(o.profile).length && "档案"].filter(Boolean);
+          const has = (v: unknown) => !!v && (typeof v !== "object" || Object.keys(v as object).length > 0);
+          const overrides = [
+            has(o.node) && "节点", has(o.root) && "代码目录", has(o.python) && "解释器", has(o.hosts) && "主机", has(o.databases) && "只读库",
+            has(o.code_paths) && "其他代码目录", has(o.logs) && "日志", has(o.urls) && "地址", has(o.profile) && "档案",
+          ].filter(Boolean);
           return (
             <li key={e.name} className={cn("flex flex-wrap items-center gap-4 px-4 py-3.5", !on && "bg-sunken/50")}>
               <EnvBadge env={e.name} className="h-6 px-2 text-[12px]" />
@@ -356,172 +439,24 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
                 <div className="flex items-center gap-2 text-[13px] font-medium text-fg">
                   {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">已停用</Badge>}
                 </div>
-                <div className="mt-0.5 text-[12px] text-fg-3">
-                  {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"} · 近 24h {h?.runs_24h ?? 0} 次运行 · 进程 {h?.running_processes ?? 0}/{h?.total_processes ?? 0} 运行中
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-fg-3">
+                  <span className="flex items-center gap-1">部署在 <NodeChip name={h?.node} online={h?.node_online} /></span>
+                  <span>· {overrides.length ? `覆盖了：${overrides.join("、")}` : "全部沿用基座配置"}</span>
+                  <span>· 近 24h {h?.runs_24h ?? 0} 次运行</span>
                 </div>
                 {h?.python && <div className="mt-0.5 truncate font-mono text-[11.5px] text-fg-3" title="该环境的解释器">{h.python}</div>}
               </div>
-              {svc.repo && (
-                <label className="flex items-center gap-1.5 text-[12px] text-fg-3">跟踪
-                  <Input mono className="h-7 w-32 text-[12px]" value={refs[e.name] ?? o.ref ?? ""} placeholder={svc.ref || "默认分支"}
-                    onChange={(ev) => setRefs((r) => ({ ...r, [e.name]: ev.target.value }))}
-                    onBlur={() => saveRef(e.name)} onKeyDown={(ev) => { if (ev.key === "Enter") ev.currentTarget.blur(); }} />
-                </label>
-              )}
-              <Switch checked={on} disabled={!svc.enabled} onChange={(v) => toggle(e.name, v)} label={<span className="text-[12.5px]">{on ? "启用" : "停用"}</span>} />
+              <Tooltip content={on ? "停用后这个环境不接收运行" : "启用后立即接收运行"}>
+                <span><Switch checked={on} disabled={!svc.enabled} onChange={(v) => toggle(e.name, v)} label={<span className="text-[12.5px]">{on ? "启用" : "停用"}</span>} /></span>
+              </Tooltip>
             </li>
           );
         })}
       </ul>
       {!svc.enabled && <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">服务整体已停用（右上角菜单），各环境开关暂不生效。</div>}
-      <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">环境本身（有哪些、谁受保护）在 <Link to="/settings/envs" className="text-accent hover:underline">设置 → 环境</Link>。</div>
-    </Card>
-  );
-}
-
-// ———————— 进程 ————————
-
-function Processes({ svc, env }: { svc: ServiceSummary; env: string }) {
-  const { data, loading, error, fetching, refetch } = useProcesses(svc.name);
-  const { data: settings } = useSettings();
-  const { data: meta } = useMeta();
-  const defaultLease = settings?.processes.default_lease_hours ?? 2;
-  const [logs, setLogs] = useState<Instance | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const rows = (data ?? []).filter((i) => i.env === env);
-  const backend = meta?.features.process_control;
-  const controlOff = backend === "off";
-  /** 能不能起：只看服务在该环境是否启用（实例上的 enabled）与平台是否开了进程启停 */
-  const envOff = !svc.enabled || svc.health[env]?.enabled === false;
-  const leaseOf = (p: string) => svc.processes[p]?.lease_hours ?? defaultLease;
-
-  const act = async (i: Instance, action: "start" | "stop" | "renew") => {
-    if (action !== "renew") {
-      const ok = await confirm({
-        title: `${action === "start" ? "启动" : "停止"} ${i.process}@${env}？`,
-        description: action === "start" ? `按 ${leaseOf(i.process)} 小时租约启动（用 ${env} 的配置），到期自动停止（可续期）。` : "进程会收到 SIGTERM，15 秒后仍未退出则强制结束。",
-        confirmText: action === "start" ? "启动" : "停止", danger: action === "stop",
-      });
-      if (!ok) return;
-    }
-    setBusy(i.process + action);
-    try {
-      const res = await api.processAction(svc.name, env, i.process, action);
-      const port = res.instance.port ? `，端口 ${res.instance.port}` : "";
-      toast({ start: `已启动 ${i.process}${port}`, stop: `已停止 ${i.process}`, renew: `租约已续期 ${leaseOf(i.process)} 小时` }[action],
-        res.instance.lease_until && action !== "stop" ? { description: `${until(res.instance.lease_until)}到期` } : undefined);
-      await refetch();
-      invalidate("services");
-    } catch (e) {
-      toast.error("操作失败", (e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader title="进程" icon={<LuServer />} description={
-        controlOff ? "平台未开启进程启停（部署配置 process_control.backend=off）：只能看状态和日志"
-          : envOff ? `${svc.name} 在 ${env} 已停用：不能启动进程`
-            : `本机副本，用 ${env} 的配置按需启动、租约到期自动停止；${backend === "local" ? "本机子进程托管" : "systemd --user 托管，日志进 journald"}`}
-        actions={<Button size="icon-sm" variant="ghost" onClick={() => refetch()} aria-label="刷新进程状态" title="刷新"><LuRefreshCw className={cn(fetching && "animate-spin")} /></Button>} />
-      {error && !data ? <ErrorState error={error} onRetry={refetch} className="py-6" /> : loading ? <SkeletonRows rows={2} /> : rows.length === 0 ? (
-        <Empty title="没有托管进程" description="在「配置」里声明进程（启动命令、端口），即可在这里按环境启停" />
-      ) : (
-        <Table>
-          <thead><tr><Th>进程</Th><Th>状态</Th><Th>端口</Th><Th>启动</Th><Th>租约</Th><Th className="text-right">操作</Th></tr></thead>
-          <tbody>
-            {rows.map((i) => {
-              const def = svc.processes[i.process];
-              return (
-                <Tr key={i.process}>
-                  <Td>
-                    <div className="font-medium text-fg">{i.process}</div>
-                    <div className="max-w-[220px] truncate font-mono text-[11px] text-fg-3" title={def?.cmd.join(" ")}>{def?.cmd.join(" ")}</div>
-                  </Td>
-                  <Td className="whitespace-nowrap">
-                    <InstanceBadge state={i.state} />
-                    {i.state === "failed" && i.last_exit && <div className="text-[11px] text-bad">exit {i.last_exit.code} · {ago(i.last_exit.at)}</div>}
-                  </Td>
-                  <Td className="font-mono text-[12px] text-fg-2">{i.port ?? "—"}</Td>
-                  <Td className="whitespace-nowrap text-[12.5px] text-fg-2">{i.started_at ? <Tooltip content={`${datetime(i.started_at, true)} · ${i.started_by}`}><span>{ago(i.started_at)}</span></Tooltip> : <span className="text-fg-3">—</span>}</Td>
-                  <Td className="whitespace-nowrap text-[12.5px]">{i.lease_until ? <span className="text-fg-2">{until(i.lease_until)}到期</span> : <span className="text-fg-3">—</span>}</Td>
-                  <Td className="text-right">
-                    <div className="flex justify-end gap-1">
-                      {i.state === "running" ? <>
-                        <Tooltip content={`续期 ${leaseOf(i.process)} 小时`}><Button size="icon-xs" variant="ghost" aria-label={`续期 ${i.process}`} onClick={() => act(i, "renew")} loading={busy === i.process + "renew"} disabled={controlOff || !!busy}><LuClock /></Button></Tooltip>
-                        <Tooltip content="日志"><Button size="icon-xs" variant="ghost" aria-label={`${i.process} 的日志`} onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>
-                        <Button size="xs" variant="danger-ghost" icon={<LuCircleStop />} onClick={() => act(i, "stop")} loading={busy === i.process + "stop"} disabled={controlOff || !!busy}>停止</Button>
-                      </> : <>
-                        {i.last_exit && <Tooltip content="上次运行的日志"><Button size="icon-xs" variant="ghost" aria-label={`${i.process} 上次运行的日志`} onClick={() => setLogs(i)}><LuScrollText /></Button></Tooltip>}
-                        {controlOff || envOff || !i.enabled
-                          ? <Tooltip content={controlOff ? "平台未开启进程启停" : `${svc.name} 在 ${env} 已停用（服务 → 环境）`}><span><Button size="xs" icon={<LuPlay />} disabled>启动</Button></span></Tooltip>
-                          : <Button size="xs" icon={<LuPlay />} onClick={() => act(i, "start")} loading={busy === i.process + "start"} disabled={!!busy}>启动</Button>}
-                      </>}
-                    </div>
-                  </Td>
-                </Tr>
-              );
-            })}
-          </tbody>
-        </Table>
-      )}
-      <LogsDrawer instance={logs} onClose={() => setLogs(null)} />
-    </Card>
-  );
-}
-
-function LogsDrawer({ instance, onClose }: { instance: Instance | null; onClose: () => void }) {
-  const { data } = useQuery(["logs", instance?.service, instance?.env, instance?.process], () => api.processLogs(instance!.service, instance!.env, instance!.process), { enabled: !!instance, refetchInterval: 5000, live: true });
-  return (
-    <Drawer open={!!instance} onClose={onClose} width="w-[760px]" title={instance ? `${instance.service}/${instance.process}@${instance.env} 日志` : ""} subtitle="最近 200 行 · 每 5 秒刷新">
-      <div className="p-4">
-        {!data ? <Skeleton className="h-96" /> : (
-          <pre className="max-h-[calc(100vh-140px)] overflow-auto rounded-md bg-[#0d0f13] p-3 font-mono text-[11.5px] leading-relaxed text-[#cfd3dc]">
-            {data.lines.map((l, i) => (
-              <div key={i} className={cn(l.includes(" WARN ") && "text-[#f0c36b]", l.includes(" ERROR ") && "text-[#ff8080]")}>{l}</div>
-            ))}
-          </pre>
-        )}
+      <div className="border-t border-line px-4 py-2.5 text-[12px] text-fg-3">
+        环境本身（有哪些、谁受保护）在 <Link to="/settings/envs" className="text-accent hover:underline">设置 → 环境</Link>；各节点在不在线在 <Link to="/settings/nodes" className="text-accent hover:underline">设置 → 节点</Link>。
       </div>
-    </Drawer>
-  );
-}
-
-// ———————— 配置文件 ————————
-
-function ConfigFiles({ svc, env, files, onEdit }: { svc: ServiceSummary; env: string; files: ServiceView["config_files"] | undefined; onEdit: () => void }) {
-  const [open, setOpen] = useState<string | null>(null);
-  const { data } = useQuery(["config", svc.name, env, open], () => api.serviceConfig(svc.name, env, open!), { enabled: !!open });
-  const { data: sync } = useSyncStatus(svc.repo ? svc.name : "", svc.repo ? env : "");
-  const sorted = useMemo(() => files ?? [], [files]);
-  return (
-    <Card>
-      <CardHeader title="配置文件" icon={<LuFileText />} description={`进程启动时把 ${env} 的文件 bind 到固定路径，其他环境的文件对进程不可见；agent 的 bash 里一律遮蔽，只能经 service_info 读（密钥打码）`}
-        actions={sorted.length > 0 && <Button size="sm" icon={<LuPencilLine />} onClick={onEdit}>编辑</Button>} />
-      {!files ? <SkeletonRows rows={2} /> : sorted.length === 0 ? <Empty title="没有声明配置文件" description="在「配置」里声明 固定路径 ← 各环境模板（含 {env}）" /> : (
-        <ul className="divide-y divide-line">
-          {sorted.map((f) => (
-            <li key={f.canonical} className="flex items-center gap-3 px-4 py-2.5">
-              <LuFileText className="size-4 shrink-0 text-fg-3" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-[12.5px] text-fg" title={f.path}>{f.path}</div>
-                <div className="truncate font-mono text-[11px] text-fg-3" title={f.canonical}>→ {f.canonical}</div>
-              </div>
-              {sync?.configs.some((c) => c.path === f.path && c.pending) && (
-                <Tooltip content="仓库里的上游变了，这个文件可能要跟着改"><button type="button" onClick={onEdit}><Badge tone="warn">待更新</Badge></button></Tooltip>
-              )}
-              {f.exists ? <span className="shrink-0 text-[11.5px] tabular-nums text-fg-3">{f.size != null ? bytes(f.size) : ""}</span> : <Badge tone="bad">文件不存在</Badge>}
-              <Button size="xs" variant="ghost" disabled={!f.exists} onClick={() => setOpen(f.path)}>查看</Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <Drawer open={!!open} onClose={() => setOpen(null)} title={open ?? ""} subtitle={`${svc.name} · ${env} · 只读（敏感值已打码）`} width="w-[720px]">
-        <div className="p-4">{data ? <CodeBlock code={data.content} maxHeight={9999} /> : <Skeleton className="h-64" />}</div>
-      </Drawer>
     </Card>
   );
 }
-

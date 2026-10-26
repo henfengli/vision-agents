@@ -1,13 +1,13 @@
 /**
- * 服务列表：每个项目一张卡——各环境的运行健康、进程、任务数。
+ * 服务列表：每个项目一张卡——各环境部署在哪个节点（在不在线）、运行健康、任务数。
  */
 import { useState } from "react";
-import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuServer } from "react-icons/lu";
+import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuScrollText, LuServer } from "react-icons/lu";
 
 import { api, useEnvs, useServices } from "@/api/hooks";
 import type { ServiceSummary } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, RUN_STATUS } from "@/components/status";
+import { EnvBadge, NodeChip, RUN_STATUS } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { Field, Input, SearchInput, Textarea } from "@/components/ui/form";
 import { Dialog, toast } from "@/components/ui/overlay";
@@ -25,7 +25,7 @@ export function ServicesPage() {
   const list = (data ?? []).filter((s) => !q || (s.name + s.title + s.description).toLowerCase().includes(q.toLowerCase()));
   return (
     <Page>
-      <PageHeader title="服务" description="与 agent 同机部署的业务项目。agent 按 服务×环境 读代码与配置、查只读库、按需启停进程。"
+      <PageHeader title="服务" description="线上部署着的业务项目。每个环境的部署主机上装着平台的一个节点：agent 就在那台主机上，按 服务×环境 读线上代码、用只读配置跑项目代码、查只读库、看日志。"
         actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} />
       <div className="mb-4 flex items-center gap-2">
         <SearchInput value={q} onChange={setQ} placeholder="筛选服务…" className="w-64" />
@@ -34,7 +34,7 @@ export function ServicesPage() {
       {error && !data ? <Card><ErrorState error={error} onRetry={refetch} /></Card> : loading ? (
         <div className="grid gap-4 md:grid-cols-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-52 rounded-lg" />)}</div>
       ) : list.length === 0 ? (
-        <Card><Empty icon={<LuServer />} title={q ? "没有匹配的服务" : "还没有服务"} description="服务 = 一个和 agent 部署在同一台机器上的项目" action={!q && <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} /></Card>
+        <Card><Empty icon={<LuServer />} title={q ? "没有匹配的服务" : "还没有服务"} description="服务 = 一个部署在装了平台节点的主机上的项目" action={!q && <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} /></Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">{list.map((s) => <ServiceCard key={s.name} s={s} />)}</div>
       )}
@@ -45,7 +45,7 @@ export function ServicesPage() {
 
 function ServiceCard({ s }: { s: ServiceSummary }) {
   const { data: envs } = useEnvs();
-  const procs = Object.keys(s.processes);
+  const logs = Object.keys(s.logs ?? {});
   const dbs = Object.keys(s.databases ?? {});
   return (
     <Card className={cn("group flex flex-col transition-shadow hover:shadow-[var(--shadow-pop)]", !s.enabled && "opacity-75")}>
@@ -60,10 +60,10 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
         </div>
       </Link>
       <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 px-4 text-[12px] text-fg-3">
-        <span className="flex min-w-0 max-w-full items-center gap-1 font-mono" title={s.root || undefined}><LuFolder className="size-3.5 shrink-0" /><span className="truncate">{s.root || "未配置部署目录"}</span></span>
+        <span className="flex min-w-0 max-w-full items-center gap-1 font-mono" title={s.root || undefined}><LuFolder className="size-3.5 shrink-0" /><span className="truncate">{s.root || "未配置代码目录"}</span></span>
         <span className="flex shrink-0 items-center gap-1"><LuListTodo className="size-3.5" />{s.task_count} 个任务</span>
         <span className="flex shrink-0 items-center gap-1"><LuDatabase className="size-3.5" />{dbs.length ? dbs.join("、") : "无只读库"}</span>
-        <span className="shrink-0">{procs.length ? `进程：${procs.join("、")}` : "无托管进程"}</span>
+        <span className="flex shrink-0 items-center gap-1" title={logs.join("、") || undefined}><LuScrollText className="size-3.5" />{logs.length ? `${logs.length} 个日志` : "无日志"}</span>
       </div>
       <div className="mt-3 grid border-t border-line" style={{ gridTemplateColumns: `repeat(${envs?.length || 3}, minmax(0, 1fr))` }}>
         {(envs ?? []).map((e, i) => {
@@ -87,9 +87,8 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
                 <span className="text-[11.5px] text-fg-3">次/24h</span>
                 {!!h?.failed_24h && <span className="ml-auto text-[11.5px] font-medium text-bad">{h.failed_24h} 失败</span>}
               </div>
-              <div className="mt-1 flex items-center gap-1 text-[11.5px] text-fg-3">
-                <span className={cn("size-1.5 rounded-full", h?.running_processes ? "bg-ok" : "bg-line-strong")} />
-                {h?.total_processes ? `${h.running_processes}/${h.total_processes} 进程` : "—"}
+              <div className="mt-1 min-w-0 text-[11.5px]">
+                <NodeChip name={h?.node} online={h?.node_online} className="text-[11.5px]" />
               </div>
             </Link>
           );
@@ -113,7 +112,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
     try {
       await api.create("services", { name, title: title || name, root, code_paths: root ? [root] : [], description });
       invalidate("services");
-      toast("服务已创建", { description: "接着配置仓库、只读库、进程、各环境配置文件与档案" });
+      toast("服务已创建", { description: "接着配置各环境的部署节点、解释器、配置文件路径、日志与档案" });
       onClose();
       navigate(`/services/${name}?tab=config&part=definition`);
     } catch (e) {
@@ -121,7 +120,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
     }
   });
   return (
-    <Dialog open={open} onClose={onClose} title="新建服务" description="先填基本信息，创建后在「配置 → 服务定义」里补全仓库、只读库、进程、配置文件和档案"
+    <Dialog open={open} onClose={onClose} title="新建服务" description="先填基本信息，创建后在「配置 → 服务定义」里补全各环境的部署节点、解释器、配置文件、日志和档案"
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <form className="space-y-3.5" onSubmit={(e) => { e.preventDefault(); if (valid && !create.pending) void create.mutate(undefined); }}>
         <div className="grid grid-cols-2 gap-3">
@@ -130,8 +129,8 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
           </Field>
           <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Vision Report" /></Field>
         </div>
-        <Field label="部署目录" help="agent 只读访问；读代码、配置、日志都从这里出发。每个环境一份代码时写 {env}">
-          <Input mono value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/svc/vision-report/code/{env}" />
+        <Field label="代码目录" help="线上部署的那份代码（agent 只读）；~ 是部署用户的 home，可写 {env}">
+          <Input mono value={root} onChange={(e) => setRoot(e.target.value)} placeholder="~/deploy/vision-report" />
         </Field>
         <Field label="说明"><Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="一句话说明这个项目做什么" /></Field>
         <button type="submit" hidden />

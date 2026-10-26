@@ -243,8 +243,15 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
   );
 }
 
-/** 内容长的阶段：折叠，展开看全文（系统提示；代码同步的拉取、步骤命令与输出、配置上游 diff） */
-const BLOCK_STAGES = new Set(["system", "pull", "sync_step", "config_outdated"]);
+/** 内容长的阶段：折叠，展开看全文（系统提示） */
+const BLOCK_STAGES = new Set(["system"]);
+
+/** 同机部署带来的几种原因码：在出错的那一步下面说一句该去哪儿处理 */
+const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
+  node_offline: { text: "这个服务×环境部署的节点不在线（那台主机上的 agent 服务没有心跳）", to: () => "/settings/nodes", link: "看节点" },
+  wrong_node: { text: "运行落到了别的节点上：服务×环境只在它部署的节点上执行，检查服务定义里各环境的部署节点", to: (r) => `/services/${r.service}?tab=config&part=definition`, link: "看服务定义" },
+  config_missing: { text: "给 agent 的只读版配置还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
+};
 
 const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
   stage: { icon: <LuFlag />, cls: "bg-sunken text-fg-3", label: "阶段" },
@@ -319,13 +326,20 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
           <div className="mt-1.5 space-y-2 pl-6">
             {thinking && <div className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-fg-2">{thoughtText}</div>}
             {block && <CodeBlock code={String(p.content ?? "")} wrap maxHeight={420} />}
-            {/* 内建任务的结果是 JSON（代码同步的拉取、步骤、配置、重启） */}
             {step.kind === "final" && (run.resolution === "builtin" && String(p.content ?? "").startsWith("{")
               ? <CodeBlock code={String(p.content)} maxHeight={420} />
               : <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
             )}
             {data && <CodeBlock title="结构化结果" code={JSON.stringify(data, null, 2)} maxHeight={320} />}
             {step.kind === "error" && <CodeBlock code={String(p.content)} wrap />}
+            {step.kind === "error" && run.error_code && ERROR_HINT[run.error_code] && (
+              <div className="flex flex-wrap items-center gap-2 text-[12px] text-fg-3">
+                <LuCircleAlert className="size-3.5 shrink-0 text-bad" />{ERROR_HINT[run.error_code].text}
+                {run.service && ERROR_HINT[run.error_code].to && (
+                  <Link to={ERROR_HINT[run.error_code].to!(run)} className="text-accent hover:underline">{ERROR_HINT[run.error_code].link}</Link>
+                )}
+              </div>
+            )}
             {step.kind === "tool" && <>
               {step.call && <ToolArgs tool={tool} args={step.call.payload.args} />}
               {step.result ? <ToolOutput tool={tool} output={String(step.result.payload.output ?? "")} />
@@ -374,6 +388,9 @@ function Sidebar({ run }: { run: Run }) {
               ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
               : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
             ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
+            ["执行节点", run.node
+              ? <Link to="/settings/nodes" className="font-mono text-[12px] hover:text-accent" title="服务×环境部署在这个节点上，运行只在这里执行">{run.node}</Link>
+              : <span className="text-fg-3">不限（{run.service ? "单机部署" : "平台任务"}）</span>],
             ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
             ["开始", datetime(run.created_at, true)],

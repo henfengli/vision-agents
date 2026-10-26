@@ -79,8 +79,39 @@ export interface Meta {
   event_sources: EventSourceInfo[];
   channels: string[];    // 通知渠道名（任务投递、notify 工具可选）
   feedback_reasons: { value: FeedbackReason; label: string }[];
-  features: { process_control: "systemd" | "local" | "off"; vector_search: boolean };
+  features: { vector_search: boolean };
+  node: string;          // 回答这个请求的节点（空 = 单机部署）
   me: Me;
+}
+
+// ———————— 节点：每台部署主机上的平台进程（共用一个库、一个控制台） ————————
+
+/** 代码目录的 git 状态（节点在部署主机上看到的） */
+export interface GitState {
+  branch: string;
+  commit: string;
+  subject: string;
+  dirty: boolean;
+  committed_at: ISODate;
+}
+
+/** 节点上报的一个 服务×环境 的本机状况 */
+export interface NodeServiceStatus {
+  root_exists: boolean;
+  python_ok: boolean;
+  git: GitState | null;
+  configs: Record<string, boolean>;   // 定义里的配置路径（key）→ 在这台主机上存不存在
+}
+
+/** GET /v1/nodes 的一项：在线 = 3 分钟内有心跳 */
+export interface NodeInfo {
+  name: string;
+  host: string;
+  version: string;
+  started_at: ISODate | null;
+  heartbeat_at: ISODate;
+  online: boolean;
+  info: { services?: Record<string, NodeServiceStatus> };   // 键形如 "vision-board@prod"
 }
 
 // ———————————————————— 平台配置（设置 → 平台） ————————————————————
@@ -88,7 +119,7 @@ export interface Meta {
 export type EnvColor = "red" | "amber" | "blue" | "green" | "violet" | "gray";
 
 export interface Env {
-  name: string;          // prod / test / dev
+  name: string;          // prod / test
   title: string;
   description: string;
   protected: boolean;    // 受保护：只是标记（控制台上醒目显示），不拦任何操作
@@ -100,7 +131,7 @@ export interface EnvsConfig {
   default: string;
 }
 
-export type NotifyEvent = "run_failed" | "run_succeeded" | "process_stopped" | "feedback_negative" | "config_outdated";
+export type NotifyEvent = "run_failed" | "run_succeeded" | "feedback_negative";
 
 export interface Channel {
   type: "dingtalk" | "webhook";
@@ -132,11 +163,6 @@ export interface MemoryConfig {
   asset_limit: number;
 }
 
-export interface ProcessesConfig {
-  default_lease_hours: number;
-  max_lease_hours: number;
-}
-
 /**
  * 平台提示词：所有角色共用的系统提示开头 + 平台自己发起的辅助模型调用。
  * 带占位的几段是 Python str.format 模板：字面花括号写成 {{ }}，保存时服务端校验（422）。
@@ -154,7 +180,6 @@ export interface ConfigSections {
   envs: EnvsConfig;
   notifications: NotificationsConfig;
   memory: MemoryConfig;
-  processes: ProcessesConfig;
   prompts: PromptsConfig;
 }
 
@@ -176,36 +201,8 @@ export interface ApiKey {
 }
 
 // ———————————————————— 服务 ————————————————————
-
-export interface ConfigFile {
-  canonical: string;     // 服务读的固定路径（每环境一份代码时也写 {env}）
-  template: string;      // 每环境一份的真实文件（含 {env}）
-  /** 仓库里和它对应的文件（相对代码目录，如 .env.template）：代码同步发现它变了就标"配置待更新"。空 = 固定路径在代码目录里时就是它自己 */
-  upstream?: string | null;
-}
-
-/** 同步后的一步：when 里的文件自这一步上次成功以来变了才跑 */
-export interface SyncStep {
-  title: string;
-  when: string[];        // 仓库内路径，支持 ** 通配
-  run: string[];         // argv，可写 {python}（该环境的解释器）与 {env}
-  shared: boolean;       // 用同一个解释器的环境共享效果（装依赖）：别的环境对同样的文件内容做过就跳过
-  timeout_s: number;
-}
-
-/** 代码同步：跟踪的分支是服务的 ref（各环境可覆盖） */
-export interface SyncDef {
-  auto: boolean;         // 代码跟踪：定时看远端，有新提交就同步
-  steps: SyncStep[];     // 不写 = 装依赖两步（requirements.txt / pyproject.toml）
-}
-
-export interface ProcessDef {
-  cmd: string[];
-  workdir?: string | null;
-  ports?: Record<string, number>;   // 环境 → 端口
-  env_vars?: Record<string, string>;
-  lease_hours?: number | null;      // 空 = 平台默认
-}
+// 同机部署：每个环境的项目部署在某台主机上，那台主机上装着平台的一个节点（envs.<环境>.node）。
+// 运行只在那个节点上执行，读的是线上那份代码、用的是线上那套解释器；平台不改代码、不装依赖、不启停业务进程。
 
 /**
  * 只读库：{库名: 连接串}。scheme 决定类型（postgresql / postgres、mysql / mariadb、doris、clickhouse / clickhouses、
@@ -213,14 +210,17 @@ export interface ProcessDef {
  */
 export type Databases = Record<string, string>;
 
+/** 按环境覆盖：只写和基座不同的部分 */
 export interface ServiceEnvOverride {
-  enabled?: boolean;     // false = 该服务在这个环境不接收运行、不起进程和内核
-  ref?: string | null;          // 该环境跟踪的分支 / tag（代码同步的默认目标）
-  python?: string | null;       // 该环境的解释器；空 = 跟随服务的 python
+  enabled?: boolean;            // false = 该服务在这个环境不接收运行、不起项目内核
+  node?: string | null;         // 这个环境部署在哪个节点；不写跟随服务的 node
+  root?: string | null;         // 这个环境的代码目录；不写跟随服务的 root
   hosts?: string[] | null;
   databases?: Databases;        // 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
   code_paths?: string[] | null;
+  python?: string | null;       // 该环境的解释器；空 = 跟随服务的 python
   urls?: Record<string, string>;  // 按键覆盖服务的 urls
+  logs?: Record<string, string>;  // 按名字覆盖服务的 logs；值写空串 = 本环境没有这个日志
   profile?: Record<string, string>;
 }
 
@@ -231,19 +231,21 @@ export interface Service extends Ledger {
   name: string;
   title: string;
   description: string;
-  root: string;          // 可含 {env}：每个环境一份代码
+  node: string;          // 默认部署节点；一般按环境写在 envs.<环境>.node
+  root: string;          // 线上的代码目录（可写 {env}、~；~ 是部署用户的 home，平台和项目是同一个用户）
   code_paths: string[];
-  repo: string;          // git 远端：代码同步从这里拉
-  ref: string;           // 默认跟踪的分支
-  python: string;        // 项目解释器，可含 {env}，~ 开头 = 平台用户的 home（如 ~/miniforge3/envs/vision-board/bin/python）；空 = python3
-  env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核与进程都带上；不支持 ${VAR}
-  /** 有名字的地址：可写 {env} 与 {port:进程名}（如 local: "http://127.0.0.1:{port:server}"）；mcp 配置里用 {url:名字} 引用 */
+  python: string;        // 项目解释器（线上用的那个），可写 {env}、~；空 = python3
+  env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核带上；不支持 ${VAR}
+  /** 有名字的地址（可写 {env}）：线上部署的页面 / API；mcp 配置里用 {url:名字} 引用 */
   urls: Record<string, string>;
   hosts: string[];
   databases: Databases;  // 只读库（db_query 查询）；各环境在 envs[env].databases 里按库名覆盖
-  configs: ConfigFile[];
-  processes: Record<string, ProcessDef>;
-  sync: SyncDef;
+  /** 项目读的配置文件路径（绝对路径，可写 ~、{env}）：真实内容平台不读不显示，项目内核里盖上控制台填的只读版 */
+  configs: string[];
+  /** 代码目录里其他含口令的文件或目录：对 agent 只遮蔽，不替换 */
+  hidden: string[];
+  /** 日志：{名字: 文件路径 | docker:<容器名>}，可写 {env}、~ */
+  logs: Record<string, string>;
   /** 服务自己的 MCP server：{名字: 连接配置}。字符串里可写 {env}、{url:名字}、${VAR}、{platform}、{platform_python} */
   mcp: Record<string, McpConnection>;
   envs: Record<string, ServiceEnvOverride>;
@@ -251,96 +253,81 @@ export interface Service extends Ledger {
   enabled: boolean;
 }
 
-/** 服务×环境视图：基座 + 环境覆盖 + 渲染后的配置文件路径 */
+/** 服务×环境视图里的一个配置文件：给 agent 的只读版填到第几版、部署主机上这个路径在不在 */
+export interface ConfigFileStatus {
+  key: string;                 // 定义里的写法（含 {env}）；内容按它存库
+  path: string;                // 渲染后的路径
+  version: number | null;      // null = 还没有填给 agent 的版本（py 起不来）
+  updated_by: string | null;
+  updated_at: ISODate | null;
+  sha: string;
+  present: boolean | null;     // 部署主机上这个路径存不存在（节点上报）；null = 还没上报
+}
+
+/** GET /v1/services/{s}/envs/{env}：服务×环境的解析结果 + 部署节点与它上报的本机状况 */
 export interface ServiceView {
   service: string;
   env: string;
   enabled: boolean;
-  python: string;        // 该环境的解释器（已渲染 {env}，空则 python3）
+  python: string;        // 该环境的解释器（已渲染）
   root: string;
   code_paths: string[];
-  repo: string;
-  ref: string;           // 该环境跟踪的分支（已合并基座）
-  urls: Record<string, string>;   // 该环境的地址（已渲染 {env} / {port:进程名}）
+  urls: Record<string, string>;   // 该环境的地址（已渲染）
   mcp_servers: string[];          // 服务自己声明的 MCP server（运行在本服务上时工具自动出现）
   hosts: string[];
   databases: Databases;           // 本环境的只读库（基座 + 覆盖，去掉空值；口令已打码）
-  config_files: { canonical: string; path: string; upstream: string; exists: boolean; size: number | null }[];   // upstream 可能为空
+  logs: Record<string, string>;   // 本环境的日志：{名字: 渲染后的路径 | docker:<容器>}
   profile: Record<string, string>;
-  git: { branch: string; commit: string; dirty: boolean; committed_at: ISODate } | null;
+  config_files: ConfigFileStatus[];
+  node: { name: string; online: boolean; heartbeat_at: ISODate | null; host: string | null } | null;   // 没写节点（单机部署）为空
+  root_exists: boolean | null;    // 以下四项是部署节点上报的；没上报为 null
+  python_ok: boolean | null;
+  git: GitState | null;
+  reported_at: ISODate | null;
 }
 
-/** 配置文件的上游状态：仓库里的 upstream 自上次核对以来变了 = pending */
-export interface ConfigUpstream {
-  path: string;
-  canonical: string;
-  upstream: string;
-  pending: boolean;
-  diff?: string;               // 上游自上次核对以来的 unified diff
-  since?: ISODate | null;      // 上次核对的时间
-}
-
-/** GET /v1/services/{s}/envs/{env}/sync */
-export interface SyncStatus {
-  service: string;
-  env: string;
-  enabled: boolean;
-  auto: boolean;
-  repo: string;
-  dir: string;
-  branch: string;
-  head: { commit: string; short: string; subject: string; author: string; committed_at: ISODate } | null;   // 还没克隆时为空
-  remote: { commit: string; checked_at: ISODate } | null;    // 代码跟踪最近一次看远端
-  behind: boolean;
-  steps: {
-    title: string;
-    when: string[];
-    shared: boolean;
-    pending: boolean;          // when 里的文件自上次成功以来变了：下次同步会跑
-    last: { ok: boolean; at: ISODate; run_id: string | null; env: string; code: number; message: string } | null;
-  }[];
-  configs: ConfigUpstream[];
-}
-
-/** POST /v1/services/{s}/sync 的请求体 */
-export interface SyncRequest {
-  envs?: string[];       // 不填 = 服务启用的全部环境
-  force?: boolean;       // 所有同步步骤都重跑（不管依赖文件变没变；重建了 conda 环境之后用）
-}
-
-/** POST /v1/services/{s}/sync 的每一项：一个环境提交一次 code-sync */
-export interface SyncAccepted {
-  env: string;
-  run_id: string | null;
-  status: string;
-  error: { code: string; message: string } | null;
-}
-
-/** GET …/config?path=&raw=true：原文（不打码）+ sha，编辑用 */
+/** GET …/config?path=&raw=true：给 agent 的只读版原文 + sha，编辑用 */
 export interface ConfigRaw {
   path: string;
-  canonical: string;
-  upstream: string | null;
-  exists: boolean;
+  key: string;
+  exists: boolean;             // false = 还没填
   content: string;
-  sha: string;                 // 保存时带回；文件不存在为空串
-  upstream_state: ConfigUpstream | null;
+  sha: string;                 // 保存时带回；还没有版本为空串
+  version: number | null;
+  updated_by: string | null;
+  updated_at: ISODate | null;
 }
 
-/** PUT …/config */
+/** GET …/config?path=：密钥打码后的内容（没填时 404） */
+export interface ConfigMasked {
+  path: string;
+  key: string;
+  content: string;
+}
+
+/** PUT …/config：changed=false 表示内容没变，没有加版本 */
 export interface ConfigSaved {
   path: string;
+  key: string;
+  version: number;
   sha: string;
-  backup: string | null;       // 旧内容的备份 id；新建文件为空
-  running: string[];           // 本环境在跑的进程：重启后才读到新配置
+  changed: boolean;
 }
 
-/** 配置文件的一份备份：replaced_by 在 at 保存之前的内容 */
+/** GET …/config/history：新的在前 */
 export interface ConfigVersion {
-  id: string;
-  at: ISODate;
-  replaced_by: string;
+  version: number;
+  updated_by: string;
+  updated_at: ISODate;
   size: number;
+}
+
+/** GET …/config/history/{version} */
+export interface ConfigVersionContent {
+  version: number;
+  content: string;
+  updated_by: string;
+  updated_at: ISODate;
 }
 
 /** GET /v1/services/{s}/tools：服务自己声明的 MCP 工具（按环境连接） */
@@ -351,33 +338,17 @@ export interface ServiceTools {
   failed: string[];              // 连不上的连接名，形如 "vision-dagster.dagster@prod"
 }
 
-export type InstanceState = "stopped" | "starting" | "running" | "stopping" | "failed";
-
-export interface Instance {
-  service: string;
-  env: string;
-  process: string;
-  state: InstanceState;
-  port: number | null;
-  pid: number | null;
-  started_at: ISODate | null;
-  lease_until: ISODate | null;
-  started_by: string | null;    // 人 / run:<id> / lease
-  last_exit: { code: number | null; at: ISODate } | null;
-  enabled: boolean;             // 服务在该环境是否启用（停用的环境不能起进程）
-}
-
 export interface ServiceEnvHealth {
   enabled: boolean;
   python: string;               // 该环境的解释器
+  node: string | null;          // 部署节点；null = 不限（单机部署）
+  node_online: boolean | null;  // null = 写了节点但它从来没上线过
   runs_24h: number;
   failed_24h: number;
   last_run: { run_id: string; status: RunStatus; created_at: ISODate } | null;
-  running_processes: number;
-  total_processes: number;
 }
 
-/** 服务列表项：带每个环境的健康汇总 */
+/** 服务列表项：带每个环境的健康汇总与部署节点 */
 export interface ServiceSummary extends Service {
   task_count: number;
   health: Record<string, ServiceEnvHealth>;
@@ -518,7 +489,7 @@ export type RunStatus = "queued" | "running" | "success" | "failed" | "cancelled
 export type Resolution = "agent" | "builtin" | "rule" | null;
 
 export interface RunTrigger {
-  type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay" | "watch";   // replay = 回归重放产生的运行；watch = 代码跟踪发现远端有新提交
+  type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay";   // replay = 回归重放产生的运行
   id: string | null;           // 触发器 id（schedule/event）；replay 时是被重放的原运行
   source: string | null;       // 事件来源
   caller: string;              // 调用身份：API 密钥名 / 控制台用户 / schedule
@@ -560,6 +531,7 @@ export interface Recipe {
 }
 
 export interface Run extends RunListItem {
+  node: string | null;         // 该在哪个节点执行（服务×环境部署在哪）；null = 哪个节点都行（平台任务、单机部署）
   task_version: number | null;
   role_version: number | null;
   recipe: Recipe | null;

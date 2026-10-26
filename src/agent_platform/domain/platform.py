@@ -1,11 +1,10 @@
 """平台配置：设置页里"对所有人生效"的那部分，存库、带版本历史。
 
-分五节，每节一份文档（definitions 表 kind=config，name=节名）：
+分四节，每节一份文档（definitions 表 kind=config，name=节名）：
 
 - envs           有哪些环境、默认环境、哪些受保护
 - notifications  通知：渠道（钉钉 / Webhook）+ 规则（什么事件、什么范围、发到哪个渠道）
 - memory         记忆默认行为：召回、沉淀、条数
-- processes      进程启停：默认租约与上限
 - prompts        平台提示词：基础约定、子代理约定、上下文压缩、记忆沉淀、交接摘要、回归判定（domain/prompts.py）
 
 "某服务在某环境是否启用"不在这里——那是服务自己的配置（ServiceDef.envs[env].enabled）。
@@ -46,7 +45,6 @@ class EnvsConfig(BaseModel):
     items: list[EnvDef] = Field(default_factory=lambda: [
         EnvDef(name="prod", title="生产", protected=True, color="red"),
         EnvDef(name="test", title="测试", color="amber"),
-        EnvDef(name="dev", title="开发", color="blue"),
     ])
     default: str = "test"          # 请求不带 env 时用哪个
 
@@ -74,9 +72,7 @@ class EnvsConfig(BaseModel):
 NotifyEvent = Literal[
     "run_failed",            # 运行失败
     "run_succeeded",         # 运行成功
-    "process_stopped",       # 进程退出（含租约到期、异常退出）
     "feedback_negative",     # 有人对一次运行（或其中一步）点了 👎
-    "config_outdated",       # 代码同步发现配置文件的上游（.env.template / settings.py…）变了，配置待更新
 ]
 
 
@@ -104,6 +100,12 @@ class NotifyRule(BaseModel):
     tasks: list[str] = Field(default_factory=list)          # 父任务名即可覆盖其子任务
     triggers: list[str] = Field(default_factory=list)       # api / chat / schedule / event / web
     channel: str
+
+    @field_validator("events", mode="before")
+    @classmethod
+    def _drop_retired(cls, v):
+        # 上一版的进程停止 / 配置模板变化事件已删除：库里的旧规则照样能读，不至于整节校验失败、通知全部失效
+        return [e for e in v if e not in ("process_stopped", "config_outdated")] if isinstance(v, list) else v
 
     def covers(self, event: str, *, service: str | None, env: str | None, task: str | None, trigger: str | None) -> bool:
         if not self.enabled or event not in self.events:
@@ -137,14 +139,6 @@ class MemoryConfig(BaseModel):
     asset_limit: int = Field(8, ge=0, le=20)
 
 
-# ———————— 进程 ————————
-
-class ProcessesConfig(BaseModel):
-    default_lease_hours: float = Field(2.0, gt=0)
-    max_lease_hours: float = Field(24.0, gt=0)
-
-
 CONFIG_SECTIONS: dict[str, type[BaseModel]] = {
-    "envs": EnvsConfig, "notifications": NotificationsConfig,
-    "memory": MemoryConfig, "processes": ProcessesConfig, "prompts": PromptsConfig,
+    "envs": EnvsConfig, "notifications": NotificationsConfig, "memory": MemoryConfig, "prompts": PromptsConfig,
 }

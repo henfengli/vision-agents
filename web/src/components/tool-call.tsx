@@ -2,9 +2,10 @@
  * 工具调用的展示（运行详情的时间线、对话的过程）：参数一行摘要、参数详情、结果。
  * db_query（旧运行是 sql_query）单独排版：查询放代码块并标出库名；结果解析出 类型 · 库 · 行列数 · 耗时，
  * 大结果写进了工作目录的文件时给出可复制的路径，预览表格按表格显示。
+ * logs 的结果第一行是 "[<文件或 docker:容器>] 最后 N 行…"，拆出来作标题。
  */
 import { useState } from "react";
-import { LuDatabase, LuFileText } from "react-icons/lu";
+import { LuDatabase, LuFileText, LuScrollText } from "react-icons/lu";
 
 import { cn } from "@/lib/cn";
 import { num } from "@/lib/format";
@@ -27,6 +28,12 @@ function dbQueryOf(a: Args): { text: string; db: string; mongo: boolean } {
   return { text: pretty, db: typeof a.db === "string" ? a.db : "", mongo };
 }
 
+/** logs(name, lines, grep, since)：哪个日志 · 最后多少行 · 过滤 */
+function logsSummary(a: Args): string {
+  if (!a.name) return "列出可读的日志";
+  return [String(a.name), `最后 ${a.lines ?? 200} 行`, a.grep ? `grep ${String(a.grep)}` : "", a.since ? `since ${String(a.since)}` : ""].filter(Boolean).join(" · ");
+}
+
 /** 时间线标题里的一行参数摘要 */
 export function summarizeArgs(args: unknown, tool?: string): string {
   if (tool === "submit_result") return "交回结构化结果";
@@ -36,6 +43,8 @@ export function summarizeArgs(args: unknown, tool?: string): string {
     const q = dbQueryOf(a);
     return (q.db ? `${q.db} · ` : "") + q.text.replace(/\s+/g, " ").slice(0, 90);
   }
+  if (tool === "logs") return logsSummary(a);
+  if (tool === "host_status") return "负载、内存、磁盘、进程、容器";
   const v = a.subagent ? `${a.subagent}：${a.description ?? ""}` : a.command ?? a.code ?? a.what ?? Object.values(a)[0];
   return v ? (typeof v === "string" ? v : JSON.stringify(v)).replace(/\s+/g, " ").slice(0, 90) : "";
 }
@@ -79,6 +88,8 @@ export interface DbResult {
 }
 
 const HEAD = /^\[([^\]]+?) · ([^\]]+)\] (\d+) 行(?: × (\d+) 列)?，(\d+) ms(.*)$/;
+/** logs 的第一行（与 services/hostlocal.read_log 一致）：[target] 最后 N 行（里匹配 'x' 的 M 行） */
+const LOG_HEAD = /^\[([^\]\n]+)\] (最后 \d+ 行[^\n]*)/;
 const FILE = /^全部结果在 (.+?)（([^）]+)）：/;
 
 /** 解析 db_query 的输出；不是这个格式（报错、旧运行）返回 null */
@@ -135,7 +146,16 @@ export function ToolOutput({ tool, output, className }: { tool?: string; output:
     const r = parseDbResult(output);
     if (r) return <div className={className}><DbOutput r={r} raw={output} /></div>;
   }
-  const failed = /^\[(拒绝|失败|超时|查询出错|不可用|未配置|参数|无服务|无进程|无数据|监控不可用|不符合要求|未执行)\]/.test(output);
+  const failed = /^\[(拒绝|失败|超时|查询出错|不可用|未配置|参数|无服务|无数据|监控不可用|不符合要求|未执行|不存在|没有权限|读取失败|工具出错)\]/.test(output);
+  // logs 的输出第一行是 "[<文件或 docker:容器>] 最后 N 行…"：拆成标题，正文按日志排版
+  const head = !failed && tool === "logs" ? LOG_HEAD.exec(output) : null;
+  if (head) {
+    const body = output.slice(head[0].length).replace(/^\n/, "");
+    return (
+      <CodeBlock title={<span className="flex min-w-0 items-center gap-1.5"><LuScrollText className="size-3.5 shrink-0" /><code className="truncate font-mono text-fg-2">{head[1]}</code><span className="shrink-0">{head[2]}</span></span>}
+        code={body} maxHeight={320} className={className} />
+    );
+  }
   return (
     <CodeBlock title={<span className={cn(failed && "text-bad")}>{failed ? "工具结果（未成功）" : "工具结果"}</span>}
       code={output} maxHeight={260} className={className} />

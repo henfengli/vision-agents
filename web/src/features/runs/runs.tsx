@@ -27,7 +27,7 @@ const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
   { value: "success", label: "成功" }, { value: "cancelled", label: "已取消" },
 ];
 
-const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay", "watch"];
+const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"];
 
 type View = "runs" | "feedback" | "replays";
 
@@ -117,10 +117,10 @@ function RunList() {
   );
 }
 
-/** 发起方 = API 密钥名（事件也是推事件那把密钥）/ 控制台用户 / schedule / code-watch（代码跟踪） */
+/** 发起方 = API 密钥名（事件也是推事件那把密钥）/ 控制台用户 / schedule */
 function CallerFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { data: meta } = useMeta();
   const { data: keys } = useApiKeys();
-  const names = new Set([meta?.me.name ?? "", ...(keys ?? []).filter((k) => !k.revoked_at).map((k) => k.name), "schedule", "code-watch", value].filter(Boolean));
+  const names = new Set([meta?.me.name ?? "", ...(keys ?? []).filter((k) => !k.revoked_at).map((k) => k.name), "schedule", value].filter(Boolean));
   return <FilterSelect label="发起方" allLabel="全部" value={value} onChange={onChange} options={[...names].map((n) => ({ value: n, label: n }))} />;
 }

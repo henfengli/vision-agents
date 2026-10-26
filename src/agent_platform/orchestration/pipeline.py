@@ -26,6 +26,7 @@ from ..memory import distill, recall
 from ..memory.gardener import run_gardener
 from ..notify import Message, Notifier
 from ..registry import Registry
+from ..services import envspec
 from ..store import assets as assets_store
 from ..store import knowledge as knowledge_store
 from ..store import runs
@@ -45,7 +46,6 @@ class Deps:
     notifier: Notifier
     model_pool: Any
     service_mcp: Any = None                                           # agent.tools.mcp_bridge.ServiceMcp
-    code_sync: Any = None                                             # services.codesync.CodeSync
     on_finished: Callable[[RunSpec], Awaitable[None]] | None = None   # 回归重放的判定挂在这里
 
 
@@ -306,27 +306,15 @@ class Pipeline:
 
 
 async def _gardener(d: Deps, spec: RunSpec) -> dict:
-    services = await d.registry.services()
-    report = {}
-    for env in (await d.registry.envs()).names:
-        report[env] = await run_gardener(env, {s.name: s.spec.view(s.name, env).code_paths for s in services})
-    return report
-
-
-async def _code_sync(d: Deps, spec: RunSpec) -> dict:
-    """把本运行的 服务×环境 的代码目录对齐到 input.ref（不填 = 跟踪的分支），再跑同步步骤（services/codesync.py）。"""
-    if not spec.service or d.code_sync is None:
-        raise Rejected("invalid_input", "代码同步需要指定服务")
-
-    async def log(kind: str, payload: dict) -> None:
-        await runs.log_event(spec.run_id, kind, payload)
-    return await d.code_sync.sync(spec.service, spec.env, ref=spec.input.get("ref") or None, run_id=spec.run_id,
-                                  log=log, force=spec.input.get("force") in (True, "true", "1"))
+    """本运行的 服务×环境：记忆里引用的代码改过的标为过期。运行落在该服务×环境部署的节点上，读的是线上的代码目录。
+    没指定服务时（单机部署）扫所有服务。"""
+    services = [s for s in await d.registry.services() if not spec.service or s.name == spec.service]
+    return {"env": spec.env, **await run_gardener(spec.env, {s.name: s.spec.view(s.name, spec.env).code_paths
+                                                              for s in services})}
 
 
 BUILTINS: dict[str, Callable[[Deps, RunSpec], Awaitable[dict]]] = {
     "memory-gardener": _gardener,
-    "code-sync": _code_sync,
 }
 
 
@@ -356,23 +344,15 @@ async def _view(d: Deps, spec: RunSpec):
     return await d.registry.service_view(spec.service, spec.env)
 
 
-async def _hidden(d: Deps) -> tuple[str, ...]:
-    """bash 沙箱里遮蔽的路径：所有服务所有环境的配置文件 + 平台密钥与凭据 + 进程启动规格 + 配置备份与同步补丁。
-    跨服务也遮：board 的运行里同样读不到 dagster 的配置。项目内核在此基础上放开本服务本环境的配置。"""
-    envs = (await d.registry.envs()).names
-    s = d.settings
-    paths = set(s.hidden_paths) | {s.instances_dir, s.config_history_dir, s.sync_backups_dir}
-    for s in await d.registry.services():
-        paths |= s.spec.secret_paths(envs)
-    return tuple(sorted(paths))
-
-
 async def _scope(d: Deps, spec: RunSpec, tools: list[str], extra: tuple = ()) -> run_scope.RunScope:
+    """沙箱的遮蔽与 home 白名单见 services/envspec.sandbox_paths：所有服务所有环境的配置文件都遮
+    （board 的运行里同样读不到 dagster 的配置）；项目内核在此基础上把本环境给 agent 的配置 bind 上去。"""
     env = await d.registry.env(spec.env)
+    hidden, allow = await envspec.sandbox_paths(d.registry, d.settings)
     return run_scope.RunScope(
         run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
-        extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=await _hidden(d))
+        extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=hidden, allow=allow)
 
 
 async def _cancelled(run_id: str) -> bool:

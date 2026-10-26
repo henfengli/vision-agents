@@ -20,8 +20,8 @@ ACTIVE = frozenset({"queued", "running"})
 Resolution = Literal["agent", "builtin", "rule"]
 RESOLUTIONS: tuple[str, ...] = ("agent", "builtin", "rule")
 
-# 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放，watch = 代码跟踪发现远端有新提交）
-TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay", "watch"]
+# 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放）
+TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"]
 DECLARABLE = frozenset({"api", "chat", "schedule", "event"})
 
 

@@ -1,6 +1,7 @@
 """元信息、统计、搜索、事件入口、登录。
 
-    GET    /v1/meta                 版本、环境、工具目录、事件来源、通知渠道、反馈问题类型、功能开关、当前身份
+    GET    /v1/meta                 版本、环境、工具目录、事件来源、通知渠道、反馈问题类型、功能开关、本节点、当前身份
+    GET    /v1/nodes                各主机上的平台节点（心跳、上报的状态）；DELETE /v1/nodes/{name} 去掉下线的
     GET    /v1/stats                hours service env
     GET    /v1/search?q=            全局搜索（服务 / 任务 / 角色 / 运行 / 知识）
     POST   /v1/events/{source}      事件入口（dagster / gitlab / webhook）
@@ -17,6 +18,7 @@ from ... import __version__
 from ...domain import FEEDBACK_REASONS, Rejected
 from ...store import db, runs
 from ...store import knowledge as knowledge_store
+from ...store import nodes as nodes_store
 from ...triggers.sources import SOURCES
 from ..auth import COOKIE, COOKIE_MAX_AGE, caller_for_token, make_session
 from ..deps import RT, WHO, Caller, Runtime
@@ -35,9 +37,23 @@ async def meta(rt: Runtime = RT, who: Caller = WHO):
         "event_sources": [s.info() for s in SOURCES.values()],
         "channels": await rt.notifier.channel_names(),
         "feedback_reasons": [{"value": k, "label": v} for k, v in FEEDBACK_REASONS.items()],
-        "features": {"process_control": rt.controller.backend, "vector_search": await db.has_vector()},
+        "features": {"vector_search": await db.has_vector()},
+        "node": rt.settings.node,                 # 回答这个请求的节点（空 = 单机部署）
         "me": who.model_dump(),
     }
+
+
+@router.get("/v1/nodes")
+async def list_nodes(_: Caller = WHO):
+    """各主机上的平台节点：心跳、版本、上报的本机状态（各服务×环境的代码目录、git、解释器、配置路径）。"""
+    return await nodes_store.list_all()
+
+
+@router.delete("/v1/nodes/{name}", status_code=204)
+async def remove_node(name: str, _: Caller = WHO):
+    """下线了的节点从列表里去掉（还在跑的节点下一次心跳会再出现）。"""
+    if not await nodes_store.remove(name):
+        raise Rejected.not_found(f"节点 {name}")
 
 
 @router.get("/v1/stats")

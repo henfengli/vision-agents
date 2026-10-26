@@ -29,7 +29,8 @@ class RunScope:
     tools: tuple[str, ...] = field(default_factory=tuple)   # 本运行角色的工具白名单（py 内核里可调的平台工具）
     extra_tools: tuple = field(default_factory=tuple)       # 运行所在服务的 MCP 工具（角色带服务工具时），内核里同样可调
     notify_channel: str | None = None                       # notify 工具发往的渠道（任务投递渠道）
-    hidden: tuple[str, ...] = field(default_factory=tuple)  # bash 沙箱 / 项目内核里遮蔽的路径（配置文件、密钥）
+    hidden: tuple[str, ...] = field(default_factory=tuple)  # bash 沙箱 / 项目内核里遮蔽的路径（配置文件、docker…）
+    allow: tuple[str, ...] = field(default_factory=tuple)   # bash 沙箱里 home 下挂回的目录（各服务的代码目录、方法目录）
 
 
 _current: ContextVar[RunScope | None] = ContextVar("run_scope", default=None)

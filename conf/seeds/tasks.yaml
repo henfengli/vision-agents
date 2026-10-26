@@ -79,25 +79,16 @@ daily-inspection:
   deliver: {channel: default}
   timeout_s: 900
 
-# 代码跟踪（部署配置 code_sync.interval_minutes，默认每小时）发现远端有新提交时自动提交它；控制台的"同步"按钮也是它
-code-sync:
-  title: 代码同步
-  description: 把服务在某个环境的代码目录对齐到跟踪的分支（master），再按变更装依赖、收集静态资源等，重启内核与在跑的进程
-  service: "*"
-  form: builtin
-  handler: code-sync
-  input:
-    ref: {type: str, description: 分支 / tag / 提交；不填 = 服务跟踪的分支（服务的 ref）}
-    force: {type: bool, description: 不管依赖文件变没变，所有同步步骤都重跑一遍（重建了 conda 环境之后用）}
-  triggers:
-    - {id: api, type: api}
-  timeout_s: 1800
-
+# 每个服务×环境各跑一次，落在该服务×环境部署的节点上（读的是那台主机上线上的代码目录）
 memory-gardener:
   title: 记忆园丁
-  description: 夜间维护：知识的 code_ref 与代码对不上就标为过期
+  description: 夜间维护：记忆里引用的代码在线上代码目录里改过了，就标为过期
+  service: "*"
   form: builtin
   handler: memory-gardener
   triggers:
-    - {id: nightly, type: schedule, cron: "0 3 * * *", envs: [prod]}
+    - {id: nightly-dagster, type: schedule, cron: "0 3 * * *", service: vision-dagster, envs: [prod, test]}
+    - {id: nightly-board, type: schedule, cron: "10 3 * * *", service: vision-board, envs: [prod, test]}
+    - {id: nightly-web, type: schedule, cron: "20 3 * * *", service: vision-web, envs: [prod, test]}
+    - {id: api, type: api}
   timeout_s: 1800

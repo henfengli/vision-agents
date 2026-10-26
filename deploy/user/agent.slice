@@ -1,0 +1,10 @@
+# ~/.config/systemd/user/agent.slice —— 平台和它起的项目内核、bash 都在这个 slice 里（deploy/install-user.sh 装）。
+# 总上限：超了只在 slice 里回收 / 杀进程，同机的线上服务不受影响。【占位】按这台主机的内存、核数和线上服务的占用改。
+[Unit]
+Description=agent-platform（平台、项目内核、bash 的总资源上限）
+
+[Slice]
+MemoryMax=8G
+MemorySwapMax=0
+CPUQuota=400%
+TasksMax=2048

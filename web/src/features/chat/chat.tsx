@@ -304,9 +304,9 @@ function SubtaskPicker({ task, value, onChange }: { task: string; value: string;
 const EXAMPLES: Record<string, string[]> = {
   "vision-dagster": ["昨天 dws_account_pnl_daily 为什么物化失败？", "dwd_position_daily 依赖哪些上游资产？", "ck 里 ods_trade_fills 昨天有多少行？", "在本环境跑一下 pnl 相关的测试"],
   "vision-board": ["账户收益日报的数据来自哪张表？", "策略周报页面在 test 能正常打开吗？", "离线 HTML 导出为什么报 Chrome 找不到？", "本环境 settings 里 STATIC_ROOT 配的是哪？"],
-  "vision-web": ["策略 alpha_mm_03 挂在哪些账户上？", "vision_cfg 里组合（Portfolio）有哪些字段？", "本地应用授权码是怎么生成的？", "最近一次代码同步改了哪些文件？"],
+  "vision-web": ["策略 alpha_mm_03 挂在哪些账户上？", "vision_cfg 里组合（Portfolio）有哪些字段？", "本地应用授权码是怎么生成的？", "nginx 错误日志里最近有什么？"],
 };
-const DEFAULT_EXAMPLES = ["这个服务的代码目录和配置文件在哪？", "最近一次代码同步改了哪些文件？", "本环境登记了哪些只读库？", "项目自带的测试怎么跑？"];
+const DEFAULT_EXAMPLES = ["这个服务的代码目录和配置文件在哪？", "线上代码目录现在是哪个提交？", "最近的应用日志里有没有报错？", "这台主机的内存和磁盘还够吗？"];
 
 function Welcome({ service, title, onPick }: { service: string; title: string; onPick: (q: string) => void }) {
   const examples = EXAMPLES[service] ?? DEFAULT_EXAMPLES;

@@ -11,7 +11,7 @@ import { useEnvs, useFeedbackInbox, useMeta, useRuns, useServices, useStats } fr
 import type { UpcomingFire } from "@/api/types";
 import { RunsChart } from "@/components/charts";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, RUN_STATUS, RunStatusDot } from "@/components/status";
+import { EnvBadge, NodeChip, RUN_STATUS, RunStatusDot } from "@/components/status";
 import { Button, LinkButton } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/form";
 import { Card, CardHeader, Empty, ErrorState, Skeleton, Stat } from "@/components/ui/primitives";
@@ -136,7 +136,7 @@ function Upcoming({ items }: { items: UpcomingFire[] | undefined }) {
   );
 }
 
-/** 服务×环境健康矩阵：最近一次运行、24h 运行/失败、进程在跑几个 */
+/** 服务×环境健康矩阵：最近一次运行、24h 运行/失败、部署节点在不在线 */
 function HealthMatrix() {
   const { data: services } = useServices({ refetchInterval: 30_000 });
   const { data: envs } = useEnvs();
@@ -144,7 +144,7 @@ function HealthMatrix() {
   const cols = envs ?? [];
   return (
     <Card>
-      <CardHeader title="服务健康" icon={<LuServer />} description="每格是一个 服务×环境：最近一次运行、近 24 小时运行与失败、在跑的进程"
+      <CardHeader title="服务健康" icon={<LuServer />} description="每格是一个 服务×环境：最近一次运行、近 24 小时运行与失败、部署节点在不在线"
         actions={<LinkButton to="/services" size="xs" variant="ghost">管理服务 <LuArrowRight /></LinkButton>} />
       {!services ? <div className="p-4"><Skeleton className="h-40" /></div> : (
         <div className="overflow-x-auto">
@@ -189,9 +189,8 @@ function HealthMatrix() {
                             <span className="text-[11.5px] text-fg-3">次</span>
                             {!!h?.failed_24h && <span className="rounded bg-bad-soft px-1 text-[11px] font-semibold tabular-nums text-bad">{h.failed_24h} 失败</span>}
                           </div>
-                          <div className="mt-0.5 flex items-center gap-1 text-[11.5px] text-fg-3">
-                            <span className={cn("size-1.5 rounded-full", h?.running_processes ? "bg-ok" : "bg-line-strong")} />
-                            进程 {h?.running_processes ?? 0}/{h?.total_processes ?? 0}
+                          <div className="mt-0.5 min-w-0 text-[11.5px]">
+                            <NodeChip name={h?.node} online={h?.node_online} className="text-[11.5px]" />
                           </div>
                         </Link>
                       </td>

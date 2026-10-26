@@ -1,14 +1,16 @@
 """项目内核：每个 会话×服务×环境 一个常驻 Python 进程，agent 用 py 工具往里发代码。
 
-和起进程用同一份"按环境就位"的规格（ProcessController.env_spec）：
-- 解释器是该环境的（ServiceDef.python，可按环境覆盖），工作目录是该环境的部署目录
-- 该环境的配置文件只读 bind 到项目读的固定路径，其他环境的配置与平台密钥遮蔽——
-  项目代码按原样读配置、连库，import 项目模块、调项目自己的函数（口径函数、ORM、dagster 资产…）
+规格来自 services/envspec.py（runtime_spec）：
+- 解释器是该环境线上用的那个（ServiceDef.python，可按环境覆盖），工作目录是线上的代码目录
+- 给 agent 的只读配置 bind 到项目读配置的路径，线上真实配置被盖住；别的环境的配置遮蔽——
+  项目代码按原样读配置、连库（只读账号），import 项目模块、调项目自己的函数（口径函数、ORM、dagster 资产…）
+- 沙箱里 home 是空的，只挂回代码目录、conda 环境、方法目录；看不到 docker、systemd 用户总线、同用户的其他进程
+- 每个内核一个 systemd 用户 scope（部署配置 limits）：内存、CPU、进程数有上限，超了只杀这个内核
 - 变量跨调用保留：同一会话里上一轮加载的 DataFrame 下一轮还在；restart 清空
-- 驱动脚本只用标准库，业务 venv 里不用额外装东西
+- 驱动脚本只用标准库，业务环境里不用额外装东西
 - 文件系统只读，scratch（和 bash 共用的工作区）可写，/tmp 是独立 tmpfs；网络照常（要连库）
 - 空闲超时回收；同时存在的内核有上限，超了先回收最久没用的
-- 代码同步或配置更新后，该服务×环境的内核重启（drop），否则 import 过的还是旧模块、读到的还是旧配置
+- 规格的 digest（解释器、配置版本、环境变量）变了就重启：配置可能是在别的节点的控制台上改的
 
 协议（驱动在子进程里把 fd 0/1 挪走，业务代码和子进程的输出不会混进协议）：
 - 宿 → 内核（原 stdin）：一行 JSON {"id", "code", "timeout", "tools"}
@@ -33,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from ..agent.tools.bash import build_safe_env
-from ..agent.tools.sandbox import has_bwrap
-from .svcrun import mask_args
+from ..agent.tools.sandbox import bwrap_argv, has_bwrap, limit_argv, scope_env
+from ..config import LimitsConfig
 
 log = logging.getLogger(__name__)
 
@@ -184,7 +186,7 @@ class _Kernel:
     stray: list[str] = field(default_factory=list)
     seq: int = 0
     drain: asyncio.Task | None = None
-    stale: bool = False                    # 代码或配置更新时正在执行：执行完、下次调用前重启
+    digest: str = ""                       # 起它时的规格摘要（解释器、配置版本、环境变量）
 
     @property
     def alive(self) -> bool:
@@ -192,12 +194,14 @@ class _Kernel:
 
 
 class KernelManager:
-    def __init__(self, scratch_dir: str, idle_minutes: float = 30, max_kernels: int = 8):
+    def __init__(self, scratch_dir: str, idle_minutes: float = 30, max_kernels: int = 3, *,
+                 limits: LimitsConfig | None = None, require_sandbox: bool = True):
         self._scratch = scratch_dir
         self._idle_s = idle_minutes * 60
         self._max = max_kernels
+        self._limits = limits
+        self._require = require_sandbox
         self._kernels: dict[str, _Kernel] = {}
-        self._renewed: set[str] = set()           # 因代码 / 配置更新被重启过、还没告诉 agent 的内核
         self._reaper: asyncio.Task | None = None
 
     # —— 对外 ——
@@ -205,19 +209,17 @@ class KernelManager:
     async def execute(self, key: str, spec: dict, code: str, *, timeout: float = 120,
                       hidden: tuple[str, ...] = (), restart: bool = False,
                       tools: dict[str, Callable[..., Awaitable[Any]]] | None = None) -> str:
-        """spec：ProcessController.runtime_spec() 的结果（service/env/python/workdir/binds/masks/env_vars）。
+        """spec：envspec.runtime_spec() 的结果（service/env/python/workdir/binds/hidden/allow/env_vars/digest）。
+        hidden：本运行 bash 沙箱的遮蔽（所有服务的配置），和 spec 的合并。
         tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。"""
         if restart:
             await self.shutdown(key)
         k = self._kernels.get(key)
-        if k is not None and k.stale and not k.lock.locked():
-            await self.shutdown(key)                # 代码或配置更新时它正忙：现在重启
-            k = None
         notice = ""
-        if key in self._renewed:
-            self._renewed.discard(key)
-            if not restart:
-                notice = "[内核已重启：代码同步或配置更新之后，之前的变量已清空]\n"
+        if k is not None and k.alive and k.digest != spec.get("digest", "") and not k.lock.locked():
+            await self.shutdown(key)                # 配置 / 解释器换了：import 过的还是旧的，重启
+            k = None
+            notice = "[内核已重启：本环境给 agent 的配置或解释器更新了，之前的变量已清空]\n"
         if k is None or not k.alive:
             k = await self._start(key, spec, hidden)
         tools = tools or {}
@@ -255,21 +257,9 @@ class KernelManager:
             k.last_used = time.monotonic()
             return notice + _format(msg, "".join(k.stray), calls)
 
-    def alive(self, key: str) -> bool:
+    def alive(self, key: str, digest: str | None = None) -> bool:
         k = self._kernels.get(key)
-        return k is not None and k.alive and not k.stale
-
-    async def drop(self, service: str, env: str) -> int:
-        """该服务×环境的代码或配置更新了：空闲的内核关掉，正在执行的标记一下、这次执行完再重启。
-        下次调用时结果开头会说明变量已清空。→ 涉及的内核数。"""
-        hit = [k for k in self._kernels.values() if k.service == service and k.env == env]
-        for k in hit:
-            self._renewed.add(k.key)
-            if k.lock.locked():
-                k.stale = True
-            else:
-                await self.shutdown(k.key)
-        return len(hit)
+        return k is not None and k.alive and (digest is None or k.digest == digest)
 
     async def shutdown(self, key: str) -> None:
         k = self._kernels.pop(key, None)
@@ -301,16 +291,24 @@ class KernelManager:
         argv = [python, "-u", "-c", DRIVER]
         workdir = spec.get("workdir") or None
         if workdir and not os.path.isdir(workdir):
-            raise KernelError(f"{spec['service']} 在 {spec['env']} 的部署目录 {workdir} 不存在（先同步代码）")
+            raise KernelError(f"{spec['service']} 在 {spec['env']} 的代码目录 {workdir} 在本机不存在（服务定义 → root）")
         if has_bwrap():
-            argv = _sandbox(argv, spec, hidden, self._scratch, workdir)
+            binds = [tuple(b) for b in spec.get("binds") or []]
+            masks = (set(hidden) | set(spec.get("hidden") or [])) - {dst for _, dst in binds}
+            argv = bwrap_argv(argv, scratch=self._scratch, hidden=sorted(masks), allow=spec.get("allow") or (),
+                              binds=binds, workdir=workdir, net=True)
+            lim = self._limits
+            argv = limit_argv(argv, lim, memory=lim.kernel_memory if lim else "", cpu=lim.kernel_cpu if lim else "")
+            env = scope_env(env, lim)
+        elif self._require:
+            raise KernelError("没有 bwrap（bubblewrap），按部署配置 require_sandbox 不起项目内核")
         else:
-            log.warning("bubblewrap 不可用：项目内核直接在宿主上跑，配置文件不会按环境就位")
+            log.warning("bubblewrap 不可用：项目内核直接在宿主上跑，给 agent 的配置不会就位（只适合开发机）")
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=workdir, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=8 * 1024 * 1024)
         now = time.monotonic()
-        k = _Kernel(key, proc, spec["service"], spec["env"], python, now, now)
+        k = _Kernel(key, proc, spec["service"], spec["env"], python, now, now, digest=spec.get("digest", ""))
         k.drain = asyncio.ensure_future(_drain(k))
         self._kernels[key] = k
         if self._reaper is None or self._reaper.done():
@@ -340,20 +338,6 @@ class KernelError(RuntimeError):
 
 def kernel_key(session_id: str, service: str, env: str) -> str:
     return f"{session_id}@{service}:{env}"
-
-
-def _sandbox(argv: list[str], spec: dict, hidden: tuple[str, ...], scratch: str, workdir: str | None) -> list[str]:
-    """全盘只读 + 遮蔽（别的服务、别的环境的配置，平台密钥）+ 本环境配置 bind 到固定路径 + scratch 可写。"""
-    selected = {p for pair in spec["binds"] for p in pair}
-    masks = sorted((set(hidden) | set(spec["masks"])) - selected)
-    args = ["bwrap", "--ro-bind", "/", "/", *mask_args(masks)]
-    for src, dst in spec["binds"]:
-        args += ["--ro-bind", src, dst]
-    args += ["--bind", scratch, scratch, "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-             "--unshare-pid", "--die-with-parent", "--new-session"]
-    if workdir:
-        args += ["--chdir", workdir]
-    return args + ["--", *argv]
 
 
 async def _drain(k: _Kernel) -> None:

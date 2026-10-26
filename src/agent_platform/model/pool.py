@@ -1,8 +1,9 @@
 """模型连接：OpenAI 兼容协议（现在接的是 Kimi）。三件事集中在这里：
 
 - 多 token 逐请求轮换（RotatingTokenAuth）
-- 账号配额排队（Quota）：同时在途的请求数（model.max_concurrency，流式响应读完才算结束）和每分钟请求数（model.rpm）。
-  agent 的模型调用和平台的辅助调用共用一份，到点再发，不撞 429；撞了也由 SDK 按 max_retries 退避重试
+- 账号配额排队（Quota / SharedQuota）：同时在途的请求数（model.max_concurrency，流式响应读完才算结束）和每分钟
+  请求数（model.rpm）。agent 的模型调用和平台的辅助调用共用一份；几个节点共用一个账号时经库排队（SharedQuota），
+  到点再发，不撞 429；撞了也由 SDK 按 max_retries 退避重试
 - ModelPool：平台自己发起的辅助调用（记忆沉淀、交接摘要、回归判定）；带 run_id 的调用结束后交给 on_call
   记一条 model_call 事件（耗时、token），运行详情里看得到
 
@@ -36,31 +37,44 @@ class ModelPoolError(RuntimeError):
 queue_wait: ContextVar[list[float] | None] = ContextVar("queue_wait", default=None)
 
 
+Release = Callable[[], Awaitable[None]]
+
+
+async def _noop() -> None:
+    return None
+
+
 class Quota:
-    """账号配额：同时在途最多 concurrency 个请求，任意 60 秒内最多 rpm 次请求；<=0 表示不限。
-    先占在途名额再等分钟窗口；名额在响应读完（流式读完）或出错时归还。"""
+    """账号配额（进程内）：同时在途最多 concurrency 个请求，任意 60 秒内最多 rpm 次请求；<=0 表示不限。
+    先占在途名额再等分钟窗口。acquire 返回归还名额的函数：响应读完（流式读完）或出错时调用。"""
 
     def __init__(self, rpm: int, concurrency: int):
         self.rpm = rpm
+        self.concurrency = concurrency
         self._slots = asyncio.Semaphore(concurrency) if concurrency > 0 else None
         self._sent: deque[float] = deque()
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> None:
+    async def acquire(self) -> Release:
         t0 = time.monotonic()
-        if self._slots is not None:
-            await self._slots.acquire()
+        release = await self._slot()
         try:
             await self._window()
         except BaseException:
-            self.release()
+            await release()
             raise
         if (acc := queue_wait.get()) is not None:
             acc[0] += (time.monotonic() - t0) * 1000
+        return release
 
-    def release(self) -> None:
-        if self._slots is not None:
+    async def _slot(self) -> Release:
+        if self._slots is None:
+            return _noop
+        await self._slots.acquire()
+
+        async def release() -> None:
             self._slots.release()
+        return release
 
     async def _window(self) -> None:
         if self.rpm <= 0:
@@ -76,21 +90,75 @@ class Quota:
                 await asyncio.sleep(60 - (now - self._sent[0]) + 0.05)
 
 
+_LOCK_BASE = 0x41474E00            # 在途名额：PG 会话级 advisory lock，键 = 基数 + 名额号
+_RPM_LOCK = 0x41474DFF             # 分钟窗口：事务级 advisory lock 串行化计数
+
+
+class SharedQuota(Quota):
+    """所有节点共用的账号配额（经共用的库）：
+    - 在途名额：每个名额一把会话级 advisory lock，抢到的请求独占一条连接到响应读完；进程挂了连接断了锁就放了
+    - 分钟窗口：model_requests 表记最近 60 秒的请求时刻，计数在事务级 advisory lock 下做"""
+
+    async def _slot(self) -> Release:
+        if self.concurrency <= 0:
+            return _noop
+        import psycopg
+
+        from ..store import db
+        conn = await psycopg.AsyncConnection.connect(db.dsn(), autocommit=True)
+        try:
+            while True:
+                for slot in range(self.concurrency):
+                    cur = await conn.execute("SELECT pg_try_advisory_lock(%s)", (_LOCK_BASE + slot,))
+                    if (await cur.fetchone())[0]:
+                        async def release(conn=conn) -> None:
+                            await conn.close()          # 断开即释放会话级锁
+                        return release
+                await asyncio.sleep(0.5)
+        except BaseException:
+            await conn.close()
+            raise
+
+    async def _window(self) -> None:
+        if self.rpm <= 0:
+            return
+        from ..store import db
+        while True:
+            async with db.pool().connection() as conn, conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_RPM_LOCK,))
+                await conn.execute("DELETE FROM model_requests WHERE at < clock_timestamp() - interval '60 seconds'")
+                cur = await conn.execute(
+                    "SELECT count(*), COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(at)), 0) FROM model_requests")
+                count, oldest_age = await cur.fetchone()
+                if count < self.rpm:
+                    await conn.execute("INSERT INTO model_requests DEFAULT VALUES")
+                    return
+            await asyncio.sleep(max(0.2, 60 - float(oldest_age) + 0.05))
+
+
 _quotas: dict[tuple[int, int], Quota] = {}
+_shared = False
+
+
+def share_quota_via_db() -> None:
+    """装配时（库连上之后）调用：之后建的客户端都走 SharedQuota。"""
+    global _shared
+    _shared = True
+    _quotas.clear()
 
 
 def quota(cfg: ModelConfig) -> Quota:
-    """进程内共用一份（agent 与辅助调用一起算）。"""
+    """进程内共用一份（agent 与辅助调用一起算）；开了 share_quota_via_db 就是所有节点共用。"""
     key = (cfg.rpm, cfg.max_concurrency)
     if key not in _quotas:
-        _quotas[key] = Quota(*key)
+        _quotas[key] = (SharedQuota if _shared else Quota)(*key)
     return _quotas[key]
 
 
 class _ReleaseOnClose(httpx.AsyncByteStream):
-    def __init__(self, inner: httpx.AsyncByteStream, release: Callable[[], None]):
+    def __init__(self, inner: httpx.AsyncByteStream, release: Release):
         self._inner = inner
-        self._release: Callable[[], None] | None = release
+        self._release: Release | None = release
 
     async def __aiter__(self):
         async for chunk in self._inner:
@@ -102,7 +170,7 @@ class _ReleaseOnClose(httpx.AsyncByteStream):
         finally:
             if self._release is not None:
                 release, self._release = self._release, None
-                release()
+                await release()
 
 
 class QuotaClient(httpx.AsyncClient):
@@ -113,16 +181,16 @@ class QuotaClient(httpx.AsyncClient):
         self._quota = q
 
     async def send(self, request: httpx.Request, **kw: Any) -> httpx.Response:
-        await self._quota.acquire()
+        release = await self._quota.acquire()
         try:
             resp = await super().send(request, **kw)
         except BaseException:
-            self._quota.release()
+            await release()
             raise
         if resp.is_closed:                      # 非流式：响应体已读完
-            self._quota.release()
+            await release()
         else:
-            resp.stream = _ReleaseOnClose(resp.stream, self._quota.release)  # type: ignore[arg-type]
+            resp.stream = _ReleaseOnClose(resp.stream, release)  # type: ignore[arg-type]
         return resp
 
 

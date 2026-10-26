@@ -1,55 +1,52 @@
 title: Vision Dagster
-description: Vision 的数据编排（Dagster）：资产、调度、传感器；线上 docker 部署，国内生产 / 测试各一套
-# 本机副本：每个环境一份代码（都跟踪 master，代码跟踪每小时同步），共用项目同名 conda 环境。
-# ~ 是平台用户的 home：代码、配置、conda（Miniforge）都在它下面，不需要 root；conda 装在别处就改 python 和 cmd
-root: ~/svc/vision-dagster/code/{env}
-repo: git@gitlab.ipa.zs:vision/vision-dagster.git
-ref: master
-python: ~/miniforge3/envs/vision-dagster/bin/python
-# dagster.yaml 从 DAGSTER_HOME 读：指到代码目录，bind 进去的本环境 dagster.yaml 才生效
-env_vars: {DAGSTER_HOME: "~/svc/vision-dagster/code/{env}"}
-urls:
-  local: "http://127.0.0.1:{port:webserver}"
-hosts: [172.24.24.136]
-# 只读库：口令写 secrets.env。国内测试 CK 在基座（dev 也用它），生产在 envs.prod 覆盖
+description: Vision 的数据编排（Dagster）：资产、调度、传感器；docker 部署，国内生产 / 测试各一套
+# 同机部署：agent 装在各环境的部署主机上（节点名见部署配置 node），读的是线上的代码目录。
+# 【占位，按实际改】代码目录、conda 环境、容器名；~ 是部署用户（平台和项目是同一个用户）的 home
+root: ~/deploy/vision-dagster
+# 线上跑在 docker 里，宿主上用不了镜像里的环境：py 工具要在宿主上另有一个装了项目依赖的环境
+# （运维建一次：conda create -n vision-dagster python=<版本> && pip install -e .）。没有就 py 用不了，其他工具照常
+python: ~/miniconda3/envs/vision-dagster/bin/python
+# 只读库：口令写 secrets.env。国内测试 CK 在基座，生产在 envs.prod 覆盖
 databases:
   ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
   # doris: "doris://${DORIS_RO_USER}:${DORIS_RO_PASSWORD}@<FE 地址>:9030/<库>"     # .env.template 里新增的 doris 接口
-# 本环境的真实配置在 conf/{env}/，进程 / 内核 / 同步步骤启动时 bind 到代码目录里的固定路径；
-# upstream 是仓库里对应的模板，变了就提示"配置待更新"
+# 项目读的配置：线上的真实内容 agent 看不到；py 里盖上控制台填的只读版（库用只读账号；dagster.yaml 里不要写
+# 运行存储的连接，内核不该连 Dagster 自己的库）
 configs:
-  - {canonical: "~/svc/vision-dagster/code/{env}/.env", template: "~/svc/vision-dagster/conf/{env}/.env", upstream: .env.template}
-  - {canonical: "~/svc/vision-dagster/code/{env}/dagster.yaml", template: "~/svc/vision-dagster/conf/{env}/dagster.yaml", upstream: dagster.template.yaml}
-processes:
-  # 只起 webserver 看资产与运行；不起 daemon（会按该环境的配置真的跑调度和传感器）
-  webserver:
-    cmd: ["~/miniforge3/envs/vision-dagster/bin/dagster-webserver", "-m", "vision_dagster", "-h", "127.0.0.1", "-p", "{port}"]
-    ports: {prod: 3900, test: 3901, dev: 3902}
-    lease_hours: 2
-sync:
-  auto: true
-  steps:
-    - {title: 安装项目, when: [pyproject.toml, setup.py, setup.cfg], shared: true, run: ["{python}", "-m", "pip", "install", "-e", "."]}
-# 服务自己的 MCP：运行在 vision-dagster 上时工具自动出现，按运行的环境连该环境线上部署的 Dagster（GraphQL，只读查询）。
+  - ~/deploy/vision-dagster/.env
+  - ~/deploy/vision-dagster/dagster.yaml
+# 生成出来的 compose 文件里有环境变量和口令：只遮蔽
+hidden:
+  - ~/deploy/vision-dagster/docker-compose.yaml
+# 线上的日志：docker 容器（logs 工具读；平台用户要能用 docker）。【占位】容器名按 docker ps 改
+logs:
+  webserver: "docker:vision-dagster-webserver"
+  daemon: "docker:vision-dagster-daemon"
+  code: "docker:vision-dagster-code"
+# 服务自己的 MCP：查线上部署的 Dagster（运行、日志、资产），并能在线上重跑作业（GraphQL）。
+# 线上作业重复运行没有影响（覆盖写同一分区），所以允许重跑全部作业；要收窄就把 DAGSTER_LAUNCH_JOBS 改成作业名正则。
 # 需要平台装 [mcp,dagster-mcp]；内网证书校验不过时在 env 里加 DAGSTER_VERIFY（CA 文件路径，或 false）
 mcp:
   dagster:
     transport: stdio
     command: "{platform_python}"
     args: ["{platform}/mcp_servers/dagster_mcp.py"]
-    env: {DAGSTER_URL: "{url:deployed}"}
-    envs: {prod: {}, test: {}}          # 只有这两个环境有线上部署
+    env: {DAGSTER_URL: "{url:deployed}", DAGSTER_LAUNCH_JOBS: ".*"}
+    envs: {prod: {}, test: {}}
 envs:
   prod:
+    node: prod
     hosts: [172.24.16.100]
     urls: {deployed: "https://vision-dagster-prod.ipa.zs:9902"}
     databases:
       ck: "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default"
   test:
+    node: test-dagster
+    hosts: [172.24.24.136]
     urls: {deployed: "https://vision-dagster-test.ipa.zs:9901"}
 profile:
-  env_notes: 线上是 docker 部署（docker-compose.template.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。本机副本直接用 conda 环境跑，不用 docker。*.india 模板是印度部署的，本机副本只用国内的
-  no_go: 本机副本不起 dagster-daemon、不手工物化生产资产；线上的运行记录、物化历史用 dagster 的 MCP 工具查
+  env_notes: 线上是 docker 部署（docker-compose.template.yaml 生成 docker-compose.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。*.india 模板是印度部署的，不用
+  no_go: 不在宿主上起 dagster-daemon / webserver；要在线上重跑作业用 dagster 的 MCP 工具（launch_job / reexecute_run），不要在 py 里 materialize 去写库
   code_refs: vision_dagster/（资产与作业定义）、vision_dagster_tests/（测试，用 py 跑 pytest）、scripts/、notebooks/（探索用的 ipynb）
   upstream: ClickHouse 国内生产 172.168.0.125、国内测试 172.24.17.66（HTTP 8123 / TCP 9000）
   runbook: 线上运维 @高殿磊

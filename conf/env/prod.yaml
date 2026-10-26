@@ -1,22 +1,23 @@
-# 生产主机（用户级部署，deploy/install-user.sh）：平台跑在一个普通用户的 systemd --user 里，不需要 root；
-# 业务项目与平台同机，业务进程用同一个用户的 agent-svc@.service 用户单元启停。
-db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
+# 生产 / 测试主机上的节点（同机部署，deploy/install-user.sh）：平台跑在部署项目的那个用户的 systemd --user 里，
+# 不需要 root。各节点共用一个库；每台机器自己的值（节点名、数据库地址、监听）写在 ~/.config/agent-platform/local.yaml。
+db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@${AGENT_DB_HOST}:5432/agent_platform"
 root_token: "${AGENT_ROOT_TOKEN}"
-public_url: "https://agent.internal"   # 用户实际访问的地址：通知里的链接用它，https 时登录 cookie 带 Secure
+public_url: "https://agent.internal"   # 用户实际访问的地址（控制台所在节点）：通知里的链接用它，https 时登录 cookie 带 Secure
 
-# 监听：默认只听 127.0.0.1:8100，由反向代理对外。没有反代时直接对外、自己做 HTTPS（端口要 ≥ 1024），
-# public_url 相应写成 https://<主机名>:8100
+model:
+  tokens: ["${MODEL_TOKEN_A}"]        # 多把 key 就都列上，按请求轮换
+
+# 和线上服务同机：模型写的代码限资源
+limits:
+  enabled: true
+
+# 监听：默认只听 127.0.0.1:8100。对外的那个节点（控制台）在它的 local.yaml 里打开，平台自己做 HTTPS（端口要 ≥ 1024），
+# public_url 相应写成 https://<主机名>:8100：
 # listen:
 #   host: 0.0.0.0
 #   port: 8100
 #   tls_cert: ~/.config/agent-platform/tls/cert.pem
 #   tls_key: ~/.config/agent-platform/tls/key.pem
-
-model:
-  tokens: ["${MODEL_TOKEN_A}"]        # 多把 key 就都列上，按请求轮换
-
-process_control:
-  backend: systemd
 
 # 有 OTLP 后端（Jaeger / Tempo / APM）时打开；口令写 secrets.env，这里用 ${VAR} 引用
 # otel:

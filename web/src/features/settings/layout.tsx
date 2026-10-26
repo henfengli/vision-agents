@@ -1,10 +1,10 @@
 /**
  * 设置：左侧分组导航 + 右侧内容。分三组——
- * 个人（只存在这台浏览器）/ 平台（对所有人生效，带版本历史）/ 定义与接入（角色、API 密钥）。
+ * 个人（只存在这台浏览器）/ 平台（对所有人生效：四节配置带版本历史，节点只读）/ 定义与接入（角色、API 密钥）。
  */
 import { type ReactNode } from "react";
 import {
-  LuBell, LuBot, LuBrain, LuCpu, LuKeyRound, LuLayers, LuMessageSquareText, LuUserCog,
+  LuBell, LuBot, LuBrain, LuKeyRound, LuLayers, LuMessageSquareText, LuServer, LuUserCog,
 } from "react-icons/lu";
 
 import { Page } from "@/components/layout/shell";
@@ -14,12 +14,12 @@ import { Link, useActive, useLocation } from "@/lib/router";
 const GROUPS: { title: string; hint: string; items: { to: string; label: string; icon: ReactNode }[] }[] = [
   { title: "个人", hint: "只存在这台浏览器", items: [{ to: "/settings/preferences", label: "个人偏好", icon: <LuUserCog /> }] },
   {
-    title: "平台", hint: "对所有人生效 · 有版本历史", items: [
+    title: "平台", hint: "对所有人生效", items: [
       { to: "/settings/envs", label: "环境", icon: <LuLayers /> },
       { to: "/settings/notifications", label: "通知", icon: <LuBell /> },
       { to: "/settings/memory", label: "记忆", icon: <LuBrain /> },
-      { to: "/settings/processes", label: "进程", icon: <LuCpu /> },
       { to: "/settings/prompts", label: "提示词", icon: <LuMessageSquareText /> },
+      { to: "/settings/nodes", label: "节点", icon: <LuServer /> },
     ],
   },
   {

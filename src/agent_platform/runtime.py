@@ -1,7 +1,10 @@
 """装配：把各层组件接成一个可运行的整体。API 进程与 worker 进程用同一份装配。
 
-    数据库 → 定义 / 配置（播种）→ 通知 → 进程控制 → 项目内核 → 代码同步 → 工具 → agent 工厂
-    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 代码跟踪 + 维护循环）
+    数据库 → 定义 / 配置（播种）→ 通知 → 项目内核 → 工具 → agent 工厂
+    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 维护循环与节点心跳）
+
+同机部署：每台主机一个节点（部署配置 node），共用一个库。各节点都跑定时（幂等键保证只建一条）和维护，
+执行队列只认领落在本节点的运行。模型配额（并发 + RPM）经库在所有节点之间共用。
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ from .agent.tools.catalog import Toolbox
 from .agent.tools.mcp_bridge import ServiceMcp, load_mcp_tools
 from .config import Settings
 from .model import ModelPool
+from .model import pool as model_pool_mod
 from .notify import Notifier
-from .orchestration.codewatch import CodeWatcher
 from .orchestration.executor import Executor
 from .orchestration.maintenance import Maintenance
 from .orchestration.pipeline import Deps, Pipeline
@@ -27,8 +30,6 @@ from .orchestration.replay import Replayer
 from .orchestration.scheduler import Scheduler
 from .orchestration.submitter import Submitter
 from .registry import Registry
-from .services.codesync import CodeSync
-from .services.control import ProcessController
 from .services.kernel import KernelManager
 from .store import db, runs
 from .store.definitions import DefinitionStore
@@ -42,9 +43,7 @@ class Runtime:
     settings: Settings
     registry: Registry
     notifier: Notifier
-    controller: ProcessController
     kernels: KernelManager
-    code_sync: CodeSync
     service_mcp: ServiceMcp
     toolbox: Toolbox
     factory: AgentFactory
@@ -57,16 +56,15 @@ class Runtime:
     _background: list[asyncio.Task] = field(default_factory=list)
 
     async def start_worker(self) -> None:
-        """在本进程里跑执行队列、定时、代码跟踪和维护循环（单机部署：API 与 worker 同进程）。"""
+        """在本进程里跑执行队列、定时和维护循环（API 与 worker 同进程）。先报一次到，提交端才知道本节点在线。"""
+        maintenance = Maintenance(self.settings, self.registry)
+        await maintenance.report()
         pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,
-                                 code_sync=self.code_sync, on_finished=self.replayer.on_finished))
-        self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs)
+                                 on_finished=self.replayer.on_finished))
+        self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs, self.settings.node)
         self.executor.start()
-        maintenance = Maintenance(self.controller, self.notifier, self.settings.retention)
-        watcher = CodeWatcher(self.registry, self.submitter, self.settings.code_sync.interval_minutes)
         self._background += [asyncio.create_task(self.scheduler.run_forever()),
-                             asyncio.create_task(watcher.run_forever()),
                              asyncio.create_task(maintenance.run_forever())]
 
     async def close(self) -> None:
@@ -90,27 +88,24 @@ async def _record_model_call(run_id: str, payload: dict) -> None:
 async def assemble(settings: Settings) -> Runtime:
     observability.setup(settings.otel)
     await db.open_db(settings.db_dsn)
-    # 配置备份与同步补丁的目录先建好：存在的路径才会在沙箱里被遮蔽
-    for d in (settings.scratch_dir, settings.assets_dir, settings.instances_dir, settings.config_history_dir,
-              settings.sync_backups_dir):
+    model_pool_mod.share_quota_via_db()          # 几个节点共用一个模型账号：并发与 RPM 在库里排队
+    for d in (settings.scratch_dir, settings.assets_dir, settings.agent_conf_dir):
         os.makedirs(d, exist_ok=True)
-    for d in (settings.config_history_dir, settings.sync_backups_dir):
-        os.chmod(d, 0o700)
+    os.chmod(settings.agent_conf_dir, 0o700)
 
     registry = Registry(DefinitionStore())
     await registry.seed(settings.seeds_dir)
 
     notifier = Notifier(registry, settings.public_url)
-    controller = ProcessController(settings, registry)
-    kernels = KernelManager(settings.scratch_dir, settings.kernel.idle_minutes, settings.kernel.max_kernels)
-    code_sync = CodeSync(settings, registry, controller, kernels, notifier)
-    toolbox = Toolbox(settings, notifier, controller=controller, kernels=kernels,
+    kernels = KernelManager(settings.scratch_dir, settings.kernel.idle_minutes, settings.kernel.max_kernels,
+                            limits=settings.limits, require_sandbox=settings.require_sandbox)
+    toolbox = Toolbox(settings, notifier, registry=registry, kernels=kernels,
                       mcp_tools=await load_mcp_tools(settings.mcp_servers))
     factory = AgentFactory(settings, toolbox)
     model_pool = ModelPool(settings.model)
     model_pool.on_call = _record_model_call
     submitter = Submitter(registry)
-    return Runtime(settings=settings, registry=registry, notifier=notifier, controller=controller, kernels=kernels,
-                   code_sync=code_sync, service_mcp=ServiceMcp(), toolbox=toolbox, factory=factory,
+    return Runtime(settings=settings, registry=registry, notifier=notifier, kernels=kernels,
+                   service_mcp=ServiceMcp(), toolbox=toolbox, factory=factory,
                    model_pool=model_pool, submitter=submitter, scheduler=Scheduler(registry, submitter),
                    replayer=Replayer(submitter, model_pool, registry), events=EventRouter(registry, submitter))

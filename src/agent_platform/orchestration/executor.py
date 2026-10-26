@@ -1,6 +1,7 @@
 """执行队列的消费端：runs 表就是队列。
 
-- 认领：status=queued 的行按创建时间先到先得，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领
+- 认领：status=queued 的行按创建时间先到先得，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领；
+  有节点名时只认领不限节点的和落在本节点的（服务×环境部署在哪个节点，提交时写进台账行）
 - 唤醒：进入 queued 时 pg_notify('runs_queued')，LISTEN 毫秒级唤醒；5 秒轮询兜底
 - 并发：最多 max_concurrent 个运行同时执行，满了就不再认领
 - 心跳：执行中的运行每 20 秒刷新 heartbeat_at；进程崩溃后心跳停了，维护循环把它们标为失败（可续跑）
@@ -25,8 +26,9 @@ HEARTBEAT_S = 20.0
 
 
 class Executor:
-    def __init__(self, pipeline: Pipeline, max_concurrent: int = 10):
+    def __init__(self, pipeline: Pipeline, max_concurrent: int = 10, node: str = ""):
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        self.node = node
         self._pipeline = pipeline
         self._sem = asyncio.Semaphore(max_concurrent)
         self._running: dict[str, asyncio.Task] = {}
@@ -36,7 +38,7 @@ class Executor:
     def start(self) -> None:
         self._loops = [asyncio.create_task(self._claim_forever()), asyncio.create_task(self._listen_forever()),
                        asyncio.create_task(self._heartbeat_forever())]
-        log.info("执行队列已启动（worker %s）", self.worker_id)
+        log.info("执行队列已启动（worker %s，节点 %s）", self.worker_id, self.node or "不限")
 
     async def stop(self, grace_s: float = 10.0) -> None:
         for t in self._loops:
@@ -58,7 +60,7 @@ class Executor:
             await self._sem.acquire()
             self._wake.clear()
             try:
-                run_id = await runs.claim_next(self.worker_id)
+                run_id = await runs.claim_next(self.worker_id, self.node)
             except Exception:  # noqa: BLE001 —— 库连不上：稍后再试
                 log.exception("认领排队运行失败")
                 run_id = None

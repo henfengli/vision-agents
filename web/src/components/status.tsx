@@ -1,16 +1,17 @@
 /**
- * 领域徽标：运行状态、环境、触发类型、实例状态、回归判定——全站一致的颜色与措辞。
+ * 领域徽标：运行状态、环境、触发类型、部署节点、回归判定——全站一致的颜色与措辞。
  */
 import { type ReactNode } from "react";
 import {
   LuBan, LuBot, LuCalendarClock, LuCircleCheck, LuCircleHelp, LuCircleMinus, LuCirclePause, LuCircleX, LuCode,
-  LuFlaskConical, LuGitPullRequestArrow, LuGlobe, LuHand, LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuTrendingDown,
+  LuFlaskConical, LuGlobe, LuHand, LuLoaderCircle, LuMessageSquare, LuRotateCcw, LuShieldCheck, LuTerminal, LuTrendingDown,
   LuWebhook, LuZap,
 } from "react-icons/lu";
 
-import type { Env, InstanceState, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
+import type { Env, ReplayVerdict, Resolution, RunStatus, TriggerType } from "@/api/types";
 import { useEnvs } from "@/api/hooks";
 import { cn } from "@/lib/cn";
+import { ago } from "@/lib/format";
 import { Badge, Dot, type Tone } from "./ui/primitives";
 import { Tooltip } from "./ui/overlay";
 
@@ -76,7 +77,6 @@ export const TRIGGER: Record<string, { label: string; icon: ReactNode }> = {
   resume: { label: "续跑", icon: <LuRotateCcw /> },
   correction: { label: "纠正", icon: <LuHand /> },
   replay: { label: "回归重放", icon: <LuFlaskConical /> },
-  watch: { label: "代码跟踪", icon: <LuGitPullRequestArrow /> },
 };
 
 export function TriggerBadge({ type, source, className }: { type: TriggerType | string; source?: string | null; className?: string }) {
@@ -90,17 +90,24 @@ export function ResolutionTag({ resolution }: { resolution: Resolution }) {
   return <Badge tone="accent" icon={m.icon}>{m.label}</Badge>;
 }
 
-export const INSTANCE: Record<InstanceState, { label: string; tone: Tone }> = {
-  running: { label: "运行中", tone: "ok" }, starting: { label: "启动中", tone: "info" }, stopping: { label: "停止中", tone: "warn" },
-  stopped: { label: "已停止", tone: "idle" }, failed: { label: "异常退出", tone: "bad" },
-};
-
-export function InstanceBadge({ state }: { state: InstanceState }) {
-  const s = INSTANCE[state];
+/**
+ * 部署节点：名字 + 在线点。online=null 表示写了节点但它从来没上线过；name 为空 = 不限节点（单机部署）。
+ * heartbeatAt 给了就在提示里带上最近一次心跳。
+ */
+export function NodeChip({ name, online, heartbeatAt, host, className }: {
+  name: string | null | undefined; online: boolean | null | undefined; heartbeatAt?: string | null; host?: string | null; className?: string;
+}) {
+  if (!name) return <span className={cn("text-[12px] text-fg-3", className)}>不限节点</span>;
+  const state = online ? "在线" : online === false ? "离线" : "从未上线";
+  const hint = [`节点 ${name} · ${state}`, host && `主机 ${host}`, heartbeatAt && `最近心跳 ${ago(heartbeatAt)}`].filter(Boolean).join(" · ");
   return (
-    <span className="inline-flex items-center gap-1.5 text-[12.5px] text-fg-2">
-      <Dot tone={s.tone as "ok"} pulse={state === "starting" || state === "stopping"} />{s.label}
-    </span>
+    <Tooltip content={hint}>
+      <span className={cn("inline-flex min-w-0 items-center gap-1.5 font-mono text-[12px]", online ? "text-fg-2" : "text-bad", className)}>
+        <Dot tone={online ? "ok" : online === false ? "bad" : "idle"} />
+        <span className="truncate">{name}</span>
+        {!online && <span className="shrink-0 font-sans text-[11px]">{state}</span>}
+      </span>
+    </Tooltip>
   );
 }
 

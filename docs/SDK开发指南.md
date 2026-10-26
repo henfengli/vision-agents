@@ -159,6 +159,7 @@ except AgentError as e:
 | `service_disabled` / `service_env_disabled` / `task_disabled` | 停用 | 控制台启用，或换环境 |
 | `env_not_allowed` | 任务不能在这个环境跑 | 换环境 |
 | `trigger_not_allowed` | 任务没开放 API 调用 | 在任务定义里加 `api` 触发 |
+| `node_offline` | 这个环境所在节点的 agent 服务没在线（HTTP 503，超过 3 分钟没心跳） | 稍后重试；持续出现就找平台负责人看那台机器上的 `agent-platform` |
 | `unknown_task` / `unknown_service` / `unknown_env` | 名字写错 | — |
 | `run_failed` / `run_cancelled` | `ask` 的运行没有成功结束 | 去控制台看运行详情 |
 

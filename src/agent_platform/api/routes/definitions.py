@@ -19,7 +19,7 @@ from fastapi import APIRouter, Body
 
 from ... import credentials
 from ...domain import Rejected
-from ...store import instances as instances_store
+from ...store import nodes as nodes_store
 from ...store import runs
 from .. import views
 from ..deps import RT, WHO, Caller, Runtime
@@ -34,9 +34,9 @@ KINDS = {"services": "service", "roles": "role", "tasks": "task"}
 async def _service_summaries(rt: Runtime, names: set[str] | None = None) -> list[dict]:
     envs = (await rt.registry.envs()).items
     health = await runs.service_health()
-    running = await instances_store.counts()
+    nodes = {n["name"]: n for n in await nodes_store.list_all()}
     tasks = [t for t in await rt.registry.tasks() if not t.spec.extends]
-    return [views.service_summary(s, envs, health, running, sum(1 for t in tasks if t.spec.service == s.name))
+    return [views.service_summary(s, envs, health, nodes, sum(1 for t in tasks if t.spec.service == s.name))
             for s in await rt.registry.services() if names is None or s.name in names]
 
 

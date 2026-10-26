@@ -1,9 +1,13 @@
-"""平台配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），${VAR} 从环境变量插值。
+"""部署配置：conf/base/common.yaml 深合并 conf/env/{AGENT_ENV}.yaml（可 extends 另一份），再深合并本机的
+~/.config/agent-platform/local.yaml（不进仓库：节点名、数据库地址、监听这类每台机器不同的值）；${VAR} 从环境变量插值。
 
-这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、外部系统地址。
-服务/角色/任务与平台配置（环境、通知、记忆、进程、提示词）都是数据，存库、在控制台编辑；
+这里只有部署参数：数据库、模型、执行并发、鉴权引导密钥、数据目录、节点、沙箱与资源上限。
+服务/角色/任务与平台配置（环境、通知、记忆、提示词）都是数据，存库、在控制台编辑；
 conf/seeds/ 只在库里还没有对应对象时播种一次。
-AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test/dev）无关。
+AGENT_ENV 只决定读哪份部署配置（开发机 / 生产机），与业务环境（prod/test）无关。
+
+同机部署：平台装在业务项目所在的主机上（生产机一份、测试机一份……），各节点共用一个 PostgreSQL 和同一套控制台。
+服务在每个环境部署在哪个节点写在服务定义里（envs.<环境>.node）；一个节点只执行落在自己身上的运行。
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -24,6 +27,7 @@ def _default_conf_root() -> Path:
 
 
 CONF_ROOT = Path(os.environ.get("AGENT_CONF") or _default_conf_root())
+LOCAL_CONF = Path(os.environ.get("AGENT_CONF_LOCAL") or Path.home() / ".config" / "agent-platform" / "local.yaml")
 
 
 def _default_data_dir() -> str:
@@ -35,10 +39,10 @@ class ModelConfig(BaseModel):
     url: str
     name: str
     tokens: list[str]
-    max_concurrency: int = 10             # 同时在途的模型请求上限（账号并发；所有调用合计，流式读完才算结束）；0 = 不限
+    max_concurrency: int = 10             # 同时在途的模型请求上限（账号并发；所有节点所有调用合计，流式读完才算结束）；0 = 不限
     embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
     context_tokens: int = 400_000         # 模型上下文长度：对话历史到它的 75% 时压缩成摘要
-    rpm: int = 0                          # 每分钟最多发几次请求（所有调用合计，平台侧排队）；0 = 不限
+    rpm: int = 0                          # 每分钟最多发几次请求（所有节点所有调用合计，经共用的库排队）；0 = 不限
     max_retries: int = 6                  # 限流 / 网关错误的重试次数（指数退避）
     stream_usage: bool = True             # 流式响应里要 token 用量（stream_options.include_usage）；网关不支持就关掉
 
@@ -63,7 +67,20 @@ class KernelConfig(BaseModel):
     """项目内核（py 工具）：每个 会话×服务×环境 一个常驻 Python 进程。"""
 
     idle_minutes: float = 30          # 空闲多久回收
-    max_kernels: int = 8              # 同时最多几个（超了回收最久没用的）
+    max_kernels: int = 3              # 同时最多几个（超了回收最久没用的）；和生产服务同机，宁少勿多
+
+
+class LimitsConfig(BaseModel):
+    """模型生成的代码（项目内核、bash）各自跑在一个 systemd 用户 scope 里，超了只在 scope 里被杀，生产服务不受影响。
+    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设总上限）。enabled=false（开发机）时不套 scope。"""
+
+    enabled: bool = False
+    slice: str = "agent.slice"
+    kernel_memory: str = "2G"
+    kernel_cpu: str = "200%"          # CPUQuota：100% = 一个核
+    bash_memory: str = "1G"
+    bash_cpu: str = "100%"
+    tasks: int = 256                  # TasksMax：进程 + 线程数
 
 
 class OtelConfig(BaseModel):
@@ -74,18 +91,13 @@ class OtelConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)   # 鉴权头等，值可写 ${VAR}
 
 
-class CodeSyncConfig(BaseModel):
-    """代码跟踪：每隔多久看一眼各服务的远端分支，有新提交就同步（服务定义 sync.auto=false 的不跟）。"""
-
-    interval_minutes: float = 60      # 0 = 不自动跟踪，只在控制台 / 接口手动同步
-
-
 class RetentionConfig(BaseModel):
     """数据保留（天）：维护循环每 6 小时清一次。运行台账（runs，含输入、输出、配方）一直保留。"""
 
     run_events_days: int = 90       # 运行的过程事件；被 👎 过的运行不清（回归重放要用）
     checkpoints_days: int = 30      # 会话的 LangGraph checkpoint：最后一轮结束这么久后清掉，之后不能再续跑
     recall_hits_days: int = 90      # 召回埋点
+    scratch_days: int = 7           # 工作目录（db_query 的结果文件、agent 写的临时文件），按本节点清
 
 
 class GrafanaConfig(BaseModel):
@@ -94,20 +106,10 @@ class GrafanaConfig(BaseModel):
     token: str = ""
 
 
-class ProcessControlConfig(BaseModel):
-    """服务进程启停的执行方式。systemd：平台用户自己的 systemd --user 模板单元 agent-svc@.service
-    （生产，deploy/install-user.sh）；local：本机子进程（开发）。租约时长是平台配置（设置 → 进程），不在这里。"""
-
-    backend: Literal["systemd", "local", "off"] = "local"
-    unit: str = "agent-svc"                    # 模板单元名前缀（agent-svc@<实例>.service）
-
-
 def _default_hidden() -> list[str]:
-    """agent 沙箱与业务进程里都看不到的路径：平台密钥（~/.config/agent-platform）与运行用户的凭据。
-    平台和它起的业务进程是同一个用户，所以这些都得遮。"""
-    home = Path.home()
-    return [str(home / ".config/agent-platform"), str(home / ".ssh"), str(home / ".git-credentials"),
-            str(home / ".netrc"), str(home / ".pgpass")]
+    """agent 沙箱里看不到的 home 以外的路径（home 本身在沙箱里整个换成空目录，只挂回需要的目录）：
+    docker 的 socket（能 docker exec 进生产容器、拿到真实配置）。服务声明的配置文件总是遮蔽，不用写在这里。"""
+    return ["/var/run/docker.sock", "/run/docker.sock"]
 
 
 class Settings(BaseModel):
@@ -116,15 +118,18 @@ class Settings(BaseModel):
     model: ModelConfig
     root_token: str                            # 引导密钥：首次登录与创建 API 密钥用
     public_url: str = "http://127.0.0.1:8100"  # 通知里跳转控制台用；必须是用户实际访问的地址
+    # 本节点的名字（服务定义 envs.<环境>.node 引用它）。空 = 单机：执行所有运行，不看服务部署在哪
+    node: str = ""
     listen: ListenConfig = ListenConfig()
     data_dir: str = Field(default_factory=_default_data_dir)
     worker: WorkerConfig = WorkerConfig()
     kernel: KernelConfig = KernelConfig()
+    limits: LimitsConfig = LimitsConfig()
+    require_sandbox: bool = True               # 没有 bwrap 时拒绝执行模型写的代码；只有开发机可以关
+    home_allow: list[str] = Field(default_factory=list)   # 沙箱里额外挂回的 home 下的目录（只读），比如 ~/.local/lib
     otel: OtelConfig = OtelConfig()
     retention: RetentionConfig = RetentionConfig()
-    code_sync: CodeSyncConfig = CodeSyncConfig()
     grafana: GrafanaConfig | None = None
-    process_control: ProcessControlConfig = ProcessControlConfig()
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
     hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
 
@@ -137,19 +142,9 @@ class Settings(BaseModel):
         return os.path.join(self.data_dir, "assets")
 
     @property
-    def instances_dir(self) -> str:
-        """进程实例的启动规格（svcrun 读它）与本地后端的日志。"""
-        return os.path.join(self.data_dir, "instances")
-
-    @property
-    def config_history_dir(self) -> str:
-        """控制台改配置文件前的旧内容备份（含口令：agent 沙箱里遮蔽）。"""
-        return os.path.join(self.data_dir, "config-history")
-
-    @property
-    def sync_backups_dir(self) -> str:
-        """代码同步丢弃本地改动前留的补丁（可能含口令：agent 沙箱里遮蔽）。"""
-        return os.path.join(self.data_dir, "sync-backups")
+    def agent_conf_dir(self) -> str:
+        """给 agent 用的只读版配置（存库，内核启动前写到这里再 bind 到项目读的路径）。700。"""
+        return os.path.join(self.data_dir, "agent-conf")
 
     @property
     def seeds_dir(self) -> Path:
@@ -200,5 +195,7 @@ def load_settings(profile: str | None = None) -> Settings:
     profile = profile or os.environ.get("AGENT_ENV", "dev")
     base = yaml.safe_load((CONF_ROOT / "base/common.yaml").read_text(encoding="utf-8")) or {}
     merged = deep_merge(base, _env_overlay(profile))
+    if LOCAL_CONF.is_file():
+        merged = deep_merge(merged, yaml.safe_load(LOCAL_CONF.read_text(encoding="utf-8")) or {})
     merged["profile"] = profile
     return Settings.model_validate(_interpolate(merged))

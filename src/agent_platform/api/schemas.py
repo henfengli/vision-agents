@@ -66,27 +66,12 @@ class ReplayBody(BaseModel):
     note: str = Field("", description="这次改了什么，方便回看")
 
 
-class ProcessBody(BaseModel):
-    hours: float | None = Field(None, gt=0, description="start：租约时长；renew：续多久。缺省用进程/平台默认")
-
-
-class SyncBody(BaseModel):
-    """POST /v1/services/{s}/sync：立即同步（不等每小时的代码跟踪）。"""
-
-    envs: list[str] | None = Field(None, description="同步哪些环境；不填 = 服务启用的全部环境")
-    force: bool = Field(False, description="所有同步步骤都重跑（不管依赖文件变没变；重建了 conda 环境之后用）")
-
-
 class ConfigWrite(BaseModel):
-    """PUT /v1/services/{s}/envs/{env}/config"""
+    """PUT /v1/services/{s}/envs/{env}/config：给 agent 用的只读版配置。"""
 
-    path: str = Field(description="配置文件：真实路径或固定路径")
+    path: str = Field(description="配置文件：定义里的写法或渲染后的路径")
     content: str
-    sha: str | None = Field(None, description="打开时读到的 sha（新建传空串）；期间文件被改过返回 409。不传则不检查")
-
-
-class ConfigAck(BaseModel):
-    path: str
+    sha: str | None = Field(None, description="打开时读到的 sha（还没有版本传空串）；期间被别人改过返回 409。不传则不检查")
 
 
 class KnowledgeCreate(BaseModel):

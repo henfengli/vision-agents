@@ -144,7 +144,7 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
         {envMeta?.protected && (
           <div className="flex items-start gap-2 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-[12.5px] text-warn">
             <LuShieldCheck className="mt-0.5 size-4 shrink-0" />
-            <span>{envMeta.title}（{envMeta.name}）是受保护环境：本机副本用的是这个环境的配置，查的是这个环境的库，注意别影响线上。</span>
+            <span>{envMeta.title}（{envMeta.name}）是受保护环境：agent 跑在这个环境的部署主机上，读的是线上代码、查的是这个环境的库（只读账号），注意别影响线上。</span>
           </div>
         )}
 

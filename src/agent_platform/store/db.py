@@ -6,14 +6,16 @@
 - api_keys           调用方密钥（只存哈希；只标识身份，不分权限）
 - runs / run_events  运行台账与全过程事件（审计与排障的事实源）；runs 同时是执行队列：
                      status=queued 的行由 worker 用 FOR UPDATE SKIP LOCKED 认领，heartbeat_at 判断执行者是否还活着；
-                     recipe 记这次运行用的各定义版本（配方）。过程事件按保留期清理（config.RetentionConfig）
-- service_instances  服务×环境×进程的运行状态（租约、pid、最近退出）
+                     recipe 记这次运行用的各定义版本（配方）；node 是该在哪个节点执行（服务×环境部署在哪），
+                     worker 只认领 node 为空或等于自己的行。过程事件按保留期清理（config.RetentionConfig）
+- nodes              节点（每台主机上的平台进程）：心跳 + 上报的本机状态（各服务×环境的代码目录、git、解释器、配置路径）
+- service_configs    给 agent 用的只读版配置：服务×环境×路径，每次保存一个新版本
+- model_requests     模型请求的分钟窗口（所有节点共用一个 RPM 配额）
 - knowledge / knowledge_history / recall_hits   记忆（agent 记下的事：fact 事实 / lesson 报错教训 / handoff 交接摘要；
                      时序化、内容历史、召回埋点）。env 为空 = 对该服务所有环境成立
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
 - feedback           反馈（对整次运行或某一步：分数 + 问题类型 + 说明；一人一步一条）
 - replays / replay_items   回归重放：拿被 👎 过的运行用当前定义重跑，并排对比、模型判定有没有改好
-- code_sync_state    代码同步的记账：每个同步步骤上次成功时的文件摘要、每个配置文件已核对过的上游版本、远端最近一次检查
 
 档案（人写的）不在库表里，在服务 / 任务定义的 profile 字段。
 schema_version 记录库结构版本。
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -88,6 +90,7 @@ CREATE TABLE IF NOT EXISTS runs (
     tokens          INT,
     duration_ms     INT,
     resume          BOOLEAN NOT NULL DEFAULT false,  -- 下次认领时从 checkpoint 接着跑
+    node            TEXT,                    -- 该在哪个节点执行；NULL = 哪个节点都行（平台任务、单机部署）
     worker          TEXT,                    -- 认领它的 worker（主机:pid）
     heartbeat_at    TIMESTAMPTZ,             -- 执行中每 20 秒刷新；停了就是执行进程没了
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -101,7 +104,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_service_env ON runs (service, env, created_a
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_dedup ON runs (dedup_key, created_at) WHERE dedup_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idem ON runs (idempotency_key) WHERE idempotency_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_runs_queue ON runs (created_at) WHERE status = 'queued';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS node TEXT;
+DROP INDEX IF EXISTS idx_runs_queue;
+CREATE INDEX IF NOT EXISTS idx_runs_queue_node ON runs (node, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_runs_role ON runs (role, created_at DESC) WHERE role IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -114,21 +119,33 @@ CREATE TABLE IF NOT EXISTS run_events (
     UNIQUE (run_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS service_instances (
-    service        TEXT NOT NULL,
-    env            TEXT NOT NULL,
-    process        TEXT NOT NULL,
-    state          TEXT NOT NULL DEFAULT 'stopped',  -- stopped/starting/running/stopping/failed
-    port           INT,
-    pid            INT,
-    started_at     TIMESTAMPTZ,
-    lease_until    TIMESTAMPTZ,
-    started_by     TEXT,
-    last_exit_code INT,
-    last_exit_at   TIMESTAMPTZ,
-    updated_at     TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (service, env, process)
+CREATE TABLE IF NOT EXISTS nodes (
+    name         TEXT PRIMARY KEY,           -- 部署配置的 node
+    host         TEXT NOT NULL DEFAULT '',   -- 主机名
+    version      TEXT NOT NULL DEFAULT '',   -- 平台版本
+    started_at   TIMESTAMPTZ,
+    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    info         JSONB NOT NULL DEFAULT '{}' -- 本机状态：{services: {"服务@环境": {...}}, host: {...}}
 );
+
+CREATE TABLE IF NOT EXISTS service_configs (
+    service    TEXT NOT NULL,
+    env        TEXT NOT NULL,
+    path       TEXT NOT NULL,                -- 定义里的写法（configs 的一项，可含 {env} 和 ~）
+    version    INT  NOT NULL,
+    content    TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (service, env, path, version)
+);
+
+CREATE TABLE IF NOT EXISTS model_requests (
+    at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_model_requests_at ON model_requests (at);
+
+DROP TABLE IF EXISTS service_instances;
+DROP TABLE IF EXISTS code_sync_state;
 
 CREATE TABLE IF NOT EXISTS knowledge (
     id             BIGSERIAL PRIMARY KEY,
@@ -212,16 +229,6 @@ CREATE TABLE IF NOT EXISTS asset_history (
     source     TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT now(),
     UNIQUE (env, service, task, kind, name, version)
-);
-
-CREATE TABLE IF NOT EXISTS code_sync_state (
-    service    TEXT NOT NULL,
-    scope      TEXT NOT NULL,                -- 环境名；shared 步骤（装依赖）是 python:<解释器>
-    key        TEXT NOT NULL,                -- step:<摘要> / config:<固定路径模板> / remote
-    digest     TEXT NOT NULL DEFAULT '',     -- 步骤：上次成功时 when 文件的内容摘要；配置：已核对过的上游 blob；remote：远端提交
-    detail     JSONB NOT NULL DEFAULT '{}',  -- 步骤：上次结果 {ok, at, run_id, message}；remote：{checked_at}
-    updated_at TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (service, scope, key)
 );
 
 CREATE TABLE IF NOT EXISTS feedback (

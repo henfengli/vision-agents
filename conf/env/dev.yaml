@@ -1,7 +1,8 @@
-# 开发机：本地 Postgres，进程用本地子进程启停。
+# 开发机：本地 Postgres，单机（不写 node：执行所有运行），没有 bwrap 时也让代码跑起来（不隔离）。
 db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@127.0.0.1:5432/agent_platform"
 root_token: "${AGENT_ROOT_TOKEN}"
 public_url: "http://127.0.0.1:8100"
+require_sandbox: false
 
 model:
   tokens: ["${MODEL_TOKEN_A}"]

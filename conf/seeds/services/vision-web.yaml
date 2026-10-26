@@ -1,34 +1,24 @@
 title: Vision Web
 description: Vision 配置管理与展示系统（Django）：策略 / 账户 / 组合等配置的维护与展示（vision_cfg）
-root: ~/svc/vision-web/code/{env}
-repo: git@gitlab.ipa.zs:vision/vision-web.git
-ref: master
-# 项目同名 conda 环境（python 3.12），三个环境共用；~ 是平台用户的 home
-python: ~/miniforge3/envs/vision-web/bin/python
+# 【占位，按实际改】部署在哪台主机（node）、代码目录、conda 环境、settings 后缀、日志路径
+root: ~/deploy/vision-web
+python: ~/miniconda3/envs/vision-web/bin/python
 env_vars: {DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}"}
-urls:
-  local: "http://127.0.0.1:{port:server}"
 # 只读库：按 settings 里实际连的库补上（口令写 secrets.env），例如
 # databases:
 #   main: "mysql://${VISION_WEB_RO_USER}:${VISION_WEB_RO_PASSWORD}@<地址>:3306/<库>"
 configs:
-  - canonical: "~/svc/vision-web/code/{env}/vision_web/settings-{env}.py"
-    template: "~/svc/vision-web/conf/{env}/settings.py"
-    upstream: vision_web/settings.py
-processes:
-  server:
-    cmd: ["{python}", "manage.py", "runserver", "127.0.0.1:{port}", "--noreload"]
-    ports: {prod: 8280, test: 8281, dev: 8282}
-    lease_hours: 4
-sync:
-  auto: true
-  steps:
-    - {title: 安装依赖, when: [requirements.txt], shared: true, run: ["{python}", "-m", "pip", "install", "-r", "requirements.txt"]}
-    - title: 收集静态资源
-      when: ["static/**", "**/static/**", "vision_web/settings.py", requirements.txt]
-      run: ["{python}", "manage.py", "collectstatic", "--noinput"]
+  - ~/deploy/vision-web/vision_web/settings-{env}.py
+logs:
+  nginx_access: /var/log/nginx/access.log
+  nginx_error: /var/log/nginx/error.log
+envs:
+  prod:
+    node: prod
+  test:
+    node: test-board
 profile:
   conventions: 每个环境一份 settings：vision_web/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_web.settings-{环境}
-  no_go: 本机副本只读查看配置，不通过页面或 manage.py 改任何配置数据
+  no_go: 只读查看配置，不通过页面或 manage.py 改任何配置数据
   env_notes: 用户登录走 FreeIPA 认证；本地应用授权要手动生成授权码（写进该环境的 settings）
   code_refs: vision_cfg/（配置模型与接口）、vision_web/（项目配置）、static/css/、docs/（接口文档）、scripts/

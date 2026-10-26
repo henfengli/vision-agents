@@ -1,12 +1,14 @@
-"""沙箱命令行：配置与密钥遮蔽、业务进程的 pid 命名空间。"""
+"""沙箱命令行：配置与密钥遮蔽、home 白名单、断网、资源 scope、没有 bwrap 时拒绝执行。"""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agent_platform.agent.tools import sandbox
-from agent_platform.services.svcrun import build_argv, mask_args
+from agent_platform.agent.tools.sandbox import mask_args
+from agent_platform.config import LimitsConfig
 
 
 class SandboxTest(unittest.TestCase):
@@ -32,15 +34,39 @@ class SandboxTest(unittest.TestCase):
             argv = sandbox.wrap_argv(["bash", "-c", "cat x"], "/data/scratch", hidden=(str(self.file),))
         self.assertLess(argv.index(str(self.file)), argv.index("/data/scratch"))
         self.assertIn("--unshare-net", argv)
+        self.assertIn("--as-pid-1", argv)
         self.assertEqual(argv[-3:], ["bash", "-c", "cat x"])
 
-    def test_service_process_gets_own_pid_namespace_and_binds_win(self):
-        argv = build_argv({"service": "b", "env": "test", "argv": ["node", "server.js"], "port": 8081,
-                           "binds": [["/conf/test/.env", "/code/test/.env"]], "masks": [str(self.file)]})
-        self.assertIn("--unshare-pid", argv)
-        self.assertLess(argv.index(str(self.file)), argv.index("/conf/test/.env"))
-        self.assertEqual(argv[argv.index("SVC_ENV") + 1], "test")
-        self.assertEqual(argv[-3:], ["--", "node", "server.js"])
+    def test_home_is_hidden_except_allowed_dirs(self):
+        home = os.path.expanduser("~")
+        code = os.path.join(home, ".vision-agents-test-code")
+        os.makedirs(code, exist_ok=True)
+        try:
+            argv = sandbox.bwrap_argv(["true"], scratch="/data/scratch", allow=[code], hidden=[os.path.join(home, ".ssh")])
+        finally:
+            os.rmdir(code)
+        self.assertEqual(argv[argv.index("--tmpfs") + 1], home)
+        i = argv.index(code)
+        self.assertEqual(argv[i - 1], "--ro-bind")
+        self.assertLess(argv.index(home), i)                       # 先清空 home，再挂回代码目录
+        self.assertNotIn(os.path.join(home, ".ssh"), argv)         # home 下没挂回的不用再单独遮
+
+    def test_binds_come_after_masks(self):
+        argv = sandbox.bwrap_argv(["true"], scratch="/s", hidden=[str(self.file)], binds=[("/agent/conf", str(self.file))])
+        self.assertLess(argv.index("/dev/null"), argv.index("/agent/conf"))
+
+    def test_limits_wrap_in_user_scope(self):
+        argv = sandbox.limit_argv(["bwrap", "x"], LimitsConfig(enabled=True), memory="1G", cpu="100%")
+        self.assertEqual(argv[:3], ["systemd-run", "--user", "--scope"])
+        self.assertIn("MemoryMax=1G", argv)
+        self.assertEqual(argv[-2:], ["bwrap", "x"])
+        self.assertEqual(sandbox.limit_argv(["x"], LimitsConfig(enabled=False), memory="1G", cpu="1%"), ["x"])
+
+    def test_no_bwrap_refuses_when_required(self):
+        with mock.patch.object(sandbox, "has_bwrap", return_value=False):
+            with self.assertRaises(sandbox.SandboxUnavailable):
+                sandbox.wrap_argv(["bash"], "/s")
+            self.assertEqual(sandbox.wrap_argv(["bash"], "/s", require=False), ["bash"])
 
 
 if __name__ == "__main__":
