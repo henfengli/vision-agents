@@ -598,7 +598,7 @@ export interface RunEvent {
     purpose?: string;          // 平台辅助调用的用途：记忆沉淀 / 交接摘要 / 回归判定
     model?: string | null;
     ms?: number | null;
-    queued_ms?: number;        // model_call：ms 里在平台侧等账号配额（并发 / RPM）的部分，不到 0.5 秒不记
+    queued_ms?: number;        // model_call：ms 里在平台侧等账号并发名额的部分，不到 0.5 秒不记
     input_tokens?: number | null;
     output_tokens?: number | null;
     tool_calls?: string[];

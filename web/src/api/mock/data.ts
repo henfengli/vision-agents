@@ -1017,8 +1017,8 @@ export function eventsOf(run: MockRun): RunEvent[] {
     const input = context;
     const output = 80 + Math.round(r() * 520);
     context += output + 600 + Math.round(r() * 1400);
-    // 账号限 3 RPM：每分钟第 4 次起要排队，耗时里大头是排队
-    const queued = r() < 0.35 ? 8000 + Math.round(r() * 48000) : 0;
+    // 账号的并发名额（3 个）占满时要排队：大约一成调用要等 1~8 秒
+    const queued = r() < 0.1 ? 1000 + Math.round(r() * 7000) : 0;
     const ms = 1600 + Math.round(r() * 6800) + queued;
     push("model_call", { ...(agent ? { agent } : {}), model: MODEL, ms, ...(queued ? { queued_ms: queued } : {}), input_tokens: input, output_tokens: output, tokens: input + output, tool_calls: calls, ...(content ? { content } : {}) }, ms);
   };
@@ -1041,7 +1041,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
   emit(plansOf(run));
   if (run.status === "running") return (run._events = out);
   if (run.status === "failed") {
-    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（账号 RPM 上限 3，重试 6 次后放弃）" }, 800);
+    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（重试 6 次后放弃）" }, 800);
     return (run._events = out);
   }
   if (run.status === "cancelled") {
