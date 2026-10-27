@@ -21,7 +21,7 @@ async def check_switches(reg: Registry, *, task_name: str, task: TaskDef, servic
     if service:
         s = await reg.service(service)
         if s is None:
-            raise Rejected("unknown_service", f"服务 {service} 不存在")
+            raise Rejected("unknown_service", f"服务 {service} 不存在", 404)
         if not s.spec.enabled:
             raise Rejected("service_disabled", f"服务 {service} 已停用")
         if not s.spec.view(service, env).enabled:

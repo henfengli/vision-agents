@@ -2,7 +2,7 @@
 
     from agent_client import AgentClient
 
-    agent = AgentClient(service="board", env="test")           # AGENT_URL / AGENT_KEY 环境变量
+    agent = AgentClient(service="vision-board", env="test")    # AGENT_URL / AGENT_KEY 环境变量
     agent.ask("3 月以来 total_fee 是多少")                       # 对话：服务的对话任务；同一个对象自动续会话
     agent.ask("环比 2 月呢")
     run = agent.run("frontend-smoke", {"version": "1.2.0"})     # 任务：等到结束，返回运行详情
@@ -57,10 +57,10 @@ class AgentClient:
         body = {"message": message, "session_id": self.session_id, "service": service or self.service,
                 "env": env or self.env, "task": task, "subtask": subtask, "input": input_fields,
                 "memory": {"recall": recall, "save": save}}
-        answer, status = "", None
+        answer, status, run_id = "", None, None
         for ev in self._sse("/v1/chat", body):
             if ev["type"] == "run":
-                self.session_id = ev["session_id"]
+                self.session_id, run_id = ev["session_id"], ev.get("run_id")
             elif ev["type"] == "error":
                 raise AgentError(400, ev["code"], ev["message"])
             elif ev["type"] == "final":
@@ -68,6 +68,8 @@ class AgentClient:
                 answer = output.get("answer") or output.get("error") or ""
             elif on_event:
                 on_event(ev)
+        if status is None:
+            raise AgentError(502, "stream_broken", "推流在运行结束前断开" + (f"，运行 {run_id}" if run_id else ""))
         if status != "success":
             raise AgentError(500, f"run_{status}", answer or "运行没有成功结束")
         return answer

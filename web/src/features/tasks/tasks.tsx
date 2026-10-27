@@ -54,9 +54,11 @@ export function TasksPage() {
     .filter((r): r is TaskRow => r !== null), [tasks, subsOf, search, q]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const groups = useMemo(() => {
-    const order = [...(services ?? []).map((s) => s.name), "*", ""];
     const map = new Map<string, TaskRow[]>();
     for (const r of rows) map.set(r.task.service ?? "", [...(map.get(r.task.service ?? "") ?? []), r]);
+    // 服务列表还没到、或任务指向的服务已不存在：这些任务也要列出来（排在已知服务之后），不能凭空消失
+    const known = (services ?? []).map((s) => s.name);
+    const order = [...known, ...[...map.keys()].filter((k) => k && k !== "*" && !known.includes(k)), "*", ""];
     return order.filter((k) => map.has(k)).map((k) => ({
       // 通用入口 ask 排在通用任务的最前面
       key: k, rows: [...map.get(k)!].sort((a, b) => Number(b.task.name === ASK_TASK) - Number(a.task.name === ASK_TASK)),
@@ -287,11 +289,22 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
   const [service, setService] = useState<string>("*");
   const [role, setRole] = useState<string>("");
   const [form, setForm] = useState<Task["form"]>("agent");
+  const [handler, setHandler] = useState("");
   const [description, setDescription] = useState("");
+  // 每次打开都是空表单（上次取消时填的不留着）
+  useEffect(() => {
+    if (!open) return;
+    setName(""); setTitle(""); setService("*"); setRole(""); setForm("agent"); setHandler(""); setDescription("");
+  }, [open]);
   const valid = /^[a-z][a-z0-9-]{1,48}$/.test(name);
+  /** 与后端一致：单角色任务要角色，内建任务要处理器名 */
+  const complete = form === "agent" ? !!role : !!handler.trim();
   const create = useMutation(async () => {
     try {
-      await api.create("tasks", { name, title, description, service: service === "_platform" ? null : service, role: role || null, form, triggers: [{ id: "api", type: "api" }] });
+      await api.create("tasks", {
+        name, title, description, service: service === "_platform" ? null : service, form, triggers: [{ id: "api", type: "api" }],
+        role: form === "agent" ? role || null : null, handler: form === "builtin" ? handler.trim() : null,
+      });
       invalidate("tasks");
       toast("任务已创建", { description: "接着配置输入、触发与输出" });
       onClose();
@@ -302,7 +315,7 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
   });
   return (
     <Dialog open={open} onClose={onClose} title="新建任务" size="lg"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid || (form === "agent" && !role)} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid || !complete} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <div className="grid gap-4 md:grid-cols-2">
         <Field label="任务名" required help="小写字母、数字、连字符；子任务请在父任务页里建" error={name && !valid ? "格式不对：小写字母开头，可含数字与连字符" : null}>
           <Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="web-inspection" />
@@ -321,10 +334,14 @@ function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => voi
             { value: "builtin", label: "内建处理器", hint: "不过模型的确定性维护作业" },
           ]} />
         </Field>
-        {form !== "builtin" && (
+        {form !== "builtin" ? (
           <Field label="角色" required={form === "agent"} className="md:col-span-2">
             <Select value={role || null} onChange={setRole} placeholder="选择执行角色"
               options={(roles ?? []).map((r) => ({ value: r.name, label: r.title || r.name, hint: r.description }))} />
+          </Field>
+        ) : (
+          <Field label="处理器名" required className="md:col-span-2" help="不过模型的确定性作业，处理器在内核代码里登记">
+            <Input mono value={handler} onChange={(e) => setHandler(e.target.value)} placeholder="memory-gardener" />
           </Field>
         )}
         <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个任务要达成什么" /></Field>

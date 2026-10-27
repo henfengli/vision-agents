@@ -82,7 +82,7 @@ export function RunMiniList({ runs, limit = 6 }: { runs: RunListItem[] | undefin
           <Link to={`/runs/${r.run_id}`} className="group flex items-center gap-3 px-4 py-2.5 hover:bg-hover/70">
             <RunStatusBadge status={r.status} className="w-[68px] justify-center" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] text-fg group-hover:text-accent">{r.summary || r.task_title}</div>
+              <div className="truncate text-[13px] text-fg group-hover:text-accent" title={r.summary || r.task_title}>{r.summary || r.task_title}</div>
               <div className="mt-0.5 truncate text-[11.5px] text-fg-3">{r.task_title || r.task}{r.service ? ` · ${r.service}` : ""}</div>
             </div>
             <EnvBadge env={r.env} />

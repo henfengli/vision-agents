@@ -16,8 +16,8 @@
 平台只读，不改线上：不拉代码、不装依赖、不启停业务进程，这些照旧由项目原来的部署流程负责。配置按环境分：生产（受保护）的真实配置
 agent 看不到，每个服务的每个配置文件由运维在控制台填一份只读账号的版本，`py` 的项目内核里盖在项目读配置的路径上；测试直接用项目的真实配置，
 库只读靠提示词约束。模型写的代码（`bash`、`py`）跑在 bubblewrap 沙箱里（文件只读，home 只露代码目录、解释器环境和方法目录，
-生产的配置、平台密钥、docker、systemd 用户总线看不到，独立 pid 命名空间），每个内核（32G）、每条命令（8G）各一个 systemd 用户 scope
-限内存，超了只杀它自己；CPU 不设上限。详见部署指南 §5。
+生产的配置、平台密钥、docker、systemd 用户总线看不到，独立 pid、ipc 命名空间；网络不限），每个内核（32G）、每条命令（8G）各一个
+systemd 用户 scope 限内存，超了只杀它自己；CPU 不设上限。详见部署指南 §5。
 
 ## 文档
 
@@ -43,7 +43,7 @@ agent     按任务的角色装配（langchain create_agent）：平台提示词
 主机      每台部署主机一个 agent 服务，local.yaml 写它负责的环境（env）和服务（services）；定时、维护在每台都跑（幂等）
 存储      Postgres（各台共用）：定义（带版本，档案在里面）· 平台配置与提示词 · API 密钥 · 运行（配方）与事件（兼执行队列）·
           给 agent 的只读配置（生产，带版本）· 记忆（事实 / 教训 / 交接摘要）· 方法 · 反馈 · 回归重放
-控制台    React 单页应用，随 Python 包发布，同进程托管；由对外的那台主机提供
+控制台    React 单页应用，安装时构建（要 Node），同进程托管；由对外的那台主机提供
 ```
 
 ## 对象
@@ -67,7 +67,6 @@ pip install -e .
 export AGENT_ROOT_TOKEN=dev-root AGENT_DB_PASSWORD=... MODEL_TOKEN_A=...   # MODEL_TOKEN_A：Kimi 开放平台的 API key
 AGENT_ENV=dev agent-platform check                # 连库、建表、播种
 AGENT_ENV=dev agent-platform serve                # http://127.0.0.1:8100（同进程带 worker），用 root token 登录控制台
-AGENT_ENV=dev agent-platform worker               # 可选：serve --no-worker 时单独跑执行队列、定时、维护循环
 ```
 
 开发机用 `conf/env/dev.yaml`：不写 `env`（单机，执行所有环境的运行），`require_sandbox: false`（没有 bwrap 也让代码跑，不隔离）。

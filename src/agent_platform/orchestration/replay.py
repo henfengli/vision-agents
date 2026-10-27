@@ -46,7 +46,8 @@ class Replayer:
             task=task, service=service, env=env, hours=hours, limit=limit)
         if not sources:
             raise Rejected("nothing_to_replay", "没有符合条件的被 👎 的运行")
-        replay_id = await replays_store.create(title=title or _title(task, service, env, len(sources)),
+        auto = f"指定的 {len(sources)} 条运行" if run_ids else _title(task, service, env, len(sources))
+        replay_id = await replays_store.create(title=title or auto,
                                                filter_=filter_, note=note, by=caller.name, source_runs=sources)
         for run_id in sources:
             try:

@@ -130,8 +130,12 @@ marked.setOptions({ gfm: true, breaks: true });
 // 网址紧贴中文/全角字符时改写成 <网址>，让链接在边界处结束；代码块与行内代码不动。
 const CJK = "\\u3000-\\u303f\\u3400-\\u9fff\\uf900-\\ufaff\\uff00-\\uffef";
 const BARE_URL_BEFORE_CJK = new RegExp(`(^|[^<(\\[\\w/])(https?:\\/\\/[^\\s<>${CJK}]+)(?=[${CJK}])`, "g");
+// 单个 ~ 在回答里是"到"（1~3 天、4.82 万~4.84 万）或 home（~/deploy/x）；GFM 会把一对单 ~ 之间的字当删除线。
+// 只认 ~~ 作删除线：单个 ~ 转义掉。
+const LONE_TILDE = /(^|[^~\\])~(?!~)/g;
 function fenceCjkUrls(text: string) {
-  return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, i) => (i % 2 ? part : part.replace(BARE_URL_BEFORE_CJK, "$1<$2>"))).join("");
+  return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/)
+    .map((part, i) => (i % 2 ? part : part.replace(BARE_URL_BEFORE_CJK, "$1<$2>").replace(LONE_TILDE, "$1\\~"))).join("");
 }
 
 export function Markdown({ text, className }: { text: string; className?: string }) {

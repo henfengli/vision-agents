@@ -64,7 +64,9 @@ function Section({ id, icon, title, description, children, actions }: { id: stri
 export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onSaved: () => void }) {
   const [d, setD] = useState<Draft>(() => toDraft(task));
   const [schema, setSchema] = useState(() => schemaText(task));
-  useEffect(() => { setD(toDraft(task)); setSchema(schemaText(task)); }, [task.version]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** 放弃修改 / 有了新版本时换一批触发器编辑器：它们自己留着输入框里的文本（如定时的固定输入），不重建就还显示旧的 */
+  const [resetKey, setResetKey] = useState(0);
+  useEffect(() => { setD(toDraft(task)); setSchema(schemaText(task)); setResetKey((n) => n + 1); }, [task.version]); // eslint-disable-line react-hooks/exhaustive-deps
   const { data: roles } = useRoles();
   const { data: services } = useServices();
   const { data: envs } = useEnvs();
@@ -73,6 +75,10 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
   const schemaError = parseSchema(schema).error;
   const dirty = useMemo(() => JSON.stringify(d) !== JSON.stringify(toDraft(task)) || schema !== schemaText(task), [d, task, schema]);
   const triggerErrors = d.triggers.some((t) => t.type === "schedule" && (validateCron(t.cron) || !t.envs.length || (d.service === "*" && !t.service)));
+  /** 与后端 TaskDef 的校验一致，免得点了保存才收到 422 */
+  const deliverError = d.deliver && !d.deliver.channel && !d.deliver.url ? "结果投递：选一个通知渠道或填回调地址（不投递就选「调用方自取」）"
+    : d.deliver?.url && !/^https?:\/\//.test(d.deliver.url) ? "结果投递：回调地址要以 http:// 或 https:// 开头" : null;
+  const timeoutError = d.timeout_s < 1 ? "超时至少 1 秒" : null;
   const editSchema = (text: string) => {
     setSchema(text);
     const r = parseSchema(text);
@@ -81,8 +87,10 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
   const save = useMutation(async () => {
     try {
-      const r = await api.update<TaskSummary>("tasks", task.name, d);
-      toast(`已保存为 v${r.version}`, { description: "定时触发已重新同步" });
+      // 枚举选项输入时保留了空项（见 InputSchemaEditor），保存前去掉
+      const input = Object.fromEntries(Object.entries(d.input).map(([k, f]) => [k, f.options ? { ...f, options: f.options.filter(Boolean) } : f]));
+      const r = await api.update<TaskSummary>("tasks", task.name, { ...d, input });
+      toast(`已保存为 v${r.version}`, { description: "5 秒内生效，定时也按新定义触发" });
       invalidate("tasks");
       onSaved();
     } catch (e) {
@@ -133,7 +141,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
           <div className="space-y-3">
             {d.triggers.length === 0 && <div className="rounded-md border border-dashed border-line px-3 py-6 text-center text-xs text-fg-3">没有触发器：只能从网页手动运行</div>}
             {d.triggers.map((tr, i) => (
-              <TriggerEditor key={tr.id} tr={tr} envs={envNames} input={d.input} generic={generic}
+              <TriggerEditor key={`${tr.id}:${resetKey}`} tr={tr} envs={envNames} input={d.input} generic={generic}
                 onChange={(v) => set("triggers", d.triggers.map((x, j) => (j === i ? v : x)))}
                 onRemove={() => set("triggers", d.triggers.filter((_, j) => j !== i))} />
             ))}
@@ -142,10 +150,10 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
         <Section id="deliver" icon={<LuSend />} title="结果与去重" description="结果总在运行台账里；这里决定要不要再主动推出去。投递失败只记事件，不改变运行状态。">
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="结果投递" className="md:col-span-2">
+            <Field label="结果投递" className="md:col-span-2" error={deliverError}>
               <DeliverEditor value={d.deliver} channels={meta?.channels ?? []} onChange={(v) => set("deliver", v)} />
             </Field>
-            <Field label="超时（秒）" help={`单次执行上限，最长 7200${d.timeout_s ? `；当前 ${seconds(d.timeout_s)}` : ""}`}><Input inputMode="numeric" value={d.timeout_s} onChange={(e) => set("timeout_s", Math.min(7200, Number(e.target.value.replace(/\D/g, "")) || 0))} /></Field>
+            <Field label="超时（秒）" error={timeoutError} help={`单次执行上限，最长 7200${d.timeout_s ? `；当前 ${seconds(d.timeout_s)}` : ""}`}><Input inputMode="numeric" value={d.timeout_s} onChange={(e) => set("timeout_s", Math.min(7200, Number(e.target.value.replace(/\D/g, "")) || 0))} /></Field>
             <Field label="去重" help="时间窗内同键的成功运行直接复用结果；a+b 拼接多个字段" className="md:col-span-2">
               <div className="flex flex-wrap items-center gap-3">
                 <Switch checked={!!d.dedup} onChange={(v) => set("dedup", v ? { key: Object.keys(d.input)[0] ?? "", window_s: 600 } : null)} />
@@ -193,9 +201,10 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
         onSave={() => {
           if (triggerErrors) toast.error("还有错误没改", "检查触发器：cron、环境、通用任务的服务");
           else if (schemaError) toast.error("还有错误没改", `结构化输出：${schemaError}`);
+          else if (deliverError || timeoutError) toast.error("还有错误没改", deliverError ?? timeoutError);
           else save.mutate(undefined);
         }}
-        onDiscard={() => { setD(toDraft(task)); setSchema(schemaText(task)); }} />
+        onDiscard={() => { setD(toDraft(task)); setSchema(schemaText(task)); setResetKey((n) => n + 1); }} />
     </div>
   );
 }
@@ -205,7 +214,8 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 type DeliverMode = "none" | "channel" | "url";
 
 function DeliverEditor({ value, channels, onChange }: { value: Deliver | null; channels: string[]; onChange: (v: Deliver | null) => void }) {
-  const mode: DeliverMode = value?.url ? "url" : value?.channel ? "channel" : "none";
+  // 按字段在不在判断，不按有没有值：刚选「HTTP 回调」时 url 还是空串，按值判断会退回「调用方自取」，地址框永远出不来
+  const mode: DeliverMode = !value ? "none" : value.url != null ? "url" : "channel";
   const setMode = (m: DeliverMode) => onChange(m === "none" ? null : m === "channel" ? { channel: channels[0] ?? "" } : { url: "" });
   return (
     <div className="space-y-2">
@@ -270,7 +280,8 @@ function InputSchemaEditor({ value, onChange }: { value: Record<string, InputFie
           <div className="flex h-8 items-center"><Switch size="sm" checked={!!f.required} onChange={(v) => update(i, k, { ...f, required: v })} /></div>
           <div className="space-y-1.5">
             <Input value={f.description ?? ""} onChange={(e) => update(i, k, { ...f, description: e.target.value })} placeholder="给调用方看的说明" />
-            {f.type === "enum" && <Input mono value={(f.options ?? []).join(",")} onChange={(e) => update(i, k, { ...f, options: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} placeholder="选项，逗号分隔" />}
+            {/* 输入时不去空项：否则刚敲下的逗号立刻被吞掉，第二个选项永远加不上；空项保存时再去掉 */}
+            {f.type === "enum" && <Input mono value={(f.options ?? []).join(",")} onChange={(e) => update(i, k, { ...f, options: e.target.value.split(",").map((x) => x.trim()) })} placeholder="选项，逗号分隔" />}
           </div>
           <Button size="icon-sm" variant="ghost" aria-label={`删除字段 ${k}`} onClick={() => onChange(Object.fromEntries(entries.filter((_, j) => j !== i)))}><LuTrash2 /></Button>
         </div>
@@ -339,6 +350,17 @@ function TriggerServiceField({ value, required, onChange }: { value: string | nu
   );
 }
 
+/** 定时的固定输入：没改成合法的 JSON 对象之前，保存的还是上一份合法的值，这里要说出来 */
+function inputError(text: string): string | null {
+  if (!text.trim()) return null;
+  try {
+    const v: unknown = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? null : "要是一个 JSON 对象 { … }；改好之前保存的还是上一份";
+  } catch {
+    return "不是合法的 JSON；改好之前保存的还是上一份";
+  }
+}
+
 function ScheduleEditor({ tr, envs, generic, onChange }: { tr: Extract<Trigger, { type: "schedule" }>; envs: string[]; generic: boolean; onChange: (t: Trigger) => void }) {
   const err = validateCron(tr.cron);
   const next = err ? [] : nextRuns(tr.cron, 4);
@@ -361,8 +383,11 @@ function ScheduleEditor({ tr, envs, generic, onChange }: { tr: Extract<Trigger, 
         {!tr.envs.length && <div className="mt-1 text-xs text-bad">至少选一个环境</div>}
       </Field>
       {generic && <TriggerServiceField value={tr.service} required onChange={(service) => onChange({ ...tr, service })} />}
-      <Field label="固定输入（JSON）" className="md:col-span-2" help="每次定时触发都带这份输入">
-        <Input mono value={inputText} onChange={(e) => { setInputText(e.target.value); try { onChange({ ...tr, input: JSON.parse(e.target.value || "{}") }); } catch { /* 输入中 */ } }} />
+      <Field label="固定输入（JSON）" className="md:col-span-2" help="每次定时触发都带这份输入" error={inputError(inputText)}>
+        <Input mono value={inputText} aria-invalid={!!inputError(inputText)} onChange={(e) => {
+          setInputText(e.target.value);
+          if (!inputError(e.target.value)) onChange({ ...tr, input: JSON.parse(e.target.value || "{}") });
+        }} />
       </Field>
     </div>
   );

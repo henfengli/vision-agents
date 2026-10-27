@@ -38,7 +38,8 @@ async def _run(run_id: str) -> dict:
 
 
 @router.post("", status_code=202)
-async def submit(body: RunBody, idempotency_key: str | None = Header(None), rt: Runtime = RT, who: Caller = WHO):
+async def submit(body: RunBody, idempotency_key: str | None = Header(None, max_length=200), rt: Runtime = RT,
+                 who: Caller = WHO):
     """控制台发起的记为 web（不受任务的触发声明约束）；其余调用方记为 api。"""
     req = RunRequest(**body.model_dump(exclude={"wait"}))
     trigger = RunTrigger(type="web" if who.kind == "user" else "api", caller=who.name)
@@ -58,7 +59,7 @@ async def list_runs(status: str | None = None, service: str | None = None, env: 
         page = await runs.list_filtered(status=status, env=env, service=service, task=task, trigger=trigger,
                                         caller=caller, session=session_id, q=q, hours=hours, cursor=cursor, limit=limit)
     except ValueError as e:
-        raise Rejected("invalid_request", str(e)) from e
+        raise Rejected("invalid_request", str(e), 422) from e
     titles = await task_titles(rt)
     return {**page, "items": [views.list_item(r, titles) for r in page["items"]]}
 

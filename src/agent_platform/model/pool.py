@@ -68,12 +68,13 @@ class Quota:
         return release
 
 
-_LOCK_BASE = 0x41474E00            # 在途名额：PG 会话级 advisory lock，键 = 基数 + 名额号
+_LOCK_CLASS = 0x4147               # 在途名额：PG 会话级 advisory lock（两个 int 的键：类别, 名额号）
 
 
 class SharedQuota(Quota):
     """prod、test 两边共用的账号并发上限（经共用的库）：每个名额一把会话级 advisory lock，
-    抢到的请求独占一条连接到响应读完；进程挂了连接断了锁就放了。名额都占着时每 0.2 秒再试。"""
+    抢到的请求独占一条连接到响应读完；进程挂了连接断了锁就放了。名额都占着时每 0.2 秒再试。
+    本进程先过一道同样大小的信号量：一台主机最多同时有 concurrency 个请求在抢 / 占名额，连接数有上限。"""
 
     async def _slot(self) -> Release:
         if self.concurrency <= 0:
@@ -81,18 +82,28 @@ class SharedQuota(Quota):
         import psycopg
 
         from ..store import db
-        conn = await psycopg.AsyncConnection.connect(db.dsn(), autocommit=True)
+        assert self._slots is not None
+        await self._slots.acquire()
+        try:
+            conn = await psycopg.AsyncConnection.connect(db.dsn(), autocommit=True)
+        except BaseException:
+            self._slots.release()
+            raise
         try:
             while True:
                 for slot in range(self.concurrency):
-                    cur = await conn.execute("SELECT pg_try_advisory_lock(%s)", (_LOCK_BASE + slot,))
+                    cur = await conn.execute("SELECT pg_try_advisory_lock(%s, %s)", (_LOCK_CLASS, slot))
                     if (await cur.fetchone())[0]:
                         async def release(conn=conn) -> None:
-                            await conn.close()          # 断开即释放会话级锁
+                            try:
+                                await conn.close()      # 断开即释放会话级锁
+                            finally:
+                                self._slots.release()
                         return release
                 await asyncio.sleep(0.2)
         except BaseException:
             await conn.close()
+            self._slots.release()
             raise
 
 

@@ -35,8 +35,8 @@ const routes: RouteDef[] = [
   { path: "/runs/:id", component: RunDetailPage },
   { path: "/replays", component: ReplaysRedirect },
   { path: "/replays/:id", component: ReplayDetailPage },
-  { path: "/chat", component: ChatPage },
-  { path: "/chat/:session", component: ChatPage },
+  // /chat 与 /chat/<会话> 是同一条路由：新对话发完第一条把地址换成 /chat/<会话> 时页面不重新挂载
+  { path: "/chat/*", component: ChatPage },
   { path: "/memory", component: MemoryPage },
   { path: "/settings", component: PreferencesPage },
   { path: "/settings/preferences", component: PreferencesPage },

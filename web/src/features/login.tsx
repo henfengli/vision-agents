@@ -5,6 +5,7 @@ import { post } from "@/api/client";
 import { Logo } from "@/components/layout/shell";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/form";
+import { invalidate } from "@/lib/query";
 import { navigate, useSearch } from "@/lib/router";
 
 /**
@@ -25,6 +26,8 @@ export function LoginPage() {
     try {
       await post("/auth/session", { token: token.trim(), name: name.trim() });
       try { localStorage.setItem("ap.login.name", name.trim()); } catch { /* 无痕模式 */ }
+      // 换了身份（退出后用别的名字 / 密钥登录）：缓存里的 meta（当前身份）等全部作废重取
+      invalidate();
       // next 只接受站内路径（/ 开头且不是 //）：不跳到别的站点
       const next = search.next && /^\/(?!\/)/.test(search.next) && !search.next.startsWith("/login") ? search.next : "/";
       navigate(next, { replace: true, force: true });
@@ -44,7 +47,7 @@ export function LoginPage() {
           <Input autoFocus type="password" mono autoComplete="current-password" value={token} onChange={(e) => setToken(e.target.value)} prefixIcon={<LuKeyRound />} placeholder="ap_…" aria-invalid={!!error} aria-label="密钥" />
         </Field>
         <Field label="你的名字" className="mt-3" help="记进版本台账与运行的发起方；不填则显示密钥名">
-          <Input value={name} autoComplete="username" onChange={(e) => setName(e.target.value)} prefixIcon={<LuUser />} placeholder="zhangsan" aria-label="你的名字" />
+          <Input value={name} maxLength={40} autoComplete="username" onChange={(e) => setName(e.target.value)} prefixIcon={<LuUser />} placeholder="zhangsan" aria-label="你的名字" />
         </Field>
         <Button type="submit" variant="primary" size="lg" className="mt-5 w-full" loading={pending} disabled={!token.trim()}>登录</Button>
       </form>

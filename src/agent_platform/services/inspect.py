@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 from .. import credentials
@@ -52,10 +53,14 @@ async def read_config(view: ServiceView, path: str, mask_secrets: bool = True, *
     return mask(text) if mask_secrets else text
 
 
+_URL_PASSWORD = re.compile(r"(://[^/\s:@]+:)[^@\s/]+@")
+
+
 def mask(text: str) -> str:
-    """把形如 key: value / KEY=value 且 key 像密钥的行的值打码。只为防止在页面/模型上下文里裸露。"""
+    """把形如 key: value / KEY=value 且 key 像密钥的行的值打码，连接串里的口令（scheme://user:pw@host）也打码。
+    只为防止在页面/模型上下文里裸露。"""
     lines = []
-    for line in text.splitlines():
+    for line in _URL_PASSWORD.sub(r"\1***@", text).splitlines():
         low = line.lower()
         if any(h in low for h in _SECRET_HINTS):
             for sep in ("=", ":"):

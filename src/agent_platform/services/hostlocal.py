@@ -39,7 +39,8 @@ def _docker_logs(container: str, lines: int, since: str) -> list[str]:
     argv = ["docker", "logs", "--tail", str(lines), "--timestamps"]
     if since:
         argv += ["--since", since]
-    r = subprocess.run([*argv, container], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([*argv, container], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=30)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[-500:] or f"docker logs 退出码 {r.returncode}")
     return (r.stdout + r.stderr).splitlines()[-lines:]
@@ -73,14 +74,15 @@ def read_log(target: str, *, lines: int = 200, grep: str = "", since: str = "") 
     return head + "\n" + (text or "（没有内容）")
 
 
-def _run(argv: list[str], timeout: float = 10) -> str | None:
+def _run(argv: list[str], timeout: float = 10, *, any_exit: bool = False) -> str | None:
+    """any_exit：退出码不是 0 也要输出（systemctl is-active 在服务没起时退出 3，这时的输出恰恰最有用）。"""
     if shutil.which(argv[0]) is None:
         return None
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return r.stdout.strip() if r.returncode == 0 else None
+    return r.stdout.strip() if r.returncode == 0 or any_exit else None
 
 
 def _meminfo() -> dict[str, int]:
@@ -130,7 +132,7 @@ def host_status(paths: list[str] | None = None) -> str:
         lines.append("占内存最多的进程（RSS KB）：\n" + "\n".join(r[:160] for r in rows))
     if docker := _run(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"]):
         lines.append("docker 容器：\n" + docker)
-    if nginx := _run(["systemctl", "is-active", "nginx"]):
+    if nginx := _run(["systemctl", "is-active", "nginx"], any_exit=True):
         lines.append(f"nginx：{nginx}")
     lines.append(f"（采集于 {time.strftime('%Y-%m-%d %H:%M:%S')}）")
     return "\n".join(lines)

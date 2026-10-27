@@ -899,7 +899,8 @@ for (const r of runs) {
   if (r.status === "running" || r.status === "queued" || r.resolution !== "agent" || rand() > 0.15) continue;
   const who = pick(PEOPLE);
   const negative = rand() < 0.45;
-  const at = new Date(new Date(r.created_at).getTime() + between(5, 300) * 60_000).toISOString();
+  // 评价时间不能晚于现在（刚结束的运行加几分钟会跑到未来，页面显示成"3 小时内"）
+  const at = new Date(Math.min(Date.now(), new Date(r.created_at).getTime() + between(5, 300) * 60_000)).toISOString();
   const base = { id: r.feedback.length + Math.floor(rand() * 1e6), run_id: r.run_id, created_by: who, created_at: at, updated_at: at };
   if (!negative) { r.feedback.push({ ...base, step_seq: 0, score: 1, reasons: [], comment: rand() < 0.3 ? "结论准确，省了半小时。" : "" }); continue; }
   const n = pick(NEGATIVE);
@@ -928,7 +929,7 @@ for (const [prefix, want] of [["data-qa", 5], ["failure-analysis", 3]] as const)
     if (have >= want) break;
     if (r.feedback.length) continue;
     const n = prefix === "data-qa" ? NEGATIVE[have % 3] : NEGATIVE[3];
-    const at = new Date(new Date(r.created_at).getTime() + 40 * MIN).toISOString();
+    const at = new Date(Math.min(Date.now(), new Date(r.created_at).getTime() + 40 * MIN)).toISOString();
     r.feedback.push({ id: 900_000 + r.feedback.length + have + (prefix === "data-qa" ? 0 : 50), run_id: r.run_id, created_by: "zhaoq", created_at: at, updated_at: at, step_seq: 0, score: -1, reasons: n.reasons, comment: n.comment });
     have++;
   }
@@ -1288,14 +1289,15 @@ export const assetList: Asset[] = [
 
 export function sessionsList(): SessionDetail[] {
   const map = new Map<string, MockRun[]>();
-  for (const r of runs) if ((r.task.startsWith("data-qa") || r.task === "ask") && r.trigger.type === "chat") map.set(r.session_id, [...(map.get(r.session_id) ?? []), r]);
+  // 与后端 store/runs.sessions 一致：对话与纠正触发的运行按会话聚合（纠正是同会话的新一轮）
+  for (const r of runs) if (r.trigger.type === "chat" || r.trigger.type === "correction") map.set(r.session_id, [...(map.get(r.session_id) ?? []), r]);
   return [...map.entries()].map(([sid, rs]) => {
     const asc = [...rs].sort((a, b) => a.created_at.localeCompare(b.created_at));
     const turns: ChatTurn[] = asc.map((r) => {
       const d = detailOf(r);
-      return { run_id: r.run_id, question: String(r.input.question), answer: d.output?.answer ?? d.output?.error ?? null, status: r.status, events: eventsOf(r).filter((e) => e.kind !== "final" && e.kind !== "error"), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "liyd") ?? null, created_at: r.created_at };
+      return { run_id: r.run_id, question: String(r.input.question ?? r.summary), answer: d.output?.answer ?? d.output?.error ?? null, status: r.status, events: eventsOf(r).filter((e) => e.kind !== "final" && e.kind !== "error"), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "liyd") ?? null, created_at: r.created_at };
     });
-    return { session_id: sid, title: String(asc[0].input.question).slice(0, 28), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[0].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
+    return { session_id: sid, title: asc[0].summary.slice(0, 60), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[asc.length - 1].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
   }).sort((a, b) => b.last_at.localeCompare(a.last_at));
 }
 

@@ -73,7 +73,7 @@ export function TaskDetailPage() {
     if (!task) return;
     const ok = await confirm({
       title: `删除 ${task.name}？`, danger: true, confirmText: "删除", requireText: task.name,
-      description: <>删除后不能再提交，历史运行保留。{task.subtask_count > 0 && <>它的 <b>{task.subtask_count}</b> 个子任务会一起删除。</>}版本台账里可以恢复。</>,
+      description: <>删除后不能再提交，历史运行保留。{task.subtask_count > 0 && <>它的 <b>{task.subtask_count}</b> 个子任务会一起删除。</>}版本台账也保留，要恢复得调接口 <code className="font-mono">POST /v1/tasks/{"{name}"}/versions/{"{v}"}/restore</code>（控制台里删掉的任务打不开）。</>,
     });
     if (!ok) return;
     try {
@@ -142,15 +142,22 @@ export function TaskDetailPage() {
 }
 
 function TaskRuns({ name }: { name: string }) {
-  const { pageSize } = useUi();
-  const { data, loading } = useRuns({ task: name, limit: pageSize });
-  return <Card><RunsTable runs={data?.items} loading={loading} columns={["status", "task", "service", "env", "trigger", "duration", "time"]} /></Card>;
+  // 和运行页一样跟随顶栏的环境视角（"查看全部运行"跳过去看到的是同一批）
+  const { pageSize, env } = useUi();
+  const { data, loading } = useRuns({ task: name, env: env || undefined, limit: pageSize });
+  return (
+    <Card>
+      {env && <div className="border-b border-line px-4 py-2 text-xs text-fg-3">只看 {env} 的运行（顶栏的环境视角）</div>}
+      <RunsTable runs={data?.items} loading={loading} columns={["status", "task", "service", "env", "trigger", "duration", "time"]} />
+    </Card>
+  );
 }
 
 // ———————— 概览 ————————
 
 function OverviewTab({ task, onEditProfile }: { task: TaskSummary; onEditProfile: () => void }) {
-  const { data: runs } = useRuns({ task: task.name, limit: 10 });
+  const { env } = useUi();
+  const { data: runs } = useRuns({ task: task.name, env: env || undefined, limit: 10 });
   const s = task.stats_24h;
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
@@ -168,7 +175,7 @@ function OverviewTab({ task, onEditProfile }: { task: TaskSummary; onEditProfile
           )}
         </Card>
         <Card>
-          <CardHeader title="近期运行" actions={<Link to={`/runs?task=${encodeURIComponent(task.name)}`} className="flex items-center gap-1 text-xs text-fg-3 hover:text-accent">全部 <LuArrowRight className="size-3" /></Link>} />
+          <CardHeader title="近期运行" description={env ? `只看 ${env}（顶栏的环境视角）` : undefined} actions={<Link to={`/runs?task=${encodeURIComponent(task.name)}`} className="flex items-center gap-1 text-xs text-fg-3 hover:text-accent">全部 <LuArrowRight className="size-3" /></Link>} />
           <RunsTable runs={runs?.items} columns={["status", "service", "env", "trigger", "duration", "time"]} compact />
         </Card>
       </div>
@@ -473,8 +480,11 @@ function OverridesTab({ task, parent }: { task: TaskSummary; parent: TaskSummary
   const dirty = JSON.stringify(d) !== JSON.stringify(pick());
 
   const save = useMutation(async () => {
+    // 只写改过的字段：没动的字段写进去就成了子任务自己的覆盖，父任务以后再改也跟不过来
+    const base = pick();
+    const patch = Object.fromEntries(Object.entries(d).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(base[k as keyof typeof base])));
     try {
-      const r = await api.update<TaskSummary>("tasks", task.name, d);
+      const r = await api.update<TaskSummary>("tasks", task.name, patch);
       toast(`已保存为 v${r.version}`);
       invalidate("tasks");
     } catch (e) { toast.error("保存失败", (e as Error).message); }

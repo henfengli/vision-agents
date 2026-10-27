@@ -7,14 +7,14 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleStop, LuExternalLink, LuMessageSquare, LuPenLine,
+  LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleStop, LuExternalLink, LuMessageSquare, LuPenLine,
   LuPlus, LuSlidersHorizontal, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
-import { stream } from "@/api/client";
+import { ApiError, stream } from "@/api/client";
 import { api, useEnvs, useServices, useSession, useSessions, useSubtasks, useTasks } from "@/api/hooks";
 import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } from "@/api/types";
-import { EnvFilter, ServiceFilter } from "@/components/filters";
+import { EnvFilter, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { FeedbackButtons } from "@/components/feedback";
 import { EnvBadge } from "@/components/status";
 import { ToolOutput, isDbTool, summarizeArgs } from "@/components/tool-call";
@@ -26,11 +26,12 @@ import { Badge, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
 import { invalidate } from "@/lib/query";
-import { Link, navigate, useParams, useSearch } from "@/lib/router";
+import { Link, navigate, useLocation, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { ASK_TASK } from "../tasks/run-dialog";
 
-interface LiveTurn extends ChatTurn { streaming?: boolean }
+/** broken：推流中断（stream_broken）时后端给的说明；运行照常在跑，结果去运行详情看 */
+interface LiveTurn extends ChatTurn { streaming?: boolean; broken?: string }
 
 /** 通用入口 ask 排第一个（没指定任务时后端也是：服务专属的对话任务优先，其次 ask） */
 const askFirst = (a: TaskSummary, b: TaskSummary) => Number(b.name === ASK_TASK) - Number(a.name === ASK_TASK);
@@ -42,12 +43,33 @@ const chatTaskOption = (t: TaskSummary) => t.name === ASK_TASK
   : { value: t.name, label: t.title || t.name, hint: `${t.name}${t.service === "*" ? " · 通用" : ""}` };
 
 export function ChatPage() {
-  const { session } = useParams<{ session?: string }>();
+  const { "*": rest } = useParams<{ "*"?: string }>();
+  const session = rest || undefined;
   const [f, setF] = useSearch<{ service: string; env: string; task: string }>();
   const [q, setQ] = useState("");
   /** 「新对话」：已经在 /chat 上聊着的新会话也要清空重来 */
   const [fresh, setFresh] = useState(0);
-  const { data: sessions } = useSessions({ service: f.service, env: f.env, task: f.task, q: q || undefined });
+  /**
+   * 新对话发完一轮后地址换成了 /chat/<会话>（刷新还在）：这个会话沿用原来的视图（同一个 key，不重新挂载、不清空）。
+   * 用 ref 不用 state：要和换地址引起的那次渲染同时生效，state 可能晚一拍，那一拍就按会话 id 重新挂载了
+   */
+  const adopted = useRef<{ sid: string; key: string } | null>(null);
+  useEffect(() => { if (adopted.current && adopted.current.sid !== session) adopted.current = null; }, [session]);
+  const ui = useUi();
+  /** 会话列表和其它列表一样默认跟随顶栏的环境视角 */
+  const env = envOf(f.env, ui.env);
+  const { data: sessions } = useSessions({ service: f.service, env: env || undefined, task: f.task, q: q || undefined });
+  /** 打开会话、开新对话时带上侧栏的筛选，不然一点就被清掉 */
+  const { search } = useLocation();
+  const keep = search.toString() ? "?" + search.toString() : "";
+  const adopt = (sid: string) => {
+    if (sid === session) return;
+    adopted.current = { sid, key: `new-${fresh}` };
+    navigate(`/chat/${encodeURIComponent(sid)}${keep}`, { replace: true });
+    // 之后再回到 /chat 就是另一个新对话
+    setFresh((n) => n + 1);
+  };
+  const own = !!session && adopted.current?.sid === session;
   const { data: tasks } = useTasks();
   const groups = useMemo(() => {
     const today: NonNullable<typeof sessions> = [], week: NonNullable<typeof sessions> = [], older: NonNullable<typeof sessions> = [];
@@ -63,11 +85,11 @@ export function ChatPage() {
     <div className="flex h-full">
       <aside className="hidden w-[272px] shrink-0 flex-col border-r border-line bg-panel md:flex">
         <div className="space-y-2 p-3">
-          <Button className="w-full" icon={<LuPlus />} onClick={() => { navigate("/chat"); setFresh((n) => n + 1); }}>新对话</Button>
+          <Button className="w-full" icon={<LuPlus />} onClick={() => { navigate("/chat" + keep); setFresh((n) => n + 1); }}>新对话</Button>
           <SearchInput value={q} onChange={setQ} placeholder="搜索会话内容" />
           <div className="flex flex-wrap gap-1.5">
             <ServiceFilter value={f.service ?? ""} onChange={(v) => setF({ service: v || undefined })} />
-            <EnvFilter value={f.env ?? ""} onChange={(v) => setF({ env: v || undefined })} />
+            <EnvFilter value={env} onChange={(v) => setF({ env: envParam(v, ui.env) })} />
             {chatTaskOptions.length > 1 && <FilterSelect label="任务" allLabel="全部" value={f.task ?? ""} onChange={(v) => setF({ task: v || undefined })} options={chatTaskOptions} />}
           </div>
         </div>
@@ -78,7 +100,7 @@ export function ChatPage() {
                 <div key={label} className="mb-2">
                   <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-fg-3">{label}</div>
                   {items.map((s) => (
-                    <Link key={s.session_id} to={`/chat/${s.session_id}`} title={s.title} aria-current={session === s.session_id ? "page" : undefined}
+                    <Link key={s.session_id} to={`/chat/${encodeURIComponent(s.session_id)}${keep}`} title={s.title} aria-current={session === s.session_id ? "page" : undefined}
                       className={cn("block rounded-md px-2.5 py-2 hover:bg-hover", session === s.session_id && "bg-accent-soft hover:bg-accent-soft")}>
                       <div className={cn("truncate text-[13px]", session === s.session_id ? "font-medium text-accent" : "text-fg")}>{s.title}</div>
                       <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-3">
@@ -92,14 +114,15 @@ export function ChatPage() {
               ))}
         </div>
       </aside>
-      <Conversation key={session ?? `new-${fresh}`} sessionId={session} />
+      <Conversation key={own ? adopted.current!.key : session ?? `new-${fresh}`} sessionId={own ? undefined : session} onSession={adopt} />
     </div>
   );
 }
 
-function Conversation({ sessionId }: { sessionId?: string }) {
+/** sessionId：地址里的会话（要从服务端加载）；onSession：新对话的一轮结束后报会话 id，好把地址换成 /chat/<会话> */
+function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?: (sid: string) => void }) {
   const ui = useUi();
-  const { data: detail, loading } = useSession(sessionId ?? "");
+  const { data: detail, loading, error: sessionError } = useSession(sessionId ?? "");
   const { data: services } = useServices();
   const { data: envs } = useEnvs();
   const { data: tasks } = useTasks();
@@ -113,20 +136,23 @@ function Conversation({ sessionId }: { sessionId?: string }) {
   const [text, setText] = useState("");
   const [sid, setSid] = useState<string | undefined>(sessionId);
   const cancelRef = useRef<(() => void) | null>(null);
+  /** 受理之前点了停止 */
+  const stopRequested = useRef(false);
   const bottom = useRef<HTMLDivElement>(null);
   const streaming = turns.some((t) => t.streaming);
   const locked = turns.length > 0;
 
   // 已有会话：维度取自会话；新会话：取个人偏好里的对话默认项
   useEffect(() => {
-    if (!detail) return;
+    // 正在流式回答时不拿服务端的版本覆盖（切回窗口会后台刷新）：会丢掉"回答中"的状态和停止按钮
+    if (!detail || turns.some((t) => t.streaming)) return;
     setTurns(detail.turns);
     setService(detail.service ?? "");
     setEnv(detail.env);
     const [base, obj] = detail.task.split(":");
     setTask(base);
     setSubtask(obj ?? "");
-  }, [detail]);
+  }, [detail]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (sessionId) return;
     if (!service && services?.length) setService((services.find((s) => s.name === ui.chat.service && s.enabled) ?? services.find((s) => s.enabled))?.name ?? "");
@@ -135,34 +161,54 @@ function Conversation({ sessionId }: { sessionId?: string }) {
 
   const chatTasks = chatTasksFor(tasks, service);
   useEffect(() => {
-    if (locked || !chatTasks.length) return;
+    if (locked || !tasks) return;
+    // 换到没有对话任务的服务：清掉上一个服务的任务，免得发到不属于它的任务上
+    if (!chatTasks.length) { if (task) setTask(""); return; }
     if (!chatTasks.some((t) => t.name === task)) setTask((chatTasks.find((t) => t.name === ui.chat.task) ?? chatTasks.find((t) => t.service === service) ?? chatTasks[0]).name);
-  }, [chatTasks, task, locked, service, ui.chat.task]);
+  }, [chatTasks, tasks, task, locked, service, ui.chat.task]);
 
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [turns]);
   useEffect(() => () => cancelRef.current?.(), []);
+  // 新对话的这一轮结束了（回答完、出错或停止）：地址换成 /chat/<会话>，刷新还能看到
+  useEffect(() => { if (sid && !sessionId && !streaming) onSession?.(sid); }, [sid, sessionId, streaming]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const taskDef = tasks?.find((t) => t.name === task);
   const extraFields = Object.entries(taskDef?.input ?? {}).filter(([k]) => k !== "question");
   const svc = services?.find((s) => s.name === service);
   const envOff = !!svc && svc.health[env]?.enabled === false;
+  /** 链接里的会话不存在（或加载失败）：不能往一个不存在的会话里续 */
+  const sessionGone = !!sessionId && !!sessionError && !detail;
 
   const patchLast = (fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t, i) => (i === all.length - 1 ? fn(t) : t)));
 
   const send = () => {
     const message = text.trim();
-    if (!message || streaming) return;
+    // 与发送按钮的禁用条件一致：Enter 也不能绕过（环境已停用、还没选服务 / 任务）
+    if (!message || streaming || !service || !task || envOff || sessionGone) return;
     setText("");
     setTurns((t) => [...t, { run_id: "", question: message, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
     const input = Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== ""));
     const body: ChatRequest = { message, session_id: sid ?? null, service, env, task, subtask: subtask || null, input, memory: memory as MemoryOverride };
     let seq = 0;
+    stopRequested.current = false;
     cancelRef.current = stream("/v1/chat", body, (ev) => {
       const type = String(ev.type);
       if (type === "run") {
+        if (stopRequested.current) {
+          // 受理前就点了停止：拿到 run_id 立刻取消，再断开推流
+          patchLast((t) => ({ ...t, run_id: String(ev.run_id), streaming: false, status: "cancelled" }));
+          if (!sid) setSid(String(ev.session_id));
+          cancelRun(String(ev.run_id));
+          cancelRef.current?.();
+          cancelRef.current = null;
+          return;
+        }
         patchLast((t) => ({ ...t, run_id: String(ev.run_id) }));
         if (!sid) setSid(String(ev.session_id));
         if (ev.subtask_created) toast(`已按 ${task} 新建子任务`, { description: String(ev.subtask_created) });
+      } else if (type === "error" && ev.code === "stream_broken") {
+        // 推流断了（库连接断开），运行没失败、还在跑：不标失败，给运行详情的链接
+        patchLast((t) => ({ ...t, broken: String(ev.message), streaming: false }));
       } else if (type === "error") {
         patchLast((t) => ({ ...t, status: "failed", answer: `**${String(ev.code)}**：${String(ev.message)}`, streaming: false }));
       } else if (type === "final") {
@@ -180,9 +226,21 @@ function Conversation({ sessionId }: { sessionId?: string }) {
       cancelRef.current = null;
     });
   };
+  const cancelRun = (runId: string) => api.cancelRun(runId)
+    .catch((e: Error) => { if (!(e instanceof ApiError && e.code === "already_finished")) toast.error("取消运行失败", e.message); })
+    .finally(() => invalidate("sessions"));
+  /** 停止 = 取消这次运行：只断开推流的话，agent 在服务端照样跑完（还会沉淀记忆、耗 token） */
   const stop = () => {
+    const runId = turns[turns.length - 1]?.run_id;
+    if (!runId && cancelRef.current) {
+      // 还没收到受理（没有 run_id）：先别断开，等 run 事件到了再取消（见 send 里的 run 分支）
+      stopRequested.current = true;
+      return;
+    }
     cancelRef.current?.();
+    cancelRef.current = null;
     patchLast((t) => ({ ...t, streaming: false, status: "cancelled" }));
+    if (runId) void cancelRun(runId);
   };
 
   /** 纠正：同会话开新一轮；结果轮询拿回来 */
@@ -212,7 +270,13 @@ function Conversation({ sessionId }: { sessionId?: string }) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[820px] px-4 py-6 md:px-6">
-          {sessionId && loading ? <div className="space-y-4"><Skeleton className="h-16" /><Skeleton className="h-40" /></div> : turns.length === 0 ? (
+          {sessionGone ? (
+            <div className="pt-16 text-center">
+              <div className="text-[14px] font-medium text-fg">{sessionError instanceof ApiError && sessionError.status === 404 ? "会话不存在" : "会话加载失败"}</div>
+              <div className="mt-1 text-[12.5px] text-fg-3">{sessionError?.message}</div>
+              <Button className="mt-4" icon={<LuPlus />} onClick={() => navigate("/chat")}>开始新对话</Button>
+            </div>
+          ) : sessionId && loading ? <div className="space-y-4"><Skeleton className="h-16" /><Skeleton className="h-40" /></div> : turns.length === 0 ? (
             <Welcome service={service} title={svc?.title ?? service} onPick={(q) => setText(q)} />
           ) : turns.map((t, i) => <Turn key={t.run_id || i} turn={t} onCorrect={(c) => correct(t.run_id, c)} />)}
           <div ref={bottom} />
@@ -247,7 +311,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
                   {extraFields.map(([k, f]) => (
                     <Field key={k} label={<span className="font-mono">{k}{f.required && <span className="text-bad">*</span>}</span>} help={f.description}>
                       {f.type === "enum" ? <Select size="sm" value={extra[k] ?? String(f.default ?? "")} onChange={(v) => setExtra({ ...extra, [k]: v })} options={(f.options ?? []).map((o) => ({ value: o, label: o }))} />
-                        : <Input value={extra[k] ?? ""} placeholder={f.default !== undefined ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
+                        : <Input value={extra[k] ?? ""} placeholder={f.default != null ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
                     </Field>
                   ))}
                 </div>
@@ -272,7 +336,7 @@ function Conversation({ sessionId }: { sessionId?: string }) {
             <span className="text-[11px] text-fg-3">{locked ? "同一会话内服务、环境、任务、对象固定；要换就开新对话" : subtask && !(tasks ?? []).some((t) => t.name === `${task}:${subtask}`) ? `发送时会按 ${task} 新建子任务 ${task}:${subtask}` : ""}</span>
             <div className="ml-auto">
               {streaming ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止"><LuCircleStop /></Button>
-                : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service || !task || envOff} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
+                : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service || !task || envOff || sessionGone} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
             </div>
           </div>
         </div>
@@ -324,6 +388,11 @@ function Welcome({ service, title, onPick }: { service: string; title: string; o
   );
 }
 
+/** 回答还没拿到（推流中断、还在跑）时给的运行详情入口 */
+function RunLink({ runId }: { runId: string }) {
+  return <Link to={`/runs/${runId}`} className="ml-1.5 inline-flex items-center gap-1 text-accent hover:underline"><LuExternalLink className="size-3" />运行详情</Link>;
+}
+
 function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) => void }) {
   const [open, setOpen] = useState(false);
   const [correcting, setCorrecting] = useState(false);
@@ -365,10 +434,15 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
               ))}
             </div>
           )}
-          {turn.answer ? <Markdown text={turn.answer} className={cn("text-[13.5px]", turn.status === "failed" && "text-bad")} />
+          {turn.broken ? (
+            <div className="flex items-start gap-1.5 text-[12.5px] text-warn">
+              <LuCircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>{turn.broken}{turn.run_id && <RunLink runId={turn.run_id} />}</span>
+            </div>
+          ) : turn.answer ? <Markdown text={turn.answer} className={cn("text-[13.5px]", turn.status === "failed" && "text-bad")} />
               : turn.streaming ? <div className="flex gap-1 py-2" aria-label="正在回答">{[0, 1, 2].map((i) => <span key={i} className="size-1.5 animate-bounce rounded-full bg-fg-3" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
                 : turn.status === "cancelled" ? <div className="text-[12.5px] text-fg-3">已停止</div>
-                  : turn.status === "running" ? <div className="text-[12.5px] text-fg-3">执行中…</div> : null}
+                  : turn.status === "running" ? <div className="text-[12.5px] text-fg-3">执行中…{turn.run_id && <RunLink runId={turn.run_id} />}</div> : null}
           {!turn.streaming && turn.answer && (
             <div className="mt-2 flex items-center gap-0.5 text-fg-3">
               <CopyButton text={turn.answer} />

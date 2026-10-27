@@ -10,17 +10,18 @@ import {
   LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
-import { api, useMeta, useRun, useRunEvents } from "@/api/hooks";
+import { ApiError } from "@/api/client";
+import { api, useMeta, useRun, useRunEvents, useTasks } from "@/api/hooks";
 import type { KnowledgeKind, RecipeRef, Run, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TRIGGER, TriggerBadge } from "@/components/status";
 import { ToolArgs, ToolOutput, summarizeArgs } from "@/components/tool-call";
-import { Button } from "@/components/ui/button";
+import { Button, LinkButton } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
 import { Field, Textarea } from "@/components/ui/form";
 import { Dialog, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, DescList, ErrorState, Kbd, SectionTitle, Skeleton } from "@/components/ui/primitives";
+import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Kbd, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
@@ -44,7 +45,9 @@ export function RunDetailPage() {
   const live = run ? LIVE.has(run.status) : true;
   const { data: events } = useRunEvents(id, live);
 
-  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  if (error) return <Page>{error instanceof ApiError && error.status === 404
+    ? <Empty title="运行不存在" description="链接可能已失效" action={<LinkButton to="/runs">回到运行列表</LinkButton>} />
+    : <ErrorState error={error} onRetry={refetch} />}</Page>;
   if (!run) return <Page><Skeleton className="mb-4 h-20" /><Skeleton className="h-96" /></Page>;
 
   return (
@@ -73,7 +76,7 @@ function Header({ run }: { run: Run }) {
   };
   const [busy, setBusy] = useState<"cancel" | "again" | null>(null);
   const cancel = async () => {
-    if (!(await confirm({ title: "取消这次运行？", description: "终止执行，运行落 cancelled 终态；已经做完的步骤保留在时间线里。", danger: true, confirmText: "取消运行" }))) return;
+    if (!(await confirm({ title: "取消这次运行？", description: "终止执行，运行落 cancelled 终态；已经做完的步骤保留在时间线里。", danger: true, confirmText: "取消运行", cancelText: "不取消" }))) return;
     setBusy("cancel");
     try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); } finally { setBusy(null); }
   };
@@ -81,12 +84,15 @@ function Header({ run }: { run: Run }) {
   const [replaying, setReplaying] = useState(false);
   /** 回归重放只收被 👎 过的 agent 运行 */
   const replayable = !live && run.resolution === "agent" && run.feedback.some((f) => f.score < 0);
-  const failed = run.status === "failed";
-  /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run，跳过去重） */
+  /** 内建任务（失败时 resolution 还是空，看任务定义）：后端不支持续跑，纠正也没有意义 */
+  const { data: tasks } = useTasks();
+  const builtin = run.resolution === "builtin" || tasks?.find((t) => t.name === run.task.split(":")[0])?.form === "builtin";
+  const failed = run.status === "failed" && !builtin;
+  /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run、新会话，跳过去重） */
   const again = async () => {
     const ok = await confirm(failed
       ? { title: "断点续跑？", description: "沿用同一个运行 id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
-      : { title: "用同样的输入再跑一次？", description: "新开一次运行，跳过去重，沿用任务 / 服务 / 环境 / 会话。", confirmText: "重跑" });
+      : { title: "用同样的输入再跑一次？", description: "新开一次运行（新会话），跳过去重，沿用任务 / 服务 / 环境 / 输入。", confirmText: "重跑" });
     if (!ok) return;
     setBusy("again");
     try {
@@ -118,11 +124,11 @@ function Header({ run }: { run: Run }) {
       </>}
       actions={<>
         {!live && (
-          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctWith}
+          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={builtin ? undefined : correctWith}
             onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
         )}
         {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
-        {!live && run.resolution !== "builtin" && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
+        {!live && !builtin && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
         {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)} title="改完提示词 / 任务定义 / 档案后，用当前定义重跑这条，看 👎 指出的问题改好没有">重放</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消</Button>
           : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
@@ -405,7 +411,7 @@ function Sidebar({ run }: { run: Run }) {
         <div className="space-y-4 p-4">
           <MemList title="召回的记忆" empty="无" items={c.recalled_knowledge.map((k) => ({ key: String(k.id), label: memLabel(k.key), kind: k.kind, hint: `#${k.rank}`, href: `/memory?id=${k.id}` }))} />
           <MemList title="召回的方法" empty="无" items={c.recalled_assets.map((a) => ({ key: String(a.id), label: `${a.kind}:${a.name}`, href: `/memory?tab=assets&id=${a.id}` }))} />
-          <MemList title="本次沉淀" empty={run.trigger.type === "replay" ? "回归重放不沉淀记忆" : run.status === "success" ? "没有可沉淀的结论" : "运行结束后沉淀"} items={[
+          <MemList title="本次沉淀" empty={run.trigger.type === "replay" ? "回归重放不沉淀记忆" : run.status === "success" ? "没有可沉淀的结论" : LIVE.has(run.status) ? "运行成功结束后沉淀" : "只有成功的运行才沉淀"} items={[
             ...c.saved_knowledge.map((k) => ({ key: "k" + k.id, label: memLabel(k.key), kind: k.kind, href: `/memory?id=${k.id}` })),
             ...c.saved_assets.map((a) => ({ key: "a" + a.id, label: `${a.kind}:${a.name}`, hint: "方法", href: `/memory?tab=assets&id=${a.id}` })),
           ]} />

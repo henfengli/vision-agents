@@ -8,7 +8,7 @@ import { LuActivity, LuChevronLeft, LuChevronRight, LuFlaskConical, LuMessageSqu
 
 import { useApiKeys, useMeta, useRuns, useTasks } from "@/api/hooks";
 import type { RunFilters, RunStatus } from "@/api/types";
-import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
+import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { RUN_STATUS, TRIGGER } from "@/components/status";
 import { Button } from "@/components/ui/button";
@@ -52,7 +52,7 @@ export function RunsPage() {
 function RunList() {
   const [s, setS] = useSearch<Search>();
   const ui = useUi();
-  const env = s.env ?? ui.env;
+  const env = envOf(s.env, ui.env);
   const filters: RunFilters = {
     status: (s.status as RunStatus) || "", hours: Number(s.hours) || undefined, service: s.service, env: env || undefined,
     task: s.task, trigger: s.trigger, caller: s.caller, q: s.q, session_id: s.session_id, cursor: s.cursor, limit: ui.pageSize,
@@ -90,7 +90,7 @@ function RunList() {
         </div>
         <FilterBar active={active} onClear={clear}>
           <ServiceFilter value={s.service ?? ""} onChange={(v) => set({ service: v })} />
-          <EnvFilter value={env} onChange={(v) => set({ env: v })} />
+          <EnvFilter value={env} onChange={(v) => set({ env: envParam(v, ui.env) })} />
           <FilterSelect label="任务" allLabel="全部" value={s.task ?? ""} onChange={(v) => set({ task: v })}
             options={(tasks ?? []).filter((t) => !t.extends && (!s.service || t.service === s.service || t.service === "*")).map((t) => ({ value: t.name, label: t.name, hint: t.title }))} />
           <FilterSelect label="触发" allLabel="全部" value={s.trigger ?? ""} onChange={(v) => set({ trigger: v })}

@@ -162,7 +162,7 @@ class Submitter:
     async def _relaunch(self, req: RunRequest, old: dict, trigger: RunTrigger, caller: Caller) -> Accepted:
         entry = await self._reg.task(old["task"])
         if entry is None:
-            raise Rejected("unknown_task", f"任务 {old['task']} 已不存在")
+            raise Rejected("unknown_task", f"任务 {old['task']} 已不存在", 404)
         await gates.check_switches(self._reg, task_name=old["task"], task=entry.spec, service=old["service"], env=old["env"])
         run_id = uuid.uuid4().hex[:16]
         session_id = req.session_id or run_id
@@ -190,8 +190,11 @@ class Submitter:
         run = await self._existing(run_id)
         if run["status"] in TERMINAL:
             raise Rejected("already_finished", f"运行已结束（{run['status']}）", 409)
-        await runs.set_status(run_id, "cancelled", output={"error": f"被 {caller.name} 取消"}, error_code="cancelled")
         await runs.log_event(run_id, "error", {"title": "cancelled", "content": f"被 {caller.name} 取消"})
+        if not await runs.set_status(run_id, "cancelled", output={"error": f"被 {caller.name} 取消"},
+                                     error_code="cancelled"):
+            run = await runs.get(run_id)       # 刚好在这之间结束了
+            raise Rejected("already_finished", f"运行已结束（{run['status'] if run else '—'}）", 409)
         await db.notify("run_cancel", run_id)
         return await runs.get(run_id)
 

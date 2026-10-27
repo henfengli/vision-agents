@@ -4,7 +4,8 @@
   只认领本主机负责的环境（部署配置 env，再按 services 限服务）的运行
 - 唤醒：进入 queued 时 pg_notify('runs_queued')，LISTEN 毫秒级唤醒；5 秒轮询兜底
 - 并发：最多 max_concurrent 个运行同时执行，满了就不再认领
-- 心跳：执行中的运行每 20 秒刷新 heartbeat_at；进程崩溃后心跳停了，维护循环把它们标为失败（可续跑）
+- 心跳：执行中的运行每 20 秒刷新 heartbeat_at（只刷还归本 worker、还在执行的；不归了就停下）；
+  进程崩溃后心跳停了，维护循环把它们标为失败（可续跑）
 - 取消：提交端把台账标成 cancelled 后 pg_notify('run_cancel', run_id)，持有它的 worker 取消执行
 - 退出：取消全部执行中的运行，记为 interrupted（可续跑）
 """
@@ -111,6 +112,11 @@ class Executor:
         while True:
             await asyncio.sleep(HEARTBEAT_S)
             try:
-                await runs.heartbeat(self.running)
+                stop = await runs.heartbeat(self.worker_id, self.running)
             except Exception:  # noqa: BLE001
                 log.exception("刷新运行心跳失败")
+                continue
+            for run_id in stop:                      # 已被取消（通知可能漏了）或被别的主机判成孤儿：停下
+                if task := self._running.get(run_id):
+                    log.warning("运行 %s 已不归本 worker 执行（取消或判为孤儿），停止", run_id)
+                    task.cancel()

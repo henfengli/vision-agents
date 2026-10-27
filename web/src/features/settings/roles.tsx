@@ -87,6 +87,7 @@ function CreateRoleDialog({ open, onClose, roles }: { open: boolean; onClose: ()
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [ext, setExt] = useState("");
+  useEffect(() => { if (open) { setName(""); setTitle(""); setExt(""); } }, [open]);
   const valid = /^[a-z][a-z0-9_]{1,40}$/.test(name);
   const create = useMutation(async () => {
     try {
@@ -178,7 +179,7 @@ function ToolsCard({ tools, serviceTools }: { tools: string[]; serviceTools: boo
             <li key={t} className="px-4 py-2">
               <div className="flex items-center gap-2">
                 {t === ALL || isMcpGroup(t) ? <ToolChip tool={t} /> : <code className="font-mono text-[12.5px] text-fg">{t}</code>}
-                {info?.dangerous && <Tooltip content="会改动东西：执行命令、启停进程"><span><Badge tone="warn" icon={<LuTriangleAlert />}>有副作用</Badge></span></Tooltip>}
+                {info?.dangerous && <Tooltip content="会改动东西：执行命令、跑项目代码"><span><Badge tone="warn" icon={<LuTriangleAlert />}>有副作用</Badge></span></Tooltip>}
               </div>
               <div className="mt-0.5 text-[11.5px] text-fg-3">
                 {t === ALL ? "全部内置工具 + 全部平台 MCP 工具"
@@ -275,7 +276,7 @@ function RoleEditor({ role, onSaved }: { role: Role; onSaved: () => void }) {
   const others = (roles ?? []).filter((r) => r.name !== role.name);
   const toolsHint = parent
     ? d.tools.length ? `写了就替换：只用这里选的，不再跟随 ${parent.name}` : `没选 = 跟随 ${parent.name}${parentResolved ? `（${parentResolved.tools.join("、") || "无"}）` : ""}`
-    : "标 ⚠ 的工具会改动东西（执行命令、启停进程），只给需要的角色";
+    : "标 ⚠ 的工具会改动东西（执行命令、跑项目代码），只给需要的角色";
 
   return (
     <div className="grid gap-4 pb-20 xl:grid-cols-[1fr_400px]">

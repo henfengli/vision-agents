@@ -65,7 +65,7 @@ export function VersionHistory({ kind, name, onRestored, stats }: {
       toast(`已恢复为 v${v.version} 的内容`);
       await refetch();
       invalidate(kind.startsWith("settings/") ? "settings" : kind);
-      if (kind === "settings/envs") invalidate("meta");
+      if (kind === "settings/envs" || kind === "settings/notifications") invalidate("meta");   // meta 里有环境与渠道名
       onRestored?.();
       setA(null);
     } catch (e) {

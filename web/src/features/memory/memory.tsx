@@ -15,7 +15,7 @@ import {
 
 import { api, useAssets, useEnvs, useKnowledge, usePromotable, useServices, useTasks } from "@/api/hooks";
 import type { Asset, AssetKind, Knowledge, KnowledgeKind, KnowledgePromote, LessonCategory, MemoryFilters, MemoryHealth } from "@/api/types";
-import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
+import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge } from "@/components/status";
 import { Button } from "@/components/ui/button";
@@ -40,7 +40,7 @@ export function MemoryPage() {
   const ui = useUi();
   const [s, setS] = useSearch<{ tab: Tab; service: string; env: string; task: string; status: string; q: string; kind: string; id: string; knowledge: string }>();
   const tab = s.tab ?? "knowledge";
-  const env = s.env ?? ui.env;
+  const env = envOf(s.env, ui.env);
   const filters: MemoryFilters = { service: s.service, env: env || undefined, task: s.task, status: s.status, q: s.q };
   const { data: promotable } = usePromotable({ service: s.service, env: env || undefined });
   const active = !!(s.service || s.env || s.task || s.status || s.q || s.kind);
@@ -53,7 +53,8 @@ export function MemoryPage() {
         档案是人写的（在 <Link to="/services" className="text-accent hover:underline">服务</Link> / <Link to="/tasks" className="text-accent hover:underline">任务</Link> 页编辑，逐字置顶注入）；
         记忆是 agent 记下的事实与报错教训；方法是可执行的做法与脚本。记忆按服务分区，可以只对某个环境成立，也可以对所有环境成立。
       </>} />
-      <Tabs className="mb-4" value={tab} onChange={(v) => setS({ tab: v === "knowledge" ? undefined : v, kind: undefined, id: undefined, knowledge: undefined })} tabs={[
+      {/* 状态筛选只在「记忆」标签上有：换标签时清掉，免得方法列表被看不见的筛选过滤 */}
+      <Tabs className="mb-4" value={tab} onChange={(v) => setS({ tab: v === "knowledge" ? undefined : v, kind: undefined, status: undefined, id: undefined, knowledge: undefined })} tabs={[
         { value: "knowledge", label: "记忆", icon: <LuBrain /> },
         { value: "assets", label: "方法", icon: <LuWrench /> },
         { value: "promotable", label: "可升格", icon: <LuArrowUpFromLine />, count: promotable?.length || null },
@@ -62,7 +63,7 @@ export function MemoryPage() {
       <div className="mb-3">
         <FilterBar active={active} onClear={clear}>
           <ServiceFilter value={s.service ?? ""} onChange={(v) => setS({ service: v, task: undefined })} />
-          <EnvFilter value={env} onChange={(v) => setS({ env: v })} includeShared={memoryTab} />
+          <EnvFilter value={env} onChange={(v) => setS({ env: envParam(v, ui.env) })} includeShared={memoryTab} />
           {(tab === "knowledge" || tab === "assets" || tab === "playground") && <TaskFilter value={s.task ?? ""} service={s.service} onChange={(v) => setS({ task: v })} />}
           {tab === "knowledge" && <FilterSelect label="状态" allLabel="生效中" value={s.status ?? ""} onChange={(v) => setS({ status: v })}
             options={[{ value: "expired", label: "已过期" }, { value: "superseded", label: "被取代" }, { value: "all", label: "全部" }]} />}
@@ -169,6 +170,8 @@ export function KnowledgeList({ filters, scope, openId, showHealth, kind, onKind
   const { data: health } = useQuery(["memory", "health", filters.service, filters.env],
     () => api.knowledgeHealth({ service: filters.service, env: filters.env }), { enabled: !!showHealth });
   const [selected, setSelected] = useState<number | null>(openId ?? null);
+  /** 已在记忆页时再从全局搜索 / 链接点进另一条：跟着打开 */
+  useEffect(() => { if (openId) setSelected(openId); }, [openId]);
   const [creating, setCreating] = useState(false);
   const [promoting, setPromoting] = useState<Knowledge | null>(null);
   const listed = data?.find((x) => x.id === selected);
@@ -382,7 +385,7 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
           {editing ? (
             <div className="space-y-2">
               <Textarea rows={8} value={text} onChange={(e) => setText(e.target.value)} />
-              <div className="flex justify-end gap-2"><Button onClick={() => setEditing(false)}>取消</Button><Button variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存</Button></div>
+              <div className="flex justify-end gap-2"><Button onClick={() => { setEditing(false); setText(entry.content); }}>取消</Button><Button variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存</Button></div>
             </div>
           ) : <div className="rounded-md border border-line bg-sunken/50 p-3.5"><Markdown text={entry.content} /></div>}
           <DescList items={[
@@ -678,7 +681,7 @@ function AssetDrawer({ asset, onClose }: { asset: Asset | null; onClose: () => v
             <div className="space-y-3">
               <Field label="摘要"><Input value={d.summary} onChange={(e) => setD({ ...d, summary: e.target.value })} /></Field>
               <Field label="内容"><Textarea rows={12} mono={isCode(asset.kind)} value={d.content} onChange={(e) => setD({ ...d, content: e.target.value })} /></Field>
-              <div className="flex justify-end gap-2"><Button onClick={() => setEditing(false)}>取消</Button><Button variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存</Button></div>
+              <div className="flex justify-end gap-2"><Button onClick={() => { setEditing(false); setD({ summary: asset.summary, content: asset.content }); }}>取消</Button><Button variant="primary" loading={save.pending} onClick={() => save.mutate(undefined)}>保存</Button></div>
             </div>
           ) : <>
             <div className="text-[13px] text-fg-2">{asset.summary}</div>
@@ -719,7 +722,8 @@ function Playground({ service, env, task }: { service?: string; env?: string; ta
           {!ready && <div className="rounded-md bg-sunken px-3 py-2 text-[12.5px] text-fg-3">召回按 服务×环境 进行（该环境的 + 所有环境通用的）：先在上方选定服务和一个具体环境；选了任务则按该任务的谱系排序。</div>}
           <Textarea rows={3} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="输入一个问题，看 agent 会被喂什么" />
           <div className="flex justify-end">
-            <Button variant="primary" icon={<LuSearch />} disabled={!query.trim() || !ready} loading={run.pending} onClick={async () => setRes(await run.mutate(undefined))}>检索</Button>
+            <Button variant="primary" icon={<LuSearch />} disabled={!query.trim() || !ready} loading={run.pending}
+              onClick={async () => { try { setRes(await run.mutate(undefined)); } catch (e) { toast.error("检索失败", (e as Error).message); } }}>检索</Button>
           </div>
           {res && (
             <ol className="space-y-2 pt-2">

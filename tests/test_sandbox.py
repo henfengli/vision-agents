@@ -1,4 +1,4 @@
-"""沙箱命令行：配置与密钥遮蔽、home 白名单、断网、资源 scope、没有 bwrap 时拒绝执行。"""
+"""沙箱命令行：配置与密钥遮蔽、home 白名单、可写的日志空洞、资源 scope、没有 bwrap 时拒绝执行；bash 的输出截取。"""
 
 import os
 import tempfile
@@ -29,13 +29,41 @@ class SandboxTest(unittest.TestCase):
         self.assertEqual(args[i - 2:i], ["--ro-bind", "/dev/null"])
         self.assertEqual(args[args.index(str(self.dir)) - 1], "--tmpfs")
 
-    def test_agent_sandbox_masks_before_scratch_and_cuts_network(self):
+    def test_agent_sandbox_masks_before_scratch_and_keeps_network(self):
         with mock.patch.object(sandbox, "has_bwrap", return_value=True):
             argv = sandbox.wrap_argv(["bash", "-c", "cat x"], "/data/scratch", hidden=(str(self.file),))
         self.assertLess(argv.index(str(self.file)), argv.index("/data/scratch"))
-        self.assertIn("--unshare-net", argv)
+        self.assertNotIn("--unshare-net", argv)                      # 网络不限
+        self.assertIn("--unshare-ipc", argv)
         self.assertIn("--as-pid-1", argv)
         self.assertEqual(argv[-3:], ["bash", "-c", "cat x"])
+
+    def test_home_itself_is_never_rebound(self):
+        home = os.path.expanduser("~")
+        argv = sandbox.bwrap_argv(["true"], scratch="/s", allow=[home, os.path.dirname(home)])
+        self.assertNotIn(["--ro-bind", home, home], [argv[i:i + 3] for i in range(len(argv))])
+
+    def test_sinks_are_writable_dev_null(self):
+        argv = sandbox.bwrap_argv(["true"], scratch="/s", sinks=[str(self.file), str(self.dir)])
+        i = argv.index(str(self.file))
+        self.assertEqual(argv[i - 2:i], ["--bind", "/dev/null"])
+        self.assertNotIn(str(self.dir), argv)                        # 只对文件
+
+    def test_bash_output_is_bounded(self):
+        import subprocess
+        import sys
+
+        from agent_platform.agent.tools import bash
+        code = "import sys; sys.stdout.write('S' + 'a' * 3000000); sys.stdout.flush(); sys.stderr.write('ERR')"
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cap = bash._Capture(proc.stdout)
+        proc.wait(30)
+        out, truncated = cap.text()
+        self.assertTrue(truncated)
+        self.assertEqual(cap.total, 3000004)
+        self.assertLessEqual(len(cap.head) + len(cap.tail), 2 * bash._KEEP_BYTES)   # 只留首尾，不整份进内存
+        self.assertTrue(out.startswith("S") and out.endswith("ERR"))
+        self.assertLess(len(out), bash.MAX_OUTPUT_CHARS + 100)
 
     def test_home_is_hidden_except_allowed_dirs(self):
         home = os.path.expanduser("~")

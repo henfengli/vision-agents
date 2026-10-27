@@ -27,14 +27,13 @@ def error(status: int, code: str, message: str, detail=None) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message, "detail": detail}}, status_code=status)
 
 
-def create_app(cfg: Settings, *, worker: bool = True) -> FastAPI:
-    """worker=True：本进程同时跑执行队列、定时与维护循环（单机部署的默认方式）。"""
+def create_app(cfg: Settings) -> FastAPI:
+    """接口 + 控制台，同进程跑执行队列、定时与维护循环。"""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         rt = await assemble(cfg)
-        if worker:
-            await rt.start_worker()
+        await rt.start_worker()
         app.state.rt = rt
         try:
             yield

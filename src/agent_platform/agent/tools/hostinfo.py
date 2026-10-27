@@ -1,11 +1,10 @@
-"""host_metrics 薄工具：查业务域部署主机的实时资源状况（内存/负载/根盘）。
+"""host_metrics 薄工具：查服务×环境登记的主机的实时资源状况（内存/负载/根盘）。
 
-链路：domain+env → 域包登记的主机列表（domain.yaml 的 hosts 字段）
+链路：服务×环境 → 服务定义登记的主机列表（hosts 字段）
 → Grafana datasource proxy → Prometheus(node_exporter) → markdown 表。
+部署配置没配 grafana 时这个工具不出现；本机的状况用 host_status 就够。
 
-不让 agent 用 bash curl 查监控的原因（与 db_query 同理）：
-LLM 现场拼命令，审查层只有正则，管不住"该访问哪个地址、什么方法"；
-薄工具把数据源、指标集、输出格式固化，LLM 只能选域和环境。
+数据源、指标集、输出格式固化在这里，模型只能选看哪个服务×环境。
 
 可测性：HTTP 只有一个 grafana_query()；collect() 注入 fetch 纯函数测试。
 """
@@ -63,7 +62,7 @@ async def grafana_query(base_url: str, datasource_uid: str, token: str,
 
 
 def _host_of(instance: str, hosts: list[str]) -> str:
-    """instance（可能带 :9100 端口）归一到域包登记的主机名。"""
+    """instance（可能带 :9100 端口）归一到服务定义登记的主机名。"""
     bare = instance.rsplit(":", 1)[0] if ":" in instance else instance
     return bare if bare in hosts else instance
 

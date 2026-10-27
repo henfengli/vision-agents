@@ -39,9 +39,8 @@ class Maintenance:
             log.exception("维护任务 %s 失败", getattr(job, "__name__", job))
 
     async def _recover_orphans(self) -> None:
-        for run_id in await runs.orphaned(ORPHAN_AFTER_S):
+        for run_id in await runs.fail_orphans(ORPHAN_AFTER_S):
             await runs.log_event(run_id, "error", {"title": "orphaned", "content": "执行进程中断，可在详情页续跑"})
-            await runs.set_status(run_id, "failed", output={"error": "执行进程中断"}, error_code="orphaned")
 
     async def _purge(self) -> None:
         if time.monotonic() - self._purged_at < PURGE_EVERY_S and self._purged_at:

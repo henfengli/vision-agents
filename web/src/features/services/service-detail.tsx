@@ -4,7 +4,7 @@
  * 不受保护的直接用项目的真实配置）
  * 与结构化编辑服务定义（&part=definition），「版本」看历史与 diff。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   LuBrain, LuCircleAlert, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuHistory, LuListTodo,
   LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
@@ -52,6 +52,9 @@ export function ServiceDetailPage() {
   const envProtected = !!allEnvs.find((e) => e.name === env)?.protected;
   const tab = (search.tab as TabKey) || "overview";
   const { data: tasks } = useTasks(name);
+  // 配置文件按环境编辑：进来就把环境写进 URL。否则顶栏切环境视角会直接换掉编辑器，没保存的修改不经确认就丢了
+  const pinEnv = tab === "config" && search.part !== "definition" && !search.env && !!envs;
+  useEffect(() => { if (pinEnv) setSearch({ env }); }, [pinEnv]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
 
@@ -133,7 +136,7 @@ export function ServiceDetailPage() {
           {tab === "runs" && <RunsTab service={svc.name} env={env} />}
           {tab === "memory" && <div className="space-y-4">
             <div className="text-xs text-fg-3">
-              {env} 的记忆连同对所有环境成立的条目一起列出。人写的约定在「配置 → 服务档案」；记忆被反复用到、确认无误后可以在条目里升格进档案（<Link to={`/memory?tab=promotable&service=${svc.name}`} className="text-accent hover:underline">看可升格的</Link>）。
+              {env} 的记忆连同对所有环境成立的条目一起列出。人写的约定在「配置 → 服务定义 → 服务档案」；记忆被反复用到、确认无误后可以在条目里升格进档案（<Link to={`/memory?tab=promotable&service=${svc.name}`} className="text-accent hover:underline">看可升格的</Link>）。
             </div>
             <KnowledgeList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
             <AssetList filters={{ service: svc.name, env: env || undefined }} scope={{ service: svc.name }} />
@@ -193,7 +196,7 @@ function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc:
           <CardHeader title="服务档案" description={`置顶逐字注入该服务在 ${env} 的每次运行`} icon={<LuScrollText />} />
           <div className="p-4">
             {!view ? <Skeleton className="h-24" /> : Object.keys(view.profile).length === 0 ? (
-              <div className="text-[12.5px] text-fg-3">还没有档案。在「配置」里补上代码和配置读不出来的事实：口径、禁区、环境差异、踩过的坑。</div>
+              <div className="text-[12.5px] text-fg-3">还没有档案。在「配置 → 服务定义 → 服务档案」里补上代码和配置读不出来的事实：口径、禁区、环境差异、踩过的坑。</div>
             ) : (
               <dl className="space-y-3">
                 {Object.entries(view.profile).map(([k, v]) => (
@@ -257,7 +260,7 @@ function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
           {view.mcp_servers.map((m) => <Badge key={m} tone="outline" icon={<LuPlug />} className="font-mono">{m}</Badge>)}
           <span className="text-[11.5px] text-fg-3">MCP，运行里自动带上</span>
         </button>
-      ) : <span className="text-fg-3">无（可在「配置 → MCP」声明）</span>],
+      ) : <span className="text-fg-3">无（可在「配置 → 服务定义 → MCP」声明）</span>],
       ["主机", view.hosts.length ? <span className="font-mono text-[12px]">{view.hosts.join("、")}</span> : <span className="text-fg-3">未登记（host_metrics 不可用；host_status 照常）</span>],
       ...(svc.hidden?.length ? [["遮蔽", <span className="text-[12px] text-fg-3">另有 {svc.hidden.length} 个含口令的文件对 agent 遮蔽</span>] as [string, React.ReactNode]] : []),
     ]} />
@@ -314,11 +317,11 @@ function ToolsTab({ svc, onOpenConfig }: { svc: ServiceSummary; onOpenConfig: ()
   return (
     <Card>
       <CardHeader title="服务工具（MCP）" icon={<LuPlug />}
-        description="服务自己声明的 MCP server（在「配置 → MCP」里写）：运行在本服务上时这些工具自动出现，调用按运行的环境连接；角色关了「自动带上服务工具」就不带。"
+        description="服务自己声明的 MCP server（在「配置 → 服务定义 → MCP」里写）：运行在本服务上时这些工具自动出现，调用按运行的环境连接；角色关了「自动带上服务工具」就不带。"
         actions={servers.length > 0 && <Button size="sm" icon={<LuRefreshCw />} loading={reloading} onClick={reload}>重新连接</Button>} />
       {error ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={4} /> : !servers.length ? (
         <Empty icon={<LuPlug />} title="这个服务没有声明 MCP"
-          description="在「配置 → MCP」里加一个 server（名字 + 连接配置），这里就会列出它的工具；比如 dagster 服务接上线上 Dagster 的运行记录、日志与重跑。"
+          description="在「配置 → 服务定义 → MCP」里加一个 server（名字 + 连接配置），这里就会列出它的工具；比如 dagster 服务接上线上 Dagster 的运行记录、日志与重跑。"
           action={<Button size="sm" onClick={onOpenConfig}>去配置</Button>} />
       ) : (
         <>

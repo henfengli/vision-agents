@@ -1,19 +1,24 @@
 """bash 工具：唯一的通用工具。
 
-隔离由 bwrap 沙箱保证（agent/tools/sandbox.py：home 白名单、配置与 docker 遮蔽、默认断网、命令即 init），
-资源由 systemd 用户 scope 限制（部署配置 limits）。本层只负责：工作目录收口、环境变量白名单
+隔离由 bwrap 沙箱保证（agent/tools/sandbox.py：home 白名单、配置与 docker 遮蔽、命令即 init），
+资源由 systemd 用户 scope 限制（部署配置 limits）。本层只负责：环境变量白名单
 （secrets.env 注入的密钥不进子进程）、超时、输出截断。
+
+输出边读边丢：只留开头和结尾各一段，命令输出再多（比如 yes、cat 大文件）平台进程的内存也不涨。
+stdout 和 stderr 合在一起，按实际先后顺序。
 """
 
 from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 
 from ...config import LimitsConfig
 
 MAX_OUTPUT_CHARS = 8000
+_KEEP_BYTES = 32 * 1024            # 开头、结尾各留这么多字节（够截出 MAX_OUTPUT_CHARS 字）
 
 # 传给子进程的环境白名单：PATH、locale 等必需项；secrets.env 注入的密钥一律不下发
 _SAFE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "USER", "SHELL")
@@ -38,23 +43,60 @@ def build_safe_env() -> dict[str, str]:
     return {k: os.environ[k] for k in _SAFE_ENV_KEYS if k in os.environ}
 
 
-def run_command(command: str, timeout: int = 60, cwd: str | None = None, *, allow_net: bool = False,
-                hidden: tuple[str, ...] = (), allow: tuple[str, ...] = (), limits: LimitsConfig | None = None,
+class _Capture:
+    """读管道：只留开头 _KEEP_BYTES 和最后 _KEEP_BYTES，记总字节数。"""
+
+    def __init__(self, stream) -> None:
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.total = 0
+        self._t = threading.Thread(target=self._read, args=(stream,), daemon=True)
+        self._t.start()
+
+    def _read(self, stream) -> None:
+        while chunk := stream.read(65536):
+            self.total += len(chunk)
+            if len(self.head) < _KEEP_BYTES:
+                room = _KEEP_BYTES - len(self.head)
+                self.head += chunk[:room]
+                chunk = chunk[room:]
+            if chunk:
+                self.tail += chunk
+                if len(self.tail) > _KEEP_BYTES:
+                    del self.tail[:-_KEEP_BYTES]
+
+    def text(self) -> tuple[str, bool]:
+        self._t.join(5)
+        head = self.head.decode("utf-8", errors="replace")
+        if self.total <= len(self.head) + len(self.tail):
+            return truncate(head + self.tail.decode("utf-8", errors="replace"))
+        tail = self.tail.decode("utf-8", errors="replace")
+        half = MAX_OUTPUT_CHARS // 2
+        return head[:half] + f"\n\n... [截断，共 {self.total} 字节] ...\n\n" + tail[-half:], True
+
+
+def run_command(command: str, timeout: int = 60, cwd: str | None = None, *, hidden: tuple[str, ...] = (),
+                allow: tuple[str, ...] = (), limits: LimitsConfig | None = None,
                 require_sandbox: bool = True) -> BashResult:
     """同步执行 shell 命令并截断输出。cwd（= scratch 目录）给定时经沙箱执行。"""
     from .sandbox import SandboxUnavailable, scope_env, wrap_argv
     try:
-        argv = (wrap_argv(["bash", "-c", command], cwd, allow_net=allow_net, hidden=hidden, allow=allow,
-                          limits=limits, require=require_sandbox) if cwd else ["bash", "-c", command])
+        argv = (wrap_argv(["bash", "-c", command], cwd, hidden=hidden, allow=allow, limits=limits,
+                          require=require_sandbox) if cwd else ["bash", "-c", command])
     except SandboxUnavailable as e:
         return BashResult(command, 126, f"[不可用] {e}", False)
+    proc = subprocess.Popen(argv, cwd=cwd, env=scope_env(build_safe_env(), limits), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    cap = _Capture(proc.stdout)
     try:
-        proc = subprocess.run(argv, cwd=cwd, env=scope_env(build_safe_env(), limits),
-                              capture_output=True, text=True, timeout=timeout)
-        output, truncated = truncate(proc.stdout + proc.stderr)
-        return BashResult(command, proc.returncode, output, truncated)
+        code = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return BashResult(command, 124, f"[超时] 命令超过 {timeout}s 被终止", False)
+        proc.kill()                          # bwrap 被杀，命名空间里的进程经 --die-with-parent 一起死
+        proc.wait()
+        output, _ = cap.text()
+        return BashResult(command, 124, f"[超时] 命令超过 {timeout}s 被终止\n{output}".rstrip(), True)
+    output, truncated = cap.text()
+    return BashResult(command, code, output, truncated)
 
 
 def format_result(r: BashResult) -> str:

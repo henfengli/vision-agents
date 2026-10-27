@@ -2,7 +2,7 @@
  * 平台配置四节：环境、通知、记忆、提示词。对所有人生效，每次保存是一个新版本，可对比、可恢复。
  * 每页同一个套路：读当前配置 → 本地草稿 → 底部保存条 → PUT 整节。
  */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { LuHistory, LuPlus, LuSend, LuTrash2 } from "react-icons/lu";
 
 import { api, useMeta, useServices, useSettings, useTasks } from "@/api/hooks";
@@ -20,7 +20,7 @@ import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton } from "@/componen
 import { cn } from "@/lib/cn";
 import { ago, datetime } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
-import { Link } from "@/lib/router";
+import { Link, useLeaveGuard } from "@/lib/router";
 import { SettingRow, SettingsLayout } from "./layout";
 
 // ———————— 共用：一节配置的草稿与保存 ————————
@@ -32,7 +32,14 @@ function useSection<S extends ConfigSection>(section: S) {
   const entry = data?.[section];
   const [draft, setDraft] = useState<ConfigSections[S] | null>(null);
   const pristine = useMemo(() => (entry ? Object.fromEntries(Object.entries(entry).filter(([k]) => !LEDGER.includes(k))) as ConfigSections[S] : null), [entry]);
-  useEffect(() => { if (pristine) setDraft(structuredClone(pristine)); }, [pristine]);
+  /** 后台重新拉到配置（回到窗口时会刷新）：没改过、或版本变了（保存 / 恢复）才换成新内容，正在编辑的草稿不丢 */
+  const seen = useRef<{ version: number; json: string } | null>(null);
+  useEffect(() => {
+    if (!entry || !pristine) return;
+    const prev = seen.current;
+    seen.current = { version: entry.version, json: JSON.stringify(pristine) };
+    setDraft((cur) => (!cur || !prev || prev.version !== entry.version || JSON.stringify(cur) === prev.json ? structuredClone(pristine) : cur));
+  }, [entry, pristine]);
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(pristine);
   const save = useMutation(async () => {
     if (!draft) return;
@@ -40,6 +47,7 @@ function useSection<S extends ConfigSection>(section: S) {
       const saved = await api.putSettings(section, draft);
       toast(`已保存为 v${saved.version}`, { description: "立即对所有人生效" });
       invalidate("settings");
+      invalidate("versions");
       if (section === "envs" || section === "notifications") invalidate("meta");
     } catch (e) { toast.error("保存失败", (e as Error).message); }
   });
@@ -52,6 +60,8 @@ function SectionPage<S extends ConfigSection>({ section, title, description, chi
 }) {
   const s = useSection(section);
   const [history, setHistory] = useState(false);
+  /** 看版本时保存条收起，草稿还在：离开页面照样要确认 */
+  useLeaveGuard(s.dirty && history);
   return (
     <SettingsLayout title={title} description={description}
       actions={<>
@@ -116,20 +126,21 @@ export function EnvsSettingsPage() {
             <div className="space-y-1 border-t border-line px-4 py-2.5 text-[12px] text-fg-3">
               <div><b className="font-medium text-fg-2">受保护</b>（如生产）：agent 看不到项目的真实配置，用控制台填的只读版（只读账号，在服务页「配置 → 配置文件」里填），bash 里遮蔽。</div>
               <div><b className="font-medium text-fg-2">不受保护</b>（如测试）：直接用项目的真实配置，文件只读，提示词要求库只读；受保护环境的配置照样遮蔽。</div>
-              <div>两种都不拦任何操作（没有审批）；受保护的环境徽标带盾牌、运行任务时提醒一句。请求不带环境时用「默认」的那个。</div>
+              <div>两种都不拦任何操作；受保护的环境徽标带盾牌、运行任务时提醒一句。请求不带环境时用「默认」的那个。</div>
             </div>
           </Card>
           <Card>
             <CardHeader title="各服务的启用情况" description="点服务名去服务页修改（服务 → 环境 → 启用）" />
             <Table>
-              <thead><tr><Th>服务</Th>{d.items.map((e) => <Th key={e.name} className="text-center"><EnvBadge env={e.name} /></Th>)}</tr></thead>
+              {/* 编辑中的环境名可能还是空的或重名：按位置做 key */}
+              <thead><tr><Th>服务</Th>{d.items.map((e, i) => <Th key={i} className="text-center"><EnvBadge env={e.name} /></Th>)}</tr></thead>
               <tbody>
                 {(services ?? []).map((s) => (
                   <Tr key={s.name}>
                     <Td><Link to={`/services/${s.name}?tab=envs`} className="font-medium text-fg hover:text-accent">{s.name}</Link>{!s.enabled && <Badge tone="idle" className="ml-2">服务已停用</Badge>}</Td>
-                    {d.items.map((e) => {
+                    {d.items.map((e, i) => {
                       const on = s.enabled && s.envs[e.name]?.enabled !== false;
-                      return <Td key={e.name} className="text-center">{on ? <span className="text-ok">●</span> : <span className="text-fg-3">○</span>}</Td>;
+                      return <Td key={i} className="text-center">{on ? <span className="text-ok">●</span> : <span className="text-fg-3">○</span>}</Td>;
                     })}
                   </Tr>
                 ))}
@@ -164,22 +175,30 @@ export function NotificationsSettingsPage() {
     <SectionPage section="notifications" title="通知" description="渠道是发到哪（钉钉群 / Webhook）；规则是什么事件、什么范围发到哪个渠道。任务的「结果投递」与 agent 的 notify 工具也用这里的渠道。">
       {(d, set) => {
         const channels = Object.entries(d.channels);
+        /** 新增 / 修改 / 改名 / 移除一个渠道，保持原有顺序（否则改一个字它就跳到最后、输入框丢焦点）；改名时引用它的规则跟着改 */
         const setChannel = (name: string, ch: Channel | null, rename?: string) => {
-          const next = { ...d.channels };
-          delete next[name];
-          if (ch) next[rename ?? name] = ch;
+          const next: Record<string, Channel> = Object.fromEntries(name in d.channels
+            ? channels.flatMap(([n, c]): [string, Channel][] => (n !== name ? [[n, c]] : ch ? [[rename ?? name, ch]] : []))
+            : ch ? [...channels, [name, ch]] : channels);
           set({ ...d, channels: next, rules: rename ? d.rules.map((r) => (r.channel === name ? { ...r, channel: rename } : r)) : d.rules });
         };
+        const renameChannel = (input: HTMLInputElement, name: string, ch: Channel) => {
+          const v = input.value.trim();
+          if (v && v !== name && v in d.channels) toast.error(`已有名为 ${v} 的渠道`);
+          if (!v || v === name || v in d.channels) { input.value = name; return; }
+          setChannel(name, ch, v);
+        };
+        const freshName = () => { let i = channels.length + 1; while (`channel-${i}` in d.channels) i++; return `channel-${i}`; };
         const setRule = (i: number, r: NotifyRule | null) => set({ ...d, rules: r ? d.rules.map((x, j) => (j === i ? r : x)) : d.rules.filter((_, j) => j !== i) });
         return (
           <>
             <Card>
-              <CardHeader title="渠道" actions={<Button size="sm" icon={<LuPlus />} onClick={() => setChannel(`channel-${channels.length + 1}`, { type: "dingtalk", url: "", token: "" })}>添加渠道</Button>} />
+              <CardHeader title="渠道" actions={<Button size="sm" icon={<LuPlus />} onClick={() => setChannel(freshName(), { type: "dingtalk", url: "", token: "" })}>添加渠道</Button>} />
               {!channels.length ? <Empty title="还没有渠道" description="至少建一个 default 渠道，任务的结果投递默认发到它" /> : (
                 <div className="divide-y divide-line">
                   {channels.map(([name, ch]) => (
                     <div key={name} className="grid items-end gap-3 px-4 py-3.5 md:grid-cols-[150px_120px_1fr_180px_auto]">
-                      <Field label="名字"><Input mono defaultValue={name} onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== name && setChannel(name, ch, e.target.value.trim())} /></Field>
+                      <Field label="名字"><Input mono defaultValue={name} onBlur={(e) => renameChannel(e.target, name, ch)} /></Field>
                       <Field label="类型"><Select value={ch.type} onChange={(type) => setChannel(name, { ...ch, type })} options={[{ value: "dingtalk", label: "钉钉" }, { value: "webhook", label: "Webhook" }]} /></Field>
                       <Field label={ch.type === "dingtalk" ? "中继地址" : "POST 地址"}><Input mono value={ch.url} onChange={(e) => setChannel(name, { ...ch, url: e.target.value })} placeholder="https://…" /></Field>
                       <Field label={ch.type === "dingtalk" ? "机器人 access_token" : "Bearer token（可空）"}><Input mono type="password" value={ch.token} onChange={(e) => setChannel(name, { ...ch, token: e.target.value })} /></Field>

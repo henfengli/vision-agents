@@ -8,7 +8,7 @@
 重跑（launch_job / reexecute_run）是在线上那套部署里、用线上的真实配置跑：前提是作业可以重复运行（覆盖写同一分区）。
 - DAGSTER_LAUNCH_JOBS：允许重跑的作业名（正则，整名匹配）；不设 = 不允许重跑，只能查
 - 同一个作业的同一个分区已经在排队 / 运行时拒绝，避免和定时、传感器撞车
-- 每次重跑都带标签 agent/launched_by=agent-platform，在 Dagster 页面里能筛出 agent 发起的运行；
+- launch_job 起的运行带标签 agent/launched_by=agent-platform，在 Dagster 页面里能筛出来（reexecute_run 沿用原运行的标签）；
   agent 那边的运行时间线里也有这次工具调用和返回的 run_id
 """
 
@@ -57,9 +57,9 @@ async def get_run_logs(run_id: str, limit: int = 50) -> list[dict]:
     """拿 run 的事件日志（错误/物料化），按时间倒序截取。"""
     data = await _gql(
         "query($id: ID!){ logsForRun(runId:$id){ __typename ... on EventConnection { "
-        "events { message stepKey timestamp } } } }", {"id": run_id})
+        "events { __typename ... on MessageEvent { message stepKey timestamp level } } } } }", {"id": run_id})
     conn = data["logsForRun"]
-    events = conn.get("events", []) if isinstance(conn, dict) else []
+    events = [e for e in (conn.get("events", []) if isinstance(conn, dict) else []) if e.get("message")]
     return events[-limit:]
 
 

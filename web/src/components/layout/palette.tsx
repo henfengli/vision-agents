@@ -111,6 +111,8 @@ export function CommandPalette() {
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索或输入命令…" aria-label="搜索或输入命令"
               className="h-12 flex-1 bg-transparent text-[14px] text-fg outline-none placeholder:text-fg-3"
               onKeyDown={(e) => {
+                // 中文输入法选字时的回车 / 方向键属于输入法，不是选命令
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(items.length - 1, s + 1)); }
                 else if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => Math.max(0, s - 1)); }
                 else if (e.key === "Enter") { e.preventDefault(); exec(items[sel]); }

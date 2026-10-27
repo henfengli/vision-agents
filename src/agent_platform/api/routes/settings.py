@@ -1,7 +1,7 @@
 """设置：平台配置（对所有人生效、带版本历史）与 API 密钥。个人偏好存在浏览器里，不经过后端。
 
     GET  /v1/settings                               全部配置节
-    GET  /v1/settings/{section}                     section ∈ envs notifications memory processes prompts
+    GET  /v1/settings/{section}                     section ∈ envs notifications memory prompts
     PUT  /v1/settings/{section}                     整节替换（通知渠道的 token 传 "***" 表示不改）
     GET  /v1/settings/{section}/versions
     POST /v1/settings/{section}/versions/{v}/restore

@@ -1,12 +1,11 @@
 # ~/.config/systemd/user/agent-platform.service —— systemd --user 单元（deploy/install-user.sh 装）：接口 + 控制台 + worker
 # 同机部署：跑在部署线上项目的那个用户下。部署配置是 conf/env/prod.yaml + ~/.config/agent-platform/local.yaml。
-# 模型写的代码（项目内核、bash）在 bwrap 沙箱里（文件只读，看不到平台密钥和生产的真实配置）、各自一个 systemd 用户 scope（agent.slice 下，限内存）。
+# 模型写的代码（项目内核、bash）在 bwrap 沙箱里（文件只读，看不到平台密钥和生产的真实配置），各自一个 systemd 用户 scope，
+# 都在 agent.slice 里限内存。平台进程本身不在 agent.slice 里：slice 内存满了只杀模型写的代码，平台不受影响。
 [Unit]
 Description=agent-platform
-After=network-online.target
 
 [Service]
-Slice=agent.slice
 Environment=AGENT_ENV=prod
 Environment=AGENT_CONF=%h/agent-platform/conf
 Environment=AGENT_DATA_DIR=%h/.local/share/agent-platform
@@ -19,7 +18,6 @@ ExecStart=%h/agent-platform/venv/bin/agent-platform serve
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
-# 平台进程本身不另设内存上限：和内核、bash 一起受 agent.slice 的总上限约束
 
 [Install]
 WantedBy=default.target

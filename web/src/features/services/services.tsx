@@ -1,7 +1,7 @@
 /**
  * 服务列表：每个项目一张卡——各环境的运行健康、任务数。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuScrollText, LuServer } from "react-icons/lu";
 
 import { api, useEnvs, useServices } from "@/api/hooks";
@@ -104,6 +104,8 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
   const [title, setTitle] = useState("");
   const [root, setRoot] = useState("");
   const [description, setDescription] = useState("");
+  // 每次打开都是空表单（上次取消时填的不留着）
+  useEffect(() => { if (open) { setName(""); setTitle(""); setRoot(""); setDescription(""); } }, [open]);
   const valid = /^[a-z][a-z0-9._-]{1,40}$/.test(name);
   const create = useMutation(async () => {
     try {

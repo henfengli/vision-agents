@@ -19,7 +19,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], list[dict]] = {}
 
-    async def get(self, kind, name):
+    async def get(self, kind, name, *, fresh=False):
         versions = self.rows.get((kind, name))
         if not versions or versions[-1]["deleted"]:
             return None

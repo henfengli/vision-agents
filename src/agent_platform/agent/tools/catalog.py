@@ -150,7 +150,8 @@ class Toolbox:
             你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
             要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
-            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）；内存有上限。restart=true 清空变量重新开始。"""
+            文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）或 /tmp；内存有上限。服务声明的日志文件在内核里
+            是空的（项目写进去的直接丢掉），看日志用 logs。restart=true 清空变量重新开始。"""
             sc = run_scope.current()
             if kernels is None or reg is None or sc.view is None:
                 return "[不可用] 本运行没有关联业务服务，没有项目内核"
@@ -166,13 +167,13 @@ class Toolbox:
             except (Rejected, KernelError) as e:
                 return f"[失败] {getattr(e, 'message', None) or e}"
 
-        async def bash(command: str, timeout: int = 60, network: bool = False) -> str:
+        async def bash(command: str, timeout: int = 60) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；home 下其他目录、平台密钥看不到；生产环境的配置文件
-            也看不到，配置用 service_info 读）、只有工作目录和 /tmp 可写、调用结束后台进程全灭、内存有上限。默认断网；需要访问本机服务端口
-            或内网接口时传 network=true。输出超过 8000 字会截断：大输出先写进文件，再 head / grep 着看。"""
+            也看不到，配置用 service_info 读）、只有工作目录和 /tmp 可写、调用结束后台进程全灭、内存有上限；网络照常。
+            stdout 和 stderr 合在一起，超过 8000 字只留开头和结尾：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
             r = await asyncio.to_thread(
-                bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir, allow_net=network,
+                bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir,
                 hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox)
             return bash_mod.format_result(r)
 
@@ -318,7 +319,7 @@ class Toolbox:
         if kernels is not None and reg is not None:
             self._add(py, "项目内核", "service", dangerous=True,
                       summary="在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留")
-        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录可写、默认断网")
+        self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭")
         self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置内容（打码）、git 状态")
         self._add(logs, "看日志", "service", summary="读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤")
         self._add(host_status, "主机状况", "service", summary="部署主机的负载、内存、磁盘、大进程、docker 容器、nginx")

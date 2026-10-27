@@ -55,16 +55,24 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
   const serviceName = needService ? service : task?.service ?? "";
   const svc = services?.find((s) => s.name === serviceName);
   /** 任务限定的环境，再去掉服务在其中停用的环境 */
+  // health[env].enabled 已经算上了服务整体停用（服务停用 = 每个环境都不收运行）
   const allowedEnvs = useMemo(() => (envs ?? []).filter((e) =>
-    (!task?.envs.length || task.envs.includes(e.name)) && svc?.envs[e.name]?.enabled !== false), [envs, task, svc]);
+    (!task?.envs.length || task.envs.includes(e.name)) && svc?.health[e.name]?.enabled !== false), [envs, task, svc]);
+  const preferredEnv = () => (allowedEnvs.find((e) => e.name === globalEnv) ?? allowedEnvs.find((e) => !e.protected) ?? allowedEnvs[0])?.name ?? "";
+  /** 依赖用名字串而不是数组：任务 / 服务列表后台刷新（比如切回窗口）会换新对象，不能因此把填了一半的表单清掉 */
+  const allowedKey = allowedEnvs.map((e) => e.name).join(",");
+  // 打开或换了任务：环境回到首选，输入回到默认值（后端没写默认值的字段 default 是 null）
   useEffect(() => {
-    if (!task) return;
-    const preferred = allowedEnvs.find((e) => e.name === globalEnv) ?? allowedEnvs.find((e) => !e.protected) ?? allowedEnvs[0];
-    setEnv(preferred?.name ?? "");
+    if (!open || !task) return;
+    setEnv(preferredEnv());
     const init: Record<string, unknown> = {};
-    for (const [k, f] of Object.entries(task.input)) if (f.default !== undefined) init[k] = f.default;
+    for (const [k, f] of Object.entries(task.input)) if (f.default != null) init[k] = f.default;
     setValues(init);
-  }, [task?.name, allowedEnvs, globalEnv]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, task?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 可选环境变了（换了服务、环境列表到了）：当前选的还能用就留着
+  useEffect(() => {
+    setEnv((cur) => (allowedEnvs.some((e) => e.name === cur) ? cur : preferredEnv()));
+  }, [allowedKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { data: subtasks } = useSubtasks(task && !task.extends ? task.name : "");
   const subtaskOptions = (subtasks ?? []).map((t) => ({ value: t.name.split(":")[1], label: t.name.split(":")[1], hint: t.title || undefined }));
@@ -75,19 +83,22 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
     const errs: Record<string, string> = {};
     for (const [k, f] of Object.entries(task.input)) {
       const v = values[k];
-      if (f.required && (v === undefined || v === "")) errs[k] = "必填";
+      if (f.required && (v == null || (typeof v === "string" && !v.trim()))) errs[k] = "必填";
       if (f.type === "json" && typeof v === "string" && v.trim()) { try { JSON.parse(v); } catch { errs[k] = "不是合法 JSON"; } }
       if (f.type === "int" && v !== undefined && v !== "" && !Number.isInteger(Number(v))) errs[k] = "需要整数";
     }
     if (needService && !service) errs.__service = "通用任务需要选择服务";
     setErrors(errs);
     if (Object.keys(errs).length) return;
-    const input = Object.fromEntries(Object.entries(values).map(([k, v]) => {
-      const f = task.input[k];
-      if (f?.type === "int") return [k, Number(v)];
-      if (f?.type === "json" && typeof v === "string") return [k, v.trim() ? JSON.parse(v) : null];
-      return [k, v];
-    }));
+    // 填了又清空的字段不发：否则整数会变成 0、JSON 变成 null，agent 的任务说明里多出"字段: null"
+    const input = Object.fromEntries(Object.entries(values)
+      .filter(([, v]) => v != null && !(typeof v === "string" && !v.trim()))
+      .map(([k, v]) => {
+        const f = task.input[k];
+        if (f?.type === "int") return [k, Number(v)];
+        if (f?.type === "json" && typeof v === "string") return [k, JSON.parse(v)];
+        return [k, v];
+      }));
     try {
       const res = await api.submitRun({ task: taskName || undefined, service: needService ? service : null, env, subtask: subtask || null, input, memory });
       invalidate("runs");

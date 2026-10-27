@@ -141,7 +141,8 @@ export function Tooltip({ content, children, side = "top" }: { content: ReactNod
 
 // ———————— 确认框（命令式：await confirm({...})） ————————
 
-export function confirm(opts: { title: ReactNode; description?: ReactNode; confirmText?: string; danger?: boolean; requireText?: string }): Promise<boolean> {
+/** cancelText：关闭按钮的文字（默认「取消」）；确认按钮本身就叫「取消…」时换一个，免得两个「取消」挨着 */
+export function confirm(opts: { title: ReactNode; description?: ReactNode; confirmText?: string; cancelText?: string; danger?: boolean; requireText?: string }): Promise<boolean> {
   return new Promise((resolve) => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -157,7 +158,7 @@ export function confirm(opts: { title: ReactNode; description?: ReactNode; confi
       return (
         <Dialog open={open} onClose={() => close(false)} size="sm" title={opts.title} description={opts.description}
           footer={<>
-            <Button onClick={() => close(false)}>取消</Button>
+            <Button onClick={() => close(false)}>{opts.cancelText ?? "取消"}</Button>
             <Button variant={opts.danger ? "danger" : "primary"} disabled={!!opts.requireText && typed !== opts.requireText} onClick={() => close(true)}>
               {opts.confirmText ?? "确定"}
             </Button>

@@ -56,7 +56,11 @@ class Runtime:
     _background: list[asyncio.Task] = field(default_factory=list)
 
     async def start_worker(self) -> None:
-        """在本进程里跑执行队列、定时和维护循环（API 与 worker 同进程）。"""
+        """在本进程里跑执行队列、定时和维护循环（API 与 worker 同进程）。
+        线上主机必须写明负责哪个环境：不写就会认领所有环境的运行（生产的运行跑到测试机上、测试的跑到生产机上）。"""
+        if not self.settings.env and self.settings.profile != "dev":
+            raise RuntimeError("部署配置没有写 env（这台主机负责哪个环境）：在 ~/.config/agent-platform/local.yaml 里写 "
+                               "env: prod 或 env: test（测试机再写 services）。只有开发机（AGENT_ENV=dev）可以不写")
         maintenance = Maintenance(self.settings)
         pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,

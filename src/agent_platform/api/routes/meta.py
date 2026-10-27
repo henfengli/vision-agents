@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from ... import __version__
 from ...domain import FEEDBACK_REASONS, Rejected
@@ -41,7 +41,7 @@ async def meta(rt: Runtime = RT, who: Caller = WHO):
 
 
 @router.get("/v1/stats")
-async def stats(hours: int = 24, service: str | None = None, env: str | None = None, rt: Runtime = RT,
+async def stats(hours: int = Query(24, ge=1, le=24 * 90), service: str | None = None, env: str | None = None, rt: Runtime = RT,
                 _: Caller = WHO):
     data = await runs.stats(hours=hours, env=env, service=service)
     upcoming = [f for f in await rt.scheduler.upcoming()
@@ -83,7 +83,7 @@ async def receive_event(source: str, request: Request, rt: Runtime = RT, who: Ca
     try:
         body = await request.json()
     except ValueError as e:
-        raise Rejected("invalid_request", "请求体需要是 JSON") from e
+        raise Rejected("invalid_request", "请求体需要是 JSON", 422) from e
     return await rt.events.receive(source, body if isinstance(body, dict) else {"data": body},
                                    dict(request.headers), who)
 

@@ -1,7 +1,7 @@
 /**
  * 应用骨架：左侧导航（含主题与退出）+ 顶栏（搜索、全局环境视角）+ 内容区。
  */
-import { type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import {
   LuActivity, LuBrain, LuChevronsLeft, LuChevronsRight, LuLayoutDashboard, LuListTodo, LuLogOut, LuMessageSquare,
   LuMonitor, LuMoon, LuSearch, LuServer, LuSettings, LuSun,
@@ -110,6 +110,8 @@ export function Logo({ className }: { className?: string }) {
 export function EnvSwitcher() {
   const { env } = useUi();
   const { data: envs } = useEnvs();
+  // 存着的视角对应的环境已经在设置里删掉了：回到全部，不然各列表按一个不存在的环境过滤、全是空的
+  useEffect(() => { if (envs && env && !envs.some((e) => e.name === env)) setUi({ env: "" }); }, [envs, env]);
   const items = [{ name: "", title: "全部" }, ...(envs ?? [])];
   return (
     <div role="group" aria-label="全局环境视角" className="inline-flex h-7 items-center rounded-md border border-line bg-sunken p-0.5">

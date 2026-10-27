@@ -87,7 +87,7 @@ function bump<T extends Ledgered>(key: string, target: T, patch: Partial<T>): T 
 
 const TOOLS: ToolInfo[] = [
   { name: "py", title: "项目内核", description: "在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: true },
-  { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、home 只露代码目录、工作目录可写、默认断网", group: "core", dangerous: true },
+  { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭", group: "core", dangerous: true },
   { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、配置内容（打码）、git 状态", group: "service", dangerous: false },
   { name: "logs", title: "看日志", description: "读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤", group: "service", dangerous: false },
   { name: "host_status", title: "主机状况", description: "部署主机的负载、内存、磁盘、大进程、docker 容器、nginx", group: "service", dangerous: false },
@@ -112,6 +112,15 @@ on("GET", "/v1/meta", () => ({
     { name: "webhook", title: "通用 Webhook", notes: "事件名放请求头 X-Event 或请求体 event", events: [{ name: "*", title: "任意事件", fields: [] }] },
   ],
 }));
+
+// ———————— 控制台登录（mock：任何非空密钥都有效；填的名字就是之后的发起人 / 修改人，不填按 root） ————————
+on("POST", "/auth/session", (_p, _q, body) => {
+  if (!String(body?.token ?? "").trim()) throw new ApiError(401, "unauthorized", "密钥无效、已吊销或已过期");
+  ME.name = String(body?.name ?? "").trim() || "root";
+  return ME;
+});
+on("GET", "/auth/session", () => ME);
+on("DELETE", "/auth/session", () => null);
 
 // ———————— 服务 ————————
 
@@ -469,6 +478,8 @@ function taskSummary(raw: Task): TaskSummary {
   const fires = raw.extends && !ownFields(raw).includes("triggers") ? [] : firesOf(t);
   return {
     ...t, overrides: ownFields(raw),
+    // 后端 model_dump 会带上输入字段的全部默认值（default 为 null、options 为 []）
+    input: Object.fromEntries(Object.entries(t.input).map(([k, f]) => [k, { required: false, description: "", default: null, options: [], ...f }])),
     stats_24h: { runs: day.length, success: day.filter((r) => r.status === "success").length, failed: day.filter((r) => r.status === "failed").length, p50_ms: durations.length ? durations[Math.floor(durations.length / 2)] : null },
     last_run: rs[0] ? { run_id: rs[0].run_id, status: rs[0].status, created_at: rs[0].created_at } : null,
     next_fire: t.enabled && fires[0] ? { env: fires[0].env, at: fires[0].at } : null,
@@ -488,13 +499,21 @@ function checkSchema(body: Partial<Task>) {
   if (s && !Object.keys(s).length) body.output_schema = null;
 }
 
+/** 形态一致性（与后端 TaskDef._form_consistency 一致）：子任务只存差异，不校验 */
+function checkForm(t: Partial<Task>) {
+  if (t.extends) return;
+  if ((t.form ?? "agent") === "agent" && !t.role) throw new ApiError(422, "invalid_definition", "单角色任务需要指定角色");
+  if (t.form === "builtin" && !t.handler) throw new ApiError(422, "invalid_definition", "内建任务需要处理器名");
+}
+
 on("GET", "/v1/tasks", (_p, q) => db.tasks.filter((t) => !q.service || t.service === q.service || t.service === "*").map(taskSummary));
 on("GET", "/v1/tasks/:name", (p) => taskSummary(findTask(p.name)));
-on("PATCH", "/v1/tasks/:name", (p, _q, body) => { checkSchema(body); return taskSummary(bump("tasks/" + p.name, findTask(p.name), body)); });
+on("PATCH", "/v1/tasks/:name", (p, _q, body) => { checkSchema(body); checkForm({ ...findTask(p.name), ...body }); return taskSummary(bump("tasks/" + p.name, findTask(p.name), body)); });
 on("POST", "/v1/tasks", (_p, _q, body) => {
   if (db.tasks.some((t) => t.name === body.name)) throw new ApiError(409, "conflict", `任务 ${body.name} 已存在`);
   checkSchema(body);
   const t = blankTask(body);
+  checkForm(t);
   db.tasks.push(t);
   return taskSummary(t);
 });
@@ -597,6 +616,7 @@ on("POST", "/v1/runs/:id/rerun", (p) => {
 on("POST", "/v1/runs/:id/resume", (p) => {
   const r = findRun(p.id);
   if (r.status !== "failed") throw new ApiError(409, "conflict", `只有失败的运行能续跑（当前 ${r.status}）`);
+  if (db.tasks.find((t) => t.name === r.task.split(":")[0])?.form !== "agent") throw new ApiError(409, "conflict", "只有单角色任务支持续跑；内建任务请用重跑");
   Object.assign(r, { status: "running", finished_at: null, _events: undefined });
   setTimeout(() => Object.assign(r, { status: "success", finished_at: now() }), 5000);
   return { run_id: r.run_id, session_id: r.session_id, status: "queued", output: null, dedup: false, subtask_created: null };
@@ -664,7 +684,8 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
   if (svc && !envEnabled(svc, env)) throw new ApiError(400, "service_env_disabled", `服务 ${service} 在 ${env} 环境已停用`);
   if (!t.enabled) throw new ApiError(400, "task_disabled", `任务 ${t.name} 已停用`);
   if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${t.name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
-  const missing = Object.entries(t.input).filter(([k, f]) => f.required && (input[k] === undefined || input[k] === "")).map(([k]) => k);
+  // 与后端 TaskDef.validate_input 一致：没给就用默认值，null / 空串都算没填
+  const missing = Object.entries(t.input).filter(([k, f]) => { const v = k in input ? input[k] : f.default; return f.required && (v == null || v === ""); }).map(([k]) => k);
   if (missing.length) throw new ApiError(400, "invalid_input", "输入不合法：" + missing.map((k) => `${k} 必填`).join("；"));
   const object = body.subtask || inlineSub;
   const name = object ? `${base}:${object}` : base;
@@ -959,31 +980,56 @@ function checkPrompts(body: Record<string, unknown>) {
   }
   if (!String(body.compaction ?? "").includes("{messages}")) throw new ApiError(422, "invalid_definition", "prompts.compaction：压缩提示必须包含 {messages}（要压缩的历史放在这里）");
 }
-on("GET", "/v1/settings", () => db.settings);
+/** 渠道 token 不回显（与后端 settings._masked 一致）；保存时传回 *** 表示不改 */
+function masked<T>(section: string, body: T): T {
+  if (section !== "notifications") return body;
+  const b = structuredClone(body) as { channels?: Record<string, { token?: string }> };
+  for (const ch of Object.values(b.channels ?? {})) if (ch.token) ch.token = "***";
+  return b as T;
+}
+/** 环境一节的校验（与后端 EnvDef / EnvsConfig 一致） */
+function checkEnvs(body: { items: { name: string }[]; default: string }) {
+  body.items.forEach((e, i) => {
+    if (!/^[a-z][a-z0-9-]{0,15}$/.test(e.name)) throw new ApiError(422, "invalid_definition", `items.${i}.name：环境名不合法：'${e.name}'（小写字母开头，可含数字与连字符）`);
+  });
+  const names = body.items.map((e) => e.name);
+  if (!names.length) throw new ApiError(422, "invalid_definition", "至少要有一个环境");
+  if (new Set(names).size !== names.length) throw new ApiError(422, "invalid_definition", "环境名重复");
+  if (!names.includes(body.default)) throw new ApiError(422, "invalid_definition", `默认环境 ${body.default} 不在环境列表里`);
+}
+on("GET", "/v1/settings", () => Object.fromEntries(SECTIONS.map((s) => [s, masked(s, db.settings[s])])));
 for (const section of SECTIONS) {
-  on("GET", `/v1/settings/${section}`, () => db.settings[section]);
+  on("GET", `/v1/settings/${section}`, () => masked(section, db.settings[section]));
   on("PUT", `/v1/settings/${section}`, (_p, _q, body) => {
     const target = db.settings[section] as unknown as Ledgered;
     const { section: _s, version: _v, updated_by: _u, updated_at: _a, ...rest } = body;
     void _s; void _v; void _u; void _a;
-    if (section === "envs") {
-      const names = (rest.items as { name: string }[]).map((e) => e.name);
-      if (!names.includes(rest.default)) throw new ApiError(422, "invalid_definition", `默认环境 ${rest.default} 不在环境列表里`);
-      db.envs.splice(0, db.envs.length, ...rest.items);
-    }
+    if (section === "envs") checkEnvs(rest);
     if (section === "notifications") {
+      const previous = db.settings.notifications.channels as Record<string, { token: string }>;
+      for (const [name, ch] of Object.entries(rest.channels as Record<string, { url: string; token: string }>)) {
+        if (!/^https?:\/\//.test(ch.url)) throw new ApiError(422, "invalid_definition", `channels.${name}.url：地址需以 http:// 或 https:// 开头`);
+        if (ch.token === "***") ch.token = previous[name]?.token ?? "";
+      }
       const missing = (rest.rules as { channel: string }[]).map((r) => r.channel).filter((c) => !(c in rest.channels));
       if (missing.length) throw new ApiError(422, "invalid_definition", `规则引用了不存在的渠道：${[...new Set(missing)].join("、")}`);
     }
     if (section === "prompts") checkPrompts(rest);
-    return bump(`settings/${section}`, target, rest);
+    const saved = bump(`settings/${section}`, target, rest);
+    // 先记版本再改 meta 的环境列表（它和这一节的 items 起初是同一个数组）
+    if (section === "envs") db.envs.splice(0, db.envs.length, ...rest.items);
+    return masked(section, saved);
   });
-  on("GET", `/v1/settings/${section}/versions`, () => versionsOf(`settings/${section}`, db.settings[section] as unknown as Record<string, unknown>));
+  on("GET", `/v1/settings/${section}/versions`, () => versionsOf(`settings/${section}`, db.settings[section] as unknown as Record<string, unknown>)
+    .map((v) => ({ ...v, definition: masked(section, v.definition) })));
   on("POST", `/v1/settings/${section}/versions/:v/restore`, (p) => {
     const target = db.settings[section] as unknown as Ledgered;
     const old = versionsOf(`settings/${section}`, target as unknown as Record<string, unknown>).find((v) => v.version === Number(p.v));
     if (!old) throw notFound("版本 " + p.v);
-    return bump(`settings/${section}`, target, old.definition as Partial<Ledgered>);
+    const restored = bump(`settings/${section}`, target, structuredClone(old.definition) as Partial<Ledgered>);
+    // 恢复环境一节：meta 里的环境列表跟着变
+    if (section === "envs") db.envs.splice(0, db.envs.length, ...(restored as unknown as { items: typeof db.envs }).items);
+    return masked(section, restored);
   });
 }
 on("POST", "/v1/settings/notifications/test", (_p, _q, body) => {

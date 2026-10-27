@@ -76,8 +76,10 @@ agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_sessi
           recall=None, save=None, on_event=None, **input_fields) -> str
 ```
 
-- 返回回答文本。运行没有成功结束时抛 `AgentError`，`code` 为 `run_failed` / `run_cancelled`。
-- 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。
+- 返回回答文本。运行没有成功结束时抛 `AgentError`，`code` 为 `run_failed` / `run_cancelled`；推流在运行结束前断开时 `code` 为
+  `stream_broken`（运行可能还在跑，`message` 里有 run id，用 `get` / `wait` 查结果）。
+- 默认续上一轮的会话，当前会话 id 在 `agent.session_id`；也可以手动赋值，续一个已有会话。续会话时没传的 `task`、`service`、`env`
+  由服务端沿用上一轮。
 - `task` 不传时，该服务专属的对话任务（声明了 `chat` 触发）优先，没有就用通用入口 `ask`；`subtask` 选用子任务（不存在会按父任务自动建）。
 - `recall` / `save` 按次覆盖记忆开关，`None` 表示跟随任务与平台默认。
 - `on_event(ev)` 可以订阅执行过程，`ev["type"]` 取值：`stage`、`model_call`（每次模型调用：耗时、token、调了哪些工具、思考）、`tool_call`、`tool_result`。子代理里发生的带 `agent` 字段。
@@ -115,7 +117,7 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 | `rerun(run_id)` | 同样的输入新开一次运行 |
 | `resume(run_id)` | 失败的运行从断点续跑 |
 | `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代上一轮沉淀的记忆 |
-| `feedback(run_id, score, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
+| `feedback(run_id, score, *, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
 
 ### 事件
 
@@ -129,7 +131,7 @@ agent.emit("webhook", {"service": "vision-board", "env": "test", "version": "1.2
 ## 幂等与去重
 
 - **幂等键**由调用方提供，解决网络重试的问题：同一个键只受理一次，重复提交返回同一个运行（`dedup: true`）。
-  键不限时间；只有失败的运行会释放这个键。
+  键最长 200 个字符，不限时间；只有失败的运行会释放这个键（定时触发的除外）。
 - **任务去重**写在任务定义里（`dedup: {key, window_s}`），解决业务重复：时间窗内同键、还在排队 / 运行中或已成功的运行直接返回它。
 
 两者是独立的两层。
@@ -161,6 +163,7 @@ except AgentError as e:
 | `trigger_not_allowed` | 任务没开放 API 调用 | 在任务定义里加 `api` 触发 |
 | `unknown_task` / `unknown_service` / `unknown_env` | 名字写错 | — |
 | `run_failed` / `run_cancelled` | `ask` 的运行没有成功结束 | 去控制台看运行详情 |
+| `stream_broken` | `ask` 的推流在运行结束前断开，运行可能还在跑 | 按 `message` 里的 run id 用 `wait` 取结果 |
 
 ## 命令行：agent-chat
 

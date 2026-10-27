@@ -167,6 +167,8 @@ while True:
     out = buf.getvalue()
     if len(out) > _LIMIT:
         out = out[:_LIMIT // 2] + "\n…[输出截断，共 %d 字符]…\n" % len(out) + out[-_LIMIT // 2:]
+    if error and len(error) > _LIMIT:
+        error = error[:_LIMIT // 2] + "\n…[截断]…\n" + error[-_LIMIT // 2:]
     _pout.write(json.dumps({"id": req["id"], "out": out, "value": value, "error": error,
                             "ms": int((time.monotonic() - t0) * 1000)}, ensure_ascii=False) + "\n")
     _pout.flush()
@@ -203,6 +205,8 @@ class KernelManager:
         self._require = require_sandbox
         self._kernels: dict[str, _Kernel] = {}
         self._reaper: asyncio.Task | None = None
+        # 查找 / 启动内核串行：同一条消息里的几个 py 调用是并发的，不能各起一个（多出来的那个没人管、占着内存）
+        self._starting = asyncio.Lock()
 
     # —— 对外 ——
 
@@ -212,42 +216,51 @@ class KernelManager:
         """spec：envspec.runtime_spec() 的结果（service/env/python/workdir/binds/hidden/allow/env_vars/digest）。
         hidden：本运行 bash 沙箱的遮蔽（所有服务的配置），和 spec 的合并。
         tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。"""
-        if restart:
-            await self.shutdown(key)
-        k = self._kernels.get(key)
         notice = ""
-        if k is not None and k.alive and k.digest != spec.get("digest", "") and not k.lock.locked():
-            await self.shutdown(key)                # 配置 / 解释器换了：import 过的还是旧的，重启
-            k = None
-            notice = "[内核已重启：本环境给 agent 的配置或解释器更新了，之前的变量已清空]\n"
-        if k is None or not k.alive:
-            k = await self._start(key, spec, hidden)
+        async with self._starting:
+            if restart:
+                await self.shutdown(key)
+            k = self._kernels.get(key)
+            if k is not None and k.alive and k.digest != spec.get("digest", "") and not k.lock.locked():
+                await self.shutdown(key)                # 配置 / 解释器换了：import 过的还是旧的，重启
+                k = None
+                notice = "[内核已重启：本环境的配置、解释器或可见范围变了，之前的变量已清空]\n"
+            if k is None or not k.alive:
+                k = await self._start(key, spec, hidden)
         tools = tools or {}
         async with k.lock:
             k.last_used = time.monotonic()
             k.seq += 1
             k.stray.clear()
             assert k.proc.stdin is not None and k.proc.stdout is not None
-            k.proc.stdin.write((json.dumps({"id": k.seq, "code": code, "timeout": timeout,
-                                            "tools": sorted(tools)}) + "\n").encode())
-            await k.proc.stdin.drain()
             deadline = time.monotonic() + timeout + 15
             calls = 0
-            while True:
-                try:
-                    line = await asyncio.wait_for(k.proc.stdout.readline(), max(1.0, deadline - time.monotonic()))
-                except (TimeoutError, asyncio.TimeoutError):
-                    await self.shutdown(key)
-                    return f"[内核无响应] 超过 {int(timeout) + 15}s 没有返回，已结束内核（变量清空，下次调用自动重启）"
-                if not line:
-                    break
-                msg = json.loads(line)
-                if "rpc" not in msg:
-                    break
-                calls += 1
-                reply = await _serve_rpc(msg, tools)
-                k.proc.stdin.write((json.dumps(reply, ensure_ascii=False, default=str) + "\n").encode())
+            line = b""
+            try:
+                k.proc.stdin.write((json.dumps({"id": k.seq, "code": code, "timeout": timeout,
+                                                "tools": sorted(tools)}) + "\n").encode())
                 await k.proc.stdin.drain()
+                while True:
+                    try:
+                        line = await asyncio.wait_for(k.proc.stdout.readline(), max(1.0, deadline - time.monotonic()))
+                    except (TimeoutError, asyncio.TimeoutError):
+                        await self.shutdown(key)
+                        return f"[内核无响应] 超过 {int(timeout) + 15}s 没有返回，已结束内核（变量清空，下次调用自动重启）"
+                    if not line:
+                        break
+                    msg = json.loads(line)
+                    if "rpc" not in msg:
+                        break
+                    calls += 1
+                    reply = await _serve_rpc(msg, tools)
+                    k.proc.stdin.write((json.dumps(reply, ensure_ascii=False, default=str) + "\n").encode())
+                    await k.proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, ValueError) as e:
+                # 内核起不来（bwrap / systemd-run 报错）或协议乱了（超长的一行、不是 JSON）：结束它，把 stderr 交给 agent
+                await asyncio.sleep(0.2)
+                await self.shutdown(key)
+                tail = "".join(k.stray)[-4000:]
+                return f"[内核出错] {type(e).__name__}: {str(e)[:300]}（变量清空，下次调用自动重启）\n{tail}".strip()
             await asyncio.sleep(0.05)                 # 让 stderr 里紧跟着的输出落进来
             if not line:
                 code_ = await k.proc.wait()
@@ -296,7 +309,7 @@ class KernelManager:
             binds = [tuple(b) for b in spec.get("binds") or []]
             masks = (set(hidden) | set(spec.get("hidden") or [])) - {dst for _, dst in binds}
             argv = bwrap_argv(argv, scratch=self._scratch, hidden=sorted(masks), allow=spec.get("allow") or (),
-                              binds=binds, workdir=workdir, net=True)
+                              binds=binds, sinks=spec.get("sinks") or (), workdir=workdir)
             lim = self._limits
             argv = limit_argv(argv, lim, memory=lim.kernel_memory if lim else "")
             env = scope_env(env, lim)
@@ -318,7 +331,10 @@ class KernelManager:
 
     async def _make_room(self) -> None:
         while len(self._kernels) >= self._max:
-            oldest = min(self._kernels.values(), key=lambda k: k.last_used)
+            idle = [k for k in self._kernels.values() if not k.lock.locked()]
+            if not idle:                              # 都在执行：不打断别人的运行
+                raise KernelError(f"项目内核已满（{self._max} 个都在执行代码），稍后再试")
+            oldest = min(idle, key=lambda k: k.last_used)
             log.info("内核数到上限 %d，回收最久没用的 %s", self._max, oldest.key)
             await self.shutdown(oldest.key)
 
@@ -342,15 +358,11 @@ def kernel_key(session_id: str, service: str, env: str) -> str:
 
 async def _drain(k: _Kernel) -> None:
     assert k.proc.stderr is not None
-    total = 0
     while True:
         chunk = await k.proc.stderr.read(65536)
         if not chunk:
             return
-        if total < 200_000:
-            text = chunk.decode(errors="replace")
-            k.stray.append(text)
-            total += len(text)
+        k.stray.append(chunk.decode(errors="replace"))   # 每次调用前清空；这里只限住单次调用里的量
         if len(k.stray) > 200:
             k.stray[:] = ["".join(k.stray)[-100_000:]]
 

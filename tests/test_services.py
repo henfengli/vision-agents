@@ -120,10 +120,15 @@ class EnvSpecTest(unittest.TestCase):
         for env in ("prod", "test"):
             (code / "conf" / f"settings-{env}.py").write_text(f"DB='real-{env}'\n")
         (code / "compose.yaml").write_text("PW=x\n")
+        conda = self.root / "conda"
+        (conda / "conda-meta").mkdir(parents=True)
+        (conda / "envs" / "vision-board" / "bin").mkdir(parents=True)
+        self.conda = conda
         self.reg = seeded_registry()
         run(self.reg.update("service", "vision-board", {
             "root": str(code), "configs": [f"{code}/conf/settings-{{env}}.py"], "hidden": [f"{code}/compose.yaml"],
-            "python": "/opt/conda/envs/vision-board/bin/python",
+            "python": str(conda / "envs" / "vision-board" / "bin" / "python"),
+            "logs": {"app": f"{code}/app.log", "web": "docker:board-web"},
         }, "test"))
         self.code = code
         self.key = f"{code}/conf/settings-{{env}}.py"
@@ -148,7 +153,9 @@ class EnvSpecTest(unittest.TestCase):
         self.assertIn(f"{self.code}/compose.yaml", spec["hidden"])
         self.assertNotIn(dst, spec["hidden"])
         self.assertIn(str(self.code), spec["allow"])
-        self.assertIn("/opt/conda", spec["allow"])                   # conda 环境连同 conda 根目录
+        self.assertIn(str(self.conda), spec["allow"])                # conda 环境连同 conda 根目录（有 conda-meta）
+        self.assertEqual(spec["sinks"], [f"{self.code}/app.log"])    # 项目自己写的日志：内核里换成可写的 /dev/null
+        self.assertIn(os.path.expanduser("~/.config/agent-platform"), spec["hidden"])   # 平台密钥目录总是遮
         changed = self._spec({("vision-board", "prod", self.key): {"version": 4, "content": "DB='readonly2'\n"}}, "prod")
         self.assertNotEqual(spec["digest"], changed["digest"])        # 配置换了版本，内核要重启
 

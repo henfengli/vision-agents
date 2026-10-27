@@ -35,23 +35,33 @@ fi
 # 1. 代码与数据目录
 mkdir -p "$APP" "$DATA"/{scratch,assets,agent-conf} "$SECRETS_DIR" "$UNITS" "$HOME/.local/bin"
 chmod 700 "$SECRETS_DIR" "$DATA/agent-conf"
+# 整份替换（仓库里删掉的模块不留在旧拷贝和构建目录里）；仓库里没有构建好的控制台时，保留上一次装好的
+DIST="$APP/src/agent_platform/webui/dist"
+OLD_DIST="$APP/.webui-dist.old"
+rm -rf "$OLD_DIST"
+[ -d "$DIST" ] && mv "$DIST" "$OLD_DIST"
+rm -rf "$APP/src" "$APP/conf" "$APP/mcp_servers" "$APP/build"
 cp -r "$REPO"/src "$REPO"/conf "$REPO"/mcp_servers "$REPO"/pyproject.toml "$APP"/
+if [ ! -f "$DIST/index.html" ] && [ -d "$OLD_DIST" ]; then rm -rf "$DIST"; mv "$OLD_DIST" "$DIST"; fi
+rm -rf "$OLD_DIST"
 
-# 2. 控制台前端：仓库里有构建好的 dist 就直接用；没有且装了 node 就现场构建
-if [ ! -f "$APP/src/agent_platform/webui/dist/index.html" ] && command -v npm >/dev/null; then
-  (cd "$REPO/web" && npm ci && npm run build) && cp -r "$REPO/src/agent_platform/webui/dist" "$APP/src/agent_platform/webui/"
+# 2. 控制台前端：装了 node 就按当前代码现场构建（构建产物不进仓库，git pull 之后要重新构建）；没有 node 就用已有的
+if command -v npm >/dev/null; then
+  (cd "$REPO/web" && npm ci && npm run build) && rm -rf "$DIST" && cp -r "$REPO/src/agent_platform/webui/dist" "$DIST"
 fi
+[ -f "$DIST/index.html" ] || echo "!! 没有控制台前端：装 Node.js 后重跑，或把别处构建好的 src/agent_platform/webui/dist 拷进仓库再重跑"
 
-# 3. Python 依赖（之前用旧 Python 建过的 venv 重建）
+# 3. Python 依赖（之前用旧 Python 建过的 venv 重建）。mcp：服务 MCP 工具；dagster-mcp：仓库自带的 dagster MCP server
 if [ -x "$APP/venv/bin/python" ] && ! ok_python "$APP/venv/bin/python"; then rm -rf "$APP/venv"; fi
 [ -x "$APP/venv/bin/python" ] || "$PY" -m venv "$APP/venv"
-"$APP/venv/bin/pip" install -q "$APP"
+"$APP/venv/bin/pip" install -q "$APP[mcp,dagster-mcp]"
 
-# 4. 前置检查（只提示，不中断）
+# 4. 前置检查（只提示，不中断）：用平台实际用到的参数试一遍
 if ! command -v bwrap >/dev/null; then
   echo "!! 缺少 bubblewrap（bwrap）：没有它平台不执行模型写的代码（require_sandbox）。"
   echo "   请管理员装（RHEL / Rocky：dnf install -y bubblewrap），或自己从系统包里取出 bwrap 放进 ~/.local/bin（部署指南 §3.0）"
-elif ! bwrap --ro-bind / / --unshare-pid --as-pid-1 --unshare-net true 2>/dev/null; then
+elif ! bwrap --ro-bind / / --tmpfs "$HOME" --dev /dev --proc /proc --tmpfs /tmp --die-with-parent \
+       --unshare-pid --unshare-ipc --new-session --as-pid-1 true 2>/dev/null; then
   echo "!! bwrap 不能以普通用户建命名空间："
   echo "   RHEL / Rocky：/proc/sys/user/max_user_namespaces 是 $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo ?)，为 0 时请管理员调大（写进 /etc/sysctl.d/）"
   echo "   Ubuntu 24.04+：请管理员设 kernel.apparmor_restrict_unprivileged_userns=0，或给 bwrap 配 AppArmor profile"
@@ -61,8 +71,14 @@ CG="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.c
 if [ -r "$CG" ] && ! grep -qw memory "$CG"; then
   echo "!! systemd 没有把 memory 控制器委派给用户：内核与 bash 的内存上限不生效。"
   echo "   请管理员加 /etc/systemd/system/user@.service.d/delegate.conf：[Service] Delegate=memory pids cpu，然后 systemctl daemon-reload"
+elif [ -r "$CG" ] && ! grep -qw cpu "$CG"; then
+  echo "提示：cpu 控制器没有委派给用户，agent.slice 的 CPUWeight 不生效（CPU 本来就不限，只是抢 CPU 时不会让着线上服务）"
 fi
-command -v systemd-run >/dev/null || echo "!! 没有 systemd-run：资源上限（limits）用不了，在 local.yaml 里设 limits.enabled: false"
+if ! command -v systemd-run >/dev/null; then
+  echo "!! 没有 systemd-run：资源上限（limits）用不了，在 local.yaml 里设 limits.enabled: false"
+elif ! systemd-run --user --scope --quiet --collect -p MemoryMax=64M -p MemorySwapMax=0 -p TasksMax=16 true 2>/dev/null; then
+  echo "!! systemd-run --user --scope 起不来：内核与 bash 会执行失败。先确认 linger 已开、能 systemctl --user status（部署指南 §3.0）"
+fi
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q '=yes'; then
   loginctl enable-linger "$USER" 2>/dev/null && echo "已开启 linger（退出登录后服务照常运行）" || \
     echo "!! 开不了 linger（本机策略不允许自己开）：退出登录后 systemd --user 会停。请管理员执行一次：loginctl enable-linger $USER"
@@ -76,8 +92,8 @@ command -v docker >/dev/null && ! docker ps >/dev/null 2>&1 && \
 
 # 5. systemd 用户单元（AGENT_ENV=prod）
 cp "$REPO/deploy/user/agent-platform.service" "$REPO/deploy/user/agent.slice" "$UNITS"/
-rm -f "$UNITS/agent-svc@.service"            # 旧版的业务进程模板单元（同机部署不再起业务进程）
 systemctl --user daemon-reload
 systemctl --user enable agent-platform
-systemctl --user restart agent-platform          # 首次即启动；重装时让新代码生效
+# 首次即启动；重装时让新代码生效。起不来（secrets.env、local.yaml 还没写好）不中断脚本，看下面的状态和日志
+systemctl --user restart agent-platform || echo "!! 启动失败：journalctl --user -u agent-platform -n 50 看原因"
 systemctl --user --no-pager status agent-platform || true

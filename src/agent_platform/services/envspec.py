@@ -29,7 +29,7 @@ def _tag(service: str, env: str, key: str) -> str:
 
 
 def materialize(conf_dir: str, service: str, env: str, key: str, path: str, content: str) -> str:
-    """把给 agent 的配置写到本机（内容没变不重写，已经 bind 进内核的文件不换 inode）。→ 本机文件路径。"""
+    """把给 agent 的配置写到本机（内容没变不重写）。→ 本机文件路径。"""
     d = os.path.join(conf_dir, service, env)
     os.makedirs(d, mode=0o700, exist_ok=True)
     file = os.path.join(d, f"{_tag(service, env, key)}-{os.path.basename(path) or 'config'}")
@@ -40,23 +40,29 @@ def materialize(conf_dir: str, service: str, env: str, key: str, path: str, cont
                 return file
     except FileNotFoundError:
         pass
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(file, flags, 0o600)
+    # 写临时文件再换名：正在跑的内核 bind 的还是旧文件（旧 inode），不会读到写了一半的内容；下次调用按摘要重启
+    tmp = f"{file}.tmp{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
+    os.replace(tmp, file)
     return file
 
 
 def python_dirs(python: str) -> list[str]:
-    """解释器所在的环境目录（conda 环境再带上 conda 根目录：包可能是硬链接或软链接到 pkgs/）。"""
-    real = os.path.realpath(python) if os.path.exists(python) else python
-    if not (real.startswith("/") or os.path.isabs(real)):
+    """解释器所在的环境目录（写的路径和解析软链接后的都要：venv 的 python 常是软链接）；
+    conda 环境再带上 conda 根目录（包可能硬链接或软链接到 pkgs/），以有 conda-meta 为准。"""
+    if not (python.startswith("/") or os.path.isabs(python)):
         return []
-    prefix = os.path.dirname(os.path.dirname(real))
-    out = [prefix]
-    if "/envs/" in prefix:
-        out.append(prefix.split("/envs/")[0])
-    return out
+    out: list[str] = []
+    for p in dict.fromkeys([python, *([os.path.realpath(python)] if os.path.exists(python) else [])]):
+        prefix = os.path.dirname(os.path.dirname(p))              # …/envs/<名字>/bin/python → …/envs/<名字>
+        out.append(prefix)
+        envs_dir = os.path.dirname(prefix)
+        root = os.path.dirname(envs_dir) if os.path.basename(envs_dir) == "envs" else ""
+        if root and os.path.isdir(os.path.join(root, "conda-meta")):
+            out.append(root)
+    return list(dict.fromkeys(out))
 
 
 def check_serves(settings: Settings, view: ServiceView) -> None:
@@ -81,7 +87,7 @@ async def sandbox_paths(registry: Registry, settings: Settings, env: str) -> tup
     """bash 沙箱：(遮蔽, home 下挂回的目录)。遮蔽各服务的配置文件（按 masked_configs）；挂回本主机负责的各服务的
     代码目录（跨服务排查要能读别的服务的代码）与方法目录。"""
     envs = (await registry.envs()).items
-    hidden = set(settings.hidden_paths) | {settings.agent_conf_dir}
+    hidden = set(settings.always_hidden)
     allow = {settings.assets_dir, *map(os.path.expanduser, settings.home_allow)}
     for s in await registry.services():
         hidden |= masked_configs(s.spec, env, envs)
@@ -116,11 +122,13 @@ async def runtime_spec(registry: Registry, settings: Settings, service: str, env
         binds.append((src, c["path"]))
         versions.append(f"{c['key']}@{row['version']}")
     others = masked_configs(entry.spec, env, envs) - {dst for _, dst in binds}
-    hidden = sorted(set(settings.hidden_paths) | {settings.agent_conf_dir} | others)
+    hidden = sorted(settings.always_hidden | others)
     allow = sorted({p for p in (view.root, *view.code_paths) if p} | set(python_dirs(view.python))
                    | {settings.assets_dir} | {os.path.expanduser(p) for p in settings.home_allow})
-    digest = hashlib.sha1(json.dumps([view.python, protected, versions, view.env_vars, view.root], sort_keys=True)
-                          .encode()).hexdigest()[:12]
+    # 服务声明的日志文件：项目自己往里写（Django 的文件日志一配置就打开），内核里换成可写的 /dev/null，免得 import 就报只读
+    sinks = sorted(t for t in view.logs.values() if not t.startswith("docker:"))
+    digest = hashlib.sha1(json.dumps([view.python, protected, versions, view.env_vars, view.root, hidden, allow, sinks],
+                                     sort_keys=True).encode()).hexdigest()[:12]
     return {"service": service, "env": env, "python": view.python, "env_vars": view.env_vars,
-            "workdir": view.root or None, "binds": binds, "hidden": hidden, "allow": allow, "digest": digest,
-            "protected": protected}
+            "workdir": view.root or None, "binds": binds, "hidden": hidden, "allow": allow, "sinks": sinks,
+            "digest": digest, "protected": protected}

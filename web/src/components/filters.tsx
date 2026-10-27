@@ -15,6 +15,16 @@ export function ServiceFilter({ value, onChange, includeNone }: { value: string;
   return <FilterSelect label="服务" allLabel="全部" value={value} onChange={onChange} options={options} />;
 }
 
+/**
+ * 列表页 URL 上的 env：不写 = 跟随顶栏的全局环境视角；ANY_ENV = 这个列表明确看全部环境
+ * （顶栏选了某个环境时，筛选里选「全部」也要真的放开）。环境名必须小写字母开头，不会撞上它。
+ */
+export const ANY_ENV = "_all";
+/** URL 参数 → 实际按哪个环境过滤（"" = 不限） */
+export const envOf = (param: string | undefined, globalEnv: string): string => (param === ANY_ENV ? "" : param ?? globalEnv);
+/** 筛选里选的值 → 写回 URL 的参数 */
+export const envParam = (picked: string, globalEnv: string): string | undefined => picked || (globalEnv ? ANY_ENV : undefined);
+
 /** includeShared：记忆按服务分区，env 为空的条目对所有环境成立——选某个环境 = 该环境的 + 通用的；"*" = 只看通用的 */
 export function EnvFilter({ value, onChange, includeShared }: { value: string; onChange: (v: string) => void; includeShared?: boolean }) {
   const { data } = useEnvs();

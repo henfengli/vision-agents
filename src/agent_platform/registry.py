@@ -206,7 +206,7 @@ class Registry:
         return spec.model_dump(mode="json", exclude_unset=diff_only)
 
     async def create(self, kind: Kind, name: str, body: dict, by: str) -> Entry:
-        if await self.store.get(kind, name) is not None:
+        if await self.store.get(kind, name, fresh=True) is not None:
             raise Rejected.conflict(f"{LABELS[kind]} {name} 已存在")
         spec = self._validate(MODELS[kind], _strip(body))
         await self._check(kind, name, spec)
@@ -214,8 +214,8 @@ class Registry:
         return await self.entry(kind, name)  # type: ignore[return-value]
 
     async def update(self, kind: Kind, name: str, patch: dict, by: str) -> Entry:
-        """局部更新：patch 里出现的顶层字段整体替换，没出现的保持不变。"""
-        current = await self.store.get(kind, name)
+        """局部更新：patch 里出现的顶层字段整体替换，没出现的保持不变（合并到库里的最新版本上，不用缓存）。"""
+        current = await self.store.get(kind, name, fresh=True)
         if current is None:
             raise Rejected.not_found(f"{LABELS[kind]} {name}")
         spec = self._validate(MODELS[kind], {**current["definition"], **_strip(patch)})

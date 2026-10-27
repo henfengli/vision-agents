@@ -253,7 +253,8 @@ def _clickhouse(url: str, sql: str, sink_of) -> Result:
         try:
             return fetch(True)
         except Exception as e:  # noqa: BLE001 —— 账号本身是 readonly=1 时不许带任何设置：去掉重试
-            if "readonly" not in str(e).lower():
+            # 只认"改不了设置"这一种；查询里自己写了 SETTINGS 的不重试（不然 SETTINGS readonly=0 就绕过了 readonly=2）
+            if "cannot modify" not in str(e).lower() or re.search(r"\bsettings\b", sql, re.IGNORECASE):
                 raise
             out = fetch(False)
             out.note = "（账号是 readonly=1，不能带超时与行数上限的设置，按账号自己的限制执行）"

@@ -26,7 +26,7 @@ kernel:
 
 # 模型写的代码（项目内核、bash）各跑在一个 systemd 用户 scope 里：内存超了只杀它自己，不波及线上服务。
 # 只管内存，CPU 不设上限。生产机和测试机内存一样，所有主机用同一组固定值。
-# 生产 / 测试主机打开（prod.yaml）；全部 scope 和平台本身在 agent.slice 里，内存总上限 64G（deploy/user/agent.slice）
+# 生产 / 测试主机打开（prod.yaml）；这些 scope 都在 agent.slice 里，合计最多 64G（deploy/user/agent.slice）；平台进程不在里面
 limits:
   enabled: false
   kernel_memory: 32G                # 每个项目内核

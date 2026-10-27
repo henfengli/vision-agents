@@ -72,7 +72,7 @@ export function OverviewPage() {
             <ul className="divide-y divide-line">
               {stats.top_failures.map((f) => (
                 <li key={f.task + f.service}>
-                  <Link to={`/runs?status=failed&task=${encodeURIComponent(f.task)}${f.service ? "&service=" + f.service : ""}`} className="block px-4 py-2.5 hover:bg-hover/70">
+                  <Link to={`/runs?status=failed&hours=${hours}&task=${encodeURIComponent(f.task)}${f.service ? "&service=" + encodeURIComponent(f.service) : ""}`} className="block px-4 py-2.5 hover:bg-hover/70">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-[13px] font-medium text-fg">{f.task}</span>
                       {f.service && <span className="truncate text-xs text-fg-3">{f.service}</span>}

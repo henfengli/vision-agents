@@ -247,7 +247,8 @@ class Pipeline:
         d = self._d
         if await _cancelled(spec.run_id):
             return
-        await runs.set_status(spec.run_id, "success", output=output, resolution=resolution)
+        if not await runs.set_status(spec.run_id, "success", output=output, resolution=resolution):
+            return                     # 期间被取消或被判成孤儿：结果不再算数
         if resolution == "rule":
             await runs.log_event(spec.run_id, "final", {"content": output.get("answer", "")})
         try:
@@ -269,8 +270,8 @@ class Pipeline:
         if await _cancelled(spec.run_id):
             return
         await runs.log_event(spec.run_id, "error", {"title": code, "content": message[:4000]})
-        await runs.set_status(spec.run_id, "failed", output={"error": message[:4000]}, error_code=code)
-        await _announce(self._d, spec, "run_failed", "运行失败", f"`{code}` {message[:1200]}")
+        if await runs.set_status(spec.run_id, "failed", output={"error": message[:4000]}, error_code=code):
+            await _announce(self._d, spec, "run_failed", "运行失败", f"`{code}` {message[:1200]}")
 
     async def deliver(self, spec: RunSpec) -> None:
         """按任务声明把终态结果推出去（通知渠道 / HTTP 回调）。重试 3 次；失败只留事件，不改运行结果。"""

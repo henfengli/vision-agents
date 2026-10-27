@@ -41,9 +41,10 @@ class DefinitionStore:
 
     # —— 读 ——
 
-    async def get(self, kind: Kind, name: str) -> dict | None:
-        """生效版本：{name, version, definition, updated_by, updated_at}；不存在或已删除返回 None。"""
-        hit = self._cached((kind, name))
+    async def get(self, kind: Kind, name: str, *, fresh: bool = False) -> dict | None:
+        """生效版本：{name, version, definition, updated_by, updated_at}；不存在或已删除返回 None。
+        fresh：跳过缓存（判断"存不存在"时用：缓存是每个进程的，别的主机刚建的这里可能还没看到）。"""
+        hit = None if fresh else self._cached((kind, name))
         if hit is not None:
             return hit or None
         async with pool().connection() as conn:

@@ -59,7 +59,7 @@ class ListenConfig(BaseModel):
 class WorkerConfig(BaseModel):
     """执行队列（runs 表）的消费端：同时执行几个运行。"""
 
-    max_concurrent_runs: int = 10
+    max_concurrent_runs: int = 4
 
 
 class KernelConfig(BaseModel):
@@ -71,7 +71,8 @@ class KernelConfig(BaseModel):
 
 class LimitsConfig(BaseModel):
     """模型生成的代码（项目内核、bash）各自跑在一个 systemd 用户 scope 里，内存超了只杀这个 scope，线上服务不受影响。
-    全部 scope 和平台本身都在 slice 里（deploy/user/agent.slice 再设内存总上限 64G）。enabled=false（开发机）时不套 scope。
+    这些 scope 都在 slice 里（deploy/user/agent.slice 再设内存总上限 64G）；平台进程不在里面，slice 满了杀不到它。
+    enabled=false（开发机）时不套 scope。
     只管内存：CPU 不设上限（slice 的 CPUWeight 低，抢 CPU 时让着线上服务）。生产机和测试机内存一样，所有主机用同一组固定值。"""
 
     enabled: bool = False
@@ -149,6 +150,13 @@ class Settings(BaseModel):
     def agent_conf_dir(self) -> str:
         """给 agent 用的只读版配置（存库，内核启动前写到这里再 bind 到项目读的路径）。700。"""
         return os.path.join(self.data_dir, "agent-conf")
+
+    @property
+    def always_hidden(self) -> set[str]:
+        """沙箱里总是遮蔽的：hidden_paths、给 agent 的配置落地目录、平台自己的密钥目录、~/.ssh。
+        home 本来就换成了空目录，后两个只在有人把它们的上级写进 home_allow 时才起作用。"""
+        return {*self.hidden_paths, self.agent_conf_dir,
+                os.path.expanduser("~/.config/agent-platform"), os.path.expanduser("~/.ssh")}
 
     @property
     def seeds_dir(self) -> Path:

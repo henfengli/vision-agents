@@ -9,12 +9,13 @@ import { LuFlaskConical, LuMessageSquareWarning } from "react-icons/lu";
 import { useFeedbackInbox, useMeta, useTasks } from "@/api/hooks";
 import type { FeedbackFilters, ReplayRequest } from "@/api/types";
 import { FeedbackItem } from "@/components/feedback";
-import { EnvFilter, FilterBar, ServiceFilter } from "@/components/filters";
+import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { EnvBadge, RunStatusDot } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { FilterSelect, Segmented } from "@/components/ui/form";
 import { Card, Empty, SkeletonRows } from "@/components/ui/primitives";
 import { Link } from "@/lib/router";
+import { useUi } from "@/lib/store";
 import { StartReplayDialog } from "./replays";
 
 export type InboxSearch = { score: string; service: string; env: string; task: string; reason: string; hours: string };
@@ -23,23 +24,27 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
   const { data: meta } = useMeta();
   const { data: tasks } = useTasks();
   const [replaying, setReplaying] = useState(false);
+  const { env: globalEnv } = useUi();
+  /** 环境和「运行」标签一样默认跟随顶栏的全局环境视角 */
+  const env = envOf(s.env, globalEnv);
   const score = s.score ?? "-1";
   const filters: FeedbackFilters = {
-    score: score === "all" ? undefined : (Number(score) as 1 | -1), service: s.service, env: s.env, task: s.task, reason: s.reason,
+    score: score === "all" ? undefined : (Number(score) as 1 | -1), service: s.service, env: env || undefined, task: s.task, reason: s.reason,
     hours: Number(s.hours) || undefined,
   };
   const { data, loading } = useFeedbackInbox(filters);
   const active = !!(s.service || s.env || s.task || s.reason);
   /** 重放只看 👎：带上服务 / 环境 / 任务 / 时间筛选（问题类型不参与选样） */
   const preset: ReplayRequest = {
-    ...(s.task ? { task: s.task } : {}), ...(s.service ? { service: s.service } : {}), ...(s.env ? { env: s.env } : {}),
+    ...(s.task ? { task: s.task } : {}), ...(s.service ? { service: s.service } : {}), ...(env ? { env } : {}),
     ...(Number(s.hours) ? { hours: Number(s.hours) } : {}),
   };
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Segmented size="sm" value={score} onChange={(v) => set({ score: v })} options={[
+        {/* 👍 没有问题类型：切过去时把问题筛选一起清掉，否则列表被看不见的筛选清空 */}
+        <Segmented size="sm" value={score} onChange={(v) => set({ score: v, ...(v === "1" ? { reason: undefined } : {}) })} options={[
           { value: "-1", label: "👎 有问题" }, { value: "1", label: "👍 有用" }, { value: "all", label: "全部" },
         ]} />
         <Segmented size="sm" value={s.hours ?? ""} onChange={(v) => set({ hours: v || undefined })} options={[
@@ -47,7 +52,7 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
         ]} />
         <FilterBar active={active} onClear={() => set({ service: undefined, env: undefined, task: undefined, reason: undefined })}>
           <ServiceFilter value={s.service ?? ""} onChange={(v) => set({ service: v })} />
-          <EnvFilter value={s.env ?? ""} onChange={(v) => set({ env: v })} />
+          <EnvFilter value={env} onChange={(v) => set({ env: envParam(v, globalEnv) })} />
           <FilterSelect label="任务" allLabel="全部" value={s.task ?? ""} onChange={(v) => set({ task: v })}
             options={(tasks ?? []).filter((t) => !t.extends).map((t) => ({ value: t.name, label: t.name, hint: t.title }))} />
           {score !== "1" && <FilterSelect label="问题" allLabel="全部" value={s.reason ?? ""} onChange={(v) => set({ reason: v })}

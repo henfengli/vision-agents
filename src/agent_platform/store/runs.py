@@ -65,10 +65,10 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
 # ———————— 执行队列 ————————
 
 async def enqueue(run_id: str, *, resume: bool = False) -> None:
-    """把一个已有的运行放回队列（续跑），并叫醒 worker。"""
+    """把一个已有的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉。"""
     async with db.pool().connection() as conn:
-        await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL WHERE run_id=%s",
-                           (resume, run_id))
+        await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL, error_code=NULL,"
+                           " finished_at=NULL, duration_ms=NULL WHERE run_id=%s", (resume, run_id))
         await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
 
@@ -93,26 +93,42 @@ async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str
     return row[0] if row else None
 
 
-async def heartbeat(run_ids: list[str]) -> None:
-    if run_ids:
-        async with db.pool().connection() as conn:
-            await conn.execute("UPDATE runs SET heartbeat_at=now() WHERE run_id = ANY(%s)", (run_ids,))
+async def heartbeat(worker: str, run_ids: list[str]) -> set[str]:
+    """刷新本 worker 正在执行的运行的心跳（只刷还归它、还在执行的）。
+    → 应该停下的：已被取消、被判成孤儿，或已由别的 worker 认领（取消通知漏了也能收住）。
+    已经落了 success 还在做收尾（沉淀记忆、投递）的不算。"""
+    if not run_ids:
+        return set()
+    async with db.pool().connection() as conn:
+        await conn.execute("UPDATE runs SET heartbeat_at=now() WHERE run_id = ANY(%s) AND worker=%s AND status='running'",
+                           (run_ids, worker))
+        cur = await conn.execute(
+            "SELECT run_id FROM runs WHERE run_id = ANY(%s)"
+            " AND (status='cancelled' OR error_code='orphaned' OR worker IS DISTINCT FROM %s)", (run_ids, worker))
+        return {r[0] for r in await cur.fetchall()}
 
 
-async def orphaned(stale_s: int) -> list[str]:
-    """执行中却很久没心跳的运行（执行进程崩溃或被杀）。"""
+async def fail_orphans(stale_s: int) -> list[str]:
+    """执行中却很久没心跳的运行（执行进程崩溃或被杀）一步标成失败。→ 这次标掉的。
+    各台主机的维护循环都会跑：一条 UPDATE 完成，同一条只会被一台标一次。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id FROM runs WHERE status='running'"
-            " AND heartbeat_at IS NOT NULL AND heartbeat_at < now() - make_interval(secs => %s)", (stale_s,))
-        return [r[0] for r in await cur.fetchall()]
+            "UPDATE runs SET status='failed', error_code='orphaned', output='{\"error\": \"执行进程中断\"}'::jsonb,"
+            " finished_at=now(),"
+            " duration_ms=(EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
+            " WHERE status='running' AND heartbeat_at IS NOT NULL"
+            " AND heartbeat_at < now() - make_interval(secs => %s) RETURNING run_id", (stale_s,))
+        ids = [r[0] for r in await cur.fetchall()]
+        for run_id in ids:
+            await conn.execute("SELECT pg_notify('run_events', %s)", (run_id,))
+        return ids
 
 
 async def active_of_trigger(task: str, trigger_id: str, env: str) -> str | None:
     """同一个定时触发器在同一环境还没跑完的运行（定时不重叠）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id FROM runs WHERE task=%s AND trigger_id=%s AND env=%s"
+            "SELECT run_id FROM runs WHERE task=%s AND trigger_type='schedule' AND trigger_id=%s AND env=%s"
             " AND status IN ('queued','running') LIMIT 1", (task, trigger_id, env))
         row = await cur.fetchone()
     return row[0] if row else None
@@ -126,21 +142,23 @@ async def get(run_id: str) -> dict | None:
 
 
 async def set_status(run_id: str, status: str, *, output: dict | None = None, resolution: str | None = None,
-                     error_code: str | None = None, tokens: int | None = None) -> None:
-    """改状态；首次 running 落 started_at，终态落 finished_at 与耗时。"""
-    terminal = status in ("success", "failed", "cancelled")
+                     error_code: str | None = None, tokens: int | None = None) -> bool:
+    """改成终态，落 finished_at 与耗时。只改还在排队 / 执行中的：已经结束的（比如刚被取消、被判成孤儿）不再覆盖。
+    → 改到了没有。改完 pg_notify('run_events')：推流的一方马上收尾，不用等下一次保活。"""
     async with db.pool().connection() as conn:
-        await conn.execute(
+        cur = await conn.execute(
             "UPDATE runs SET status=%s,"
             " output=COALESCE(%s::jsonb, output), resolution=COALESCE(%s, resolution),"
             " error_code=COALESCE(%s, error_code), tokens=COALESCE(%s, tokens),"
-            " started_at=CASE WHEN %s='running' AND started_at IS NULL THEN now() ELSE started_at END,"
-            " finished_at=CASE WHEN %s THEN now() ELSE finished_at END,"
-            " duration_ms=CASE WHEN %s THEN (EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
-            "   ELSE duration_ms END"
-            " WHERE run_id=%s",
+            " finished_at=now(),"
+            " duration_ms=(EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
+            " WHERE run_id=%s AND status IN ('queued','running') RETURNING run_id",
             (status, json.dumps(output, ensure_ascii=False, default=str) if output is not None else None,
-             resolution, error_code, tokens, status, terminal, terminal, run_id))
+             resolution, error_code, tokens, run_id))
+        changed = await cur.fetchone() is not None
+        if changed:
+            await conn.execute("SELECT pg_notify('run_events', %s)", (run_id,))
+    return changed
 
 
 async def set_recipe(run_id: str, task_version: int | None, role_version: int | None, recipe: dict) -> None:
@@ -176,7 +194,9 @@ async def find_idempotent(key: str) -> dict | None:
     if not row:
         return None
     r = _row(cur, row)
-    if r["status"] == "failed":
+    # 失败的运行释放唯一键，允许调用方重提。定时触发除外：各台主机都会按同一个键触发同一个时刻，
+    # 释放了，第一台跑失败后别的主机会把这一刻再触发一遍
+    if r["status"] == "failed" and not key.startswith("schedule:"):
         async with db.pool().connection() as conn:   # 释放唯一键，允许重提
             await conn.execute("UPDATE runs SET idempotency_key=NULL WHERE run_id=%s", (r["run_id"],))
         return None
