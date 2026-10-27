@@ -88,6 +88,9 @@ function bump<T extends Ledgered>(key: string, target: T, patch: Partial<T>): T 
 const TOOLS: ToolInfo[] = [
   { name: "py", title: "项目内核", description: "在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: true },
   { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭", group: "core", dangerous: true },
+  { name: "read", title: "读文件", description: "带行号读文件、按 offset 翻页，或列目录；能读什么和 bash 一样", group: "core", dangerous: false },
+  { name: "grep", title: "搜代码", description: "在代码里按正则搜（ripgrep），返回 文件:行号:内容；在 bash 的沙箱里跑", group: "core", dangerous: false },
+  { name: "todo", title: "待办", description: "多步任务的待办清单，运行详情里显示给人看", group: "core", dangerous: false },
   { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、配置内容（打码）、git 状态", group: "service", dangerous: false },
   { name: "logs", title: "看日志", description: "读本服务本环境线上的日志（文件 / docker 容器 / systemd 单元），按行数取尾部或在整个文件里按正则搜", group: "service", dangerous: false },
   { name: "host_status", title: "主机状况", description: "部署主机的负载、内存、磁盘、大进程；本服务的进程、监听端口、crontab、容器资源；nginx", group: "service", dangerous: false },

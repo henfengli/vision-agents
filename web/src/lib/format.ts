@@ -35,9 +35,10 @@ export function duration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${Math.round(s % 60)}s`;
+  if (s < 59.5) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  const t = Math.round(s);          // 先取整再拆分，免得出现 "1m 60s"
+  const m = Math.floor(t / 60);
+  if (m < 60) return `${m}m ${t % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 

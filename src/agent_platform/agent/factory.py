@@ -22,21 +22,51 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from ..config import Settings
 from ..domain import PromptsConfig, Rejected, ResolvedRole
 from ..store import runs
+from . import scope as run_scope
 from .tools.catalog import Toolbox
 
 log = logging.getLogger(__name__)
 
 SUBMIT_TOOL = "submit_result"
 _ACCEPTED = "已收到结构化结果"
-# LangGraph 的步数上限（每次模型调用、每批工具调用各算一步）：一次运行最多约 100 轮"想 → 调工具"
-STEP_LIMIT = 200
-SUBAGENT_STEP_LIMIT = 120
+
+# 模型调用次数上限（一次"想 → 调工具"算一次）。到了不报错：停用工具，让 agent 交代查到了什么、还剩什么（ExecutionGuard）。
+MODEL_CALL_LIMIT = 80
+SUBAGENT_MODEL_CALL_LIMIT = 40
+# LangGraph 的步数上限只是兜底（每轮约 3 个节点：压缩检查、模型、工具），正常情况下先到上面的次数上限
+STEP_LIMIT = MODEL_CALL_LIMIT * 3 + 40
+SUBAGENT_STEP_LIMIT = SUBAGENT_MODEL_CALL_LIMIT * 3 + 30
+
+WRAP_UP = ("[步数用完] 这次运行的模型调用次数已到上限，工具已停用。不要再调用工具，直接用文字回答：\n"
+           "1. 已经查明的事实和依据（命令输出、SQL、代码位置）；\n2. 结论（证据不足的标为推测）；\n"
+           "3. 还没做完的事和建议的下一步。")
+WRAP_UP_SUBMIT = (f"[步数用完] 这次运行的模型调用次数已到上限，除了 {SUBMIT_TOOL} 其他工具都已停用。"
+                  f"用目前查到的调用 {SUBMIT_TOOL} 交回结构化结果（拿不准的按字段说明标出），交完再用文字简述："
+                  "查明了什么、结论（证据不足的标为推测）、还没做完的事。")
+
+# 修剪旧的工具输出（参照 Kilo Code 的 prune）：最近的工具输出原样保留，更早的换成一行说明，省上下文
+PRUNE_KEEP_LAST = 6            # 最近这么多条工具结果不动
+PRUNE_PROTECT_CHARS = 60_000   # 从后往前累计到这么多字之后的才修剪
+PRUNE_MIN_CHARS = 20_000       # 能省下的不到这么多就不修剪（修剪会改变提示前缀，少动为好）
+PRUNE_SKIP = ("todo", "task", SUBMIT_TOOL)      # task：子代理的结论，重查要重跑整个子代理
+
+# 重复调用（参照 Kilo Code 的 doom loop）：同一工具同样参数、结果也一样，连续第 3 次提醒，第 5 次不再执行
+REPEAT_WARN = 3
+REPEAT_BLOCK = 5
+REPEAT_SKIP = ("todo",)
+_REPEAT_NOTE = "\n\n[注意] "
+_BLOCKED = "[重复调用] "
+
+# 这次执行的模型调用计数（主 agent 一份，每个子代理调用各一份；contextvar：并发的子代理互不影响）
+_BUDGET: ContextVar[dict | None] = ContextVar("model_call_budget", default=None)
 
 
 def system_prompt(role: ResolvedRole, subagents: list[ResolvedRole], prompts: PromptsConfig,
@@ -129,7 +159,7 @@ class AgentFactory:
 
     def _middleware(self, model: Any, prompts: PromptsConfig) -> list:
         from langchain.agents.middleware import SummarizationMiddleware
-        return [_patch_middleware(),
+        return [_patch_middleware(), _guard_middleware(),
                 SummarizationMiddleware(model, trigger=("tokens", int(self._s.model.context_tokens * 0.75)),
                                         keep=("messages", 20), summary_prompt=prompts.compaction)]
 
@@ -178,6 +208,155 @@ def _patch_middleware() -> Any:
     return PatchDanglingToolCalls()
 
 
+def _guard_middleware() -> Any:
+    """执行护栏（参照 Kilo Code）：
+    - 模型调用次数到上限：这次调用不让再用工具（结构化任务只留 submit_result），追加收尾说明，让它交代结果
+    - 修剪旧的工具输出：发给模型的消息里，较早的大段工具结果换成一行说明（状态里的原文不动）
+    - 重复调用：同一工具同样参数连续第 3 次且结果都一样，结果后面加提醒；第 5 次不再执行"""
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    class ExecutionGuard(AgentMiddleware):
+        async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+            budget = _BUDGET.get()
+            messages = prune_tool_outputs(request.messages, budget.setdefault("pruned", set()) if budget is not None else None)
+            overrides: dict[str, Any] = {"messages": messages} if messages is not request.messages else {}
+            if budget is not None:
+                budget["calls"] += 1
+                if budget["calls"] > budget["max"]:
+                    submit = [t for t in request.tools if _tool_name(t) == SUBMIT_TOOL]
+                    overrides["messages"] = [*(overrides.get("messages") or request.messages),
+                                             HumanMessage(WRAP_UP_SUBMIT if submit else WRAP_UP)]
+                    # 停用工具：结构化任务只留交结果的口子；其余保留工具定义但不许调用（有的网关不收"历史里有工具调用却没给工具"）
+                    overrides.update({"tools": submit} if submit else {"tool_choice": "none"})
+                    if not budget.get("wrapped"):
+                        budget["wrapped"] = True
+                        await _log_stage("step_limit", f"模型调用到上限（{budget['max']} 次）：停用工具，让 agent 收尾",
+                                         budget.get("agent"))
+            return await handler(request.override(**overrides) if overrides else request)
+
+        async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+            call = request.tool_call
+            name = call.get("name") or ""
+            if name in REPEAT_SKIP:
+                return await handler(request)
+            state = request.state
+            messages = (state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)) or []
+            repeats, same = repeated_calls(messages, call)
+            if repeats + 1 >= REPEAT_BLOCK and same:    # 结果在变的是轮询（sleep 再查），不拦
+                text = (f"{_BLOCKED}已经连续 {repeats + 1} 次用同样的参数调用 {name}，结果都一样，不再执行。"
+                        "换个查法（换参数、换工具、先看别的线索），或者用目前查到的给出结论。")
+                await _log_blocked(name, call.get("args"), text)   # 工具没跑就没有 tool_call 事件：补上，时间线看得到
+                return ToolMessage(content=text, tool_call_id=call.get("id") or "", name=name, status="error")
+            result = await handler(request)
+            if repeats + 1 >= REPEAT_WARN and same and isinstance(result, ToolMessage):
+                warn = (f"{_REPEAT_NOTE}这是连续第 {repeats + 1} 次用同样的参数调用 {name}，前几次的结果都一样。"
+                        "在等状态变化就先 bash sleep 一会儿再查；否则换个做法，别再原样重试。")
+                result = result.model_copy(update={"content": _text(result.content) + warn})
+            return result
+
+    return ExecutionGuard()
+
+
+def _tool_name(tool: Any) -> str:
+    return tool.get("name", "") if isinstance(tool, dict) else getattr(tool, "name", "")
+
+
+async def _log_stage(stage: str, title: str, agent: str | None = None) -> None:
+    sc = run_scope.maybe_current()
+    if sc is None:
+        return
+    try:
+        await runs.log_event(sc.run_id, "stage", {"stage": stage, "title": title, **({"agent": agent} if agent else {})})
+    except Exception:  # noqa: BLE001
+        log.debug("记录阶段事件失败", exc_info=True)
+
+
+async def _log_blocked(name: str, args: Any, text: str) -> None:
+    sc = run_scope.maybe_current()
+    if sc is None:
+        return
+    budget = _BUDGET.get() or {}
+    who = {"agent": budget["agent"]} if budget.get("agent") else {}
+    try:
+        await runs.log_event(sc.run_id, "tool_call", {**who, "tool": name, "args": _clip_obj(args)})
+        await runs.log_event(sc.run_id, "tool_result", {**who, "tool": name, "output": text})
+    except Exception:  # noqa: BLE001
+        log.debug("记录被拦下的调用失败", exc_info=True)
+
+
+_SPILLED = re.compile(r"全文在 (\S+?)[：:，,\s]")
+
+
+def prune_tool_outputs(messages: list, pruned: set | None = None) -> list:
+    """较早的大段工具结果换成一行说明（只改这次发给模型的，状态里的不动）。没东西可修剪时原样返回同一个列表。
+    pruned：这次执行里已经修剪过的 tool_call_id。新的可修剪的攒够 PRUNE_MIN_CHARS 才成批加进去，
+    其间修剪的集合不变，发给模型的前缀保持稳定（不然每轮都改一条中间的消息，模型那边的前缀缓存全废）。"""
+    tool_idx = [i for i, m in enumerate(messages) if getattr(m, "type", "") == "tool"]
+    total, cand, saved = 0, [], 0
+    for rank, i in enumerate(reversed(tool_idx)):
+        m = messages[i]
+        n = len(_text(m.content))
+        total += n
+        if rank < PRUNE_KEEP_LAST or total <= PRUNE_PROTECT_CHARS or n < 500 or (m.name or "") in PRUNE_SKIP:
+            continue
+        if pruned is None or m.tool_call_id not in pruned:
+            cand.append(i)
+            saved += n
+    if pruned is None:
+        if saved < PRUNE_MIN_CHARS:
+            return messages
+    else:
+        if saved >= PRUNE_MIN_CHARS:
+            pruned.update(messages[i].tool_call_id for i in cand)
+        cand = [i for i in tool_idx if messages[i].tool_call_id in pruned]
+        if not cand:
+            return messages
+    out = list(messages)
+    for i in cand:
+        m = out[i]
+        text = _text(m.content)
+        spilled = _SPILLED.search(text)
+        where = f"全文在 {spilled.group(1)}，" if spilled else ""
+        note = (f"[较早的工具输出已省略以节省上下文：{m.name or '工具'}，原 {len(text)} 字。{where}"
+                f"开头：{text[:160].strip()}…；需要细节就重新查]")
+        out[i] = m.model_copy(update={"content": note})
+    return out
+
+
+def repeated_calls(messages: list, call: dict) -> tuple[int, bool]:
+    """在这次调用之前，紧挨着有几次同名同参数的调用；它们的结果是否都一样。"""
+    def key(c: dict) -> tuple[str, str]:
+        return c.get("name") or "", json.dumps(c.get("args") or {}, sort_keys=True, ensure_ascii=False, default=str)
+
+    current, cid = key(call), call.get("id")
+    before: list[tuple[str, tuple[str, str]]] = []
+    for m in messages:
+        kind = getattr(m, "type", "")
+        if kind == "human":
+            before = []                          # 新的一轮（同会话的上一次运行）不连着算
+        if kind != "ai":
+            continue
+        for c in getattr(m, "tool_calls", None) or []:
+            if c.get("id") == cid:
+                break
+            before.append((c.get("id") or "", key(c)))
+    # 比结果时去掉守卫自己追加的提醒
+    results = {getattr(m, "tool_call_id", ""): _text(m.content).split(_REPEAT_NOTE, 1)[0]
+               for m in messages if getattr(m, "type", "") == "tool"}
+    n, outputs = 0, set()
+    for prev_id, k in reversed(before):
+        if k != current:
+            break
+        out = results.get(prev_id)
+        if out is None:                          # 同一条消息里并发的、还没有结果的：不算
+            continue
+        n += 1
+        if not out.startswith(_BLOCKED):         # 被守卫拦下的不算"结果变了"，拦截保持有效
+            outputs.add(out)
+    return n, len(outputs) <= 1
+
+
 def _task_tool(subs: dict[str, tuple[Any, str]]) -> Any:
     """委派给子代理：子代理独立上下文跑完，最后一条回复作为工具结果交回。"""
     from langchain_core.messages import AIMessage, HumanMessage
@@ -193,12 +372,16 @@ def _task_tool(subs: dict[str, tuple[Any, str]]) -> Any:
         if hit is None:
             return f"[参数] 没有子代理 {subagent}（可选：{'、'.join(subs)}）"
         from langgraph.errors import GraphRecursionError
+        # 子代理自己一份调用次数：到上限时它会被要求收尾，把查到的交回来
+        token = _BUDGET.set({"calls": 0, "max": SUBAGENT_MODEL_CALL_LIMIT, "agent": subagent})
         try:
             result = await hit[0].ainvoke({"messages": [HumanMessage(content=description)]},
                                           {"recursion_limit": SUBAGENT_STEP_LIMIT})
         except GraphRecursionError:
             return (f"[子代理步数用完] {subagent} 走了 {SUBAGENT_STEP_LIMIT} 步还没结束（可能在原地打转）。"
                     "把子问题拆小、写清楚要交回什么再委派，或者自己接着做")
+        finally:
+            _BUDGET.reset(token)
         for m in reversed(result.get("messages") or []):
             if isinstance(m, AIMessage) and _text(m.content).strip():
                 return _text(m.content)
@@ -236,25 +419,34 @@ async def invoke(agent: Any, run_id: str, thread_id: str, prompt: str | None, st
     from langgraph.errors import GraphRecursionError
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": STEP_LIMIT}
     payload = None if prompt is None else {"messages": [{"role": "user", "content": prompt}]}
+    budget = {"calls": 0, "max": MODEL_CALL_LIMIT}
+    token = _BUDGET.set(budget)
     try:
-        await _stream(agent, run_id, payload, config)
-    except GraphRecursionError:
-        raise Rejected("step_limit", f"agent 走了 {STEP_LIMIT} 步（模型调用 + 工具调用）还没结束，可能在原地打转："
-                                     "看最后几步在做什么，改提示词或把问题拆小；续跑会从断点再给这么多步") from None
-    messages = await _messages(agent, config)
-    out: dict[str, Any] = {"answer": _answer(messages)}
-    if structured:
-        data = _submitted(messages)
-        if data is None:                  # 没交或没交成：提醒一次
-            await runs.log_event(run_id, "stage", {"stage": "output", "title": "提醒交回结构化结果",
-                                                   "content": f"运行结束时还没有通过校验的 {SUBMIT_TOOL}，提醒一次。"})
-            await _stream(agent, run_id, {"messages": [{"role": "user", "content":
-                          f"还没有用 {SUBMIT_TOOL} 交回通过校验的结构化结果。请现在调用 {SUBMIT_TOOL} 交回。"}]}, config)
-            messages = await _messages(agent, config)
+        try:
+            await _stream(agent, run_id, payload, config)
+        except GraphRecursionError:
+            raise Rejected("step_limit", f"agent 走了 {STEP_LIMIT} 步（模型调用 + 工具调用）还没结束，可能在原地打转："
+                                         "看最后几步在做什么，改提示词或把问题拆小；续跑会从断点接着走") from None
+        messages = await _messages(agent, config)
+        out: dict[str, Any] = {"answer": _answer(messages)}
+        if structured:
             data = _submitted(messages)
-            out["answer"] = _answer(messages) or out["answer"]
-        out["data"] = data
-    return out
+            if data is None:                  # 没交或没交成：提醒一次
+                await runs.log_event(run_id, "stage", {"stage": "output", "title": "提醒交回结构化结果",
+                                                       "content": f"运行结束时还没有通过校验的 {SUBMIT_TOOL}，提醒一次。"})
+                if not budget.get("wrapped"):              # 收尾过的保持收尾（只剩 submit_result），没收尾的至少再给 3 次
+                    budget["max"] = max(budget["max"], budget["calls"] + 3)
+                await _stream(agent, run_id, {"messages": [{"role": "user", "content":
+                              f"还没有用 {SUBMIT_TOOL} 交回通过校验的结构化结果。请现在调用 {SUBMIT_TOOL} 交回。"}]}, config)
+                messages = await _messages(agent, config)
+                data = _submitted(messages)
+                out["answer"] = _answer(messages) or out["answer"]
+            out["data"] = data
+        if budget.get("wrapped"):
+            out["step_limit"] = True                       # 到了次数上限、是收尾时给的结论：运行详情据此标注
+        return out
+    finally:
+        _BUDGET.reset(token)
 
 
 async def _stream(agent: Any, run_id: str, payload: Any, config: dict) -> None:

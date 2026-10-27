@@ -42,12 +42,36 @@ def list_item(run: dict, titles: dict[str, str]) -> dict:
     return {**run, "task_title": titles.get(run["task"]) or titles.get(base) or base}
 
 
+def _last_todo(events: list[dict]) -> list[dict] | None:
+    """待办：主 agent 最后一次被接受的 todo 调用的清单（子代理的不算；参数不合格被工具拒了的跳过）。
+    tool_call 事件记的是校验前的原始参数，这里按工具的规则再筛一遍。"""
+    from ..agent.tools.catalog import TODO_STATUS
+    calls = [e["payload"] for e in events if e["kind"] in ("tool_call", "tool_result")
+             and e["payload"].get("tool") == "todo" and not e["payload"].get("agent")]
+    todo, pending = None, None
+    for p in calls:
+        if "args" in p:                              # tool_call；结果还没来时先算它
+            pending = p.get("args")
+        elif pending is not None:
+            if not str(p.get("output", "")).startswith("[参数]"):
+                todo = pending
+            pending = None
+    for args in (pending, todo):
+        items = args.get("items") if isinstance(args, dict) else None
+        if isinstance(items, list) and items and all(
+                isinstance(i, dict) and isinstance(i.get("content"), str) and i.get("status", "pending") in TODO_STATUS
+                for i in items):
+            return [{"content": i["content"], "status": i.get("status", "pending")} for i in items]
+    return None
+
+
 async def run_detail(run: dict, titles: dict[str, str]) -> dict:
     """Run：列表字段 + 输入输出 + 上下文（注入了什么、沉淀了什么、同会话的其他轮）。
     replay_of：回归重放出来的运行，指向被重放的原运行。"""
     run_id = run["run_id"]
     events = await runs.events(run_id)
     stage = {e["payload"].get("stage"): e["payload"] for e in events if e["kind"] == "stage"}
+    todo = _last_todo(events)
     session_runs = [{"run_id": r["run_id"], "task": r["task"], "status": r["status"], "created_at": r["created_at"]}
                     for r in await runs.by_session(run["session_id"], exclude=run_id)]
     return {
@@ -67,7 +91,10 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
             "saved_assets": [{"id": a["id"], "kind": a["kind"], "name": a["name"]}
                              for a in await assets_store.by_source_run(run_id)],
             "session_runs": session_runs,
+            "todo": todo,
         },
+        # 执行中的工具（bash / py 跑得久时每几秒一条输出尾部）：{键: {tool, title, output, ms, at}}；结束了就没有
+        "progress": run.get("progress") or None,
     }
 
 

@@ -23,7 +23,6 @@ import json
 import logging
 
 from ..domain import FEEDBACK_REASONS, Caller, Rejected
-from ..domain.prompts import REPLAY_JUDGE, REPLAY_JUDGE_V1
 from ..registry import Registry
 from ..store import feedback as feedback_store
 from ..store import replays as replays_store
@@ -99,9 +98,8 @@ class Replayer:
                                       f"重放没有成功结束：{why}"[:500])
             return
         issues = await feedback_store.negatives_of(old["run_id"])
+        # 存着的还是旧版默认（只会判 👎 的）时，读配置时已经换成现在的默认（PromptsConfig._upgrade）
         template = (await self._registry.config("prompts")).replay_judge
-        if template.strip() == REPLAY_JUDGE_V1.strip():
-            template = REPLAY_JUDGE          # 存着的还是旧版默认（只会判 👎 的）：换成现在的默认
         prompt = template.format(
             task=old["task"], where=f"{old['service'] or '平台'} · {old['env']}",
             input=json.dumps(old["input"], ensure_ascii=False, indent=1)[:3000],

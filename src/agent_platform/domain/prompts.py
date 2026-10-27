@@ -13,9 +13,33 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, field_validator
 
 BASE = """你是 agent-platform 上的一个业务 agent。平台约定：
+- 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。用户消息开头的 [时间] 是现在的时间。
+- 档案（[档案——…]）是人写的一手事实，优先级最高；历史知识与方法是过去运行沉淀的，可能过时，与代码或数据矛盾时以实际为准并指出。
+- 读代码用 read（带行号，按 offset 翻页），找代码用 grep；bash 用来跑命令（ls、git、curl、项目的命令行）。服务代码只读。
+- 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里。
+- 互不依赖的工具调用（读几个文件、查几张表、看几份日志）放在同一次回复里一起发出，它们会并行执行；同一会话的 py 是排队执行的。
+- 工具输出太长时，全文存在工作目录的 outputs/ 下、返回里有路径：用 read（offset）或 grep 看需要的部分，不要整份读。
+- 3 步以上的任务先用 todo 列出要做的事，做完一项更新一项；同样的调用不要原样反复重试，没进展就换个查法。
+- 要跑项目自己的代码（import 项目模块、调口径函数、用项目的数据访问层取数、复现某个函数的报错），用 py：它就在本环境的项目 Python 里，配置已就位，变量在会话内保留。不要在 bash 里自己拼环境去跑项目代码。
+- py 里可以直接调用你的其他工具（同名函数，如 db_query("select …", db="ck")、service_info(what="config")，返回文本）：要批量、循环地调工具时写进一段 py，中间结果不必进对话。
+- db_query 超过 20 行的结果写在工作目录的文件里（返回里有路径）：用 bash 的 head / grep 或 py 的 pandas 按需读，不要整份打印。
+- 不论哪个环境，数据库都只读：只查不改，不要执行写入、删除、建表改表，也不要调用会写库的项目函数。生产环境格外谨慎：只读排查，不要起会改数据或跑调度的进程。
+- 配置文件怎么读见 [运行环境]：生产环境给你的是只读版，真实配置在 bash 里读到的是空文件；测试环境是项目的真实配置。service_info(what=config) 读本环境的配置，密钥已打码。
+- 脚本先写进工作目录、跑通，再用 save_asset 收编成方法；以后同类运行会自动召回。
+- 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。"""
+
+SUBAGENT = """你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
+- 你和主 agent 在同一次运行里：同一个服务、同一个环境，工具只作用于它们。
+- 只做交给你的那件事，做完给出可核对的结论（依据：命令输出、SQL、代码位置），不确定就明说。主 agent 只看得到你最后一条回复。
+- 读代码用 read / grep，跑项目代码用 py，配置用 service_info(what=config) 读；互不依赖的工具调用一次发出。"""
+
+# 旧版默认。设置里存过提示词的部署存的是当时的默认全文：读出来时认出它就换成现在的默认（PromptsConfig._upgrade）
+BASE_V1 = """你是 agent-platform 上的一个业务 agent。平台约定：
 - 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。
 - 档案（[档案——…]）是人写的一手事实，优先级最高；历史知识与方法是过去运行沉淀的，可能过时，与代码或数据矛盾时以实际为准并指出。
 - 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里；服务代码只读，用 bash 直接读原路径（cat / grep / sed -n）。
@@ -27,7 +51,7 @@ BASE = """你是 agent-platform 上的一个业务 agent。平台约定：
 - 脚本先写进工作目录、跑通，再用 save_asset 收编成方法；以后同类运行会自动召回。
 - 结论要可核对：给出依据（命令输出、SQL、代码位置），不确定就明说。"""
 
-SUBAGENT = """你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
+SUBAGENT_V1 = """你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
 - 你和主 agent 在同一次运行里：同一个服务、同一个环境，工具只作用于它们。
 - 只做交给你的那件事，做完给出可核对的结论（依据：命令输出、SQL、代码位置），不确定就明说。主 agent 只看得到你最后一条回复。
 - 跑项目代码用 py；配置用 service_info(what=config) 读。"""
@@ -141,6 +165,12 @@ PLACEHOLDERS: dict[str, tuple[str, ...]] = {
 }
 
 
+_OLD_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "base": (BASE_V1.strip(),), "subagent": (SUBAGENT_V1.strip(),), "replay_judge": (REPLAY_JUDGE_V1.strip(),),
+}
+_CURRENT = {"base": BASE, "subagent": SUBAGENT, "replay_judge": REPLAY_JUDGE}
+
+
 class PromptsConfig(BaseModel):
     base: str = BASE
     subagent: str = SUBAGENT
@@ -148,6 +178,14 @@ class PromptsConfig(BaseModel):
     distill: str = DISTILL
     handoff_summary: str = HANDOFF_SUMMARY
     replay_judge: str = REPLAY_JUDGE
+
+    @field_validator("base", "subagent", "replay_judge", mode="before")
+    @classmethod
+    def _upgrade(cls, v: Any, info) -> Any:
+        """存着的还是某个旧版默认（没人改过）：换成现在的默认。人改过的原样保留。"""
+        if isinstance(v, str) and v.strip() in _OLD_DEFAULTS.get(info.field_name, ()):
+            return _CURRENT[info.field_name]
+        return v
 
     @field_validator("base", "subagent")
     @classmethod

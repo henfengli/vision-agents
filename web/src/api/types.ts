@@ -500,13 +500,25 @@ export interface Run extends RunListItem {
   recipe: Recipe | null;
   replay_of: string | null;    // 回归重放出来的运行：指向被重放的原运行
   input: Record<string, unknown>;
-  /** 声明了 output_schema 的任务：data 是通过校验的结构化结果 */
-  output: { answer?: string; error?: string; data?: Record<string, unknown>; [k: string]: unknown } | null;
+  /** 声明了 output_schema 的任务：data 是通过校验的结构化结果；step_limit：模型调用次数到上限、停用工具后给的收尾结论 */
+  output: { answer?: string; error?: string; data?: Record<string, unknown>; step_limit?: boolean; [k: string]: unknown } | null;
   error_code: string | null;
   memory: MemoryOverride;
   context: RunContext;
   feedback: FeedbackEntry[];   // 所有人对整次（step_seq=0）与各步的评价
+  /** 执行中的工具（bash / py 跑得久时每几秒一条输出尾部），工具结束就没了 */
+  progress?: Record<string, ToolProgress> | null;
 }
+
+export interface ToolProgress {
+  tool: string;                // bash / py
+  title: string;               // 命令 / 代码第一行
+  output: string;              // 输出尾部（最多 2000 字）
+  ms: number;                  // 已跑多久
+  at: ISODate;
+}
+
+export interface TodoItem { content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }
 
 export interface RunContext {
   profile: string;                                   // 注入的档案原文
@@ -515,6 +527,7 @@ export interface RunContext {
   saved_knowledge: { id: number; key: string; kind: KnowledgeKind }[];   // 不含交接摘要
   saved_assets: { id: number; kind: string; name: string }[];
   session_runs: { run_id: string; task: string; status: RunStatus; created_at: ISODate }[];
+  todo?: TodoItem[] | null;    // 主 agent 最后一次 todo 调用的清单
 }
 
 /** model_call 取代了 thought（旧运行里还有 thought，照样显示） */

@@ -8,7 +8,7 @@
  * 继承：写了就替换——子角色写了工具 / 子代理 / 自动带服务工具就整体替换父角色的，没写就跟随；提示词在父角色之后追加。
  */
 import { useEffect, useMemo, useState } from "react";
-import { LuAsterisk, LuBot, LuHistory, LuLayoutDashboard, LuPlug, LuPlus, LuSettings, LuTriangleAlert, LuUsers, LuX } from "react-icons/lu";
+import { LuAsterisk, LuBot, LuHistory, LuLayoutDashboard, LuPlug, LuPlus, LuSettings, LuTriangleAlert, LuUsers, LuWrench, LuX } from "react-icons/lu";
 
 import { api, useMeta, useRole, useRoles, useTasks } from "@/api/hooks";
 import type { Role, ToolInfo } from "@/api/types";
@@ -190,6 +190,12 @@ function ToolsCard({ tools, serviceTools }: { tools: string[]; serviceTools: boo
             </li>
           );
         })}
+        <li className="flex items-center gap-2 px-4 py-2.5 text-[12px]">
+          <LuWrench className="size-3.5 text-fg-3" />
+          <span className="text-fg-2">附带</span>
+          <code className="font-mono text-fg">{tools.some((t) => t === ALL || t === "bash") ? "read · grep · todo" : "todo"}</code>
+          <span className="text-fg-3">· {tools.some((t) => t === ALL || t === "bash") ? "有 bash 就带 read / grep；" : ""}每个角色都有待办清单，不用写</span>
+        </li>
         <li className="flex items-center gap-2 px-4 py-2.5 text-[12px]">
           <LuPlug className="size-3.5 text-fg-3" />
           <span className="text-fg-2">服务工具</span>

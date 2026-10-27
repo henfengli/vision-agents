@@ -68,7 +68,7 @@ async def enqueue(run_id: str, *, resume: bool = False) -> None:
     """把一个已有的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉。"""
     async with db.pool().connection() as conn:
         await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL, error_code=NULL,"
-                           " finished_at=NULL, duration_ms=NULL WHERE run_id=%s", (resume, run_id))
+                           " finished_at=NULL, duration_ms=NULL, progress=NULL WHERE run_id=%s", (resume, run_id))
         await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
 
@@ -114,7 +114,7 @@ async def fail_orphans(stale_s: int) -> list[str]:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "UPDATE runs SET status='failed', error_code='orphaned', output='{\"error\": \"执行进程中断\"}'::jsonb,"
-            " finished_at=now(),"
+            " finished_at=now(), progress=NULL,"
             " duration_ms=(EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
             " WHERE status='running' AND heartbeat_at IS NOT NULL"
             " AND heartbeat_at < now() - make_interval(secs => %s) RETURNING run_id", (stale_s,))
@@ -150,7 +150,7 @@ async def set_status(run_id: str, status: str, *, output: dict | None = None, re
             "UPDATE runs SET status=%s,"
             " output=COALESCE(%s::jsonb, output), resolution=COALESCE(%s, resolution),"
             " error_code=COALESCE(%s, error_code), tokens=COALESCE(%s, tokens),"
-            " finished_at=now(),"
+            " finished_at=now(), progress=NULL,"
             " duration_ms=(EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
             " WHERE run_id=%s AND status IN ('queued','running') RETURNING run_id",
             (status, json.dumps(output, ensure_ascii=False, default=str) if output is not None else None,
@@ -166,6 +166,21 @@ async def set_recipe(run_id: str, task_version: int | None, role_version: int | 
     async with db.pool().connection() as conn:
         await conn.execute("UPDATE runs SET task_version=%s, role_version=%s, recipe=%s WHERE run_id=%s",
                            (task_version, role_version, json.dumps(recipe, ensure_ascii=False), run_id))
+
+
+async def set_progress(run_id: str, key: str, payload: dict) -> None:
+    """执行中的工具的进度（输出尾部）。只写还在跑的运行：结束时 set_status 已清空，迟到的写入不再复活。"""
+    async with db.pool().connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET progress = COALESCE(progress, '{}'::jsonb) || jsonb_build_object(%s::text, %s::jsonb)"
+            " WHERE run_id=%s AND status='running'",
+            (key, json.dumps({**payload, "at": datetime.now().astimezone().isoformat()}, ensure_ascii=False), run_id))
+
+
+async def clear_progress(run_id: str, key: str) -> None:
+    async with db.pool().connection() as conn:
+        await conn.execute("UPDATE runs SET progress = progress - %s::text WHERE run_id=%s AND progress IS NOT NULL",
+                           (key, run_id))
 
 
 async def add_tokens(run_id: str, n: int) -> None:

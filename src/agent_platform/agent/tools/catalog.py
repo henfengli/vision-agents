@@ -17,6 +17,7 @@ import asyncio
 import functools
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -31,19 +32,34 @@ from ...store import assets as assets_store
 from .. import scope as run_scope
 from . import bash as bash_mod
 from . import db as db_mod
-from .sandbox import work_dir
+from . import files as files_mod
+from . import outputs
+from .progress import Progress
+from .sandbox import invisible_reason, work_dir
 
 log = logging.getLogger(__name__)
 
 ASSET_KINDS = ("procedure", "script", "query", "baseline")
-ALIASES = {"sql_query": "db_query"}       # 旧角色定义里的写法
+ALIASES = {"sql_query": "db_query", "read_file": "read"}       # 旧角色定义里的写法
 
 Fn = Callable[..., Awaitable[str]]
+
+
+TODO_STATUS = ("pending", "in_progress", "completed", "cancelled")
 
 
 def _work_dir(s: Settings, sc: run_scope.RunScope) -> str:
     """本会话×服务×环境的工作目录（和项目内核的 $SCRATCH 是同一个）。"""
     return work_dir(s.scratch_dir, kernel_key(sc.session_id, sc.service or "-", sc.env))
+
+
+def _resolve(s: Settings, sc: run_scope.RunScope, path: str) -> str:
+    """read / grep 的路径：~ 展开；相对路径按本服务的代码目录（平台任务按工作目录）。"""
+    p = os.path.expanduser(path.strip()) if path.strip() else ""
+    if p and os.path.isabs(p):
+        return os.path.normpath(p)
+    base = (sc.view.root if sc.view and sc.view.root else "") or _work_dir(s, sc)
+    return os.path.normpath(os.path.join(base, p)) if p else base
 
 
 @dataclass(frozen=True)
@@ -103,7 +119,9 @@ class Toolbox:
         return sorted({(t.metadata or {}).get("mcp_server") or "" for t in self._mcp.values()} - {""})
 
     def expand(self, names: list[str] | tuple[str, ...]) -> list[str]:
-        """角色里的工具写法 → 具体工具名："*" = 全部内置 + 全部平台 MCP；"mcp:<server>" = 该 server 的全部工具。"""
+        """角色里的工具写法 → 具体工具名："*" = 全部内置 + 全部平台 MCP；"mcp:<server>" = 该 server 的全部工具。
+        自动带上的：有 bash 的角色带 read / grep（只读，是 bash 能力的子集）；todo 人人都有（没有副作用）。
+        这样库里已有的角色定义不用改就能用上。"""
         out: list[str] = []
         for n in names:
             if n == "*":
@@ -113,7 +131,8 @@ class Toolbox:
             else:
                 items = [ALIASES.get(n, n)]
             out += [x for x in items if x not in out]
-        return out
+        implied = (["read", "grep"] if "bash" in out else []) + ["todo"]
+        return out + [x for x in implied if x in self._fns and x not in out]
 
     def unknown(self, names: list[str]) -> list[str]:
         servers = set(self.mcp_servers())
@@ -137,7 +156,7 @@ class Toolbox:
     def host_tools(self, names: list[str] | tuple[str, ...], extra: list | tuple = ()) -> dict[str, Fn]:
         """内核里可调用的平台工具：角色白名单（py 自己除外）+ 运行所在服务的 MCP 工具。"""
         names = self.expand(names)
-        out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n != "py"}
+        out: dict[str, Fn] = {n: self._fns[n] for n in names if n in self._fns and n not in ("py", "todo")}
         out.update({n: self._mcp[n].coroutine for n in names if n in self._mcp})   # MCP 工具按关键字参数调用
         out.update({t.name: t.coroutine for t in extra if t.name not in out and t.coroutine is not None})
         return out
@@ -156,11 +175,13 @@ class Toolbox:
             要循环 / 批量调工具时写进一段代码，只把 print 的结论带回来。db_query 的大结果在文件里，用 pandas 读它。
             沉淀过的脚本类方法所在目录已在 sys.path 上，可以直接 import。
             文件系统只读，要写文件写到 $SCRATCH（与 bash 共用的工作目录）或 /tmp；内存有上限。服务声明的日志文件在内核里
-            是空的（项目写进去的直接丢掉），看日志用 logs。restart=true 清空变量重新开始。"""
+            是空的（项目写进去的直接丢掉），看日志用 logs。restart=true 清空变量重新开始。
+            输出超过 20000 字时全文存进工作目录的 outputs/，返回里有路径。同一会话的 py 调用是排队执行的。"""
             sc = run_scope.current()
             if kernels is None or reg is None or sc.view is None:
                 return "[不可用] 本运行没有关联业务服务，没有项目内核"
             key = kernel_key(sc.session_id, sc.service, sc.env)
+            prog = Progress(sc.run_id, "py", code.strip().splitlines()[0] if code.strip() else "")
             try:
                 spec = await envspec.runtime_spec(reg, s, sc.service, sc.env)
                 if restart or not kernels.alive(key, spec["digest"]):
@@ -169,16 +190,20 @@ class Toolbox:
                                                                exclude_run=sc.replay_of)
                     spec["method_paths"] = [m["path"] for m in methods if m.get("path")]
                 return await kernels.execute(key, spec, code, timeout=max(1, min(timeout, 1800)), hidden=sc.hidden,
-                                             restart=restart, tools=toolbox.host_tools(sc.tools, sc.extra_tools))
+                                             restart=restart, tools=toolbox.host_tools(sc.tools, sc.extra_tools),
+                                             progress=prog.update)
             except (Rejected, KernelError) as e:
                 return f"[失败] {getattr(e, 'message', None) or e}"
+            finally:
+                await asyncio.shield(prog.done())
 
         async def bash(command: str, timeout: int = 60) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；home 下其他目录、平台密钥看不到；生产环境的配置文件
             也看不到，配置用 service_info 读）、只有工作目录和 /tmp 可写、调用结束后台进程全灭、内存有上限；网络照常。
             当前目录是本会话的工作目录（$SCRATCH，和 py 共用，跨调用保留）；每次调用是新的 shell，cd、export 不会带到
             下一次，要连着做的写进同一条命令（&&）。PATH 最前面是本服务的项目解释器所在目录：python / pip / pytest
-            用的是项目的环境。stdout 和 stderr 合在一起，超过 8000 字只留开头和结尾：大输出先写进文件，再 head / grep 着看。"""
+            用的是项目的环境。读代码、找代码用 read / grep，不要 cat 整个文件。
+            stdout 和 stderr 合在一起，超过 12000 字只留开头和结尾，全文存进工作目录的 outputs/，返回里有路径。"""
             sc = run_scope.current()
             work = _work_dir(s, sc)
             env = bash_mod.build_safe_env()
@@ -187,11 +212,76 @@ class Toolbox:
                 env.update(sc.view.env_vars)
                 if os.path.isabs(sc.view.python):
                     env["PATH"] = os.path.dirname(sc.view.python) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
-            r = await asyncio.to_thread(
-                bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir,
-                hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox, env=env,
-                workdir=work)
+            stop = threading.Event()
+            prog = Progress(sc.run_id, "bash", command)
+            try:
+                r = await asyncio.to_thread(
+                    bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir,
+                    hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox, env=env,
+                    workdir=work, stop=stop, on_progress=prog.push, spill_path=outputs.new_path(work, "bash"))
+            except asyncio.CancelledError:
+                stop.set()                     # 线程里的等待循环看到后杀掉进程（不然命令会一直跑到它自己的超时）
+                raise
+            finally:
+                await asyncio.shield(prog.done())
             return bash_mod.format_result(r)
+
+        async def read(path: str, offset: int = 1, limit: int = 2000) -> str:
+            """读文件（每行带行号 `行号: 内容`）或列目录。path：绝对路径，或相对本服务代码目录的路径。
+            一次最多 2000 行 / 50KB，单行超过 2000 字截断；没读完时末尾会告诉你下一段的 offset。
+            大文件先用 grep 找到行号，再用 offset 读那一段；不要一小段一小段地读（一次读够上下文）。
+            能读什么和 bash 一样：遮蔽的配置、home 下没挂回的目录读不到。"""
+            sc = run_scope.current()
+            full = _resolve(s, sc, path)
+
+            def hidden_why(p: str) -> str | None:
+                return invisible_reason(p, hidden=sc.hidden, allow=sc.allow, scratch=s.scratch_dir)
+
+            if why := hidden_why(full):
+                return f"[看不到] {full}：{why}"
+            try:      # 打开之后按打开的那个文件再查一次：查和读之间路径被换成软链接也读不到别处
+                return await asyncio.to_thread(files_mod.read_text, full, offset, limit, hidden_why)
+            except PermissionError:
+                return f"[没有权限] 平台用户读不了 {full}"
+            except OSError as e:
+                return f"[读取失败] {full}：{e}"
+
+        async def grep(pattern: str, path: str = "", glob: str = "", ignore_case: bool = False) -> str:
+            """在代码里按正则搜（ripgrep 语法；没装 rg 时用 grep -E）：返回 `文件:行号:内容`，最多 300 条、每个文件最多 50 条。
+            path：目录或文件（绝对路径，或相对本服务代码目录），不填 = 本服务代码目录。glob：只搜这些文件，如 "*.py"。
+            跳过 .gitignore 里的、二进制文件。遮蔽的配置搜不到。找到位置后用 read(path, offset) 看上下文。"""
+            sc = run_scope.current()
+            full = _resolve(s, sc, path or ((sc.view.root if sc.view else "") or _work_dir(s, sc)))
+            if why := invisible_reason(full, hidden=sc.hidden, allow=sc.allow, scratch=s.scratch_dir):
+                return f"[看不到] {full}：{why}"
+            rg = files_mod.find_rg(lambda p: invisible_reason(p, hidden=sc.hidden, allow=sc.allow,
+                                                               scratch=s.scratch_dir) is None)
+            cmd = files_mod.grep_command(pattern, full, glob, ignore_case, rg)
+            stop = threading.Event()
+            try:
+                r = await asyncio.to_thread(
+                    bash_mod.run_command, cmd, 60, s.scratch_dir, hidden=sc.hidden, allow=sc.allow, limits=s.limits,
+                    require_sandbox=s.require_sandbox, workdir=_work_dir(s, sc), stop=stop)
+            except asyncio.CancelledError:
+                stop.set()
+                raise
+            if r.exit_code in (124, 126, 130):
+                return bash_mod.format_result(r)
+            return files_mod.format_grep(r.output, pattern, full)
+
+        async def todo(items: list[dict]) -> str:
+            """维护这次运行的待办清单（整份替换），运行详情里会显示给人看。
+            items：[{"content": "做什么", "status": "pending|in_progress|completed|cancelled"}]。
+            3 步以上的任务先列出来；开始做一项就把它标成 in_progress（同时只有一项），做完马上标 completed，
+            发现新的事加进去。一两步就能做完的事不用列。"""
+            bad = [i for i in items if not isinstance(i, dict) or not str(i.get("content", "")).strip()
+                   or i.get("status", "pending") not in TODO_STATUS]
+            if bad:
+                return f"[参数] 每项要有 content，status 只能是 {'/'.join(TODO_STATUS)}"
+            marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]", "cancelled": "[-]"}
+            done = sum(1 for i in items if i.get("status") == "completed")
+            body = "\n".join(f"{marks[i.get('status', 'pending')]} {i['content']}" for i in items)
+            return f"待办已更新（完成 {done}/{len(items)}）：\n{body}"
 
         async def service_info(what: str = "overview", path: str = "") -> str:
             """查看本次运行所在服务×环境。what：overview（目录 / 配置文件 / 日志总览）、
@@ -236,7 +326,8 @@ class Toolbox:
                 return "可读的日志：\n" + "\n".join(f"- {k}：{t}" for k, t in available.items())
             if name not in available:
                 return f"[参数] name 须为 {'、'.join(available)} 之一"
-            return await asyncio.to_thread(hostlocal.read_log, available[name], lines=lines, grep=grep, since=since)
+            return await asyncio.to_thread(hostlocal.read_log, available[name], lines=lines, grep=grep, since=since,
+                                           spill_dir=_work_dir(s, sc))
 
         async def host_status() -> str:
             """本服务本环境部署主机（就是你所在的这台）的现状：负载、内存、磁盘、占内存最多的进程；本服务的进程、
@@ -329,6 +420,9 @@ class Toolbox:
             self._add(py, "项目内核", "service", dangerous=True,
                       summary="在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留")
         self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭")
+        self._add(read, "读文件", "core", summary="带行号读文件、按 offset 翻页，或列目录；能读什么和 bash 一样")
+        self._add(grep, "搜代码", "core", summary="在代码里按正则搜（ripgrep），返回 文件:行号:内容；在 bash 的沙箱里跑")
+        self._add(todo, "待办", "core", summary="多步任务的待办清单，运行详情里显示给人看")
         self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置内容（打码）、git 状态")
         self._add(logs, "看日志", "service",
                   summary="读本服务本环境线上的日志（文件 / docker 容器 / systemd 单元），按行数取尾部或在整个文件里按正则搜")

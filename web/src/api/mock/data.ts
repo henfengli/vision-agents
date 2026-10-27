@@ -11,7 +11,7 @@
  */
 import type {
   ApiKey, Asset, ChatTurn, Env, FeedbackReason, Knowledge, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
-  Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, Trigger,
+  Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, TodoItem, Trigger,
 } from "../types";
 
 // ———————— 随机工具 ————————
@@ -376,9 +376,13 @@ export const tasks: Task[] = [
 
 const PROMPTS: PromptsConfig = {
   base: `你是 agent-platform 上的一个业务 agent。平台约定：
-- 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。
+- 每次运行都绑定一个服务和一个环境（见用户消息里的 [运行环境]），你的工具只作用于它们，不要尝试操作别的服务或环境。用户消息开头的 [时间] 是现在的时间。
 - 档案（[档案——…]）是人写的一手事实，优先级最高；历史知识与方法是过去运行沉淀的，可能过时，与代码或数据矛盾时以实际为准并指出。
-- 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里；服务代码只读，用 bash 直接读原路径（cat / grep / sed -n）。
+- 读代码用 read（带行号，按 offset 翻页），找代码用 grep；bash 用来跑命令（ls、git、curl、项目的命令行）。服务代码只读。
+- 工作目录：bash 的当前目录是一块可写区（py 里是 $SCRATCH），写文件、放脚本都在这里。
+- 互不依赖的工具调用（读几个文件、查几张表、看几份日志）放在同一次回复里一起发出，它们会并行执行；同一会话的 py 是排队执行的。
+- 工具输出太长时，全文存在工作目录的 outputs/ 下、返回里有路径：用 read（offset）或 grep 看需要的部分，不要整份读。
+- 3 步以上的任务先用 todo 列出要做的事，做完一项更新一项；同样的调用不要原样反复重试，没进展就换个查法。
 - 要跑项目自己的代码（import 项目模块、调口径函数、用项目的数据访问层取数、复现某个函数的报错），用 py：它就在本环境的项目 Python 里，配置已就位，变量在会话内保留。不要在 bash 里自己拼环境去跑项目代码。
 - py 里可以直接调用你的其他工具（同名函数，如 db_query("select …")、service_info(what="config")，返回文本）：要批量、循环地调工具时写进一段 py，中间结果不必进对话。
 - 不论哪个环境，数据库都只读：只查不改，不要执行写入、删除、建表改表，也不要调用会写库的项目函数。生产环境格外谨慎：只读排查，不要起会改数据或跑调度的进程。
@@ -388,7 +392,7 @@ const PROMPTS: PromptsConfig = {
   subagent: `你是 agent-platform 上被主 agent 委派来处理一个子问题的子代理。
 - 你和主 agent 在同一次运行里：同一个服务、同一个环境，工具只作用于它们。
 - 只做交给你的那件事，做完给出可核对的结论（依据：命令输出、SQL、代码位置），不确定就明说。主 agent 只看得到你最后一条回复。
-- 跑项目代码用 py；配置用 service_info(what=config) 读。`,
+- 读代码用 read / grep，跑项目代码用 py，配置用 service_info(what=config) 读；互不依赖的工具调用一次发出。`,
   compaction: `对话历史太长，要压缩成一份摘要替换掉下面这些消息，之后的工作只能看到摘要。
 按四节输出，没有内容的节写"无"，不要输出别的：
 
@@ -780,11 +784,20 @@ function failureAnswer(r: Run): string {
 
 // ———————— 巡检 / 冒烟 ————————
 
+const INSPECT_ITEMS = ["报表数据新鲜度", "线上报表页可用与耗时", "应用日志报错", "主机资源"];
+/** 巡检的待办：前 done 项完成，第 done 项进行中 */
+const inspectTodo = (done: number) => {
+  const items = INSPECT_ITEMS.map((content, i) => ({ content, status: i < done ? "completed" : i === done ? "in_progress" : "pending" }));
+  const marks: Record<string, string> = { pending: "[ ]", in_progress: "[~]", completed: "[x]" };
+  return { tool: "todo", args: { items }, ms: 4,
+    output: `待办已更新（完成 ${Math.min(done, items.length)}/${items.length}）：\n` + items.map((i) => `${marks[i.status]} ${i.content}`).join("\n") };
+};
+
 function inspectionPlans(r: Run): Plan[] {
   const site = r.env === "prod" ? "https://vision-board.moon-prod.ipa.zs/" : "https://vision-board.ipa.zs/";
   return [
-    { think: "按方法「Board 巡检」逐项：报表数据新鲜度、线上页面、主机资源。先查报表依赖的几张表的最新交易日。",
-      calls: [{ tool: "db_query", args: { db: "ck", query: "SELECT 'dws_account_pnl_daily' AS t, max(trade_date) AS latest FROM dws_account_pnl_daily\nUNION ALL SELECT 'dwd_position_daily', max(trade_date) FROM dwd_position_daily\nUNION ALL SELECT 'ads_strategy_report', max(trade_date) FROM ads_strategy_report\nUNION ALL SELECT 'market_kline_1d', max(trade_date) FROM market_kline_1d" }, ms: 160,
+    { think: "按方法「Board 巡检」逐项：报表数据新鲜度、线上页面、应用日志、主机资源。先列个待办，同时查报表依赖的几张表的最新交易日。",
+      calls: [inspectTodo(0), { tool: "db_query", args: { db: "ck", query: "SELECT 'dws_account_pnl_daily' AS t, max(trade_date) AS latest FROM dws_account_pnl_daily\nUNION ALL SELECT 'dwd_position_daily', max(trade_date) FROM dwd_position_daily\nUNION ALL SELECT 'ads_strategy_report', max(trade_date) FROM ads_strategy_report\nUNION ALL SELECT 'market_kline_1d', max(trade_date) FROM market_kline_1d" }, ms: 160,
         output: ckOut({ rows: 4, cols: ["t", "latest"], preview: [["dws_account_pnl_daily", TD[0]], ["dwd_position_daily", TD[0]], ["ads_strategy_report", TD[0]], ["market_kline_1d", TD[0]]], ms: 144 }) }] },
     { think: "数据都到了上个交易日。看线上报表页能不能打开、耗时多少。",
       calls: [{ tool: "py", args: { code: `import requests\nfor p in ["report/pnl_daily/", "report/positions/", "report/strategy_weekly/"]:\n    r = requests.get("${site}" + p, timeout=15)\n    print(p, r.status_code, round(r.elapsed.total_seconds(), 2))` }, ms: 3100,
@@ -793,7 +806,9 @@ function inspectionPlans(r: Run): Plan[] {
       calls: [{ tool: "logs", args: { name: "app", lines: 2000, grep: "error|exception|traceback" }, ms: 140,
         output: `[${codeDir(r)}/vision-board.log] 最后 2000 行里匹配 'error|exception|traceback' 的 1 行\n${TD[0]} 07:12:44,019 ERROR report.strategy slow query 2.8s: SELECT … FROM dws_strategy_nav_daily` }] },
     { think: "只有一条慢查询，和周报页慢对得上。最后看主机资源。",
-      calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut(r) }] },
+      calls: [inspectTodo(3), { tool: "host_status", args: {}, ms: 260, output: hostStatusOut(r) }] },
+    { think: "四项都看完了，清单收尾。",
+      calls: [inspectTodo(4)] },
   ];
 }
 const inspectionAnswer = () => "巡检完成：**6 项正常，2 项关注**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，应用日志里有对应的慢查询，建议看 `report/strategy.py`\n- ⚠️ 根盘 81%（阈值 80%），较上周 +5%，建议清理旧日志与 docker 镜像\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓";
@@ -1192,8 +1207,12 @@ export function detailOf(run: MockRun): Run {
   const replay = run.trigger.type === "replay";
   const savedLesson = knowledge.find((k) => k.kind === "lesson" && k.service === run.service && k.task.startsWith("failure-analysis"));
   const savedFact = knowledge.find((k) => k.key === "table:dws_account_pnl_daily");
+  // 待办 = 主 agent 最后一次 todo 调用的清单（子代理的不算）
+  const lastTodo = [...ev].reverse().find((e) => e.kind === "tool_call" && e.payload.tool === "todo" && !e.payload.agent);
+  const todo = lastTodo ? ((lastTodo.payload.args as { items?: TodoItem[] } | undefined)?.items ?? null) : null;
   return {
     ...run,
+    progress: progressOf(run),
     output: run._output !== undefined ? run._output
       : final ? { answer: String(final.payload.content) }
         : err ? { error: String(err.payload.content) } : null,
@@ -1208,8 +1227,21 @@ export function detailOf(run: MockRun): Run {
       saved_assets: [],
       session_runs: runs.filter((x) => x.session_id === run.session_id && x.run_id !== run.run_id).slice(0, 6)
         .map((x) => ({ run_id: x.run_id, task: x.task, status: x.status, created_at: x.created_at })),
+      todo,
     },
   };
+}
+
+/** 执行中的运行：一个跑得久的工具的输出尾部（后端每 3 秒刷一次 runs.progress） */
+function progressOf(run: MockRun): Run["progress"] {
+  if (run.status !== "running" || tasks.find((t) => t.name === run.task.split(":")[0])?.form === "builtin") return null;
+  const ms = Math.max(3000, Math.min(NOW - new Date(run.created_at).getTime() - 20_000, 95_000));
+  const at = new Date(NOW - 1500).toISOString();
+  if (run.task.startsWith("failure-analysis"))
+    return { "bash-1": { tool: "bash", title: `cd ${codeDir(run)} && python -m pytest tests/assets/test_pnl.py -x -q`, ms, at,
+      output: "============================= test session starts ==============================\ncollected 42 items\n\ntests/assets/test_pnl.py ........................................" } };
+  return { "py-1": { tool: "py", title: "df = pd.read_parquet(path)", ms, at,
+    output: "读取 queries/q-1021-0915-a3f2.parquet：482,381 行 × 9 列\n按交易日、账户汇总中…\n已处理 300,000 / 482,381 行" } };
 }
 
 function label(k: string): string {

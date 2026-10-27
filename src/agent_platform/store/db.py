@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at      TIMESTAMPTZ,
     finished_at     TIMESTAMPTZ
 );
+-- 执行中的工具（bash / py）每几秒写一次输出尾部：{键: {tool, output, ms, at}}；工具结束删键，运行结束清空
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS progress JSONB;
 CREATE INDEX IF NOT EXISTS idx_runs_created ON runs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs (task, created_at DESC);

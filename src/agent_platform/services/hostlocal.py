@@ -107,7 +107,7 @@ def _journal(unit: str, lines: int, since: str) -> list[str]:
     return []
 
 
-def read_log(target: str, *, lines: int = 200, grep: str = "", since: str = "") -> str:
+def read_log(target: str, *, lines: int = 200, grep: str = "", since: str = "", spill_dir: str | None = None) -> str:
     """target：文件路径（可带通配）、docker:<容器名> 或 journal:<单元>。
     grep 是正则（不分大小写）：文件在整个文件里搜（超大文件只搜末尾 512MB），docker / journal 在最后 5 万行里搜，
     都返回最后 lines 条匹配。since 对 docker / journal 有效（如 30m、2h、2026-10-21 08:00:00）。"""
@@ -143,7 +143,10 @@ def read_log(target: str, *, lines: int = 200, grep: str = "", since: str = "") 
         out = out[-lines:]
     text = "\n".join(out)
     if len(text) > MAX_CHARS:
-        text = "…[前面省略，只显示最后 %d 字]\n" % MAX_CHARS + text[-MAX_CHARS:]
+        # 全文存进工作目录（spill_dir），模型拿到路径，用 read / grep 看前面的部分
+        path = _spill(spill_dir, text) if spill_dir else None
+        hint = f"全文在 {path}，用 read(path, offset=行号) 或 grep 看" if path else "要看前面的就缩小 lines 或用 grep"
+        text = f"…[前面省略，只显示最后 {MAX_CHARS} 字；{hint}]\n" + text[-MAX_CHARS:]
     name = where if where == target else f"{target} → {where}"
     streamed = target.startswith(("docker:", "journal:"))
     if pat:
@@ -154,6 +157,11 @@ def read_log(target: str, *, lines: int = 200, grep: str = "", since: str = "") 
     if since and not streamed:
         head += "（since 只对 docker / journal 有效，文件日志已忽略）"
     return head + "\n" + (text or "（没有内容）")
+
+
+def _spill(work: str, text: str) -> str | None:
+    from ..agent.tools import outputs        # 延迟导入：本模块只用标准库，测试里单独用也不用拉起工具层
+    return outputs.spill(work, "logs", text)
 
 
 def _run(argv: list[str], timeout: float = 10, *, any_exit: bool = False) -> str | None:

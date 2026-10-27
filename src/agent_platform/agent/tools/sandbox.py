@@ -101,6 +101,33 @@ def bwrap_argv(argv: list[str], *, scratch: str, hidden=(), allow=(), binds=(), 
     return args + ["--", *argv]
 
 
+def invisible_reason(path: str, *, hidden=(), allow=(), scratch: str = "", home: str | None = None) -> str | None:
+    """这个路径在 bash 沙箱里看不看得到——read 工具在平台进程里直接读文件，按同一套规则拦（和 bwrap_argv 对齐）：
+    home 下只有挂回的目录（allow）和 scratch；/proc、/dev、/tmp、/run/user 在沙箱里是新的、看不到宿主的；
+    遮蔽的配置和目录看不到。路径和它解析软链接后的真实路径都要过。看得到返回 None，否则返回原因。"""
+    def both(p: str) -> list[str]:       # bwrap 挂载时跟随软链接：写的路径和解析后的都算
+        return list(dict.fromkeys([os.path.normpath(p), os.path.realpath(p)]))
+
+    home = os.path.normpath(home if home is not None else os.path.expanduser("~"))
+    hide_home = home not in ("", "/", os.sep) and os.path.isdir(home)
+    allowed = [q for p in allow if p and not (hide_home and _under(home, os.path.normpath(p))) for q in both(p)]
+    scratches = both(scratch) if scratch else []
+    fresh = ["/proc", "/dev", "/tmp", "/sys"]
+    if hasattr(os, "getuid"):
+        fresh.append(f"/run/user/{os.getuid()}")
+    masks = [q for m in hidden if m for q in both(m)]
+    for p in both(path):
+        if any(_under(p, m) for m in masks):
+            return "这个文件 / 目录对 agent 遮蔽（含口令的配置：生产用 service_info(what=config) 读给 agent 的只读版）"
+        if any(_under(p, q) for q in scratches):      # scratch 在 /tmp 新建之后才 bind，在 /tmp 下也看得到
+            continue
+        if any(_under(p, f) for f in fresh):
+            return "沙箱里这个目录是新的（看不到宿主上的内容）"
+        if hide_home and _under(p, home) and not any(_under(p, q) for q in allowed):
+            return "home 下只看得到代码目录、解释器环境、方法目录和工作目录"
+    return None
+
+
 def limit_argv(argv: list[str], limits: LimitsConfig | None, *, memory: str) -> list[str]:
     """套一个 systemd 用户 scope：内存（不换 swap）和进程数有上限，超了只杀这一个 scope。CPU 不限。"""
     if limits is None or not limits.enabled:

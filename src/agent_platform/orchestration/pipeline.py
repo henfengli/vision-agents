@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -126,7 +127,7 @@ class Pipeline:
     # —— 步骤 ——
 
     async def prepare(self, spec: RunSpec) -> RunSpec:
-        """记配方、重过开关（1–4 环）、拼提示：档案 → 运行环境 → 召回 → 方法 → 问题。"""
+        """记配方、重过开关（1–4 环）、拼提示：当前时间 → 档案 → 运行环境 → 召回 → 方法 → 问题。"""
         d = self._d
         task = await d.registry.task(spec.task)
         if task is None:
@@ -148,7 +149,7 @@ class Pipeline:
         if spec.resume:                      # 续跑：提示已在 checkpoint 里，不重新拼
             return spec
 
-        parts: list[str] = []
+        parts: list[str] = [now_block()]
         profile = compose_profile(spec.service, view.profile if view else {}, spec.task, task.spec.profile)
         if profile:
             parts.append(profile)
@@ -236,6 +237,8 @@ class Pipeline:
         output: dict[str, Any] = {"answer": answer or (json.dumps(data, ensure_ascii=False, indent=2) if data else "")}
         if spec.output_schema:
             output["data"] = data
+        if result.get("step_limit"):
+            output["step_limit"] = True        # 模型调用次数到上限、停用工具后给的收尾结论（可能没查完）
         await runs.log_event(spec.run_id, "final", {"content": output["answer"], **({"data": data} if data else {})})
         return output
 
@@ -373,6 +376,18 @@ async def _announce(d: Deps, spec: RunSpec, event: str, title: str, text: str) -
         title=f"{title}：{spec.task}", text=f"{spec.service or '平台'} · {spec.env} · {spec.trigger.type}\n\n{text}",
         link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"),
         service=spec.service, env=spec.env, task=spec.task, trigger=spec.trigger.type)
+
+
+_WEEKDAYS = "一二三四五六日"
+
+
+def now_block(now: datetime | None = None) -> str:
+    """当前时间（执行运行的这台主机的本地时间）：问"昨天、上个交易日、最近 7 天"时模型要知道今天是哪天。"""
+    now = (now or datetime.now()).astimezone()
+    offset = now.strftime("%z")
+    tz = f"UTC{offset[:3]}:{offset[3:]}" if offset else "本地时间"
+    return (f"[时间] 现在是 {now:%Y-%m-%d %H:%M}（{tz}，星期{_WEEKDAYS[now.weekday()]}）。"
+            "说「今天 / 昨天 / 最近 N 天」按这个算；按交易日统计的，以库里的交易日历为准。")
 
 
 def _methods_block(methods: list[dict], limit: int = 4000) -> str:

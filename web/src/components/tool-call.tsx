@@ -2,11 +2,12 @@
  * 工具调用的展示（运行详情的时间线、对话的过程）：参数一行摘要、参数详情、结果。
  * db_query（旧运行是 sql_query）单独排版：查询放代码块并标出库名；结果解析出 类型 · 库 · 行列数 · 耗时，
  * 大结果写进了工作目录的文件时给出可复制的路径，预览表格按表格显示。
- * logs 的结果第一行是 "[<文件或 docker:容器>] 最后 N 行…"，拆出来作标题。
+ * logs 的结果第一行是 "[<文件或 docker:容器>] 最后 N 行…"，拆出来作标题。todo 的参数按清单显示。
  */
 import { useState } from "react";
 import { LuDatabase, LuFileText, LuScrollText } from "react-icons/lu";
 
+import type { TodoItem } from "@/api/types";
 import { cn } from "@/lib/cn";
 import { num } from "@/lib/format";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "./ui/data";
@@ -45,12 +46,54 @@ export function summarizeArgs(args: unknown, tool?: string): string {
   }
   if (tool === "logs") return logsSummary(a);
   if (tool === "host_status") return "负载、内存、磁盘、进程、容器";
+  if (tool === "read") return `${String(a.path ?? "")}${Number(a.offset) > 1 ? ` · 从第 ${a.offset} 行` : ""}`;
+  if (tool === "grep") return `${String(a.pattern ?? "")}${a.path ? ` · ${String(a.path)}` : ""}${a.glob ? ` · ${String(a.glob)}` : ""}`;
+  if (tool === "todo") {
+    const items = todoItems(a.items);
+    return `待办 ${items.filter((i) => i.status === "completed").length}/${items.length}` + (items.find((i) => i.status === "in_progress") ? ` · 正在：${items.find((i) => i.status === "in_progress")!.content}` : "");
+  }
   const v = a.subagent ? `${a.subagent}：${a.description ?? ""}` : a.command ?? a.code ?? a.what ?? Object.values(a)[0];
   return v ? (typeof v === "string" ? v : JSON.stringify(v)).replace(/\s+/g, " ").slice(0, 90) : "";
 }
 
+export function todoItems(raw: unknown): TodoItem[] {
+  return Array.isArray(raw) ? raw.filter((x): x is TodoItem => !!x && typeof x === "object" && typeof (x as TodoItem).content === "string"
+    && typeof ((x as TodoItem).status ?? "pending") === "string") : [];
+}
+
+const TODO_MARK: Record<TodoItem["status"], { icon: string; cls: string; label: string }> = {
+  pending: { icon: "○", cls: "text-fg-3", label: "待做" },
+  in_progress: { icon: "◐", cls: "text-info", label: "进行中" },
+  completed: { icon: "✓", cls: "text-ok", label: "已完成" },
+  cancelled: { icon: "×", cls: "text-fg-3", label: "已取消" },
+};
+
+/** 待办清单（todo 工具的参数；运行详情侧栏也用） */
+export function TodoList({ items, className }: { items: TodoItem[]; className?: string }) {
+  return (
+    <ul className={cn("space-y-1 text-[12.5px]", className)}>
+      {items.map((it, i) => {
+        const m = TODO_MARK[it.status] ?? TODO_MARK.pending;
+        return (
+          <li key={i} className="flex items-start gap-2">
+            <span className={cn("mt-px w-3 shrink-0 text-center text-[11px]", m.cls)} aria-hidden>{m.icon}</span>
+            <span className="sr-only">{m.label}：</span>
+            <span className={cn("min-w-0 flex-1", it.status === "completed" ? "text-fg-3" : it.status === "in_progress" ? "font-medium text-fg" : "text-fg-2", it.status === "cancelled" && "line-through")}>
+              {it.content}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export function ToolArgs({ tool, args }: { tool?: string; args: unknown }) {
   const a = asArgs(args);
+  if (a && tool === "todo") {
+    const items = todoItems(a.items);
+    if (items.length) return <div className="rounded-md border border-line bg-sunken px-3 py-2.5"><TodoList items={items} /></div>;
+  }
   if (a) {
     if (isDbTool(tool)) {
       const q = dbQueryOf(a);
@@ -88,8 +131,8 @@ export interface DbResult {
 }
 
 const HEAD = /^\[([^\]]+?) · ([^\]]+)\] (\d+) 行(?: × (\d+) 列)?，(\d+) ms(.*)$/;
-/** logs 的第一行（与 services/hostlocal.read_log 一致）：[target] 最后 N 行（里匹配 'x' 的 M 行） */
-const LOG_HEAD = /^\[([^\]\n]+)\] (最后 \d+ 行[^\n]*)/;
+/** logs 的第一行（与 services/hostlocal.read_log 一致）：[target] 最后 N 行 / [target] 整个文件里匹配 'x' 的共 M 行… */
+const LOG_HEAD = /^\[([^\]\n]+)\] ([^\n]*?(?:最后 \d+ 行|里匹配)[^\n]*)/;
 const FILE = /^全部结果在 (.+?)（([^）]+)）：/;
 
 /** 解析 db_query 的输出；不是这个格式（报错、旧运行）返回 null */
@@ -146,8 +189,8 @@ export function ToolOutput({ tool, output, className }: { tool?: string; output:
     const r = parseDbResult(output);
     if (r) return <div className={className}><DbOutput r={r} raw={output} /></div>;
   }
-  const failed = /^\[(拒绝|失败|超时|查询出错|不可用|未配置|参数|无服务|无数据|监控不可用|不符合要求|未执行|不存在|没有权限|读取失败|工具出错)\]/.test(output);
-  // logs 的输出第一行是 "[<文件或 docker:容器>] 最后 N 行…"：拆成标题，正文按日志排版
+  const failed = /^\[(拒绝|失败|超时|查询出错|不可用|未配置|参数|无服务|无数据|不符合要求|未执行|不存在|没有权限|读取失败|工具出错|看不到|已取消|重复调用|超出范围|内核出错|内核无响应|内核已退出)\]/.test(output);
+  // logs 的输出第一行是 "[<文件或 docker:容器>] 最后 N 行…" / "…整个文件里匹配 …"：拆成标题，正文按日志排版
   const head = !failed && tool === "logs" ? LOG_HEAD.exec(output) : null;
   if (head) {
     const body = output.slice(head[0].length).replace(/^\n/, "");

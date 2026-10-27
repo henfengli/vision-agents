@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from ..agent.tools.bash import build_safe_env
+from ..agent.tools import outputs
 from ..agent.tools.sandbox import bwrap_argv, has_bwrap, limit_argv, scope_env, work_dir
 from ..config import LimitsConfig
 
@@ -44,7 +45,7 @@ MAX_RESULT_CHARS = 20_000
 ROOM_WAIT_S = 120              # 内核数到上限且都在执行时，新会话的 py 调用最多等这么久
 
 DRIVER = r'''
-import ast, io, json, os, signal, sys, time, traceback
+import ast, io, json, os, signal, sys, threading, time, traceback
 
 _pin = os.fdopen(os.dup(0), "rb")
 _pout = os.fdopen(os.dup(1), "w", encoding="utf-8")
@@ -52,7 +53,52 @@ os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
 os.dup2(2, 1)
 sys.stdin = io.StringIO("")
 _LIMIT = 50000
+_SPILL = 20000                       # 输出超过这么多字：全文存进 $SCRATCH/outputs/，返回里给路径
+_PROGRESS_S = 3                      # 执行中每隔几秒把输出尾部发给宿主（时间线上看进度）
 G = {"__name__": "__main__", "__builtins__": __builtins__}
+_wlock = threading.Lock()            # 结果、RPC 请求、进度从不同线程写同一条管道
+
+
+def _send(obj):
+    line = json.dumps(obj, ensure_ascii=False, default=str) + "\n"
+    with _wlock:
+        _pout.write(line)
+        _pout.flush()
+
+
+def _spill(rid, text):
+    try:
+        d = os.path.join(os.environ.get("SCRATCH") or "/tmp", "outputs")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "py-%s-%d.txt" % (time.strftime("%m%d-%H%M%S"), rid))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+    except OSError:
+        return None
+
+
+class _Buf(io.StringIO):
+    """收集输出，顺带记总长和最后 2000 字：进度线程只读这两个，不用每次把整份输出复制一遍。"""
+
+    def __init__(self):
+        super().__init__()
+        self.n = 0
+        self.tail = ""
+
+    def write(self, s):
+        self.n += len(s)
+        self.tail = (self.tail + s)[-2000:]
+        return super().write(s)
+
+
+def _progress(rid, buf, stop, t0):
+    """执行中的进度：输出有变化就把尾部发出去。宿主只认当前这次调用的 id。"""
+    last = -1
+    while not stop.wait(_PROGRESS_S):
+        if buf.n != last:
+            last = buf.n
+            _send({"progress": rid, "out": buf.tail, "ms": int((time.monotonic() - t0) * 1000)})
 
 
 class CellTimeout(BaseException):
@@ -96,9 +142,7 @@ def _rpc(name, args, kwargs):
     """平台工具调用：写一行请求给宿主，等同号的回复（超时中断后迟到的旧回复直接丢掉）。"""
     _rpc_seq[0] += 1
     rid = _rpc_seq[0]
-    _pout.write(json.dumps({"rpc": rid, "call": name, "args": args, "kwargs": kwargs},
-                           ensure_ascii=False, default=str) + "\n")
-    _pout.flush()
+    _send({"rpc": rid, "call": name, "args": args, "kwargs": kwargs})
     while True:
         line = _pin.readline()
         if not line:
@@ -146,11 +190,13 @@ while True:
     for _n in req.get("tools") or ():
         if _n not in G or getattr(G[_n], "_platform_tool", False):
             G[_n] = _stub(_n)         # 用户自己定义了同名变量就不覆盖
-    buf = io.StringIO()
+    buf = _Buf()
     old = sys.stdout, sys.stderr
     sys.stdout = sys.stderr = buf
     value = error = None
     t0 = time.monotonic()
+    stop = threading.Event()
+    threading.Thread(target=_progress, args=(req["id"], buf, stop, t0), daemon=True).start()
     if hasattr(signal, "setitimer"):
         signal.setitimer(signal.ITIMER_REAL, float(req.get("timeout") or 120))
     try:
@@ -164,15 +210,19 @@ while True:
     finally:
         if hasattr(signal, "setitimer"):
             signal.setitimer(signal.ITIMER_REAL, 0)
+        stop.set()
         sys.stdout, sys.stderr = old
     out = buf.getvalue()
+    spilled = None
+    if len(out) + len(value or "") + len(error or "") > _SPILL:
+        spilled = _spill(req["id"], out + ("\n[值] %s\n" % value if value is not None else "")
+                         + ("\n[错误]\n%s\n" % error if error else ""))
     if len(out) > _LIMIT:
         out = out[:_LIMIT // 2] + "\n…[输出截断，共 %d 字符]…\n" % len(out) + out[-_LIMIT // 2:]
     if error and len(error) > _LIMIT:
         error = error[:_LIMIT // 2] + "\n…[截断]…\n" + error[-_LIMIT // 2:]
-    _pout.write(json.dumps({"id": req["id"], "out": out, "value": value, "error": error,
-                            "ms": int((time.monotonic() - t0) * 1000)}, ensure_ascii=False) + "\n")
-    _pout.flush()
+    _send({"id": req["id"], "out": out, "value": value, "error": error, "spilled": spilled,
+           "ms": int((time.monotonic() - t0) * 1000)})
 '''
 
 
@@ -213,10 +263,15 @@ class KernelManager:
 
     async def execute(self, key: str, spec: dict, code: str, *, timeout: float = 120,
                       hidden: tuple[str, ...] = (), restart: bool = False,
-                      tools: dict[str, Callable[..., Awaitable[Any]]] | None = None) -> str:
+                      tools: dict[str, Callable[..., Awaitable[Any]]] | None = None,
+                      progress: Callable[[str, int], Awaitable[None]] | None = None) -> str:
         """spec：envspec.runtime_spec() 的结果（service/env/python/workdir/binds/hidden/allow/env_vars/digest）。
         hidden：本运行 bash 沙箱的遮蔽（所有服务的配置），和 spec 的合并。
-        tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。"""
+        tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。
+        progress：执行中每隔几秒拿到输出尾部和已用毫秒（时间线上的"执行中"）。
+
+        调用被取消（运行被取消、任务超时、worker 停机）时结束这个内核：里面那段代码还在跑，留着它，
+        下一次调用会先读到它迟到的结果。结果按请求 id 对号，对不上的旧结果丢掉。"""
         notice = ""
         waited = 0.0
         while True:
@@ -257,31 +312,46 @@ class KernelManager:
                     try:
                         line = await asyncio.wait_for(k.proc.stdout.readline(), max(1.0, deadline - time.monotonic()))
                     except (TimeoutError, asyncio.TimeoutError):
-                        await self.shutdown(key)
+                        await self._drop(key, k)
                         return f"[内核无响应] 超过 {int(timeout) + 15}s 没有返回，已结束内核（变量清空，下次调用自动重启）"
                     if not line:
                         break
                     msg = json.loads(line)
-                    if "rpc" not in msg:
-                        break
-                    calls += 1
-                    reply = await _serve_rpc(msg, tools)
-                    k.proc.stdin.write((json.dumps(reply, ensure_ascii=False, default=str) + "\n").encode())
-                    await k.proc.stdin.drain()
+                    if "progress" in msg:
+                        if progress is not None and msg["progress"] == k.seq:
+                            try:
+                                await progress(msg.get("out") or "", int(msg.get("ms") or 0))
+                            except Exception:  # noqa: BLE001 —— 进度只是给人看的，写不进去不影响执行
+                                log.debug("内核进度回调失败", exc_info=True)
+                        continue
+                    if "rpc" in msg:
+                        calls += 1
+                        reply = await _serve_rpc(msg, tools)
+                        k.proc.stdin.write((json.dumps(reply, ensure_ascii=False, default=str) + "\n").encode())
+                        await k.proc.stdin.drain()
+                        continue
+                    if msg.get("id") != k.seq:
+                        continue                            # 不是这次的结果（不该发生：被取消的调用会结束内核）
+                    break
+            except asyncio.CancelledError:
+                # 运行被取消 / 超时：内核里的代码还在跑，结束它，别让下一次调用读到迟到的结果
+                await asyncio.shield(self._drop(key, k))
+                raise
             except (BrokenPipeError, ConnectionResetError, ValueError) as e:
                 # 内核起不来（bwrap / systemd-run 报错）或协议乱了（超长的一行、不是 JSON）：结束它，把 stderr 交给 agent
                 await asyncio.sleep(0.2)
-                await self.shutdown(key)
+                await self._drop(key, k)
                 tail = "".join(k.stray)[-4000:]
                 return f"[内核出错] {type(e).__name__}: {str(e)[:300]}（变量清空，下次调用自动重启）\n{tail}".strip()
             await asyncio.sleep(0.05)                 # 让 stderr 里紧跟着的输出落进来
             if not line:
                 code_ = await k.proc.wait()
-                self._kernels.pop(key, None)
+                if self._kernels.get(key) is k:
+                    self._kernels.pop(key, None)
                 tail = "".join(k.stray)[-4000:]
                 return f"[内核已退出] 退出码 {code_}（变量清空，下次调用自动重启）\n{tail}".strip()
             k.last_used = time.monotonic()
-            return notice + _format(msg, "".join(k.stray), calls)
+            return notice + _format(msg, "".join(k.stray), calls, spill_dir=work_dir(self._scratch, key))
 
     def alive(self, key: str, digest: str | None = None) -> bool:
         k = self._kernels.get(key)
@@ -291,6 +361,12 @@ class KernelManager:
         k = self._kernels.pop(key, None)
         if k is not None:
             await _kill(k)
+
+    async def _drop(self, key: str, k: _Kernel) -> None:
+        """结束这一个内核（池子里已经换成别的同键内核时只杀它自己，不动新的）。"""
+        if self._kernels.get(key) is k:
+            self._kernels.pop(key, None)
+        await _kill(k)
 
     async def close(self) -> None:
         for key in list(self._kernels):
@@ -408,7 +484,7 @@ async def _serve_rpc(msg: dict, tools: dict[str, Callable[..., Awaitable[Any]]])
         return {"rpc": rid, "error": f"{type(e).__name__}: {str(e)[:1000]}"}
 
 
-def _format(resp: dict, stray: str, calls: int = 0) -> str:
+def _format(resp: dict, stray: str, calls: int = 0, spill_dir: str | None = None) -> str:
     parts = []
     if resp.get("out"):
         parts.append(resp["out"].rstrip("\n"))
@@ -420,6 +496,14 @@ def _format(resp: dict, stray: str, calls: int = 0) -> str:
         parts.append(f"[错误]\n{resp['error'].rstrip()}")
     text = "\n".join(parts) or "（无输出）"
     if len(text) > MAX_RESULT_CHARS:
-        half = MAX_RESULT_CHARS // 2
-        text = text[:half] + f"\n…[截断，共 {len(text)} 字符]…\n" + text[-half:]
+        # 全文：内核里已经存了的（输出很长时）用它的，否则这里存；模型拿到路径，用 read / grep 看要的部分
+        path = resp.get("spilled")
+        if path and stray.strip():           # 内核存的文件里没有直接写到 fd 的输出：补在后面
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("\n[直接输出 / stderr]\n" + _ANSI.sub("", stray))
+            except OSError:
+                pass
+        path = path or (outputs.spill(spill_dir, "py", text) if spill_dir else None)
+        text = outputs.clip(text, MAX_RESULT_CHARS, path)
     return f"{text}\n（{resp.get('ms', 0)} ms" + (f"，平台工具调用 {calls} 次）" if calls else "）")

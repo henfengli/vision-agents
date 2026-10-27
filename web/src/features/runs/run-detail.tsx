@@ -7,7 +7,7 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import {
   LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
-  LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
+  LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
 import { ApiError } from "@/api/client";
@@ -16,7 +16,7 @@ import type { KnowledgeKind, RecipeRef, Run, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TRIGGER, TriggerBadge } from "@/components/status";
-import { ToolArgs, ToolOutput, summarizeArgs } from "@/components/tool-call";
+import { TodoList, ToolArgs, ToolOutput, summarizeArgs, todoItems } from "@/components/tool-call";
 import { Button, LinkButton } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
 import { Field, Textarea } from "@/components/ui/form";
@@ -246,9 +246,30 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
               <span className="text-[12.5px] text-fg-3">{run.status === "queued" ? "排队中…" : "执行中…下一步会实时出现在这里"}</span>
             </li>
           )}
+          {live && <LiveProgress progress={run.progress} />}
         </ol>
       )}
     </Card>
+  );
+}
+
+/** 跑得久的 bash / py：每几秒一条输出尾部（runs.progress），工具结束就消失 */
+function LiveProgress({ progress }: { progress: Run["progress"] }) {
+  const items = Object.entries(progress ?? {}).sort(([, a], [, b]) => b.ms - a.ms);
+  if (!items.length) return null;
+  return (
+    <li className="ml-[30px] space-y-2 pb-2">
+      {items.map(([key, p]) => (
+        <div key={key} className="overflow-hidden rounded-md border border-info/30 bg-info-soft/20">
+          <div className="flex items-center gap-2 border-b border-info/20 px-3 py-1.5 text-[12px]">
+            <Badge tone="info" icon={<LuWrench />}>{p.tool}</Badge>
+            <code className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2" title={p.title}>{p.title}</code>
+            <span className="shrink-0 tabular-nums text-fg-3">已跑 {duration(p.ms)}</span>
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[11.5px] leading-relaxed text-fg-2">{p.output || "（还没有输出）"}</pre>
+        </div>
+      ))}
+    </li>
   );
 }
 
@@ -334,6 +355,12 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
           <div className="mt-1.5 space-y-2 pl-6">
             {thinking && <div className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-fg-2">{thoughtText}</div>}
             {block && <CodeBlock code={String(p.content ?? "")} wrap maxHeight={420} />}
+            {step.kind === "final" && run.output?.step_limit && (
+              <div className="flex items-start gap-2 rounded-md border border-warn/30 bg-warn-soft/40 px-3 py-2 text-[12.5px] text-warn">
+                <LuCircleAlert className="mt-0.5 size-3.5 shrink-0" />
+                <span>模型调用次数到了上限，工具已停用，这是让 agent 收尾时给的结论：可能没查完，看里面列的「还没做完的事」。要接着查就纠正或在对话里追问。</span>
+              </div>
+            )}
             {step.kind === "final" && (run.resolution === "builtin" && String(p.content ?? "").startsWith("{")
               ? <CodeBlock code={String(p.content)} maxHeight={420} />
               : <div className="rounded-md border border-ok/25 bg-ok-soft/20 px-4 py-3"><Markdown text={String(p.content)} className="text-[13px]" /></div>
@@ -381,9 +408,17 @@ function ModelMeta({ p, className }: { p: RunEvent["payload"]; className?: strin
 
 function Sidebar({ run }: { run: Run }) {
   const c = run.context;
+  const todo = todoItems(c.todo);
   /* 宽屏时侧栏贴顶、自己滚：时间线短的时候左边不会空一大截，时间线长的时候侧栏一直看得见 */
   return (
     <div className="min-w-0 space-y-4 xl:sticky xl:top-0 xl:max-h-[calc(100dvh-48px-3.5rem)] xl:self-start xl:overflow-y-auto xl:pr-0.5">
+      {todo.length > 0 && (
+        <Card>
+          <CardHeader title="待办" icon={<LuListTodo />}
+            description={`agent 列的计划 · 完成 ${todo.filter((t) => t.status === "completed").length}/${todo.length}`} />
+          <div className="px-4 py-3"><TodoList items={todo} /></div>
+        </Card>
+      )}
       <Card>
         <CardHeader title="输入" />
         <div className="p-3"><JsonView value={run.input} maxHeight={260} /></div>
