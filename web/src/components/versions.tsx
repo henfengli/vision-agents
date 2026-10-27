@@ -14,7 +14,7 @@ import { DiffView, stableYaml } from "./ui/data";
 import { confirm, toast } from "./ui/overlay";
 import { Badge, Card, CardHeader, Empty, SkeletonRows } from "./ui/primitives";
 
-const STRIP = new Set(["version", "updated_by", "updated_at", "name", "section", "overrides", "stats_24h", "last_run", "next_fire", "subtask_count", "task_count", "health"]);
+const STRIP = new Set(["version", "updated_by", "updated_at", "name", "section", "overrides", "stats_24h", "last_run", "next_fire", "subtask_count", "task_count", "generic_task_count", "health"]);
 
 function clean(def: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(def).filter(([k]) => !STRIP.has(k)));

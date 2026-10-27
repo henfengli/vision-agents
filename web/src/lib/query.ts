@@ -124,6 +124,11 @@ export function invalidate(...prefix: unknown[]) {
   }
 }
 
+/** 读缓存里的当前值（增量拉取时接着上次的往后取） */
+export function getQueryData<T>(key: Key): T | undefined {
+  return cache.get(hashKey(key))?.data as T | undefined;
+}
+
 /** 直接写缓存（乐观更新） */
 export function setQueryData<T>(key: Key, updater: (old: T | undefined) => T) {
   const e = entry(hashKey(key)) as Entry<T>;

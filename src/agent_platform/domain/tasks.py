@@ -4,7 +4,8 @@
 service=None（平台任务，不涉及业务服务）。
 
 子任务 = "父任务:对象名"，只嵌套一层，定义只存差异（model_fields_set 判定显式
-覆盖），其余沿 extends 合并。调用方显式带 subtask 选用，平台不从输入里猜。
+覆盖），其余沿 extends 合并。调用方显式带 subtask 选用；任务声明了 object_input
+（比如失败分析的 asset_key）时，这个输入字段的值就是对象名，两边互相补齐，不用填两遍。
 
 触发全部声明在任务上：api / chat / schedule（cron × 环境）/ event（来源 × 事件）。
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import string
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -97,7 +99,10 @@ class TriggerRule(BaseModel):
     @field_validator("pattern")
     @classmethod
     def _compiles(cls, v: str) -> str:
-        re.compile(v)
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"规则的正则不合法：{e}") from None
         return v
 
 
@@ -111,10 +116,36 @@ class EventTrigger(_TriggerBase):
     session: str | None = None                    # 会话命名模板，如 dagster:{asset_key}:{error_class}:{date}
     service: str | None = None                    # 通用任务：固定服务；不填则取事件数据里的 service 字段
 
+    def problem(self) -> str | None:
+        """写入时的检查（读库时不查：老定义照样能用）。不合法的过滤正则、会话模板要在保存时拦下，
+        到收事件时才炸的话整个事件入口（所有任务）都会失败。"""
+        for field, pattern in self.filter.items():
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                return f"事件 {self.id} 的过滤 {field} 正则不合法：{e}"
+        if self.session:
+            try:
+                names = [f for _, f, _, _ in string.Formatter().parse(self.session) if f is not None]
+            except ValueError as e:
+                return f"事件 {self.id} 的会话命名模板不合法：{e}（字面花括号写成 {{{{ }}}}）"
+            if any(not n or not n.isidentifier() for n in names):
+                return f"事件 {self.id} 的会话命名模板里，占位要是字段名，如 {{asset_key}}、{{date}}"
+        for r in self.rules:
+            # 空正则匹配任何报错：所有事件都会被这条规则截下、不再交给 agent
+            if not r.pattern.strip():
+                return f"事件 {self.id} 有一条规则的正则是空的（会匹配所有报错）"
+            if not r.conclusion.strip():
+                return f"事件 {self.id} 的规则 {r.pattern} 没写结论"
+        return None
+
     def accepts(self, data: dict[str, Any]) -> bool:
         for field, pattern in self.filter.items():
-            if not re.search(pattern, str(data.get(field, "")), re.IGNORECASE):
-                return False
+            try:
+                if not re.search(pattern, str(data.get(field, "")), re.IGNORECASE):
+                    return False
+            except re.error:
+                return False                      # 老定义里不合法的正则：当作不匹配，别让整个事件入口失败
         return True
 
     def input_from(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -155,9 +186,24 @@ class Dedup(BaseModel):
     key: str                       # 输入字段，a+b 拼接
     window_s: int = 600
 
+    @field_validator("window_s")
+    @classmethod
+    def _window(cls, v: int) -> int:
+        if not 1 <= v <= 7 * 86400:
+            raise ValueError("去重窗口须在 1 秒 ~ 7 天之间")
+        return v
+
+    @property
+    def fields(self) -> list[str]:
+        return [k.strip() for k in self.key.split("+") if k.strip()]
+
     def key_of(self, input_data: dict[str, Any]) -> str:
-        parts = [str(input_data.get(k.strip(), "")) for k in self.key.split("+")]
+        parts = [str(input_data.get(k, "")) for k in self.fields]
         return "|".join(parts) if any(parts) else ""
+
+
+# 内建处理器（form=builtin 的 handler）：实现在 orchestration/pipeline.py 的 BUILTINS，名字在这里登记，保存时就能校验
+BUILTIN_HANDLERS = ("memory-gardener",)
 
 
 # ———————— 任务 ————————
@@ -186,6 +232,9 @@ class TaskDef(BaseModel):
     # 结构化输出（JSON Schema，顶层须是 object）：声明了就要求 agent 最后按它交回结果，
     # 校验通过的放在运行输出的 output.data（answer 照旧是文字结论）。给服务 / 自动化调用方用。
     output_schema: dict[str, Any] | None = None
+    # 对象字段：子任务的对象名就是这个输入字段的值（失败分析的 asset_key）。选了对象就自动填上这个输入；
+    # 只给了这个输入、没点名子任务时，按它的值找（没有就建）对应的子任务——事件、API、定时都一样
+    object_input: str | None = None
 
     @field_validator("timeout_s")
     @classmethod
@@ -217,8 +266,9 @@ class TaskDef(BaseModel):
 
     @model_validator(mode="after")
     def _form_consistency(self):
+        # 读库时也查的基本一致性；更细的检查只在写入时做（consistency_error），老定义不会因此读不出来
         if self.extends:
-            return self   # 子任务只存差异，形态一致性在合并后的生效定义上校验
+            return self   # 子任务只存差异，一致性在合并后的生效定义上校验
         if self.form == "agent" and not self.role:
             raise ValueError("单角色任务需要指定角色")
         if self.form == "builtin" and not self.handler:
@@ -271,6 +321,57 @@ class TaskDef(BaseModel):
             if name not in out and f.default is not None:
                 out[name] = f.default
         return out
+
+
+def consistency_error(t: TaskDef, *, triggers: bool = True) -> str | None:
+    """写入时检查一份（生效）定义是否自洽；不自洽返回原因。父任务查它自己，子任务查和父任务合并之后的。
+    triggers=False：不查触发器——子任务没写自己的触发时，合并来的是父任务的，定时和事件都不会按子任务触发
+    （调度、事件路由跳过它们），拿子任务收窄的环境、改过的输入去对父任务的定时没有意义，父任务那边已经查过。"""
+    if t.form == "agent" and not t.role:
+        return "单角色任务需要指定角色"
+    if t.form == "builtin":
+        if not t.handler:
+            return "内建任务需要处理器名"
+        if t.handler not in BUILTIN_HANDLERS:
+            return f"未知的内建处理器 {t.handler}（可用：{'、'.join(BUILTIN_HANDLERS)}）"
+    for name in t.input:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+            return f"输入字段名 {name!r} 不合法（字母、数字、下划线，字母或下划线开头）"
+    for name, f in t.input.items():
+        if f.type == "enum" and not f.options:
+            return f"输入字段 {name} 是枚举，至少要有一个选项"
+    if t.object_input and t.object_input not in t.input:
+        return f"对象字段 {t.object_input} 不在输入字段里"
+    if t.dedup:
+        if not t.dedup.fields:
+            return "去重要写按哪个输入字段（a+b 拼接多个）"
+        missing = [k for k in t.dedup.fields if k not in t.input]
+        if missing:
+            return f"去重字段不在输入里：{'、'.join(missing)}"
+    if not triggers:
+        return None
+    ids = [tr.id for tr in t.triggers]
+    if len(ids) != len(set(ids)):
+        return "触发器 id 重复"
+    for tr in t.triggers:
+        if tr.type == "event" and (why := tr.problem()):
+            return why
+        if tr.type != "schedule":
+            continue
+        if t.envs and (outside := [e for e in tr.envs if e not in t.envs]):
+            return f"定时 {tr.id} 的环境 {'、'.join(outside)} 不在任务允许的环境里"
+        if errors := t.validate_input(t.with_defaults(tr.input)):
+            return f"定时 {tr.id} 的固定输入不合法：" + "；".join(f"{k} {v}" for k, v in errors.items())
+    return None
+
+
+def object_value(t: TaskDef, input_data: dict[str, Any]) -> str:
+    """对象字段的值（能当子任务对象名的才算；Dagster 的多段 asset key 这类带斜杠的不算，运行落在父任务上）。"""
+    if not t.object_input:
+        return ""
+    v = input_data.get(t.object_input)
+    v = str(v).strip() if isinstance(v, (str, int)) and not isinstance(v, bool) else ""
+    return v if v and OBJECT_NAME_RE.match(v) else ""
 
 
 # ———————— 子任务 ————————

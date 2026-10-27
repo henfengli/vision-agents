@@ -11,9 +11,9 @@ from .prompts import PromptsConfig
 from .roles import ResolvedRole, RoleDef, RoleError, resolve_role
 from .runs import ACTIVE, RESOLUTIONS, RUN_STATUSES, SYSTEM, TERMINAL, Caller, RunRequest, RunTrigger
 from .services import EnvOverride, ServiceDef, ServiceView
-from .tasks import (ApiTrigger, ChatTrigger, Dedup, Deliver, EventTrigger, InputField, MemoryOverride,
-                    ScheduleTrigger, TaskDef, Trigger, TriggerRule, compose_profile, merge_task, profile_lines,
-                    question_text, split_subtask_name)
+from .tasks import (BUILTIN_HANDLERS, ApiTrigger, ChatTrigger, Dedup, Deliver, EventTrigger, InputField,
+                    MemoryOverride, ScheduleTrigger, TaskDef, Trigger, TriggerRule, compose_profile, consistency_error,
+                    merge_task, object_value, profile_lines, question_text, split_subtask_name)
 
 __all__ = [
     "ACTIVE", "ApiTrigger", "CONFIG_SECTIONS", "Channel", "ChatTrigger", "Dedup",
@@ -24,5 +24,5 @@ __all__ = [
     "RunRequest", "RunTrigger", "ScheduleTrigger", "ServiceDef", "ServiceView", "TERMINAL",
     "TaskDef", "Trigger",
     "TriggerRule", "WHOLE_RUN", "compose_profile", "merge_task", "profile_lines", "question_text", "resolve_role",
-    "split_subtask_name",
+    "split_subtask_name", "BUILTIN_HANDLERS", "consistency_error", "object_value",
 ]

@@ -22,7 +22,7 @@ from .. import __version__, observability
 from ..agent import factory as agent_factory
 from ..agent import scope as run_scope
 from ..config import Settings
-from ..domain import Rejected, RunTrigger, compose_profile, question_text
+from ..domain import BUILTIN_HANDLERS, Rejected, RunTrigger, compose_profile, question_text
 from ..memory import distill, recall
 from ..memory.gardener import run_gardener
 from ..notify import Message, Notifier
@@ -262,9 +262,12 @@ class Pipeline:
             await runs.log_event(spec.run_id, "final", {"content": output.get("answer", "")})
         try:
             if spec.correction:
-                previous = await runs.latest_of_session(spec.session_id, exclude=spec.run_id)
-                if previous:
-                    await knowledge_store.supersede_by_runs([previous["run_id"]], spec.run_id)
+                # 取代被纠正的那一轮（trigger.id）沉淀的；老的纠正运行没记 id，退回同会话的上一轮
+                corrected = spec.trigger.id
+                if not corrected and (previous := await runs.latest_of_session(spec.session_id, exclude=spec.run_id)):
+                    corrected = previous["run_id"]
+                if corrected:
+                    await knowledge_store.supersede_by_runs([corrected], spec.run_id)
             if spec.save and spec.service and resolution == "agent":
                 memory = await d.registry.config("memory")
                 await distill(d.model_pool, env=spec.env, service=spec.service, run_id=spec.run_id, task=spec.task,
@@ -326,6 +329,7 @@ async def _gardener(d: Deps, spec: RunSpec) -> dict:
 BUILTINS: dict[str, Callable[[Deps, RunSpec], Awaitable[dict]]] = {
     "memory-gardener": _gardener,
 }
+assert set(BUILTINS) == set(BUILTIN_HANDLERS), "内建处理器的实现和 domain.tasks.BUILTIN_HANDLERS 要一致"
 
 
 # ==================== 小工具 ====================

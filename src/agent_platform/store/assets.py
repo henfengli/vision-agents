@@ -517,8 +517,9 @@ async def by_source_run(run_id: str) -> list[dict]:
 
 async def list_entries(env: str | None = None, service: str | None = None, task: str | None = None,
                        kind: str | None = None, status: str | None = None, entry_id: int | None = None,
-                       limit: int = 300) -> list[dict]:
-    """控制台方法页：跨环境可选，带文件清单（文件类资产）。task 含其子任务；status：active / superseded / all。"""
+                       q: str | None = None, limit: int = 300) -> list[dict]:
+    """控制台方法页：跨环境可选，带文件清单（文件类资产）。task 含其子任务；status：active / superseded（已停用）/ all；
+    q：名字、摘要、内容里不分大小写地找。"""
     conds, params = [], []
     for col, val in (("env", env), ("service", service), ("kind", kind), ("id", entry_id)):
         if val:
@@ -531,6 +532,10 @@ async def list_entries(env: str | None = None, service: str | None = None, task:
         conds.append("valid_to IS NULL")
     elif status == "superseded":
         conds.append("valid_to IS NOT NULL")
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        conds.append("(name ILIKE %s OR summary ILIKE %s OR content ILIKE %s)")
+        params += [like, like, like]
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     async with pool().connection() as conn:
         cur = await conn.execute(

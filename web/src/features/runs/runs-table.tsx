@@ -55,7 +55,14 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
             {has("service") && <Td className="whitespace-nowrap">{r.service ? <Link to={`/services/${r.service}`} onClick={(e) => e.stopPropagation()} className="text-fg-2 hover:text-accent">{r.service}</Link> : <span className="text-fg-3">平台</span>}</Td>}
             {has("env") && <Td><EnvBadge env={r.env} /></Td>}
             {has("trigger") && <Td className="whitespace-nowrap"><TriggerBadge type={r.trigger.type} source={r.trigger.source} /></Td>}
-            {has("duration") && <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">{duration(r.duration_ms)}</Td>}
+            {has("duration") && (
+              <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">
+                {/* 还在跑的显示已经跑了多久（列表随轮询刷新） */}
+                {r.status === "running" && r.duration_ms == null
+                  ? <Tooltip content="已经跑了多久"><span className="text-fg-3">{duration(Math.max(0, Date.now() - Date.parse(r.created_at)))}…</span></Tooltip>
+                  : duration(r.duration_ms)}
+              </Td>
+            )}
             {has("tokens") && <Td className="whitespace-nowrap text-right tabular-nums text-fg-3">{r.tokens ? num(r.tokens) : "—"}</Td>}
             {has("time") && (
               <Td className="whitespace-nowrap text-right">

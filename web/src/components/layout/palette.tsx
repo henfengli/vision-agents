@@ -1,12 +1,12 @@
 /**
- * 命令面板（⌘K / Ctrl K）：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/记忆）。
+ * 命令面板（⌘K / Ctrl K）：页面跳转、切换环境/主题、全局搜索（服务/任务/运行/角色/记忆/方法）。
  * 键盘：↑↓ 选择、Enter 执行、Esc 关闭。
  */
 import { Dialog, DialogPanel } from "@headlessui/react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   LuActivity, LuBell, LuBot, LuBrain, LuCornerDownLeft, LuFlaskConical, LuKeyRound, LuLayers, LuLayoutDashboard, LuListTodo, LuMessageSquare,
-  LuMessageSquareText, LuMessageSquareWarning, LuMonitor, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuSun,
+  LuMessageSquareText, LuMessageSquareWarning, LuMonitor, LuMoon, LuPlay, LuSearch, LuServer, LuSettings, LuSun, LuWrench,
 } from "react-icons/lu";
 
 import { api, useEnvs } from "@/api/hooks";
@@ -30,9 +30,12 @@ window.addEventListener("keydown", (e) => {
 interface Cmd { id: string; label: ReactNode; hint?: ReactNode; icon: ReactNode; group: string; run: () => void; keywords?: string }
 
 const HIT_ICON: Record<SearchHit["type"], ReactNode> = {
-  service: <LuServer />, task: <LuListTodo />, run: <LuActivity />, role: <LuBot />, knowledge: <LuBrain />, session: <LuMessageSquare />,
+  service: <LuServer />, task: <LuListTodo />, run: <LuActivity />, role: <LuBot />, knowledge: <LuBrain />, asset: <LuWrench />, session: <LuMessageSquare />,
 };
-const HIT_GROUP: Record<SearchHit["type"], string> = { service: "服务", task: "任务", run: "运行", role: "角色", knowledge: "记忆", session: "会话" };
+const HIT_GROUP: Record<SearchHit["type"], string> = { service: "服务", task: "任务", run: "运行", role: "角色", knowledge: "记忆", asset: "方法", session: "会话" };
+
+/** 旧后端的教训标题是 lesson:<指纹>：换成副标题里能读的部分（新后端已经给结论第一行） */
+const hitTitle = (h: SearchHit) => (h.type === "knowledge" && /^lesson:[0-9a-f]+$/i.test(h.title) ? "教训" : h.title);
 
 export function CommandPalette() {
   const isOpen = useSyncExternalStore((l) => { subs.add(l); return () => subs.delete(l); }, () => open);
@@ -88,7 +91,7 @@ export function CommandPalette() {
   const items: Cmd[] = useMemo(() => {
     const term = q.trim().toLowerCase();
     const cmds = term ? commands.filter((c) => (String(c.label) + " " + (c.keywords ?? "")).toLowerCase().includes(term)) : commands.slice(0, 9);
-    const results = hits.map((h) => ({ id: h.type + h.id, label: h.title, hint: h.subtitle, icon: HIT_ICON[h.type], group: HIT_GROUP[h.type], run: () => navigate(h.href) }));
+    const results = hits.map((h) => ({ id: h.type + h.id, label: hitTitle(h), hint: h.subtitle, icon: HIT_ICON[h.type] ?? <LuSearch />, group: HIT_GROUP[h.type] ?? "其他", run: () => navigate(h.href) }));
     return [...results, ...cmds];
   }, [commands, hits, q]);
 

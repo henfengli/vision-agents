@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from contextvars import ContextVar
 from typing import Any
 
@@ -279,8 +280,9 @@ async def _log_blocked(name: str, args: Any, text: str) -> None:
     budget = _BUDGET.get() or {}
     who = {"agent": budget["agent"]} if budget.get("agent") else {}
     try:
-        await runs.log_event(sc.run_id, "tool_call", {**who, "tool": name, "args": _clip_obj(args)})
-        await runs.log_event(sc.run_id, "tool_result", {**who, "tool": name, "output": text})
+        call = f"blocked-{uuid.uuid4().hex[:8]}"
+        await runs.log_event(sc.run_id, "tool_call", {**who, "tool": name, "call": call, "args": _clip_obj(args)})
+        await runs.log_event(sc.run_id, "tool_result", {**who, "tool": name, "call": call, "output": text})
     except Exception:  # noqa: BLE001
         log.debug("记录被拦下的调用失败", exc_info=True)
 
@@ -495,10 +497,12 @@ async def _record(run_id: str, ev: dict, started: dict[str, tuple[float, float]]
         await runs.log_event(run_id, "model_call", event)
         return n
     elif kind == "on_tool_start":
-        await runs.log_event(run_id, "tool_call", {**who, "tool": name, "args": _clip_obj(data.get("input"))})
+        # call：同一次工具调用的 tool_call / tool_result 用它配对（并发调同一个工具时只靠工具名配不准）
+        await runs.log_event(run_id, "tool_call", {**who, "tool": name, "call": ev.get("run_id", "")[:12],
+                                                   "args": _clip_obj(data.get("input"))})
     elif kind == "on_tool_end":
         out = data.get("output")
-        await runs.log_event(run_id, "tool_result", {**who, "tool": name,
+        await runs.log_event(run_id, "tool_result", {**who, "tool": name, "call": ev.get("run_id", "")[:12],
                                                      "output": _clip(getattr(out, "content", out))})
     return 0
 

@@ -75,7 +75,7 @@ function mcpErrors(rows: McpRow[]): Record<number, string> {
 const URL_SUGGESTIONS: KvSuggestion[] = [
   { key: "site", label: "site 线上页面" }, { key: "deployed", label: "deployed 线上服务" }, { key: "api", label: "api 线上接口" },
 ];
-const PYTHON_HELP = "py 工具（项目内核）用线上这个解释器；可写 {env}、~，空 = python3";
+const PYTHON_HELP = "跑项目代码用线上这个 Python；可写 {env}、~，空 = python3";
 
 /** 环境变量会出现在内核进程的环境里：不允许 ${VAR}，口令写进给 agent 的配置文件 */
 function envVarsError(v: Record<string, string>): string | null {
@@ -184,7 +184,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
         ))}
       </nav>
       <div className="min-w-0 space-y-4 pb-20">
-        <Section id="basic" icon={<LuSettings />} title="基本信息" description="写的是线上实际部署的那份：agent 装在部署主机上，读的就是这里的代码、用的就是这里的解释器。~ 是部署用户的 home（平台和项目是同一个用户），路径可以写 {env}；各环境不同的部分在下面「环境」里覆盖。代码目录也用来校验记忆新鲜度（引用的文件改过即过期）">
+        <Section id="basic" icon={<LuSettings />} title="基本信息" description="线上实际部署的那份代码和 Python；各环境不同的部分在下面「环境」里改。">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="显示名"><Input value={draft.title} onChange={(e) => set("title", e.target.value)} /></Field>
             <Field label="代码目录" help="线上部署的代码，agent 只读；可写 {env}、~"><Input mono value={draft.root} placeholder="~/deploy/xxx" onChange={(e) => set("root", e.target.value)} /></Field>
@@ -200,14 +200,14 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="databases" icon={<LuDatabase />} title="只读库" description="db_query 能查的库：{库名: 连接串}，agent 调用时 db 填库名（只登记了一个时可省略）。各环境在下面「环境」里按库名覆盖，比如生产换成生产库的地址与口令。">
+        <Section id="databases" icon={<LuDatabase />} title="只读库" description="agent 能查的库（库名 → 连接串）；生产库的地址和口令在下面「环境」里单独写。">
           <div className="space-y-2">
             <DatabasesEditor value={draft.databases} onChange={(v) => set("databases", v)} />
             <DatabasesHint />
           </div>
         </Section>
 
-        <Section id="configs" icon={<LuFileText />} title="配置文件" description={<>项目读配置的路径（绝对路径，可写 ~、{"{env}"}）。<b className="font-medium text-fg-2">受保护的环境（生产）</b>：真实配置平台不读、不显示，agent 也看不到（bash 里被遮蔽）；项目内核启动时，平台把控制台里填的只读版盖在这个路径上——在服务页「配置 → 配置文件」里按环境填。<b className="font-medium text-fg-2">不受保护的环境（测试）</b>：agent 直接用项目的真实配置，不用填。</>}>
+        <Section id="configs" icon={<LuFileText />} title="配置文件" description="项目读配置的路径。受保护的环境里 agent 看不到真实内容，用「配置 → 配置文件」里填的只读版。">
           <div className="space-y-4">
             <PathListEditor value={draft.configs} onChange={(v) => set("configs", v)} placeholder="~/deploy/xxx/xxx/settings-{env}.py" addLabel="添加配置文件"
               empty="没有声明配置文件：项目内核用线上代码目录里的默认配置" />
@@ -216,23 +216,23 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
             )}
             <div className="border-t border-line pt-3">
               <div className="mb-2 flex items-center gap-1.5 text-[12.5px] font-medium text-fg"><LuEyeOff className="size-3.5 text-fg-3" />只遮蔽的文件</div>
-              <div className="mb-2 text-xs text-fg-3">代码目录里其他含口令、agent 不该看的文件或目录（比如生成出来的 docker-compose.yaml）：受保护的环境（生产）的运行里 bash 和项目内核都遮蔽，不替换内容；测试的运行里不遮。</div>
+              <div className="mb-2 text-xs text-fg-3">其他含口令的文件或目录（如生成的 docker-compose.yaml）：受保护的环境里 agent 看不到它们。</div>
               <PathListEditor value={draft.hidden} onChange={(v) => set("hidden", v)} placeholder="~/deploy/xxx/docker-compose.yaml" addLabel="添加遮蔽的文件"
                 empty="没有要额外遮蔽的文件" />
             </div>
           </div>
         </Section>
 
-        <Section id="logs" icon={<LuScrollText />} title="日志" description={<>agent 的 logs 工具能读的线上日志：{"{名字: 目标}"}。目标写文件路径（绝对路径，可以 ~ 开头、写 {"{env}"}；可带 <code className="font-mono">*</code> 通配，取匹配到的最新那个文件）、<code className="font-mono">docker:&lt;容器名&gt;</code> 或 <code className="font-mono">journal:&lt;systemd 单元&gt;</code>；文件要平台用户有读权限，docker 要平台用户能用 docker。各环境在下面「环境」里按名字覆盖。</>}>
+        <Section id="logs" icon={<LuScrollText />} title="日志" description={<>agent 能看的线上日志：写文件路径（<code className="font-mono">*</code> 取最新的那个文件）、<code className="font-mono">docker:&lt;容器名&gt;</code> 或 <code className="font-mono">journal:&lt;systemd 单元&gt;</code>。</>}>
           <LogsEditor value={draft.logs} onChange={(v) => set("logs", v)} />
         </Section>
 
-        <Section id="urls" icon={<LuGlobe />} title="地址" description="有名字的地址：线上部署的页面 / API……agent 在运行环境里看得到，MCP 配置里用 {url:名字} 引用。可写 {env}；各环境的不同地址在下面「环境」里按名字覆盖。">
+        <Section id="urls" icon={<LuGlobe />} title="地址" description="线上页面、接口的地址，agent 能看到；各环境不同的地址在下面「环境」里写。">
           <KeyValueEditor value={draft.urls} onChange={(v) => set("urls", v)} multiline={false} keyPlaceholder="名字，如 site / deployed"
             valuePlaceholder="https://xxx.ipa.zs/" suggestions={URL_SUGGESTIONS} />
         </Section>
 
-        <Section id="mcp" icon={<LuPlug />} title="MCP" description="服务自己的 MCP server：{名字: 连接配置}。运行在本服务上时工具自动出现，按运行的环境连接；写了 envs 就只在列出的环境可用（envs.<环境> 里的内容深合并覆盖上面的配置）。">
+        <Section id="mcp" icon={<LuPlug />} title="MCP" description="服务自己的工具服务：运行在这个服务上时自动可用；写了 envs 就只在列出的环境可用。">
           <div className="space-y-3">
             <div className="rounded-md bg-sunken px-3 py-2 text-[12px] leading-relaxed text-fg-3">
               字符串里可写 <code className="font-mono">{"{env}"}</code>（运行的环境）、<code className="font-mono">{"{url:名字}"}</code>（上面「地址」里该环境的地址）、
@@ -262,7 +262,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="envs" icon={<LuLayers />} title="环境" description="服务在每个环境是否启用，以及和基座不同的部分（只写差异）。">
+        <Section id="envs" icon={<LuLayers />} title="环境" description="每个环境是否启用，以及和上面不同的部分（只写不同的）。">
           <div className="space-y-3">
             {allEnvs.map((e) => {
               const o: ServiceEnvOverride = draft.envs[e.name] ?? {};
@@ -309,7 +309,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="profile" icon={<LuScrollText />} title="服务档案" description="置顶逐字注入该服务的所有运行，不走召回。只记代码和配置里读不出来的事实——能读出来的写进来只会过时。">
+        <Section id="profile" icon={<LuScrollText />} title="服务档案" description="每次运行都原样带上。只写代码和配置里看不出来的事，看得出来的写进来只会过时。">
           <KeyValueEditor value={draft.profile} onChange={(v) => set("profile", v)} suggestions={PROFILE_SUGGESTIONS} />
         </Section>
       </div>

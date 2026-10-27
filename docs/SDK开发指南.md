@@ -116,7 +116,7 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 | `cancel(run_id)` | 取消 |
 | `rerun(run_id)` | 同样的输入新开一次运行 |
 | `resume(run_id)` | 失败的运行从断点续跑（如 `interrupted`、`orphaned`、`step_limit`） |
-| `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代上一轮沉淀的记忆 |
+| `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代被纠正那一轮沉淀的记忆；运行没结束、会话里还有一轮在跑时 409 |
 | `feedback(run_id, score, *, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
 
 ### 事件

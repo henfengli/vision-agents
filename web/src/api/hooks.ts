@@ -6,11 +6,11 @@ import { del, get, patch, post, put } from "./client";
 import type {
   ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigMasked, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
   ConfigVersion, ConfigVersionContent, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters,
-  Meta, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
+  Meta, Page, PromptsConfig, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
   RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire,
   Version, VersionStat,
 } from "./types";
-import { useQuery, type QueryOptions } from "../lib/query";
+import { getQueryData, useQuery, type QueryOptions } from "../lib/query";
 
 const enc = encodeURIComponent;
 
@@ -70,7 +70,7 @@ export const api = {
   // —— 运行 ——
   runs: (f: RunFilters) => get<Page<RunListItem>>("/v1/runs", { ...f }),
   run: (id: string) => get<Run>(`/v1/runs/${enc(id)}`),
-  runEvents: (id: string) => get<RunEvent[]>(`/v1/runs/${enc(id)}/events`),
+  runEvents: (id: string, after = 0) => get<RunEvent[]>(`/v1/runs/${enc(id)}/events`, after ? { after } : {}),
   submitRun: (req: RunRequest) => post<RunAccepted>("/v1/runs", req),
   cancelRun: (id: string) => post<Run>(`/v1/runs/${enc(id)}/cancel`),
   rerun: (id: string) => post<RunAccepted>(`/v1/runs/${enc(id)}/rerun`),
@@ -110,6 +110,8 @@ export const api = {
   // —— 设置 ——
   settings: () => get<Settings>("/v1/settings"),
   putSettings: <S extends ConfigSection>(section: S, body: ConfigSections[S]) => put<Settings[S]>(`/v1/settings/${section}`, body),
+  /** 平台内置的默认提示词（每段的「恢复默认」用） */
+  promptDefaults: () => get<PromptsConfig>("/v1/settings/prompts/defaults"),
   testChannel: (channel: string) => post<{ ok: boolean }>("/v1/settings/notifications/test", { channel }),
   apiKeys: () => get<ApiKey[]>("/v1/api-keys"),
   /** 返回里的 token 只出现这一次 */
@@ -143,7 +145,17 @@ export const useVersionStats = (kind: StatsPath, name?: string, enabled = true) 
   useQuery(["versions", "stats", kind, name ?? ""], () => api.versionStats(kind, name), { enabled, staleTime: 30_000 });
 export const useRuns = (f: RunFilters, o?: QueryOptions) => useQuery(["runs", "list", f], () => api.runs(f), { refetchInterval: 8000, ...o });
 export const useRun = (id: string, live = false) => useQuery(["runs", "one", id], () => api.run(id), { refetchInterval: live ? 2000 : undefined, live });
-export const useRunEvents = (id: string, live = false) => useQuery(["runs", "events", id], () => api.runEvents(id), { refetchInterval: live ? 1500 : undefined, live });
+/** 运行事件：第一次整份取，之后只取最后一条之后的（after=seq）接在后面 */
+export const useRunEvents = (id: string, live = false) => {
+  const key = ["runs", "events", id] as const;
+  return useQuery(key, async () => {
+    const cur = getQueryData<RunEvent[]>(key);
+    const after = cur?.length ? cur[cur.length - 1].seq : 0;
+    if (!after) return api.runEvents(id);
+    const more = await api.runEvents(id, after);
+    return more.length ? [...cur!, ...more] : cur!;
+  }, { refetchInterval: live ? 1500 : undefined, live });
+};
 export const useSessions = (f: { service?: string; env?: string; task?: string; q?: string } = {}) => useQuery(["sessions", f], () => api.sessions(f));
 export const useSession = (id: string) => useQuery(["sessions", "one", id], () => api.session(id), { enabled: !!id });
 export const useServiceTools = (name: string) => useQuery(["services", name, "tools"], () => api.serviceTools(name), { staleTime: 30_000 });
@@ -157,6 +169,7 @@ export const useReplay = (id: number, live = false) =>
   useQuery(["replays", "one", id], () => api.replay(id), { enabled: Number.isFinite(id), refetchInterval: live ? 5000 : undefined, live });
 export const useSettings = () => useQuery(["settings"], api.settings);
 export const useApiKeys = () => useQuery(["settings", "api-keys"], api.apiKeys);
+export const usePromptDefaults = () => useQuery(["settings", "prompt-defaults"], api.promptDefaults, { staleTime: 10 * 60_000 });
 export const useStats = (q: { hours?: number; env?: string; service?: string }) => useQuery(["stats", q], () => api.stats(q), { refetchInterval: 30_000 });
 
 /** 环境列表（来自 meta，到处都要用） */

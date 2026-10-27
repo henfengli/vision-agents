@@ -13,7 +13,7 @@
     GET    /v1/knowledge/{id}/history   内容历史
     POST   /v1/knowledge/{id}/promote   升格进档案 {target: service|task, key, task?, content?}
 
-    GET    /v1/assets                   service env task kind status
+    GET    /v1/assets                   service env task kind status(active|superseded|all) q
     POST   /v1/assets                   人工录入方法 {service, env, task, kind, name, summary, content}
     PATCH  /v1/assets/{id}              {summary?, content?, status?: active|superseded}
     DELETE /v1/assets/{id}              作废
@@ -156,8 +156,8 @@ async def _knowledge(entry_id: int) -> dict:
 
 @router.get("/assets")
 async def list_assets(service: str | None = None, env: str | None = None, task: str | None = None,
-                      kind: str | None = None, status: str | None = None, _: Caller = WHO):
-    return await assets_store.list_entries(env=env, service=service, task=task, kind=kind, status=status)
+                      kind: str | None = None, status: str | None = None, q: str | None = None, _: Caller = WHO):
+    return await assets_store.list_entries(env=env, service=service, task=task, kind=kind, status=status, q=q)
 
 
 @router.post("/assets", status_code=201)

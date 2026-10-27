@@ -20,6 +20,7 @@ import {
 } from "./features/settings/platform";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
 import { TaskDetailPage } from "./features/tasks/task-detail";
+import { NewTaskPage } from "./features/tasks/task-editor";
 import { TasksPage } from "./features/tasks/tasks";
 import { navigate, Routes, useLocation, type RouteDef } from "./lib/router";
 
@@ -28,6 +29,8 @@ const routes: RouteDef[] = [
   { path: "/services", component: ServicesPage },
   { path: "/services/:name", component: ServiceDetailPage },
   { path: "/tasks", component: TasksPage },
+  // 任务名不能有下划线，_new 不会和某个任务撞
+  { path: "/tasks/_new", component: NewTaskPage },
   { path: "/tasks/:name", component: TaskDetailPage },
   { path: "/runs", component: RunsPage },
   { path: "/runs/:id", component: RunDetailPage },

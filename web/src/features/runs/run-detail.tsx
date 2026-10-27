@@ -4,14 +4,14 @@
  * 右栏是上下文（输入、配方、执行信息、注入的档案、召回与沉淀、反馈、同会话运行）。
  * 进行中的运行 1.5 秒增量刷新；被 👎 过的 agent 运行可以用当前定义重放（回归）。
  */
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
   LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
 } from "react-icons/lu";
 
 import { ApiError } from "@/api/client";
-import { api, useMeta, useRun, useRunEvents, useTasks } from "@/api/hooks";
+import { api, useMeta, useRun, useRunEvents, useServices, useTasks } from "@/api/hooks";
 import type { KnowledgeKind, RecipeRef, Run, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
@@ -39,11 +39,24 @@ function useMine(run: Run) {
   return (step: number) => run.feedback.find((f) => f.step_seq === step && f.created_by === meta?.me.name) ?? null;
 }
 
+/** 结束之后再跟这么久：记忆沉淀、结果推送、回归判定这几条是运行落终态之后才写的 */
+const AFTER_FINISH_MS = 25_000;
+
 export function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { data: run, error, refetch } = useRun(id, true);
+  const [poll, setPoll] = useState(true);
+  const { data: run, error, refetch } = useRun(id, poll);
   const live = run ? LIVE.has(run.status) : true;
-  const { data: events } = useRunEvents(id, live);
+  useEffect(() => {
+    if (!run) return;
+    if (LIVE.has(run.status)) { setPoll(true); return; }
+    const left = AFTER_FINISH_MS - (Date.now() - new Date(run.finished_at ?? 0).getTime());
+    if (left <= 0) { setPoll(false); return; }
+    setPoll(true);
+    const t = window.setTimeout(() => setPoll(false), left);
+    return () => window.clearTimeout(t);
+  }, [run?.status, run?.finished_at]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { data: events } = useRunEvents(id, poll);
 
   if (error) return <Page>{error instanceof ApiError && error.status === 404
     ? <Empty title="运行不存在" description="链接可能已失效" action={<LinkButton to="/runs">回到运行列表</LinkButton>} />
@@ -52,7 +65,7 @@ export function RunDetailPage() {
 
   return (
     <Page wide>
-      <Header run={run} />
+      <Header run={run} events={events} />
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-4">
           <Timeline run={run} events={events} live={live} />
@@ -63,7 +76,14 @@ export function RunDetailPage() {
   );
 }
 
-function Header({ run }: { run: Run }) {
+/** 运行中：耗时每秒跳一次 */
+function Elapsed({ since }: { since: string }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = window.setInterval(() => tick((n) => n + 1), 1000); return () => window.clearInterval(t); }, []);
+  return <>{duration(Math.max(0, Date.now() - new Date(since).getTime()))}</>;
+}
+
+function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
   const live = LIVE.has(run.status);
   const mine = useMine(run)(0);
   /** 👎 面板里勾了"按意见重答"：直接提交纠正，跳到新一轮 */
@@ -82,27 +102,46 @@ function Header({ run }: { run: Run }) {
   };
   const [correcting, setCorrecting] = useState(false);
   const [replaying, setReplaying] = useState(false);
-  /** 内建任务（失败时 resolution 还是空，看任务定义）：后端不支持续跑，纠正也没有意义 */
   const { data: tasks } = useTasks();
-  const builtin = run.resolution === "builtin" || tasks?.find((t) => t.name === run.task.split(":")[0])?.form === "builtin";
-  /** 回归重放：任何结束了的 agent 运行（规则命中、内建、本身就是重放出来的除外） */
-  const replayable = !live && !builtin && run.resolution !== "rule" && !run.replay_of;
+  const { data: services } = useServices();
+  const def = tasks?.find((t) => t.name === run.task);
+  const baseDef = tasks?.find((t) => t.name === run.task.split(":")[0]);
+  /** 内建任务（失败时 resolution 还是空，看任务定义）：不能续跑，纠正也没有意义 */
+  const builtin = run.resolution === "builtin" || baseDef?.form === "builtin";
+  const rule = run.resolution === "rule";
+  const replay = run.trigger.type === "replay" || !!run.replay_of;
+  /** 现在还能不能在这个任务 / 服务 / 环境上再跑：能的话按钮可点，不能的话说明原因（后端同样会拒） */
+  const svcHealth = run.service ? services?.find((s) => s.name === run.service)?.health[run.env] : undefined;
+  const blocked = !tasks ? "加载中" : !def ? "任务已删除" : !def.enabled ? "任务已停用" : baseDef && !baseDef.enabled ? "父任务已停用"
+    : svcHealth && !svcHealth.enabled ? `${run.service} 在 ${run.env} 已停用` : def.envs.length && !def.envs.includes(run.env) ? `任务不再允许在 ${run.env} 跑` : null;
+  /** 回归重放：结束了的 agent 运行（规则命中、内建、本身就是重放出来的除外） */
+  const replayable = !live && !builtin && !rule && !replay;
   const disliked = run.feedback.some((f) => f.score < 0);
-  const failed = run.status === "failed" && !builtin;
-  /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run、新会话，跳过去重） */
+  /** 失败的 agent 运行续跑（同一个 run 接着走）；走到 agent 之前就失败的（配置没填、服务停用…）从头执行 */
+  const failed = run.status === "failed" && !builtin && !rule;
+  const reached = (events ?? []).some((e) => e.kind === "model_call" || e.kind === "thought" || (e.kind === "stage" && e.payload.stage === "system"));
   const again = async () => {
     const ok = await confirm(failed
-      ? { title: "断点续跑？", description: "沿用同一个运行 id、同一个会话，从失败处继续：已完成的步骤不重做。", confirmText: "续跑" }
-      : { title: "用同样的输入再跑一次？", description: "新开一次运行（新会话），跳过去重，沿用任务 / 服务 / 环境 / 输入。", confirmText: "重跑" });
+      ? reached
+        ? { title: "接着跑？", description: "同一个运行、同一个会话，从断点继续：已经完成的步骤不重做。", confirmText: "续跑" }
+        : { title: "重新执行？", description: "上次在准备阶段就失败了（还没走到 agent），这次从头执行，还是同一个运行。", confirmText: "重新执行" }
+      : rule
+        ? { title: "交给 agent 分析一遍？", description: "这次是规则直接给的结论。重跑会用同样的输入新开一次运行，这回交给 agent 分析（不再走规则）。", confirmText: "重跑" }
+        : { title: "用同样的输入再跑一次？", description: "新开一次运行（新会话），沿用任务、服务、环境和输入；不走去重。", confirmText: "重跑" });
     if (!ok) return;
     setBusy("again");
     try {
       const r = failed ? await api.resume(run.run_id) : await api.rerun(run.run_id);
       invalidate("runs");
-      toast(failed ? "已从断点续跑" : "已重新提交", { description: shortId(r.run_id) });
+      toast(failed ? (reached ? "已接着跑" : "已重新执行") : "已重新提交", { description: shortId(r.run_id) });
       navigate(`/runs/${r.run_id}`);
-    } catch (e) { toast.error("提交失败", (e as Error).message); } finally { setBusy(null); }
+    } catch (e) { toast.error("没能提交", (e as Error).message); } finally { setBusy(null); }
   };
+  /** 纠正：结论不对时在同一会话里重答（和对话页一致，只对成功的运行） */
+  const correctable = run.status === "success" && !builtin && !replay;
+  /** 能在对话页接着问：这是对话的一轮（或对话里的纠正），且任务现在还开着对话触发（不然下一条消息会被拒） */
+  const chatOpen = !!def?.triggers.some((t) => t.type === "chat" && t.enabled !== false);
+  const chatSession = chatOpen && (run.trigger.type === "chat" || (run.trigger.type === "correction" && run.session_id !== run.run_id));
   return (
     <PageHeader
       crumbs={[{ label: "运行", to: "/runs" }, { label: <span className="font-mono">{shortId(run.run_id)}</span> }]}
@@ -119,22 +158,23 @@ function Header({ run }: { run: Run }) {
           </span>
         )}
         <span title={datetime(run.created_at, true)}>{ago(run.created_at)}</span>
-        <span>耗时 {live ? "进行中" : duration(run.duration_ms)}</span>
+        <span>{live ? <>已运行 <Elapsed since={run.created_at} /></> : <>耗时 {duration(run.duration_ms)}</>}</span>
         {!!run.tokens && <span>{num(run.tokens)} tokens</span>}
         <span className="flex items-center font-mono">{run.run_id}<CopyButton text={run.run_id} /></span>
       </>}
       actions={<>
         {!live && (
-          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={builtin ? undefined : correctWith}
+          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctable && !blocked ? correctWith : undefined}
             onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
         )}
-        {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
-        {!live && !builtin && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
-        {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
-          title={disliked ? "改完提示词 / 任务定义 / 档案 / 记忆后，用现在的一切重跑这条，看 👎 指出的问题改好没有"
-            : "改完提示词 / 任务定义 / 档案 / 记忆后，用现在的一切重跑这条，把这次的答案当参照看有没有退步"}>重放</Button>}
+        {chatSession && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
+        {correctable && <Button icon={<LuPencilLine />} disabled={!!blocked} title={blocked ?? "结论不对：告诉 agent 哪里错了，在同一会话里重答"} onClick={() => setCorrecting(true)}>纠正</Button>}
+        {replayable && <Button icon={<LuFlaskConical />} disabled={!!blocked} onClick={() => setReplaying(true)}
+          title={blocked ?? (disliked ? "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，看 👎 指出的问题改好没有"
+            : "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，和这次的答案对比有没有退步")}>重放</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消</Button>
-          : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
+          : !replay && <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} disabled={!!blocked} title={blocked ?? undefined} onClick={again}>
+            {failed ? (reached ? "续跑" : "重新执行") : "重跑"}</Button>}
         <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
         {replayable && <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={{ run_ids: [run.run_id] }} />}
       </>}
@@ -193,7 +233,10 @@ function buildSteps(run: Run, events: RunEvent[]): Step[] {
       const s: Step = { key: "t" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, call: ev, ev };
       steps.push(s); open.push(s);
     } else if (ev.kind === "tool_result") {
-      const i = open.findIndex((s) => s.call?.payload.tool === ev.payload.tool && s.call?.payload.agent === ev.payload.agent);
+      // 有 call 的按它配对（并发调同一个工具时只看工具名会配错）；旧事件没有，按工具名 + 子代理配第一个没配上的
+      const i = ev.payload.call
+        ? open.findIndex((s) => s.call?.payload.call === ev.payload.call)
+        : open.findIndex((s) => s.call?.payload.tool === ev.payload.tool && s.call?.payload.agent === ev.payload.agent);
       if (i >= 0) { open[i].result = ev; open.splice(i, 1); } else steps.push({ key: "r" + ev.seq, kind: "tool", at: ev.at, seq: ev.seq, result: ev, ev });
     } else if (ev.kind === "model_call") {
       steps.push({ key: "m" + ev.seq, kind: "model", at: ev.at, seq: ev.seq, ev });
@@ -219,7 +262,8 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
   const tools = steps.filter((s) => s.kind === "tool").length;
   const models = steps.filter((s) => s.kind === "model").length;
   const thoughts = steps.filter((s) => s.kind === "thought").length;
-  const final = steps.find((s) => s.kind === "final" || s.kind === "error");
+  /** 跳转的目标是最后一个结果（续跑过的运行前面还有一次出错） */
+  const final = [...steps].reverse().find((s) => s.kind === "final" || s.kind === "error");
   /** 旧运行只有 thought：照旧数思考 */
   const counted = thoughts && !models ? `${thoughts} 次思考` : `${models} 次模型调用`;
   return (
@@ -238,7 +282,7 @@ function Timeline({ run, events, live }: { run: Run; events: RunEvent[] | undefi
         <ol className="relative px-4 py-3">
           {steps.length === 0 && !live && <li className="py-6 text-center text-[12.5px] text-fg-3">这次运行没有记录步骤</li>}
           {steps.map((s, i) => (
-            <StepRow key={s.key} step={s} run={run} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} />
+            <StepRow key={s.key} step={s} run={run} offset={new Date(s.at).getTime() - t0} last={i === steps.length - 1 && !live} expandAll={expandAll} anchor={s === final} />
           ))}
           {live && (
             <li className="flex items-center gap-3 py-2 pl-[3px]">
@@ -276,10 +320,23 @@ function LiveProgress({ progress }: { progress: Run["progress"] }) {
 /** 内容长的阶段：折叠，展开看全文（系统提示） */
 const BLOCK_STAGES = new Set(["system"]);
 
-/** 同机部署带来的几种原因码：在出错的那一步下面说一句该去哪儿处理 */
+/** 失败原因码：在出错的那一步下面说一句是怎么回事、该去哪儿处理 */
 const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
   wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services）决定" },
   config_missing: { text: "受保护的环境要填给 agent 的只读版配置：还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
+  orphaned: { text: "执行它的 agent 服务中途退出了（重启、崩溃或被杀）。点「续跑」接着走" },
+  interrupted: { text: "执行它的 agent 服务在跑的时候退出了（一般是重启或升级）。点「续跑」接着走" },
+  timeout: { text: "超过了任务的超时。续跑大概率还会超时：先把任务的超时调大，或把问题拆小", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "改任务的超时" },
+  step_limit: { text: "agent 走了太多步还没结束，多半在原地打转：看最后几步在做什么，改提示词或把问题拆小；续跑会从断点接着走" },
+  invalid_output: { text: "任务要求按结构化输出交回结果，agent 没交或交的不合格（提醒过一次）。纠正、或者改任务的输出 schema / 角色提示词", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
+  invalid_definition: { text: "任务定义有问题（比如内建处理器不存在）", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
+  unknown_task: { text: "排队期间任务被删掉了，这个运行没法再跑" },
+  unknown_service: { text: "服务已经不存在了" },
+  service_disabled: { text: "排队期间服务被停用了", to: (r) => `/services/${r.service}`, link: "去服务页" },
+  service_env_disabled: { text: "排队期间服务在这个环境被停用了", to: (r) => `/services/${r.service}?tab=envs`, link: "去启用" },
+  task_disabled: { text: "排队期间任务被停用了", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}`, link: "去任务页" },
+  env_not_allowed: { text: "任务现在不允许在这个环境跑", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
+  error: { text: "执行中抛了异常（模型接口、工具或框架）。看上面的报错：临时性的（比如 429、网络）可以直接续跑" },
 };
 
 const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
@@ -290,8 +347,9 @@ const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; labe
   final: { icon: <LuCircleCheck />, cls: "bg-ok-soft text-ok", label: "最终答案" },
   error: { icon: <LuCircleAlert />, cls: "bg-bad-soft text-bad", label: "出错" },
 };
+const CANCELLED_META = { icon: <LuBan />, cls: "bg-sunken text-fg-3", label: "已取消" };
 
-function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean }) {
+function StepRow({ step, run, offset, last, expandAll, anchor }: { step: Step; run: Run; offset: number; last: boolean; expandAll: boolean; anchor: boolean }) {
   const [open, setOpen] = useState<boolean | null>(null);
   const p = step.ev.payload;
   /** 模型调用：带思考过程的能展开（短的默认展开）；平台辅助调用（记忆沉淀…）用用途当标题 */
@@ -302,25 +360,30 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
   const mine = useMine(run)(step.seq);
   const others = step.seq ? run.feedback.filter((f) => f.step_seq === step.seq && f.score < 0) : [];
   const rateable = step.seq > 0 && (step.kind === "tool" || step.kind === "model" || step.kind === "thought" || step.kind === "final");
-  const meta = STEP_META[step.kind];
+  /** 出错那一步的原因码看事件自己的（续跑过的运行，前面那次和最后的不一样）；人取消的不当错误显示 */
+  const code = step.kind === "error" ? String(p.title ?? (step.seq ? "" : run.error_code ?? "")) : "";
+  const cancelled = step.kind === "error" && code === "cancelled";
+  const meta = cancelled ? CANCELLED_META : STEP_META[step.kind];
   const tool = step.call?.payload.tool ?? step.result?.payload.tool;
   const agent = step.kind === "tool" ? (step.call ?? step.result)?.payload.agent : p.agent;
   const title = step.kind === "tool"
     ? <span className="flex min-w-0 items-center gap-2"><span className="shrink-0 text-fg-3">{step.call ? "工具调用" : "工具结果"}</span><code className="shrink-0 font-mono text-[12.5px] font-medium text-fg">{tool}</code><span className="truncate font-normal text-fg-3" title={summarizeArgs(step.call?.payload.args, tool)}>{summarizeArgs(step.call?.payload.args, tool)}</span></span>
     : step.kind === "model" ? (p.purpose || (p.content ? "思考" : meta.label))
         : step.kind === "stage" ? (p.title ?? p.stage)
-          : step.kind === "error" && run.error_code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{run.error_code}</code></span>
-            : meta.label;
+          : cancelled ? <span className="text-fg-2">{meta.label}<span className="ml-2 font-normal text-fg-3">{String(p.content ?? "")}</span></span>
+            : step.kind === "error" && code ? <span className="flex items-center gap-2">{meta.label}<code className="font-mono text-[11.5px] font-normal text-bad">{code}</code></span>
+              : meta.label;
   const right = step.kind === "tool" && step.result?.payload.duration_ms !== undefined ? duration(step.result.payload.duration_ms as number)
     : step.kind === "tool" && !step.result && LIVE.has(run.status) ? "进行中"
       : step.kind === "model" ? (p.ms != null ? duration(p.ms) : null)
         : step.kind === "stage" && p.duration_ms != null ? duration(p.duration_ms)
           : p.tokens ? `${num(p.tokens)} tok` : null;
-  const collapsible = step.kind === "stage" ? block : step.kind === "model" ? thinking : true;
-  const outcome = step.kind === "final" || step.kind === "error";
+  const collapsible = cancelled ? false : step.kind === "stage" ? block : step.kind === "model" ? thinking : true;
   const data = step.kind === "final" ? p.data ?? run.output?.data : undefined;
+  /** 「怎么处理」只给最后一次出错、且运行现在还是失败的：续跑成功后，前面那次的建议已经过时 */
+  const hint = code && !cancelled && anchor && run.status === "failed" ? ERROR_HINT[code] : undefined;
   return (
-    <li id={outcome ? "step-final" : undefined} className="group relative flex scroll-mt-4 gap-3 pb-1">
+    <li id={anchor ? "step-final" : undefined} className="group relative flex scroll-mt-4 gap-3 pb-1">
       {!last && <span className="absolute left-[11px] top-7 bottom-0 w-px bg-line" />}
       <span className={cn("relative z-10 mt-1 flex size-[22px] shrink-0 items-center justify-center rounded-full [&_svg]:size-3", meta.cls)}>{meta.icon}</span>
       <div className="min-w-0 flex-1 pb-2">
@@ -367,12 +430,15 @@ function StepRow({ step, run, offset, last, expandAll }: { step: Step; run: Run;
             )}
             {data && <CodeBlock title="结构化结果" code={JSON.stringify(data, null, 2)} maxHeight={320} />}
             {step.kind === "error" && <CodeBlock code={String(p.content)} wrap />}
-            {step.kind === "error" && run.error_code && ERROR_HINT[run.error_code] && (
-              <div className="flex flex-wrap items-center gap-2 text-[12px] text-fg-3">
-                <LuCircleAlert className="size-3.5 shrink-0 text-bad" />{ERROR_HINT[run.error_code].text}
-                {run.service && ERROR_HINT[run.error_code].to && (
-                  <Link to={ERROR_HINT[run.error_code].to!(run)} className="text-accent hover:underline">{ERROR_HINT[run.error_code].link}</Link>
-                )}
+            {hint && (
+              <div className="flex items-start gap-1.5 text-[12px] leading-relaxed text-fg-3">
+                <LuCircleAlert className="mt-[3px] size-3.5 shrink-0 text-bad" />
+                <span>
+                  {hint.text}
+                  {hint.to && (run.service || !hint.to(run).startsWith("/services")) && (
+                    <Link to={hint.to(run)} className="ml-2 text-accent hover:underline">{hint.link}</Link>
+                  )}
+                </span>
               </div>
             )}
             {step.kind === "tool" && <>
@@ -431,8 +497,8 @@ function Sidebar({ run }: { run: Run }) {
             ["触发", run.replay_of
               ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
               : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
-            ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
-            ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
+            ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}&env=${run.env}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
+            ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}&env=${run.env}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
             ["开始", datetime(run.created_at, true)],
             ["结束", run.finished_at ? datetime(run.finished_at, true) : "—"],

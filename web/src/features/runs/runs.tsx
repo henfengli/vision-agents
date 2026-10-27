@@ -27,7 +27,8 @@ const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
   { value: "success", label: "成功" }, { value: "cancelled", label: "已取消" },
 ];
 
-const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"];
+/** 续跑不改运行的触发方式（还是原来那次的），所以这里没有「续跑」 */
+const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "correction", "replay"];
 
 const PAGE_SIZE = 50;
 
@@ -40,7 +41,7 @@ export function RunsPage() {
   const view: View = s.view === "feedback" || s.view === "replays" ? s.view : "runs";
   return (
     <Page wide>
-      <PageHeader title="运行" description="每一次执行的事实记录：配方钉死用到的每样定义的版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义或记忆后在「回归重放」里拿过去的运行重跑验证" />
+      <PageHeader title="运行" description="每一次执行都在这里，点进去看每一步做了什么。大家的评价在「反馈」，改完提示词或定义后在「回归重放」里拿过去的运行重跑对比。" />
       <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },

@@ -148,7 +148,9 @@ export function SearchSelect<T extends string>({ value, onChange, options, place
  * 空字符串表示"不选"。用于子任务对象名这类"有就选、没有就建"的字段。
  */
 export function CreatableSelect({ value, onChange, options, placeholder = "选择或输入…", createLabel = "新建", className, validate }: {
-  value: string; onChange: (v: string) => void; options: Option[]; placeholder?: string; createLabel?: string; className?: string;
+  value: string; onChange: (v: string) => void; options: Option[]; placeholder?: string; className?: string;
+  /** 下拉里新值前面的标签；可以按输入的值给（比如不能当对象名的值标「直接用」） */
+  createLabel?: string | ((v: string) => string);
   validate?: (v: string) => string | null;
 }) {
   const [query, setQuery] = useState("");
@@ -174,7 +176,7 @@ export function CreatableSelect({ value, onChange, options, placeholder = "选�
           ? <div className="px-2 py-1.5 text-xs text-bad">{invalid}</div>
           : (
             <ComboboxOption value={q} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] data-[focus]:bg-hover">
-              <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[11px] font-medium text-accent">{createLabel}</span>
+              <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[11px] font-medium text-accent">{typeof createLabel === "function" ? createLabel(q) : createLabel}</span>
               <span className="truncate font-mono text-[12.5px]">{q}</span>
             </ComboboxOption>
           ))}

@@ -24,7 +24,7 @@ import { useLeaveGuard } from "@/lib/router";
 export function ConfigStatusBadges({ file }: { file: ConfigFileStatus }) {
   return file.version != null
     ? <Badge tone="ok" title={`${file.updated_by ?? ""} 更新于 ${datetime(file.updated_at)}`}>已填第 {file.version} 版</Badge>
-    : <Badge tone="warn" title="还没有填给 agent 的只读版：py 工具在这个环境起不来">未填</Badge>;
+    : <Badge tone="warn" title="还没填只读版：agent 在这个环境跑不了项目代码">未填</Badge>;
 }
 
 export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSummary; env: string; onOpenDefinition: () => void }) {
@@ -49,8 +49,8 @@ export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSu
       <div className="flex gap-2.5 rounded-lg border border-info/30 bg-info-soft/40 px-4 py-3 text-[12.5px] leading-relaxed text-fg-2">
         <LuInfo className="mt-0.5 size-4 shrink-0 text-info" />
         <div className="space-y-1">
-          <div>{env} 是受保护的环境，这里填的是 agent 的项目内核在这个路径上读到的内容：py 里项目代码照常 import 配置、照常连库。<b className="font-medium text-fg">线上那份真实配置平台不读、不显示</b>，agent 在 bash 里也看不到。</div>
-          <div>照抄线上的配置，把库口令换成只读账号。{dagster && <>dagster.yaml 里不要写运行存储（run / event_log / schedule storage）的连接：项目内核不该连 Dagster 自己的库。</>}还没填的路径，py 工具在 {env} 起不来。</div>
+          <div>{env} 受保护：agent <b className="font-medium text-fg">看不到线上的真实配置</b>，跑项目代码时读到的是这里填的只读版。</div>
+          <div>照抄线上的配置，把库口令换成只读账号；没填的，agent 在 {env} 跑不了项目代码。{dagster && <>dagster.yaml 里不要写 Dagster 自己的运行存储连接。</>}</div>
         </div>
       </div>
       <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
@@ -89,7 +89,7 @@ function RealConfigList({ env, files, onOpenDefinition }: { env: string; files: 
       <div className="flex gap-2.5 rounded-lg border border-info/30 bg-info-soft/40 px-4 py-3 text-[12.5px] leading-relaxed text-fg-2">
         <LuInfo className="mt-0.5 size-4 shrink-0 text-info" />
         <div>
-          {env} 不是受保护的环境。测试环境<b className="font-medium text-fg">直接用项目的真实配置</b>：bash、py 里都能读到原文，不用在这里填。文件照样只读（只有工作目录和 /tmp 可写），数据库只读靠提示词约束。只有受保护的环境（生产）才要填给 agent 的只读版。
+          {env} 不受保护：agent <b className="font-medium text-fg">直接用项目的真实配置</b>，不用在这里填。只有受保护的环境（如生产）才要填只读版。
         </div>
       </div>
       <Card>
@@ -142,7 +142,7 @@ function ConfigEditor({ svc, env, file }: { svc: ServiceSummary; env: string; fi
       const res = await api.saveConfig(svc.name, env, { path, content: draft });
       setBase({ content: draft });
       setQueryData<ConfigRaw>(key, (old) => ({ ...old!, content: draft, exists: true, version: res.version }));
-      if (res.changed) toast(`已保存为第 ${res.version} 版`, { description: `${env} 的项目内核下次调用时自动重启，读到新内容` });
+      if (res.changed) toast(`已保存为第 ${res.version} 版`, { description: `${env} 下次运行就用新内容` });
       else toast.info("内容没变", "没有加新版本");
       invalidate("services", svc.name);
     } catch (e) {
@@ -167,7 +167,7 @@ function ConfigEditor({ svc, env, file }: { svc: ServiceSummary; env: string; fi
           {!data.exists && (
             <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft/60 px-3 py-2 text-[12.5px] text-warn">
               <LuCircleAlert className="mt-0.5 size-4 shrink-0" />
-              <span>还没有填：py 工具在 {env} 起不来（config_missing）。把线上那份复制过来、口令换成只读账号，保存即第 1 版。</span>
+              <span>还没有填：agent 在 {env} 跑不了项目代码。把线上那份复制过来、口令换成只读账号，保存就是第 1 版。</span>
             </div>
           )}
           <Textarea mono value={draft} spellCheck={false} aria-label={`编辑 ${file.path}`} placeholder={"# 照抄线上的配置，库口令换成只读账号"}

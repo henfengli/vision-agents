@@ -296,8 +296,10 @@ export const tasks: Task[] = [
     input: {
       run_id: { type: "str", required: true, description: "Dagster run id" },
       asset_key: { type: "str", required: true, description: "失败的资产" },
-      error: { type: "text", required: true, description: "报错堆栈" },
+      error: { type: "text", description: "报错堆栈（手动跑时可不填：agent 按 run_id 去 Dagster 查日志）" },
     },
+    // 每个资产一个子任务：asset_key 就是对象名
+    object_input: "asset_key",
     envs: ["prod", "test"],
     triggers: [
       {
@@ -313,21 +315,23 @@ export const tasks: Task[] = [
     profile: { pitfalls: "资产失败先看上游资产是否完成，多数失败是上游延迟级联；先用 dagster 的 MCP 工具看线上这次运行的日志" },
     version: 4, ...by("gaodl", 1 * DAY),
   },
-  // 事件里点名的资产不存在子任务时自动建（继承父任务）；值得写档案的资产后来补了档案
+  // 事件里的资产（asset_key）还没有子任务时自动建（继承父任务）；值得写档案的资产后来补了档案（人改过就不再算自动创建）
+  // _own：子任务自己写了哪些字段（后端 model_fields_set），其余跟随父任务
   {
     ...taskBase, name: "failure-analysis:dws_account_pnl_daily", title: "账户收益日表", description: "", service: "vision-dagster", role: "ops_analyst", form: "agent",
-    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: true,
+    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: false,
     profile: {
       upstream: "dwd_position_daily、market_kline_1d（交易日 18:30 前到齐）",
       pitfalls: "新开的子账户在 dim_account 里晚一天才有，汇总时会丢行：先查 dim_account 再下结论",
     },
+    _own: ["title", "profile"],
     version: 2, ...by("gaodl", 2 * DAY),
-  },
+  } as Task,
   {
     ...taskBase, name: "failure-analysis:ods_trade_fills", title: "", description: "", service: "vision-dagster", role: "ops_analyst", form: "agent",
-    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: true,
+    input: {}, triggers: [], deliver: { channel: "default" }, timeout_s: 900, extends: "failure-analysis", auto_created: true, _own: [],
     version: 1, ...by("auto:event", 7 * HOUR),
-  },
+  } as Task,
   {
     ...taskBase, name: "data-qa", title: "数据口径问答", description: "业务方提问指标口径与取数",
     service: "*", role: "data_searcher", form: "agent",
@@ -338,10 +342,11 @@ export const tasks: Task[] = [
   // 对话里点名了"账户收益"这个对象：自动建的子任务，口径后来写进了它的档案
   {
     ...taskBase, name: "data-qa:account_pnl", title: "账户收益", description: "", service: "*", role: "data_searcher", form: "agent",
-    input: {}, triggers: [], timeout_s: 600, extends: "data-qa", auto_created: true,
+    input: {}, triggers: [], timeout_s: 600, extends: "data-qa", auto_created: false,
     profile: { conventions: "账户收益 = 已实现盈亏 + 浮动盈亏，按交易日汇总，单位元；跨币种先按当日中间价折成人民币", code_refs: "vision-board 的 report/pnl.py（account_pnl()）" },
+    _own: ["title", "profile"],
     version: 2, ...by("wangzh", 3 * DAY),
-  },
+  } as Task,
   {
     ...taskBase, name: "frontend-smoke", title: "Board 冒烟测试", description: "GitLab 部署成功后检查报表页面与接口",
     service: "vision-board", role: "qa_engineer", form: "agent",
@@ -468,6 +473,8 @@ env_specific：结论只在 {env} 环境成立（比如这个环境特有的配�
 };
 /** 设置里的提示词一节（server.ts 的 PUT / 恢复会原地改它的版本）；31 小时前 wangzh 改到 v3 */
 const promptsEntry = { section: "prompts", ...PROMPTS, version: PROMPTS_VERSION, updated_by: "wangzh", updated_at: iso(VERSION_STEP) };
+/** 平台内置的默认提示词（GET /v1/settings/prompts/defaults）：mock 里就是上面这份内置文本，PUT 改的是 promptsEntry，不动它 */
+export const PROMPT_DEFAULTS: PromptsConfig = Object.freeze({ ...PROMPTS });
 
 // ———————— 运行 ————————
 
@@ -928,7 +935,7 @@ for (const r of runs) {
   if (r.task.startsWith("data-qa") && r.trigger.type === "chat") r.session_id = (r.task === "data-qa" ? "" : r.task.split(":")[1] + "-") + pick(sessionPool);
   else if (r.task === "ask" && r.trigger.type === "chat") r.session_id = "ask-" + pick(sessionPool.slice(0, 4));
   else if (r.task.startsWith("failure-analysis") && r.trigger.type === "event" && r.input.asset_key) {
-    const cls = String(r.input.error).match(/^[\w.]+?(\w+(?:Error|Exception))/)?.[1] ?? "Error";
+    const cls = String(r.input.error).match(/^(?:\w+\.)*(\w+(?:Error|Exception))/)?.[1] ?? "Error";
     r.session_id = `dagster:${r.input.asset_key}:${cls}:${r.created_at.slice(0, 10)}`;
   } else r.session_id = r.run_id;
 }
@@ -1121,7 +1128,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
     push("stage", { stage: "execute", title: "内建处理器 memory-gardener", content: `校验 ${run.service} 在 ${run.env} 的记忆引用的代码（${codeDir(run)}）` }, 800);
     if (run.status === "running") return (run._events = out);
     if (run.status === "failed") {
-      push("error", { title: "internal_error", content: `git -C ${codeDir(run)} 超时（5 秒）` }, 6000);
+      push("error", { title: "error", content: `TimeoutExpired: git -C ${codeDir(run)} 超时（5 秒）` }, 6000);
       return (run._events = out);
     }
     if (run.status === "cancelled") return (run._events = out);
@@ -1152,24 +1159,29 @@ export function eventsOf(run: MockRun): RunEvent[] {
       for (const c of p.calls) {
         const old = legacy && c.tool === "db_query";
         const tool = old ? "sql_query" : c.tool;
-        push("tool_call", { ...(agent ? { agent } : {}), tool, args: old ? { sql: c.args.query } : c.args }, 300);
+        // call：同一次调用的 tool_call / tool_result 配对用（9.0 之前的旧运行没有）
+        const call = legacy ? {} : { call: `c${seq + 1}` };
+        push("tool_call", { ...(agent ? { agent } : {}), tool, ...call, args: old ? { sql: c.args.query } : c.args }, 300);
         if (c.sub) {
           const sub = String(c.args.subagent);
           emit(c.sub, sub);
           model([], "查完了，按要求交回结论。", sub);
         }
-        push("tool_result", { ...(agent ? { agent } : {}), tool, output: old ? legacyDbOutput(c.output) : c.output, duration_ms: c.ms ?? 300 }, c.ms ?? 300);
+        push("tool_result", { ...(agent ? { agent } : {}), tool, ...call, output: old ? legacyDbOutput(c.output) : c.output, duration_ms: c.ms ?? 300 }, c.ms ?? 300);
       }
     }
   };
   emit(plansOf(run));
   if (run.status === "running") return (run._events = out);
   if (run.status === "failed") {
-    push("error", { content: run.task === "frontend-smoke" ? "Playwright: Timeout 30000ms exceeded waiting for selector \"[data-table=strategy]\"" : "模型调用失败：429 Too Many Requests（重试 6 次后放弃）" }, 800);
+    push("error", run.task === "frontend-smoke"
+      ? { title: "timeout", content: "执行超时（任务的 timeout_s = 900s）" }
+      : { title: "error", content: "RateLimitError: Error code: 429 - Too Many Requests（重试 6 次后放弃）" }, 800);
     return (run._events = out);
   }
   if (run.status === "cancelled") {
-    push("stage", { stage: "cancelled", title: "已取消", content: "人工取消（liyd）" }, 500);
+    // 与后端 submitter.cancel 一致：记一条 error 事件（title=cancelled），运行的 error_code 也是 cancelled
+    push("error", { title: "cancelled", content: "被 liyd 取消" }, 500);
     return (run._events = out);
   }
   const answer = run._answer ?? answerOf(run);
@@ -1216,7 +1228,9 @@ export function detailOf(run: MockRun): Run {
     output: run._output !== undefined ? run._output
       : final ? { answer: String(final.payload.content) }
         : err ? { error: String(err.payload.content) } : null,
-    error_code: run._error_code ?? (err ? (run.task === "frontend-smoke" ? "run_failed" : run.task === "memory-gardener" ? "internal_error" : "model_unavailable") : null),
+    // 与后端 pipeline.fail 一致：模型 / 工具 / 框架抛的异常都记成 error，取消是 cancelled
+    // 续跑成功的运行时间线上还留着上次的出错：只有失败的才有原因码
+    error_code: run._error_code ?? (run.status === "cancelled" ? "cancelled" : run.status === "failed" && err ? String(err.payload.title ?? "error") : null),
     context: {
       profile,
       recalled_knowledge: run.resolution === "agent" ? recallable.slice(0, 3).map((k, i) => ({ id: k.id, key: k.key, kind: k.kind, rank: i + 1 })) : [],
@@ -1321,16 +1335,26 @@ export const assetList: Asset[] = [
 
 export function sessionsList(): SessionDetail[] {
   const map = new Map<string, MockRun[]>();
-  // 与后端 store/runs.sessions 一致：对话与纠正触发的运行按会话聚合（纠正是同会话的新一轮）
+  // 与后端 store/runs.sessions 一致：对话与纠正触发的运行按会话聚合（纠正是同会话的新一轮）；
+  // 至少有一轮是对话发起的才算（纠正一次定时运行不会让它出现在对话列表里）
   for (const r of runs) if (r.trigger.type === "chat" || r.trigger.type === "correction") map.set(r.session_id, [...(map.get(r.session_id) ?? []), r]);
-  return [...map.entries()].map(([sid, rs]) => {
-    const asc = [...rs].sort((a, b) => a.created_at.localeCompare(b.created_at));
-    const turns: ChatTurn[] = asc.map((r) => {
-      const d = detailOf(r);
-      return { run_id: r.run_id, question: String(r.input.question ?? r.summary), answer: d.output?.answer ?? d.output?.error ?? null, status: r.status, events: eventsOf(r).filter((e) => e.kind !== "final" && e.kind !== "error"), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "liyd") ?? null, created_at: r.created_at };
-    });
-    return { session_id: sid, title: asc[0].summary.slice(0, 60), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[asc.length - 1].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
-  }).sort((a, b) => b.last_at.localeCompare(a.last_at));
+  return [...map.entries()].filter(([, rs]) => rs.some((r) => r.trigger.type === "chat")).map(([sid, rs]) => sessionOf(sid, rs))
+    .sort((a, b) => b.last_at.localeCompare(a.last_at));
+}
+
+/** 与后端 GET /v1/sessions/{id}（runs.of_session）一致：会话里的全部运行，不管是怎么触发的；没有就是 null */
+export function sessionDetail(sid: string): SessionDetail | null {
+  const rs = runs.filter((r) => r.session_id === sid);
+  return rs.length ? sessionOf(sid, rs) : null;
+}
+
+function sessionOf(sid: string, rs: MockRun[]): SessionDetail {
+  const asc = [...rs].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const turns: ChatTurn[] = asc.map((r) => {
+    const d = detailOf(r);
+    return { run_id: r.run_id, question: String(r.input.question ?? r.summary), answer: d.output?.answer ?? d.output?.error ?? null, status: r.status, events: eventsOf(r).filter((e) => e.kind !== "final" && e.kind !== "error"), feedback: r.feedback.find((f) => f.step_seq === 0 && f.created_by === "liyd") ?? null, created_at: r.created_at };
+  });
+  return { session_id: sid, title: asc[0].summary.slice(0, 60), service: asc[asc.length - 1].service, env: asc[asc.length - 1].env, task: asc[asc.length - 1].task, runs: rs.length, last_at: asc[asc.length - 1].created_at, turns };
 }
 
 // ———————— 设置（conf/seeds/settings.yaml） ————————

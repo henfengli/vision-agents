@@ -286,6 +286,25 @@ async def by_session(session_id: str, exclude: str = "", limit: int = 50) -> lis
         return [_list_row(r) for r in await cur.fetchall()]
 
 
+async def live_in_session(session_id: str) -> dict | None:
+    """会话里还在排队 / 执行的那一轮（同一会话同时只能有一轮）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_id, status FROM runs WHERE session_id=%s AND status IN ('queued','running')"
+            " ORDER BY created_at DESC LIMIT 1", (session_id,))
+        row = await cur.fetchone()
+    return {"run_id": row[0], "status": row[1]} if row else None
+
+
+async def reached_agent(run_id: str) -> bool:
+    """这次运行走到 agent 了没有（记过系统提示或模型调用）：没走到的续跑没有 checkpoint 可接，要从头执行。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM run_events WHERE run_id=%s AND (kind='model_call' OR kind='thought'"
+            " OR (kind='stage' AND payload->>'stage'='system')) LIMIT 1", (run_id,))
+        return await cur.fetchone() is not None
+
+
 async def latest_of_session(session_id: str, exclude: str = "") -> dict | None:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
@@ -302,7 +321,9 @@ async def sessions(*, service: str | None = None, env: str | None = None, task: 
         if val:
             conds.append(clause)
             params.append(val)
-    having, params_q = (" HAVING bool_or(summary ILIKE %s)", ["%" + q + "%"]) if q else ("", [])
+    # 至少有一轮是对话发起的才算对话会话：纠正一次定时 / API 运行不会让它出现在对话列表里
+    having = " HAVING bool_or(trigger_type='chat')" + (" AND bool_or(summary ILIKE %s)" if q else "")
+    params_q = ["%" + q + "%"] if q else []
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "SELECT session_id, max(created_at), count(*),"
@@ -408,8 +429,12 @@ async def stats(hours: int = 24, env: str | None = None, service: str | None = N
             f" (array_agg(COALESCE(output->>'error', '') ORDER BY created_at DESC))[1]"
             f" FROM runs{where} AND status='failed' GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 5", params)
         failures = [{"task": t, "service": s, "failed": n, "last_error": (e or "")[:300]} for t, s, n, e in await cur.fetchall()]
-        cur = await conn.execute(
-            "SELECT count(*) FROM runs WHERE status='running'" + (" AND env=%s" if env else ""), [env] if env else [])
+        live_conds, live_params = ["status='running'"], []
+        for clause, val in (("env=%s", env), ("service=%s", service)):
+            if val:
+                live_conds.append(clause)
+                live_params.append(val)
+        cur = await conn.execute("SELECT count(*) FROM runs WHERE " + " AND ".join(live_conds), live_params)
         running = (await cur.fetchone())[0]
         cur = await conn.execute("SELECT now()")
         now = (await cur.fetchone())[0]

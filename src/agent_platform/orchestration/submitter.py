@@ -18,8 +18,8 @@ from dataclasses import asdict, dataclass
 
 import psycopg
 
-from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef
-from ..domain.tasks import check_task_name
+from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef, object_value
+from ..domain.tasks import check_task_name, split_subtask_name
 from ..registry import Registry
 from ..store import db, runs
 from . import gates
@@ -64,6 +64,12 @@ class Submitter:
         service = await self._resolve_service(task_name, task, req.service)
         env = (await self._reg.env(req.env)).name
         input_data = task.with_defaults(req.input)
+        _, obj = split_subtask_name(task_name)
+        if obj and task.object_input and not input_data.get(task.object_input):
+            input_data[task.object_input] = obj            # 选了对象：对象字段不用再填一遍
+        if req.session_id and trigger.type in ("chat", "correction") and (live := await runs.live_in_session(req.session_id)):
+            # 同一会话（同一个 LangGraph thread）同时只能有一轮在跑，否则两轮的消息会交错写进同一段上下文
+            raise Rejected("conflict", f"这个会话还有一轮在执行（{live['run_id'][:8]}），等它结束或先停止", 409)
         if errors := task.validate_input(input_data):
             raise Rejected("invalid_input", "输入不合法：" + "；".join(f"{k} {v}" for k, v in errors.items()),
                            detail={"fields": errors})
@@ -102,10 +108,14 @@ class Submitter:
         parent = await self._reg.task_raw(base)
         if parent is None:
             raise Rejected("unknown_task", f"任务 {base} 不存在", 404)
+        if not obj and not parent.spec.extends:
+            obj = object_value(parent.spec, req.input)     # 任务声明了对象字段：按它的值落到对应子任务
         if not obj:
             return base, base, False
         if parent.spec.extends:
             raise Rejected("invalid_subtask", f"{base} 本身是子任务，不能再派生", 400)
+        if parent.spec.form == "builtin":
+            raise Rejected("invalid_subtask", f"{base} 是内建任务，没有子任务", 400)
         name = f"{base}:{obj}"
         try:
             check_task_name(name)
@@ -147,11 +157,15 @@ class Submitter:
         return await self._relaunch(req, old, RunTrigger(type="rerun", caller=caller.name), caller)
 
     async def correct(self, run_id: str, correction: str, caller: Caller) -> Accepted:
-        """纠正：在同一会话里开新一轮，带上纠正内容；成功后取代上一轮沉淀的记忆。"""
+        """纠正：在同一会话里开新一轮，带上纠正内容；成功后取代被纠正的那一轮（trigger.id）沉淀的记忆。"""
         old = await self._existing(run_id)
+        if old["status"] not in TERMINAL:
+            raise Rejected("conflict", "运行还没结束，结束后再纠正", 409)
+        if live := await runs.live_in_session(old["session_id"]):
+            raise Rejected("conflict", f"这个会话还有一轮在执行（{live['run_id'][:8]}），等它结束或先停止", 409)
         req = RunRequest(task=old["task"], service=old["service"], env=old["env"], session_id=old["session_id"],
                          input={**old["input"], "question": f"[纠正] {correction}"}, memory=old.get("memory") or {})
-        return await self._relaunch(req, old, RunTrigger(type="correction", caller=caller.name), caller)
+        return await self._relaunch(req, old, RunTrigger(type="correction", id=run_id, caller=caller.name), caller)
 
     async def replay(self, run_id: str, caller: Caller) -> Accepted:
         """回归重放：同样的输入用当前定义重跑一次（新会话、不沉淀、不投递），供并排对比。"""
@@ -187,9 +201,17 @@ class Submitter:
         entry = await self._reg.task(run["task"])
         if entry is None or entry.spec.form != "agent":
             raise Rejected("conflict", "只有单角色任务支持续跑；内建任务请用重跑", 409)
+        if run["resolution"] == "rule":
+            raise Rejected("conflict", "规则命中的运行没有可续的步骤，请用重跑", 409)
+        if live := await runs.live_in_session(run["session_id"]):
+            # 续跑接着写同一个会话 thread：会话里另有一轮在跑时两轮会交错
+            raise Rejected("conflict", f"这个会话还有一轮在执行（{live['run_id'][:8]}），等它结束或先停止", 409)
         await gates.check_switches(self._reg, task_name=run["task"], task=entry.spec, service=run["service"], env=run["env"])
-        await runs.log_event(run_id, "stage", {"stage": "resume", "title": f"续跑（{caller.name}）"})
-        await runs.enqueue(run_id, resume=True)
+        # 上次没走到 agent（准备阶段就失败了：配置没填、服务停用…）：checkpoint 里什么都没有，从头执行
+        started = await runs.reached_agent(run_id)
+        await runs.log_event(run_id, "stage", {"stage": "resume", "title": f"续跑（{caller.name}）" if started
+                                               else f"重新执行（{caller.name}；上次没走到 agent，从头开始）"})
+        await runs.enqueue(run_id, resume=started)
         return Accepted(run_id, run["session_id"], "queued")
 
     async def cancel(self, run_id: str, caller: Caller) -> dict:

@@ -6,6 +6,7 @@
     GET  /v1/settings/{section}/versions
     POST /v1/settings/{section}/versions/{v}/restore
     GET  /v1/settings/prompts/version-stats         平台提示词每个版本的运行效果
+    GET  /v1/settings/prompts/defaults              平台内置的默认提示词（「恢复默认」用）
     POST /v1/settings/notifications/test            {channel} 发一条测试消息
 
     GET    /v1/api-keys
@@ -19,6 +20,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...domain import CONFIG_SECTIONS, Rejected
+from ...domain.prompts import PromptsConfig
 from ...notify import Message
 from ...store import api_keys, runs
 from ..deps import RT, WHO, Caller, Runtime
@@ -81,6 +83,12 @@ async def section_versions(section: str, rt: Runtime = RT, _: Caller = WHO):
 async def prompts_version_stats(_: Caller = WHO):
     """平台提示词每个版本跑出来的效果（按运行配方里记的版本聚合）。"""
     return await runs.version_stats("prompts", "prompts")
+
+
+@router.get("/settings/prompts/defaults")
+async def prompts_defaults(_: Caller = WHO):
+    """平台内置的默认提示词（设置页每段的「恢复默认」用）。"""
+    return PromptsConfig().model_dump()
 
 
 @router.post("/settings/{section}/versions/{version}/restore")

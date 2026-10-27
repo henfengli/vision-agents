@@ -43,8 +43,12 @@ async def _accept(body: ChatBody, rt: Runtime, who: Caller):
         task = await rt.registry.chat_task_for(service)
         if not task:
             raise Rejected("unknown_task", f"服务 {service or '—'} 没有可对话的任务（任务需声明 chat 触发）", 404)
-    req = RunRequest(task=task, subtask=body.subtask, service=service, env=env,
-                     input={**body.input, "question": body.message}, session_id=body.session_id, memory=body.memory)
+    # 续会话：任务的其它输入沿用上一轮（这轮写了的以这轮为准），必填的输入不用每轮重填
+    carried = {k: v for k, v in (last["input"] if last else {}).items() if k != "question"}
+    subtask = body.subtask if body.subtask is not None or not last else (last["task"].partition(":")[2] or None)
+    req = RunRequest(task=task, subtask=subtask, service=service, env=env,
+                     input={**carried, **body.input, "question": body.message}, session_id=body.session_id,
+                     memory=body.memory)
     return await rt.submitter.submit(req, trigger=RunTrigger(type="chat", caller=who.name), caller=who)
 
 

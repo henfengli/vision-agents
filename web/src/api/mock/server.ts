@@ -106,6 +106,7 @@ on("GET", "/v1/meta", () => ({
   version: "9.0.0", envs: db.envs, default_env: db.settings.envs.default, me: ME,
   channels: Object.keys(db.settings.notifications.channels),
   feedback_reasons: REASONS,
+  builtin_handlers: ["memory-gardener"],
   features: { vector_search: true },
   tools: TOOLS,
   event_sources: [
@@ -229,13 +230,19 @@ function serviceSummary(s: Svc): ServiceSummary {
     const last = rs[0];
     health[e.name] = {
       enabled: envEnabled(s, e.name),
+      env_enabled: s.envs[e.name]?.enabled !== false,
       python: pythonOf(s, e.name),
       runs_24h: rs.filter((r) => within(r.created_at, 24)).length,
       failed_24h: rs.filter((r) => within(r.created_at, 24) && r.status === "failed").length,
       last_run: last ? { run_id: last.run_id, status: last.status, created_at: last.created_at } : null,
     };
   }
-  return { ...redactService(s), task_count: db.tasks.filter((t) => t.service === s.name && !t.extends).length, health };
+  // 与后端 _service_summaries 一致：专属任务 + 通用任务（service="*"），都不含子任务
+  return {
+    ...redactService(s), health,
+    task_count: db.tasks.filter((t) => t.service === s.name && !t.extends).length,
+    generic_task_count: db.tasks.filter((t) => t.service === "*" && !t.extends).length,
+  };
 }
 
 const findService = (name: string) => db.services.find((x) => x.name === name) ?? (() => { throw notFound("服务 " + name); })();
@@ -444,17 +451,14 @@ on("GET", "/v1/roles/:name/resolved", (p): ResolvedRole => {
 
 // ———————— 任务 ————————
 
-const OWN_KEYS = ["title", "description", "input", "envs", "triggers", "profile", "enabled", "deliver", "timeout_s", "memory"] as const;
+/** mock 的子任务记着自己写了哪些字段（_own，等于后端的 model_fields_set），其余跟随父任务 */
+type MockTask = Task & { _own?: string[] };
+const LEDGER = ["name", "version", "updated_by", "updated_at", "extends", "auto_created", "_own"];
 
-/** 子任务自己写了哪些字段（mock：非空即覆盖） */
-function ownFields(t: Task): (typeof OWN_KEYS)[number][] {
+/** 子任务自己写了哪些字段 */
+function ownFields(t: Task): string[] {
   if (!t.extends) return [];
-  return OWN_KEYS.filter((k) => {
-    const v = t[k] as unknown;
-    if (k === "enabled") return v === false;
-    if (k === "deliver" || k === "timeout_s") return false;
-    return Array.isArray(v) ? v.length > 0 : v && typeof v === "object" ? Object.keys(v).length > 0 : !!v;
-  });
+  return ((t as MockTask)._own ?? []).filter((k) => !LEDGER.includes(k)).sort();
 }
 
 function effective(t: Task): Task {
@@ -463,10 +467,63 @@ function effective(t: Task): Task {
   if (!parent) return t;
   const own = ownFields(t);
   const out = { ...parent, name: t.name, extends: t.extends, auto_created: t.auto_created, version: t.version, updated_by: t.updated_by, updated_at: t.updated_at } as Task;
-  for (const k of own) (out as unknown as Record<string, unknown>)[k] = t[k];
-  out.profile = { ...parent.profile, ...t.profile };
-  out.input = { ...parent.input, ...t.input };
+  for (const k of own) (out as unknown as Record<string, unknown>)[k] = (t as unknown as Record<string, unknown>)[k];
+  out.profile = { ...parent.profile, ...(own.includes("profile") ? t.profile : {}) };
+  out.input = { ...parent.input, ...(own.includes("input") ? t.input : {}) };
+  delete (out as MockTask)._own;
   return out;
+}
+
+const NAME_RE = /^[a-z][a-z0-9-]{1,48}$/;
+const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const BUILTINS = ["memory-gardener"];
+
+/**
+ * 与后端写入时的检查一致（domain/tasks.py consistency_error + registry._check_task）。
+ * triggers=false：子任务没写自己的触发——合并来的父任务定时 / 事件不按它触发，不拿它的环境、输入去对
+ */
+function checkTask(t: Task, triggers = true) {
+  const bad = (m: string) => { throw invalid(m); };
+  if (t.form === "agent" && !t.role) bad("单角色任务需要指定角色");
+  if (t.form === "builtin" && !t.handler) bad("内建任务需要处理器名");
+  if (t.form === "builtin" && t.handler && !BUILTINS.includes(t.handler)) bad(`未知的内建处理器 ${t.handler}（可用：${BUILTINS.join("、")}）`);
+  if (t.role && !db.roles.some((r) => r.name === t.role)) bad(`角色 ${t.role} 不存在`);
+  if (t.service && t.service !== "*" && !db.services.some((s) => s.name === t.service)) bad(`服务 ${t.service} 不存在`);
+  if (!(t.timeout_s >= 1 && t.timeout_s <= 7200)) bad("超时须在 1~7200 秒之间");
+  for (const [name, f] of Object.entries(t.input)) {
+    if (!FIELD_RE.test(name)) bad(`输入字段名 '${name}' 不合法（字母、数字、下划线，字母或下划线开头）`);
+    if (f.type === "enum" && !f.options?.length) bad(`输入字段 ${name} 是枚举，至少要有一个选项`);
+  }
+  if (t.object_input && !(t.object_input in t.input)) bad(`对象字段 ${t.object_input} 不在输入字段里`);
+  if (t.dedup) {
+    const keys = t.dedup.key.split("+").map((k) => k.trim()).filter(Boolean);
+    if (!keys.length) bad("去重要写按哪个输入字段（a+b 拼接多个）");
+    const missing = keys.filter((k) => !(k in t.input));
+    if (missing.length) bad(`去重字段不在输入里：${missing.join("、")}`);
+  }
+  const ids = t.triggers.map((x) => x.id);
+  if (triggers && new Set(ids).size !== ids.length) bad("触发器 id 重复");
+  const envNames = db.settings.envs.items.map((e) => e.name);
+  for (const e of t.envs) if (!envNames.includes(e)) bad(`未知环境：${e}`);
+  for (const tr of triggers ? t.triggers : []) {
+    if (tr.type === "schedule") {
+      if (!tr.envs.length) bad("定时触发至少要选一个环境");
+      const outside = t.envs.length ? tr.envs.filter((e) => !t.envs.includes(e)) : [];
+      if (outside.length) bad(`定时 ${tr.id} 的环境 ${outside.join("、")} 不在任务允许的环境里`);
+      if (t.service === "*" && !tr.service) bad(`通用任务的定时触发 ${tr.id} 需要指定服务`);
+      const missing = Object.entries(t.input).filter(([k, f]) => f.required && (tr.input?.[k] ?? f.default) == null).map(([k]) => k);
+      if (missing.length) bad(`定时 ${tr.id} 的固定输入不合法：${missing.map((k) => `${k} 必填`).join("；")}`);
+    }
+    if (tr.type === "event") {
+      for (const r of tr.rules ?? []) {
+        if (!r.pattern.trim()) bad(`事件 ${tr.id} 有一条规则的正则是空的（会匹配所有报错）`);
+        if (!r.conclusion.trim()) bad(`事件 ${tr.id} 的规则 ${r.pattern} 没写结论`);
+      }
+    }
+  }
+  if (t.deliver?.channel && !(t.deliver.channel in db.settings.notifications.channels))
+    bad(`结果投递的渠道 ${t.deliver.channel} 不存在（可选：${Object.keys(db.settings.notifications.channels).join("、") || "无"}）`);
+  if (t.deliver && !t.deliver.channel === !t.deliver.url) bad("投递需要且只能填渠道或回调地址之一");
 }
 
 const firesOf = (t: Task) => t.triggers.flatMap((tr) => tr.type === "schedule" && tr.enabled !== false
@@ -502,21 +559,53 @@ function checkSchema(body: Partial<Task>) {
   if (s && !Object.keys(s).length) body.output_schema = null;
 }
 
-/** 形态一致性（与后端 TaskDef._form_consistency 一致）：子任务只存差异，不校验 */
-function checkForm(t: Partial<Task>) {
-  if (t.extends) return;
-  if ((t.form ?? "agent") === "agent" && !t.role) throw new ApiError(422, "invalid_definition", "单角色任务需要指定角色");
-  if (t.form === "builtin" && !t.handler) throw new ApiError(422, "invalid_definition", "内建任务需要处理器名");
+/** 父任务改了：每个子任务合并之后也要还成立 */
+function checkChildren(parent: Task) {
+  // 只有 extends 的子任务生效定义就是父任务，父任务那边已经查过
+  for (const c of db.tasks.filter((x) => x.extends === parent.name && ownFields(x).length)) {
+    try { checkTask(effectiveWith(c, parent), ownFields(c).includes("triggers")); }
+    catch (e) { throw invalid(`子任务 ${c.name} 合并后不成立：${(e as Error).message}`); }
+  }
+}
+function effectiveWith(child: Task, parent: Task): Task {
+  const i = db.tasks.findIndex((x) => x.name === parent.name);
+  const saved = db.tasks[i];
+  db.tasks[i] = parent;
+  try { return effective(child); } finally { db.tasks[i] = saved; }
 }
 
-on("GET", "/v1/tasks", (_p, q) => db.tasks.filter((t) => !q.service || t.service === q.service || t.service === "*").map(taskSummary));
+// 子任务（effective）的生效定义里 service / role / form 等都是父任务的；summary 用的就是它
+const filteredTasks = (service: unknown) => db.tasks.filter((t) => { const e = effective(t); return !service || e.service === service || e.service === "*"; });
+on("GET", "/v1/tasks", (_p, q) => filteredTasks(q.service).map(taskSummary));
 on("GET", "/v1/tasks/:name", (p) => taskSummary(findTask(p.name)));
-on("PATCH", "/v1/tasks/:name", (p, _q, body) => { checkSchema(body); checkForm({ ...findTask(p.name), ...body }); return taskSummary(bump("tasks/" + p.name, findTask(p.name), body)); });
+on("PATCH", "/v1/tasks/:name", (p, _q, body) => {
+  const cur = findTask(p.name);
+  checkSchema(body);
+  const { name: _n, version: _v, updated_by: _u, updated_at: _a, ...patch } = body as Record<string, unknown>;
+  void _n; void _v; void _u; void _a;
+  if (cur.extends) {
+    // 子任务：写了的字段成了它自己的；写 null = 去掉这项、重新跟随父任务。人改过一次就不再算自动创建
+    const parent = findTask(cur.extends);
+    const own = new Set(ownFields(cur));
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) { own.delete(k); next[k] = structuredClone((parent as unknown as Record<string, unknown>)[k]); } else { own.add(k); next[k] = v; }
+    }
+    if (own.size) checkTask(effective({ ...cur, ...next, _own: [...own] } as MockTask), own.has("triggers"));
+    return taskSummary(bump("tasks/" + p.name, cur, { ...next, auto_created: false, _own: [...own] } as Partial<Task>));
+  }
+  const next = { ...cur, ...patch } as Task;
+  checkTask(next);
+  checkChildren(next);
+  return taskSummary(bump("tasks/" + p.name, cur, patch as Partial<Task>));
+});
 on("POST", "/v1/tasks", (_p, _q, body) => {
-  if (db.tasks.some((t) => t.name === body.name)) throw new ApiError(409, "conflict", `任务 ${body.name} 已存在`);
+  const name = String(body.name ?? "");
+  if (!NAME_RE.test(name)) throw invalid(`任务名不合法：'${name}'（小写字母开头，可含数字与连字符）`);
+  if (db.tasks.some((t) => t.name === name)) throw new ApiError(409, "conflict", `任务 ${name} 已存在`);
   checkSchema(body);
   const t = blankTask(body);
-  checkForm(t);
+  checkTask(t);
   db.tasks.push(t);
   return taskSummary(t);
 });
@@ -526,20 +615,31 @@ on("DELETE", "/v1/tasks/:name", (p) => {
   return { deleted: removed };
 });
 on("GET", "/v1/tasks/:name/subtasks", (p) => db.tasks.filter((t) => t.extends === p.name).map(taskSummary));
+const SUBTASK_FIELDS = ["title", "description", "profile", "input", "envs", "enabled"];
+/** 新建子任务：只存它自己写的字段（与后端 SubtaskBody 一致），其余跟随父任务 */
+function newSubtask(parent: Task, object: string, own: Record<string, unknown>, by: string, auto: boolean): Task {
+  return { ...blankTask({ ...parent, ...own, name: `${parent.name}:${object}`, extends: parent.name, auto_created: auto }), updated_by: by, _own: Object.keys(own) } as MockTask;
+}
+const objectError = (o: string) => !o ? "对象名不能为空" : o.length > 120 ? "对象名不超过 120 个字符" : /[:\s/\\]/.test(o) ? "对象名不能含冒号、空白或斜杠" : null;
 on("POST", "/v1/tasks/:name/subtasks", (p, _q, body) => {
   const parent = findTask(p.name);
   if (parent.extends) throw new ApiError(400, "invalid_subtask", `${p.name} 本身是子任务，不能再派生`);
+  if (parent.form === "builtin") throw invalid(`${p.name} 是内建任务，不能建子任务`);
   const object = String(body.object || "").trim();
-  if (!object || /[:\s/]/.test(object)) throw new ApiError(422, "invalid_definition", "对象名不能为空，且不能含冒号、空白或斜杠");
+  if (objectError(object)) throw invalid(objectError(object)!);
   const name = `${p.name}:${object}`;
   if (db.tasks.some((t) => t.name === name)) throw new ApiError(409, "conflict", `子任务 ${name} 已存在`);
-  const { object: _o, ...overrides } = body;
-  void _o;
-  const t = blankTask({ ...overrides, name, extends: p.name, service: parent.service, role: parent.role, form: parent.form, triggers: [], deliver: parent.deliver, timeout_s: parent.timeout_s });
+  const own = Object.fromEntries(Object.entries(body).filter(([k, v]) => SUBTASK_FIELDS.includes(k) && v != null));
+  const t = newSubtask(parent, object, own, ME.name, false);
   db.tasks.push(t);
   return taskSummary(t);
 });
-on("GET", "/v1/tasks/:name/schedule", (p) => firesOf(effective(findTask(p.name))));
+// 与后端一致：父任务连同有自己定时的子任务；停用的不算
+on("GET", "/v1/tasks/:name/schedule", (p) => {
+  const t = findTask(p.name);
+  return [t, ...db.tasks.filter((x) => x.extends === t.name && ownFields(x).includes("triggers"))]
+    .filter((x) => effective(x).enabled && t.enabled).flatMap((x) => firesOf(effective(x))).sort((a, b) => a.at.localeCompare(b.at));
+});
 
 // ———————— 每个版本跑出来的效果（任务 / 角色 / 平台提示词；回归重放不算） ————————
 
@@ -603,31 +703,52 @@ on("GET", "/v1/runs", (_p, q) => {
   return page;
 });
 on("GET", "/v1/runs/:id", (p) => db.detailOf(findRun(p.id)));
-on("GET", "/v1/runs/:id/events", (p) => db.eventsOf(findRun(p.id)));
+on("GET", "/v1/runs/:id/events", (p, q) => db.eventsOf(findRun(p.id)).filter((e) => !q.after || e.seq > Number(q.after)));
 on("POST", "/v1/runs", (_p, _q, body) => submitRun(body, "web"));
 on("POST", "/v1/runs/:id/cancel", (p) => {
   const r = findRun(p.id);
   if (["success", "failed", "cancelled"].includes(r.status)) throw new ApiError(409, "already_finished", `运行已结束（${r.status}）`);
-  Object.assign(r, { status: "cancelled", finished_at: now(), _events: undefined });
+  // 与后端 submitter.cancel 一致：落 cancelled、error_code=cancelled，时间线上一条 error 事件
+  Object.assign(r, { status: "cancelled", finished_at: now(), _events: undefined, _error_code: "cancelled" });
   return db.detailOf(r);
 });
+const TERMINAL = ["success", "failed", "cancelled"];
 on("POST", "/v1/runs/:id/rerun", (p) => {
   const r = findRun(p.id);
   const [task, subtask] = r.task.split(":");
-  return submitRun({ task, subtask, service: r.service, env: r.env, input: r.input }, "rerun");
+  return submitRun({ task, subtask, service: r.service, env: r.env, input: r.input, memory: r.memory }, "rerun");
 });
 on("POST", "/v1/runs/:id/resume", (p) => {
   const r = findRun(p.id);
   if (r.status !== "failed") throw new ApiError(409, "conflict", `只有失败的运行能续跑（当前 ${r.status}）`);
-  if (db.tasks.find((t) => t.name === r.task.split(":")[0])?.form !== "agent") throw new ApiError(409, "conflict", "只有单角色任务支持续跑；内建任务请用重跑");
-  Object.assign(r, { status: "running", finished_at: null, _events: undefined });
-  setTimeout(() => Object.assign(r, { status: "success", finished_at: now() }), 5000);
+  if (effective(findTask(r.task)).form !== "agent") throw new ApiError(409, "conflict", "只有单角色任务支持续跑；内建任务请用重跑");
+  if (r.resolution === "rule") throw new ApiError(409, "conflict", "规则命中的运行没有可续的步骤，请用重跑");
+  const live = db.runs.find((x) => x.session_id === r.session_id && x !== r && !TERMINAL.includes(x.status));
+  if (live) throw new ApiError(409, "conflict", `这个会话还有一轮在执行（${live.run_id.slice(0, 8)}），等它结束或先停止`);
+  // 与后端一致：同一个 run_id 接着跑，事件接在后面（页面按 after=seq 增量取）；没走到 agent 的从头执行
+  const prev = db.eventsOf(r);
+  const started = prev.some((e) => e.kind === "model_call" || e.kind === "thought" || (e.kind === "stage" && e.payload.stage === "system"));
+  const add = (kind: RunEvent["kind"], payload: RunEvent["payload"]) => {
+    const evs = r._events ?? prev;
+    r._events = [...evs, { seq: (evs[evs.length - 1]?.seq ?? 0) + 1, kind, at: now(), payload }];
+  };
+  add("stage", { stage: "resume", title: started ? `续跑（${ME.name}）` : `重新执行（${ME.name}；上次没走到 agent，从头开始）` });
+  Object.assign(r, { status: "running", finished_at: null, _error_code: undefined, duration_ms: null });
+  setTimeout(() => {
+    if (r.status !== "running") return;
+    add("model_call", { model: "kimi-k2.7-code", ms: 4200, input_tokens: 9800, output_tokens: 260, tokens: 10060, tool_calls: [], content: "接着上次的进度把结论整理出来。" });
+    add("final", { content: "（续跑）按上次查到的依据给出结论：上游分区晚到，重跑当日分区即可。" });
+    Object.assign(r, { status: "success", resolution: "agent", finished_at: now() });
+  }, 5000);
   return { run_id: r.run_id, session_id: r.session_id, status: "queued", output: null, dedup: false, subtask_created: null };
 });
 on("POST", "/v1/runs/:id/correct", (p, _q, body) => {
   const r = findRun(p.id);
+  if (!TERMINAL.includes(r.status)) throw new ApiError(409, "conflict", "运行还没结束，结束后再纠正");
+  const live = db.runs.find((x) => x.session_id === r.session_id && !TERMINAL.includes(x.status));
+  if (live) throw new ApiError(409, "conflict", `这个会话还有一轮在执行（${live.run_id.slice(0, 8)}），等它结束或先停止`);
   const [task, subtask] = r.task.split(":");
-  return submitRun({ task, subtask, service: r.service, env: r.env, input: { ...r.input, question: `[纠正] ${body.text}` }, session_id: r.session_id }, "correction");
+  return submitRun({ task, subtask, service: r.service, env: r.env, input: { ...r.input, question: `[纠正] ${body.text}` }, session_id: r.session_id, memory: r.memory }, "correction", false, r.run_id);
 });
 // ———————— 反馈：一人一步一条，再提交即覆盖 ————————
 
@@ -669,11 +790,26 @@ interface SubmitBody { task?: string | null; service?: string | null; env?: stri
 
 /** POST /v1/runs：task 不填 = 通用入口 ask。闸门：任务存在且启用、服务与环境启用、环境在任务允许的范围内、必填输入齐全 */
 /** manual：调用方自己把运行收尾（对话的流式回答） */
-function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccepted {
+function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId: string | null = null): RunAccepted {
   const [base, inlineSub] = (body.task || "ask").split(":");
-  const t = db.tasks.find((x) => x.name === base);
-  if (!t) throw new ApiError(404, "unknown_task", `任务 ${base} 不存在`);
-  const input = body.input ?? {};
+  const parent = db.tasks.find((x) => x.name === base);
+  if (!parent) throw new ApiError(404, "unknown_task", `任务 ${base} 不存在`);
+  const input = { ...(body.input ?? {}) };
+  // 与后端 submitter 一致：没点名对象、但任务声明了对象字段 → 按这个字段的值落到对应子任务；点名了对象 → 对象字段自动填上
+  const derived = !body.subtask && !inlineSub && parent.object_input && typeof input[parent.object_input] === "string" && !objectError(String(input[parent.object_input]).trim())
+    ? String(input[parent.object_input]).trim() : "";
+  const object = body.subtask || inlineSub || derived;
+  if (object && parent.form === "builtin") throw new ApiError(400, "invalid_subtask", `${base} 是内建任务，没有子任务`);
+  if (object && objectError(object)) throw new ApiError(400, "invalid_subtask", objectError(object)!);
+  if (object && parent.object_input && !input[parent.object_input]) input[parent.object_input] = object;
+  const name = object ? `${base}:${object}` : base;
+  const existing = object ? db.tasks.find((x) => x.name === name) : undefined;
+  // 闸门按生效定义判断：已有的子任务用它合并后的（可能有自己的环境、停用），新对象用父任务的
+  const t = existing ? effective(existing) : parent;
+  if (body.session_id && trigger === "chat") {
+    const live = db.runs.find((r) => r.session_id === body.session_id && (r.status === "running" || r.status === "queued"));
+    if (live) throw new ApiError(409, "conflict", `这个会话还有一轮在执行（${live.run_id.slice(0, 8)}），等它结束或先停止`);
+  }
   const env = body.env || db.settings.envs.default;
   let service = t.service;
   if (t.service === "*") {
@@ -685,23 +821,30 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
   const svc = db.services.find((s) => s.name === service);
   if (svc && !svc.enabled) throw new ApiError(400, "service_disabled", `服务 ${service} 已停用`);
   if (svc && !envEnabled(svc, env)) throw new ApiError(400, "service_env_disabled", `服务 ${service} 在 ${env} 环境已停用`);
-  if (!t.enabled) throw new ApiError(400, "task_disabled", `任务 ${t.name} 已停用`);
-  if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${t.name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
-  // 与后端 TaskDef.validate_input 一致：没给就用默认值，null / 空串都算没填
-  const missing = Object.entries(t.input).filter(([k, f]) => { const v = k in input ? input[k] : f.default; return f.required && (v == null || v === ""); }).map(([k]) => k);
-  if (missing.length) throw new ApiError(400, "invalid_input", "输入不合法：" + missing.map((k) => `${k} 必填`).join("；"));
-  const object = body.subtask || inlineSub;
-  const name = object ? `${base}:${object}` : base;
+  if (!t.enabled) throw new ApiError(400, "task_disabled", `任务 ${name} 已停用`);
+  if (existing && !parent.enabled) throw new ApiError(400, "task_disabled", `父任务 ${base} 已停用`);
+  if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
+  // 与后端 TaskDef.validate_input 一致：没给就用默认值，null / 空串都算没填；类型也查
+  const problems = Object.entries(t.input).flatMap(([k, f]) => {
+    const v = k in input ? input[k] : f.default;
+    if (v == null || v === "") return f.required ? [`${k} 必填`] : [];
+    if (f.type === "int" && !(Number.isInteger(v) || (typeof v === "string" && /^-?\d+$/.test(v)))) return [`${k} 需要整数`];
+    if (f.type === "bool" && typeof v !== "boolean") return [`${k} 需要 true/false`];
+    if (f.type === "enum" && f.options?.length && !f.options.includes(String(v))) return [`${k} 取值须为 ${f.options.join("/")}`];
+    return [];
+  });
+  if (problems.length) throw new ApiError(400, "invalid_input", "输入不合法：" + problems.join("；"));
+  for (const [k, f] of Object.entries(t.input)) if (!(k in input) && f.default != null) input[k] = f.default;
   let created: string | null = null;
-  if (object && !db.tasks.some((x) => x.name === name)) {
-    db.tasks.push(blankTask({ name, extends: base, auto_created: true, service: t.service, role: t.role, form: t.form, triggers: [], deliver: t.deliver, updated_by: "auto:" + ME.name }));
+  if (object && !existing) {
+    db.tasks.push(newSubtask(parent, object, {}, "auto:" + ME.name, true));
     created = name;
   }
   const run_id = db.hex(12);
   const session_id = body.session_id || run_id;
   const run: db.MockRun = {
-    run_id, session_id, task: name, task_title: t.title, service: service ?? null, env, role: t.role, status: "running", resolution: null,
-    trigger: { type: trigger as "web", id: null, source: null, caller: ME.name },
+    run_id, session_id, task: name, task_title: parent.title, service: service ?? null, env, role: t.role, status: "running", resolution: null,
+    trigger: { type: trigger as "web", id: triggerId, source: null, caller: ME.name },
     summary: String(input.question ?? Object.values(input)[0] ?? t.title), tokens: null, duration_ms: null,
     created_at: now(), finished_at: null, task_version: db.tasks.find((x) => x.name === name)?.version ?? t.version,
     role_version: db.roles.find((r) => r.name === t.role)?.version ?? null, recipe: null,
@@ -711,9 +854,9 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
   };
   run.recipe = db.recipeOf(run, 0);
   db.runs.unshift(run);
-  if (!manual) setTimeout(() => Object.assign(run, t.form === "builtin"
+  if (!manual) setTimeout(() => { if (run.status === "running") Object.assign(run, t.form === "builtin"
     ? { status: "success", resolution: "builtin", duration_ms: 6400, tokens: 0, finished_at: now(), _events: undefined, _output: { env, drift_expired: 0 } }
-    : { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }), 6500);
+    : { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }); }, 6500);
   return { run_id, session_id, status: "queued", output: null, dedup: false, subtask_created: created };
 }
 
@@ -863,7 +1006,7 @@ on("GET", "/v1/sessions", (_p, q) => db.sessionsList()
   .filter((s) => (!q.service || s.service === q.service) && (!q.env || s.env === q.env) && (!q.task || s.task.split(":")[0] === q.task)
     && (!q.q || s.title.includes(String(q.q)) || s.turns.some((t) => t.question.includes(String(q.q)))))
   .map(({ turns: _t, ...s }) => { void _t; return s; }));
-on("GET", "/v1/sessions/:id", (p) => db.sessionsList().find((x) => x.session_id === p.id) ?? (() => { throw notFound("会话"); })());
+on("GET", "/v1/sessions/:id", (p) => db.sessionDetail(p.id) ?? (() => { throw notFound("会话"); })());
 
 // ———————— 记忆 ————————
 
@@ -973,8 +1116,13 @@ on("POST", "/v1/knowledge/:id/promote", (p, _q, body) => {
 });
 
 const findAsset = (id: string) => db.assetList.find((x) => x.id === Number(id)) ?? (() => { throw notFound("方法 " + id); })();
+/** q：名字、摘要、内容里不分大小写地找（与后端 ILIKE 一致） */
+const assetHit = (a: Asset, q: unknown) => {
+  const term = String(q ?? "").trim().toLowerCase();
+  return !term || (a.name + "\n" + a.summary + "\n" + a.content).toLowerCase().includes(term);
+};
 on("GET", "/v1/assets", (_p, q) => db.assetList.filter((a) => (!q.service || a.service === q.service) && (!q.env || a.env === q.env)
-  && (!q.kind || a.kind === q.kind) && taskMatch(q.task, a.task) && (!q.status || q.status === "all" || a.status === q.status)));
+  && (!q.kind || a.kind === q.kind) && taskMatch(q.task, a.task) && (!q.status || q.status === "all" || a.status === q.status) && assetHit(a, q.q)));
 on("POST", "/v1/assets", (_p, _q, body) => {
   const a: Asset = { id: Math.max(...db.assetList.map((x) => x.id)) + 1, files: [], source_run: null, use_count: 0, last_used_at: null, feedback_score: 0, status: "active", updated_at: now(), task: "", ...body };
   db.assetList.unshift(a);
@@ -1020,15 +1168,36 @@ function checkEnvs(body: { items: { name: string }[]; default: string }) {
   if (new Set(names).size !== names.length) throw new ApiError(422, "invalid_definition", "环境名重复");
   if (!names.includes(body.default)) throw new ApiError(422, "invalid_definition", `默认环境 ${body.default} 不在环境列表里`);
 }
+/** 移除的环境还被引用：409 in_use，列出引用的地方（与后端 registry 的引用检查一致） */
+function checkEnvsInUse(next: { items: { name: string }[] }) {
+  const kept = new Set(next.items.map((e) => e.name));
+  for (const env of db.settings.envs.items.map((e) => e.name).filter((n) => !kept.has(n))) {
+    const users = [
+      ...db.services.filter((s) => env in s.envs).map((s) => `服务 ${s.name} 的环境覆盖`),
+      ...db.tasks.filter((t) => t.envs.includes(env) || t.triggers.some((tr) => tr.type === "schedule" && tr.envs.includes(env))).map((t) => `任务 ${t.name}`),
+      ...db.settings.notifications.rules.filter((r) => r.envs.includes(env)).map((r) => `通知规则「${r.name}」`),
+      ...[...new Set([...db.agentConfigs.keys()].filter((k) => k.includes(`@${env}|`)).map((k) => k.split("@")[0]))].map((s) => `服务 ${s} 给 agent 的配置`),
+    ];
+    if (users.length) throw new ApiError(409, "in_use", `环境 ${env} 正被使用：${users.join("、")}。先改掉这些引用再移除`);
+  }
+}
+/** 移除的渠道还被任务的结果投递引用：409 in_use */
+function checkChannelsInUse(next: { channels: Record<string, unknown> }) {
+  const users = db.tasks.filter((t) => t.deliver?.channel && !(t.deliver.channel in next.channels)).map((t) => `任务 ${t.name}（投递到 ${t.deliver!.channel}）`);
+  if (users.length) throw new ApiError(409, "in_use", `渠道正被任务的结果投递使用：${users.join("、")}。先改掉这些任务的投递再移除`);
+}
 on("GET", "/v1/settings", () => Object.fromEntries(SECTIONS.map((s) => [s, masked(s, db.settings[s])])));
+/** 平台内置的默认提示词（与后端 PromptsConfig() 一致） */
+on("GET", "/v1/settings/prompts/defaults", () => db.PROMPT_DEFAULTS);
 for (const section of SECTIONS) {
   on("GET", `/v1/settings/${section}`, () => masked(section, db.settings[section]));
   on("PUT", `/v1/settings/${section}`, (_p, _q, body) => {
     const target = db.settings[section] as unknown as Ledgered;
     const { section: _s, version: _v, updated_by: _u, updated_at: _a, ...rest } = body;
     void _s; void _v; void _u; void _a;
-    if (section === "envs") checkEnvs(rest);
+    if (section === "envs") { checkEnvs(rest); checkEnvsInUse(rest); }
     if (section === "notifications") {
+      checkChannelsInUse(rest);
       const previous = db.settings.notifications.channels as Record<string, { token: string }>;
       for (const [name, ch] of Object.entries(rest.channels as Record<string, { url: string; token: string }>)) {
         if (!/^https?:\/\//.test(ch.url)) throw new ApiError(422, "invalid_definition", `channels.${name}.url：地址需以 http:// 或 https:// 开头`);
@@ -1109,12 +1278,15 @@ on("GET", "/v1/stats", (_p, q) => {
     if (!cur.last_error) cur.last_error = String(db.detailOf(r).output?.error ?? "");
     failMap.set(k, cur);
   }
-  const upcoming = db.tasks.filter((t) => t.enabled).flatMap((t) => firesOf(effective(t)))
-    .filter((f) => (!q.env || f.env === q.env) && (!q.service || f.service === q.service)).sort((a, b) => a.at.localeCompare(b.at)).slice(0, 8);
+  // 与后端一致：不含内建任务（记忆园丁每个服务×环境各一条，会把业务定时挤掉），带任务显示名与总次数
+  const fires = db.tasks.filter((t) => t.enabled && effective(t).form !== "builtin")
+    .flatMap((t) => firesOf(effective(t)).map((f) => ({ ...f, task_title: effective(t).title || t.name })))
+    .filter((f) => (!q.env || f.env === q.env) && (!q.service || f.service === q.service)).sort((a, b) => a.at.localeCompare(b.at));
   const stats: Stats = {
     hours,
     totals: { runs: rs.length, success: rs.filter((r) => r.status === "success").length, failed: rs.filter((r) => r.status === "failed").length, running: db.runs.filter((r) => r.status === "running" && (!q.env || r.env === q.env) && (!q.service || r.service === q.service)).length },
-    by_env: byEnv, series, top_failures: [...failMap.values()].sort((a, b) => b.failed - a.failed).slice(0, 5), upcoming,
+    by_env: byEnv, series, top_failures: [...failMap.values()].sort((a, b) => b.failed - a.failed).slice(0, 5),
+    upcoming: fires.slice(0, 8), upcoming_total: fires.length,
     tokens: rs.reduce((n, r) => n + (r.tokens ?? 0), 0),
   };
   return stats;
@@ -1124,12 +1296,20 @@ on("GET", "/v1/search", (_p, q) => {
   const term = String(q.q || "").toLowerCase();
   if (!term) return [];
   const hits: SearchHit[] = [];
-  for (const s of db.services) if ((s.name + s.title).toLowerCase().includes(term)) hits.push({ type: "service", id: s.name, title: s.title, subtitle: s.name, href: `/services/${s.name}` });
+  const firstLine = (text: string, limit = 60) => { const l = text.split("\n").map((x) => x.trim()).find(Boolean) ?? ""; return l.length > limit ? l.slice(0, limit) + "…" : l; };
+  for (const s of db.services) if ((s.name + s.title + s.description).toLowerCase().includes(term)) hits.push({ type: "service", id: s.name, title: s.title || s.name, subtitle: s.description ? `${s.name} · ${firstLine(s.description, 40)}` : s.name, href: `/services/${s.name}` });
   for (const t of db.tasks) if ((t.name + t.title).toLowerCase().includes(term)) hits.push({ type: "task", id: t.name, title: t.title || t.name, subtitle: t.name, href: `/tasks/${encodeURIComponent(t.name)}` });
   for (const r of db.roles) if ((r.name + r.title).toLowerCase().includes(term)) hits.push({ type: "role", id: r.name, title: r.title, subtitle: r.name, href: `/settings/roles/${r.name}` });
   for (const r of db.runs) if (r.run_id.startsWith(term) || r.summary.toLowerCase().includes(term)) hits.push({ type: "run", id: r.run_id, title: r.summary, subtitle: `${r.task} · ${r.env} · ${r.run_id.slice(0, 8)}`, href: `/runs/${r.run_id}` });
-  for (const k of db.knowledge) if (k.kind !== "handoff" && (k.key + k.content).toLowerCase().includes(term)) hits.push({ type: "knowledge", id: String(k.id), title: k.key, subtitle: `${k.service}@${k.env || "所有环境"} · ${k.content.slice(0, 40)}`, href: `/memory?knowledge=${k.id}` });
-  return hits.slice(0, 20);
+  // 教训的键是 lesson:<指纹>，人看不懂：标题用结论的第一行（与后端一致）
+  for (const k of db.knowledge.filter((x) => x.kind !== "handoff" && x.status === "active" && (x.key + x.content).toLowerCase().includes(term)).slice(0, 6)) {
+    const lesson = k.kind === "lesson";
+    hits.push({ type: "knowledge", id: String(k.id), title: lesson ? `教训：${firstLine(k.content)}` : k.key,
+      subtitle: `${k.service}@${k.env || "所有环境"}${lesson ? "" : ` · ${firstLine(k.content, 40)}`}`, href: `/memory?knowledge=${k.id}` });
+  }
+  for (const a of db.assetList.filter((x) => x.status === "active" && assetHit(x, term)).slice(0, 6))
+    hits.push({ type: "asset", id: String(a.id), title: a.name, subtitle: `${a.service}@${a.env} · ${firstLine(a.summary, 40)}`, href: `/memory?tab=assets&id=${a.id}` });
+  return hits.slice(0, 30);
 });
 
 // ———————— 流式：对话 ————————
@@ -1139,11 +1319,17 @@ export function handleStream(path: string, body: any, onEvent: (ev: Record<strin
   let accepted: RunAccepted;
   try {
     // 没指定任务：续会话沿用上一轮的任务；否则该服务专属的对话任务优先，其次通用入口 ask
-    const last = body.session_id ? db.runs.find((r) => r.session_id === body.session_id) : undefined;
+    const last = body.session_id ? db.runs.filter((r) => r.session_id === body.session_id).sort((a, b) => b.created_at.localeCompare(a.created_at))[0] : undefined;
     const chatTasks = db.tasks.filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat" && tr.enabled !== false));
-    const task = body.task || last?.task || (chatTasks.find((t) => t.service === body.service) ?? chatTasks.find((t) => t.name === "ask") ?? chatTasks.find((t) => t.service === "*"))?.name;
+    const task = body.task || last?.task.split(":")[0] || (chatTasks.find((t) => t.service === body.service) ?? chatTasks.find((t) => t.name === "ask") ?? chatTasks.find((t) => t.service === "*"))?.name;
     if (!task) throw new ApiError(404, "unknown_task", `服务 ${body.service || "—"} 没有可对话的任务（任务需声明 chat 触发）`);
-    accepted = submitRun({ task, subtask: body.subtask, service: body.service, env: body.env, input: { ...(body.input ?? {}), question: body.message }, session_id: body.session_id, memory: body.memory }, "chat", true);
+    const chosen = db.tasks.find((t) => t.name === task);
+    if (chosen && !chosen.triggers.some((tr) => tr.type === "chat" && tr.enabled !== false))
+      throw new ApiError(400, "trigger_not_allowed", `任务 ${task} 没有声明 chat 触发`);
+    // 续会话：任务的其它输入沿用上一轮（这轮写了的以这轮为准）；对象也沿用
+    const carried = Object.fromEntries(Object.entries(last?.input ?? {}).filter(([k]) => k !== "question"));
+    const subtask = body.subtask ?? (last ? last.task.split(":")[1] ?? null : null);
+    accepted = submitRun({ task, subtask, service: body.service ?? last?.service, env: body.env ?? last?.env, input: { ...carried, ...(body.input ?? {}), question: body.message }, session_id: body.session_id, memory: body.memory }, "chat", true);
   } catch (e) {
     const err = e as ApiError;
     setTimeout(() => { onEvent({ type: "error", code: err.code, message: err.message }); onDone(); }, 150);
@@ -1164,13 +1350,13 @@ export function handleStream(path: string, body: any, onEvent: (ev: Record<strin
     ...(hasCk ? [
       { type: "model_call", model: db.MODEL, ms: 4140, input_tokens: 5820, output_tokens: 264, tokens: 6084, tool_calls: ["db_query"],
         content: `问题是「${q.slice(0, 40)}」。按记忆里的口径，账户收益在 dws_account_pnl_daily，按交易日汇总；先查最近 5 个交易日，数据量小，直接看结果。` },
-      { type: "tool_call", tool: "db_query", args: { query: sql, db: "ck" } },
-      { type: "tool_result", tool: "db_query", output: db.ckOut({ rows: rows.length, cols: ["trade_date", "pnl", "accounts"], preview: rows, ms: 214 }), duration_ms: 240 },
+      { type: "tool_call", tool: "db_query", call: "q1", args: { query: sql, db: "ck" } },
+      { type: "tool_result", tool: "db_query", call: "q1", output: db.ckOut({ rows: rows.length, cols: ["trade_date", "pnl", "accounts"], preview: rows, ms: 214 }), duration_ms: 240 },
     ] : [
       { type: "model_call", model: db.MODEL, ms: 3920, input_tokens: 5310, output_tokens: 233, tokens: 5543, tool_calls: ["py"],
         content: `问题是「${q.slice(0, 40)}」。${svc?.title ?? "这个服务"}没有登记只读库，配置都在 vision_cfg 的模型里，用 py 在项目内核里只读查 ORM。` },
-      { type: "tool_call", tool: "py", args: { code: "from vision_cfg.models import Strategy, Account, Portfolio\nprint(Strategy.objects.count(), Account.objects.count(), Portfolio.objects.count())" } },
-      { type: "tool_result", tool: "py", output: "38 214 17", duration_ms: 610 },
+      { type: "tool_call", tool: "py", call: "p1", args: { code: "from vision_cfg.models import Strategy, Account, Portfolio\nprint(Strategy.objects.count(), Account.objects.count(), Portfolio.objects.count())" } },
+      { type: "tool_result", tool: "py", call: "p1", output: "38 214 17", duration_ms: 610 },
     ]),
     { type: "model_call", model: db.MODEL, ms: 5310, input_tokens: 6580, output_tokens: 412, tokens: 6992, tool_calls: [], content: "结果拿到了，整理成表格回答。" },
   ];

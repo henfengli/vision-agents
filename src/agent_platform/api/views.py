@@ -11,18 +11,26 @@ from ..store import knowledge as knowledge_store
 from ..store import runs
 
 
-def service_summary(entry: Entry, envs: list[EnvDef], health: dict, task_count: int) -> dict:
-    """Service + 每个环境的健康汇总。定义里的只读库口令不回显（redact_service）。"""
+def service_summary(entry: Entry, envs: list[EnvDef], health: dict, task_count: int,
+                    generic_task_count: int = 0) -> dict:
+    """Service + 每个环境的健康汇总。定义里的只读库口令不回显（redact_service）。
+
+    task_count：本服务专属的任务数；generic_task_count：通用任务（service="*"，调用时指定服务）数，
+    服务页的「任务」标签两组一起列。health[env].enabled 是实际是否接收运行（服务整体开关 且 该环境开关），
+    env_enabled 只看该环境自己的开关：服务整体停用时页面据此只说一次"服务已停用"，不把每个环境都标成未启用。"""
     per_env = {}
     for e in envs:
         env = e.name
         view = entry.spec.view(entry.name, env)
+        override = entry.spec.envs.get(env)
         h = health.get((entry.name, env), {})
         per_env[env] = {
-            "enabled": view.enabled, "python": view.python,
+            "enabled": view.enabled, "env_enabled": override.enabled if override is not None else True,
+            "python": view.python,
             "runs_24h": h.get("runs_24h", 0), "failed_24h": h.get("failed_24h", 0), "last_run": h.get("last_run"),
         }
-    return {**credentials.redact_service(entry.dump()), "task_count": task_count, "health": per_env}
+    return {**credentials.redact_service(entry.dump()), "task_count": task_count,
+            "generic_task_count": generic_task_count, "health": per_env}
 
 
 def task_summary(effective: Entry, own: Entry, stats: dict, next_fire: dict | None, subtask_count: int) -> dict:

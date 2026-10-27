@@ -79,6 +79,7 @@ export interface Meta {
   event_sources: EventSourceInfo[];
   channels: string[];    // 通知渠道名（任务投递、notify 工具可选）
   feedback_reasons: { value: FeedbackReason; label: string }[];
+  builtin_handlers: string[];   // 内建任务可选的处理器
   features: { vector_search: boolean };
   me: Me;
 }
@@ -305,7 +306,8 @@ export interface ServiceTools {
 }
 
 export interface ServiceEnvHealth {
-  enabled: boolean;
+  enabled: boolean;             // 实际是否接收运行：服务整体启用 且 该环境启用
+  env_enabled: boolean;         // 只看该环境自己的开关（envs[env].enabled，默认 true）；服务整体停用时页面据此只说一次"服务已停用"
   python: string;               // 该环境的解释器
   runs_24h: number;
   failed_24h: number;
@@ -314,7 +316,8 @@ export interface ServiceEnvHealth {
 
 /** 服务列表项：带每个环境的健康汇总 */
 export interface ServiceSummary extends Service {
-  task_count: number;
+  task_count: number;           // 本服务专属的任务（不含子任务）
+  generic_task_count: number;   // 通用任务（service="*"，调用时指定服务）：每个服务都能用
   health: Record<string, ServiceEnvHealth>;
 }
 
@@ -418,6 +421,8 @@ export interface Task extends Ledger {
   handler?: string | null;      // form=builtin 的处理器名
   /** 结构化输出（JSON Schema，顶层须是 {"type": "object", …}）：声明了就要求 agent 按它交回，放在 output.data */
   output_schema?: Record<string, unknown> | null;
+  /** 对象字段：子任务的对象名就是这个输入的值（失败分析的 asset_key）；选了对象自动填上，只给了它就落到对应子任务 */
+  object_input?: string | null;
 }
 
 export interface TaskSummary extends Task {
@@ -551,6 +556,7 @@ export interface RunEvent {
     output_tokens?: number | null;
     tool_calls?: string[];
     tool?: string;
+    call?: string;             // tool_call / tool_result 配对用（同一次调用相同）；旧事件没有
     args?: unknown;
     output?: string;
     duration_ms?: number;
@@ -854,12 +860,14 @@ export interface Stats {
   by_env: Record<string, { runs: number; success: number; failed: number }>;
   series: { t: ISODate; success: number; failed: number; other: number }[];
   top_failures: { task: string; service: string | null; failed: number; last_error: string }[];
-  upcoming: UpcomingFire[];
+  /** 接下来的定时触发（最多 8 条，不含记忆园丁这类内建任务）；task_title 是任务的显示名 */
+  upcoming: (UpcomingFire & { task_title: string })[];
+  upcoming_total: number;       // 去掉内建任务后的总次数
   tokens: number;
 }
 
 export interface SearchHit {
-  type: "service" | "task" | "run" | "role" | "knowledge" | "session";
+  type: "service" | "task" | "run" | "role" | "knowledge" | "asset" | "session";
   id: string;
   title: string;
   subtitle: string;

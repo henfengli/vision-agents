@@ -15,7 +15,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from .domain import (CONFIG_SECTIONS, EnvDef, EnvsConfig, Rejected, ResolvedRole, RoleDef, RoleError, ServiceDef,
-                     ServiceView, TaskDef, merge_task, resolve_role)
+                     ServiceView, TaskDef, consistency_error, merge_task, resolve_role)
 from .domain.services import check_service_name
 from .domain.tasks import check_task_name, split_subtask_name
 from .store.definitions import DefinitionStore, Kind
@@ -85,6 +85,10 @@ class Registry:
         if section not in CONFIG_SECTIONS:
             raise Rejected.not_found(f"配置节 {section}")
         spec = self._validate(CONFIG_SECTIONS[section], body)
+        if by != "seed" and (users := await self._config_users(section, spec)):
+            what = "环境" if section == "envs" else "渠道"
+            raise Rejected("in_use", f"要去掉的{what}还有人在用，先改掉：{'、'.join(users[:8])}"
+                                     + (f" 等 {len(users)} 处" if len(users) > 8 else ""), 409, detail={"used_by": users})
         await self.store.put("config", section, spec.model_dump(mode="json"), by)
         return await self.config_entry(section)
 
@@ -214,11 +218,17 @@ class Registry:
         return await self.entry(kind, name)  # type: ignore[return-value]
 
     async def update(self, kind: Kind, name: str, patch: dict, by: str) -> Entry:
-        """局部更新：patch 里出现的顶层字段整体替换，没出现的保持不变（合并到库里的最新版本上，不用缓存）。"""
+        """局部更新：patch 里出现的顶层字段整体替换，没出现的保持不变（合并到库里的最新版本上，不用缓存）。
+        子任务：字段写 null = 去掉这项覆盖、重新跟随父任务；人改过一次就不再算「自动创建」。"""
         current = await self.store.get(kind, name, fresh=True)
         if current is None:
             raise Rejected.not_found(f"{LABELS[kind]} {name}")
-        spec = self._validate(MODELS[kind], {**current["definition"], **_strip(patch)})
+        merged = {**current["definition"], **_strip(patch)}
+        if kind == "task" and merged.get("extends"):
+            merged = {k: v for k, v in merged.items() if v is not None or k not in patch}
+            if not by.startswith("auto:"):
+                merged.pop("auto_created", None)
+        spec = self._validate(MODELS[kind], merged)
         await self._check(kind, name, spec)
         await self.store.put(kind, name, self._stored(kind, spec), by)
         return await self.entry(kind, name)  # type: ignore[return-value]
@@ -284,14 +294,38 @@ class Registry:
 
     async def _check_task(self, name: str, spec: TaskDef) -> None:
         base, obj = split_subtask_name(name)
+        effective = spec
         if obj:
             if spec.extends != base:
                 raise Rejected("invalid_definition", f"子任务 {name} 的 extends 必须是 {base}", 422)
             parent = await self.entry("task", base)
             if parent is None:
                 raise Rejected("invalid_definition", f"父任务 {base} 不存在", 422)
+            if parent.spec.form == "builtin":
+                raise Rejected("invalid_definition", f"{base} 是内建任务，不能建子任务", 422)
+            if not _own_fields(spec):
+                # 只有 extends（调用时自动建的）：生效定义就是父任务的，父任务自己的毛病不该挡住新对象的运行
+                # （新规则之前存的父任务可能过不了写入检查，那要在父任务上改）
+                return
+            effective = self._merged(name, parent.spec, spec)
         elif spec.extends:
             raise Rejected("invalid_definition", "只有子任务（名字形如 父任务:对象）才能声明 extends", 422)
+        if why := consistency_error(effective, triggers=not obj or "triggers" in spec.model_fields_set):
+            raise Rejected("invalid_definition", why, 422)
+        if not obj:
+            # 父任务改了：每个子任务合并之后也要还成立（不然任务列表读到它就会出错）。
+            # 只有 extends 的子任务生效定义就是父任务，上面已经查过
+            for child in await self.subtasks(name):
+                if not _own_fields(child.spec):
+                    continue
+                merged = self._merged(child.name, spec, child.spec)
+                if why := consistency_error(merged, triggers="triggers" in child.spec.model_fields_set):
+                    raise Rejected("invalid_definition", f"子任务 {child.name} 合并后不成立：{why}", 422)
+        if effective.deliver and effective.deliver.channel:
+            channels = (await self.config("notifications")).channels
+            if effective.deliver.channel not in channels:
+                raise Rejected("invalid_definition", f"结果投递的渠道 {effective.deliver.channel} 不存在"
+                                                     f"（可选：{'、'.join(channels) or '无，先在 设置 → 通知 里建'}）", 422)
         if spec.role and await self.entry("role", spec.role) is None:
             raise Rejected("invalid_definition", f"角色 {spec.role} 不存在", 422)
         if spec.service and spec.service != "*" and await self.entry("service", spec.service) is None:
@@ -311,6 +345,42 @@ class Registry:
         unknown = sorted(set(names) - set(known))
         if unknown:
             raise Rejected("invalid_definition", f"未知环境：{'、'.join(unknown)}（可选：{'、'.join(known)}）", 422)
+
+    @staticmethod
+    def _merged(name: str, parent: TaskDef, child: TaskDef) -> TaskDef:
+        try:
+            return merge_task(parent, child)
+        except ValidationError as e:
+            raise Rejected("invalid_definition", f"子任务 {name} 和父任务合并后不合法：{_validation_message(e)}", 422) from e
+
+    async def _config_users(self, section: str, body: Any) -> list[str]:
+        """改平台配置之前：去掉的环境 / 渠道还有谁在用。改名也算去掉（定义里写的是名字）。"""
+        if section == "envs":
+            removed = set((await self.envs()).names) - set(body.names)
+            if not removed:
+                return []
+            users = []
+            for s in await self.services():
+                users += [f"服务 {s.name} 的 {e} 环境覆盖" for e in s.spec.envs if e in removed]
+            for t in await self.tasks():
+                used = set(t.spec.envs) | {e for tr in t.spec.triggers for e in getattr(tr, "envs", [])}
+                users += [f"任务 {t.name}（{e}）" for e in sorted(used & removed)]
+            rules = (await self.config("notifications")).rules
+            users += [f"通知规则 {r.name}（{e}）" for r in rules for e in r.envs if e in removed]
+            from .store import service_configs
+            try:
+                for s in await self.services():
+                    for e in sorted(removed):
+                        if await service_configs.versions(s.name, e):
+                            users.append(f"服务 {s.name} 在 {e} 给 agent 的配置")
+            except RuntimeError:                  # 没连库（单元测试）：只查定义里的引用
+                pass
+            return users
+        if section == "notifications":
+            removed = set((await self.config("notifications")).channels) - set(body.channels)
+            return [f"任务 {t.name} 的结果投递（{t.spec.deliver.channel}）" for t in await self.tasks()
+                    if t.spec.deliver and t.spec.deliver.channel in removed]
+        return []
 
     # ———————— 播种 ————————
 
@@ -368,6 +438,11 @@ class Registry:
             return self._stored(kind, self._validate(MODELS[kind], body))
         except Rejected:
             return None
+
+
+def _own_fields(spec: TaskDef) -> set[str]:
+    """子任务自己写了哪些字段（extends、auto_created 不算）。"""
+    return spec.model_fields_set - {"extends", "auto_created"}
 
 
 def _strip(body: dict) -> dict:

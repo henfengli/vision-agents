@@ -12,7 +12,7 @@ import {
 } from "react-icons/lu";
 
 import { ApiError, stream } from "@/api/client";
-import { api, useEnvs, useServices, useSession, useSessions, useSubtasks, useTasks } from "@/api/hooks";
+import { api, useEnvs, useServices, useSession, useSessions, useSettings, useSubtasks, useTasks } from "@/api/hooks";
 import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } from "@/api/types";
 import { EnvFilter, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { FeedbackButtons } from "@/components/feedback";
@@ -20,7 +20,7 @@ import { EnvBadge } from "@/components/status";
 import { ToolOutput, isDbTool, summarizeArgs } from "@/components/tool-call";
 import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
-import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea, objectNameError } from "@/components/ui/form";
+import { CreatableSelect, FilterSelect, SearchInput, Segmented, Select, Textarea, objectNameError } from "@/components/ui/form";
 import { Popover, Tooltip, toast } from "@/components/ui/overlay";
 import { Badge, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
@@ -28,15 +28,24 @@ import { ago } from "@/lib/format";
 import { invalidate } from "@/lib/query";
 import { Link, navigate, useLocation, useParams, useSearch } from "@/lib/router";
 import { getUi, setUi, useUi, type UiState } from "@/lib/store";
+import { InputControl, inputErrors, inputValue } from "../tasks/input-control";
 import { ASK_TASK } from "../tasks/run-dialog";
 
-/** broken：推流中断（stream_broken）时后端给的说明；运行照常在跑，结果去运行详情看 */
-interface LiveTurn extends ChatTurn { streaming?: boolean; broken?: string }
+/**
+ * key：这一轮在页面上的身份（流式事件按它落到对应的那一轮，不按"最后一轮"）；
+ * broken：推流中断（stream_broken）时后端给的说明；运行照常在跑，结果去运行详情看
+ */
+interface LiveTurn extends ChatTurn { key: string; streaming?: boolean; broken?: string }
+
+const LIVE_STATUS = new Set(["queued", "running"]);
+let turnSeq = 0;
 
 /** 通用入口 ask 排第一个（没指定任务时后端也是：服务专属的对话任务优先，其次 ask） */
 const askFirst = (a: TaskSummary, b: TaskSummary) => Number(b.name === ASK_TASK) - Number(a.name === ASK_TASK);
-const chatTasksFor = (tasks: TaskSummary[] | undefined, service: string) =>
-  (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat") && (t.service === service || t.service === "*")).sort(askFirst);
+/** 能在对话里选的任务：启用、声明了（开着的）对话触发、属于这个服务（或通用）、允许这个环境 */
+const chatTasksFor = (tasks: TaskSummary[] | undefined, service: string, env: string) =>
+  (tasks ?? []).filter((t) => !t.extends && t.enabled && t.triggers.some((tr) => tr.type === "chat" && tr.enabled !== false)
+    && (t.service === service || t.service === "*") && (!env || !t.envs.length || t.envs.includes(env))).sort(askFirst);
 
 const chatTaskOption = (t: TaskSummary) => t.name === ASK_TASK
   ? { value: t.name, label: <span className="flex items-center gap-1.5">{t.title || t.name}<Badge tone="accent">通用</Badge></span>, hint: "ask · 任何服务任何环境直接问" }
@@ -114,13 +123,17 @@ export function ChatPage() {
               ))}
         </div>
       </aside>
-      <Conversation key={own ? adopted.current!.key : session ?? `new-${fresh}`} sessionId={own ? undefined : session} onSession={adopt} />
+      <Conversation key={own ? adopted.current!.key : session ?? `new-${fresh}`} sessionId={own ? undefined : session} onSession={adopt}
+        prefer={{ service: f.service, task: f.task }} />
     </div>
   );
 }
 
-/** sessionId：地址里的会话（要从服务端加载）；onSession：新对话的一轮结束后报会话 id，好把地址换成 /chat/<会话> */
-function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?: (sid: string) => void }) {
+/**
+ * sessionId：地址里的会话（要从服务端加载）；onSession：新对话的一轮结束后报会话 id，好把地址换成 /chat/<会话>；
+ * prefer：侧栏筛的服务 / 任务，新对话优先用它们（筛了 vision-board 却在问 vision-dagster 很别扭）
+ */
+function Conversation({ sessionId, onSession, prefer }: { sessionId?: string; onSession?: (sid: string) => void; prefer?: { service?: string; task?: string } }) {
   const ui = useUi();
   const { data: detail, loading, error: sessionError } = useSession(sessionId ?? "");
   const { data: services } = useServices();
@@ -130,17 +143,42 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
   const [env, setEnv] = useState("");
   const [task, setTask] = useState("");
   const [subtask, setSubtask] = useState("");
-  const [extra, setExtra] = useState<Record<string, string>>({});
-  const [memory, setMemory] = useState<{ recall: boolean; save: boolean }>({ recall: ui.chat.recall, save: ui.chat.save });
+  const [extra, setExtra] = useState<Record<string, unknown>>({});
+  /** null = 跟随任务 / 平台的默认；以前存成 true 的就是"开着没动过"，也当跟随 */
+  const [memory, setMemory] = useState<MemoryOverride>({ recall: ui.chat.recall === false ? false : null, save: ui.chat.save === false ? false : null });
   const [turns, setTurns] = useState<LiveTurn[]>([]);
   const [text, setText] = useState("");
   const [sid, setSid] = useState<string | undefined>(sessionId);
   const cancelRef = useRef<(() => void) | null>(null);
   /** 受理之前点了停止 */
   const stopRequested = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
   const bottom = useRef<HTMLDivElement>(null);
   const streaming = turns.some((t) => t.streaming);
-  const locked = turns.length > 0;
+  /** 服务端那边还有一轮没结束（别的标签页发的、刷新前发的、纠正）：不能再发，等它结束 */
+  const serverLive = turns.some((t) => !t.streaming && LIVE_STATUS.has(t.status));
+  const busy = streaming || serverLive;
+  /** 会话建起来了（有一轮被受理）才锁维度：第一条就被拒的话还能改了再发 */
+  const locked = !!sid || turns.some((t) => !!t.run_id);
+  useSessionPoll(sessionId, serverLive);
+  /**
+   * 这个页面里发出的、推流断了还在服务端跑的轮次：新对话发完第一轮后没有按地址加载会话（sessionId 为空），
+   * 上面的会话轮询不管它。每 2 秒查一次运行，结束了补上结论，输入框也就解锁了（不用为了解锁去取消一个好好的运行）
+   */
+  const orphaned = sessionId ? "" : turns.filter((t) => !t.streaming && LIVE_STATUS.has(t.status) && t.run_id).map((t) => `${t.key}|${t.run_id}`).join(",");
+  useEffect(() => {
+    if (!orphaned) return;
+    const timer = window.setInterval(() => {
+      for (const item of orphaned.split(",")) {
+        const [key, runId] = item.split("|");
+        void api.run(runId).then((run) => {
+          if (!LIVE_STATUS.has(run.status)) patchTurn(key, (t) => ({ ...t, status: run.status, answer: run.output?.answer ?? run.output?.error ?? t.answer, broken: undefined }));
+        }).catch(() => undefined);
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [orphaned]); // eslint-disable-line react-hooks/exhaustive-deps
   /** 新对话里改了服务 / 环境 / 任务 / 记忆开关：记在这台浏览器，下次新对话默认用上次的；已有会话里改的不记 */
   const remember = (patch: Partial<UiState["chat"]>) => {
     if (sessionId || Object.values(patch).some((v) => v === "")) return;
@@ -151,7 +189,7 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
   useEffect(() => {
     // 正在流式回答时不拿服务端的版本覆盖（切回窗口会后台刷新）：会丢掉"回答中"的状态和停止按钮
     if (!detail || turns.some((t) => t.streaming)) return;
-    setTurns(detail.turns);
+    setTurns(detail.turns.map((t) => ({ ...t, key: t.run_id })));
     setService(detail.service ?? "");
     setEnv(detail.env);
     const [base, obj] = detail.task.split(":");
@@ -160,17 +198,30 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
   }, [detail]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (sessionId) return;
-    if (!service && services?.length) setService((services.find((s) => s.name === ui.chat.service && s.enabled) ?? services.find((s) => s.enabled))?.name ?? "");
+    const usable = (name?: string) => services?.find((s) => s.name === name && s.enabled);
+    if (!service && services?.length) setService((usable(prefer?.service) ?? usable(ui.chat.service) ?? services.find((s) => s.enabled))?.name ?? "");
     if (!env && envs?.length) setEnv((envs.find((e) => e.name === (ui.chat.env || ui.env)) ?? envs.find((e) => !e.protected) ?? envs[0]).name);
-  }, [sessionId, services, envs, service, env, ui.chat.service, ui.chat.env, ui.env]);
+  }, [sessionId, services, envs, service, env, ui.chat.service, ui.chat.env, ui.env]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 新对话还没发出去时改了侧栏的服务 / 任务筛选：跟着换
+  useEffect(() => {
+    if (sessionId || locked) return;
+    if (prefer?.service && services?.some((s) => s.name === prefer.service && s.enabled)) { setService(prefer.service); setSubtask(""); }
+  }, [prefer?.service]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (sessionId || locked || !prefer?.task) return;
+    setTask(prefer.task); setSubtask(""); setExtra({});
+  }, [prefer?.task]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const chatTasks = chatTasksFor(tasks, service);
+  const chatTasks = chatTasksFor(tasks, service, env);
   useEffect(() => {
     if (locked || !tasks) return;
     // 换到没有对话任务的服务：清掉上一个服务的任务，免得发到不属于它的任务上
     if (!chatTasks.length) { if (task) setTask(""); return; }
-    if (!chatTasks.some((t) => t.name === task)) setTask((chatTasks.find((t) => t.name === ui.chat.task) ?? chatTasks.find((t) => t.service === service) ?? chatTasks[0]).name);
-  }, [chatTasks, tasks, task, locked, service, ui.chat.task]);
+    if (!chatTasks.some((t) => t.name === task)) {
+      const pick = (name?: string) => chatTasks.find((t) => t.name === name);
+      setTask((pick(sessionId ? undefined : prefer?.task) ?? pick(ui.chat.task) ?? chatTasks.find((t) => t.service === service) ?? chatTasks[0]).name);
+    }
+  }, [chatTasks, tasks, task, locked, service, ui.chat.task]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [turns]);
   useEffect(() => () => cancelRef.current?.(), []);
@@ -178,22 +229,37 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
   useEffect(() => { if (sid && !sessionId && !streaming) onSession?.(sid); }, [sid, sessionId, streaming]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const taskDef = tasks?.find((t) => t.name === task);
-  const extraFields = Object.entries(taskDef?.input ?? {}).filter(([k]) => k !== "question");
+  /** 其它输入：question 是消息本身；对象字段由「对象」那一格给（后端按子任务把它填上），不再单独填一遍 */
+  const extraDefs = Object.fromEntries(Object.entries(taskDef?.input ?? {}).filter(([k]) => k !== "question" && k !== taskDef?.object_input));
+  const extraFields = Object.entries(extraDefs);
+  /** 续会话时其它输入后端沿用上一轮，不用再填；新会话里必填的没填就不能发 */
+  const extraErrors = locked ? {} : inputErrors(extraDefs, extra);
+  const objectField = taskDef?.object_input ? taskDef.input[taskDef.object_input] : undefined;
+  /** 对象字段必填：新会话里要先选对象（续会话沿用上一轮的） */
+  const needObject = !locked && !!objectField?.required && objectField.default == null && !subtask;
+  const missingExtra = Object.keys(extraErrors);
   const svc = services?.find((s) => s.name === service);
   const envOff = !!svc && svc.health[env]?.enabled === false;
   /** 链接里的会话不存在（或加载失败）：不能往一个不存在的会话里续 */
   const sessionGone = !!sessionId && !!sessionError && !detail;
+  const canSend = !!text.trim() && !busy && !!service && !!task && !envOff && !sessionGone && !missingExtra.length && !needObject;
 
-  const patchLast = (fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t, i) => (i === all.length - 1 ? fn(t) : t)));
+  const patchTurn = (key: string, fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t) => (t.key === key ? fn(t) : t)));
 
   const send = () => {
     const message = text.trim();
-    // 与发送按钮的禁用条件一致：Enter 也不能绕过（环境已停用、还没选服务 / 任务）
-    if (!message || streaming || !service || !task || envOff || sessionGone) return;
+    // 与发送按钮的禁用条件一致：Enter 也不能绕过（环境已停用、还没选服务 / 任务、必填输入没填）
+    if (!canSend) return;
     setText("");
-    setTurns((t) => [...t, { run_id: "", question: message, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
-    const input = Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== ""));
-    const body: ChatRequest = { message, session_id: sid ?? null, service, env, task, subtask: subtask || null, input, memory: memory as MemoryOverride };
+    const key = `t${++turnSeq}`;
+    const patchLast = (fn: (t: LiveTurn) => LiveTurn) => patchTurn(key, fn);
+    setTurns((t) => [...t, { key, run_id: "", question: message, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
+    const input: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(extra)) {
+      try { const val = inputValue(extraDefs[k], v); if (val !== undefined) input[k] = val; } catch { /* 不合法的 JSON：上面已拦 */ }
+    }
+    const body: ChatRequest = { message, session_id: sid ?? null, service, env, task, subtask: subtask || null, input, memory };
+    let runId = "";
     let seq = 0;
     stopRequested.current = false;
     cancelRef.current = stream("/v1/chat", body, (ev) => {
@@ -208,7 +274,8 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
           cancelRef.current = null;
           return;
         }
-        patchLast((t) => ({ ...t, run_id: String(ev.run_id) }));
+        runId = String(ev.run_id);
+        patchLast((t) => ({ ...t, run_id: runId }));
         if (!sid) setSid(String(ev.session_id));
         if (ev.subtask_created) toast(`已按 ${task} 新建子任务`, { description: String(ev.subtask_created) });
       } else if (type === "error" && ev.code === "stream_broken") {
@@ -222,10 +289,12 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
       } else if (["stage", "model_call", "thought", "tool_call", "tool_result"].includes(type)) {
         const { type: _t, ...payload } = ev;
         void _t;
-        patchLast((t) => ({ ...t, events: [...t.events, { seq: ++seq, kind: type as RunEvent["kind"], at: new Date().toISOString(), payload } as RunEvent] }));
+        patchLast((t) => ({ ...t, events: [...t.events, { seq: Number(ev.seq) || ++seq, kind: type as RunEvent["kind"], at: new Date().toISOString(), payload } as RunEvent] }));
       }
     }, (err) => {
-      if (err) { patchLast((t) => ({ ...t, status: "failed", answer: err.message, streaming: false })); toast.error("发送失败", err.message); }
+      // 已经受理了（有 run_id）：连接断了不等于运行失败，它在服务端照常跑，给运行详情的入口
+      if (err && runId) patchLast((t) => ({ ...t, streaming: false, broken: `连接断了（${err.message}），运行还在服务端执行` }));
+      else if (err) { patchLast((t) => ({ ...t, status: "failed", answer: err.message, streaming: false })); toast.error("发送失败", err.message); }
       else patchLast((t) => ({ ...t, streaming: false }));
       invalidate("sessions");
       cancelRef.current = null;
@@ -236,28 +305,31 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
     .finally(() => invalidate("sessions"));
   /** 停止 = 取消这次运行：只断开推流的话，agent 在服务端照样跑完（还会沉淀记忆、耗 token） */
   const stop = () => {
-    const runId = turns[turns.length - 1]?.run_id;
-    if (!runId && cancelRef.current) {
+    const live = [...turns].reverse().find((t) => t.streaming || LIVE_STATUS.has(t.status));
+    if (!live) return;
+    if (!live.run_id && cancelRef.current) {
       // 还没收到受理（没有 run_id）：先别断开，等 run 事件到了再取消（见 send 里的 run 分支）
       stopRequested.current = true;
       return;
     }
-    cancelRef.current?.();
-    cancelRef.current = null;
-    patchLast((t) => ({ ...t, streaming: false, status: "cancelled" }));
-    if (runId) void cancelRun(runId);
+    if (live.streaming) { cancelRef.current?.(); cancelRef.current = null; }
+    patchTurn(live.key, (t) => ({ ...t, streaming: false, status: "cancelled" }));
+    if (live.run_id) void cancelRun(live.run_id);
   };
 
-  /** 纠正：同会话开新一轮；结果轮询拿回来 */
+  /** 纠正：同会话开新一轮；结果轮询拿回来（离开页面就停） */
   const correct = async (runId: string, correction: string) => {
+    if (busy) return;
     try {
       const acc = await api.correct(runId, correction);
-      setTurns((t) => [...t, { run_id: acc.run_id, question: `[纠正] ${correction}`, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
-      for (let i = 0; i < 150; i++) {
+      const key = `t${++turnSeq}`;
+      setTurns((t) => [...t, { key, run_id: acc.run_id, question: `[纠正] ${correction}`, answer: "", status: "running", events: [], feedback: null, created_at: new Date().toISOString(), streaming: true }]);
+      while (alive.current) {
         await new Promise((r) => setTimeout(r, 2000));
-        const run = await api.run(acc.run_id);
-        if (["success", "failed", "cancelled"].includes(run.status)) {
-          setTurns((all) => all.map((t) => (t.run_id === acc.run_id ? { ...t, status: run.status, answer: run.output?.answer ?? run.output?.error ?? "", streaming: false } : t)));
+        if (!alive.current) return;
+        const run = await api.run(acc.run_id).catch(() => null);
+        if (run && !LIVE_STATUS.has(run.status)) {
+          patchTurn(key, (t) => ({ ...t, status: run.status, answer: run.output?.answer ?? run.output?.error ?? "", streaming: false }));
           break;
         }
       }
@@ -283,7 +355,7 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
             </div>
           ) : sessionId && loading ? <div className="space-y-4"><Skeleton className="h-16" /><Skeleton className="h-40" /></div> : turns.length === 0 ? (
             <Welcome service={service} title={svc?.title ?? service} onPick={(q) => setText(q)} />
-          ) : turns.map((t, i) => <Turn key={t.run_id || i} turn={t} onCorrect={(c) => correct(t.run_id, c)} />)}
+          ) : turns.map((t) => <Turn key={t.key} turn={t} onCorrect={busy ? undefined : (c) => correct(t.run_id, c)} />)}
           <div ref={bottom} />
         </div>
       </div>
@@ -302,52 +374,87 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
               <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); remember({ task: v }); }}
                 placeholder="该服务没有对话任务" options={chatTasks.map(chatTaskOption)} />
             </Dim>
-            <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个资产、一张表、一个报表）问。会带上这个对象的专属档案，沉淀的记忆也记在它名下；输入新名字会自动建一个子任务。`}>
-              {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
-            </Dim>
+            {/* 通用入口 ask 不分对象（运行对话框、任务页也不给它建子任务）；锁定后只在真有对象时显示 */}
+            {task && task !== ASK_TASK && (!locked || subtask) && (
+              <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task} 的某个具体对象（一个资产、一张表、一个报表）问。会带上这个对象的专属档案，沉淀的记忆也记在它名下；输入新名字会自动建一个子任务。`}>
+                {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
+              </Dim>
+            )}
           </div>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} aria-label="消息" placeholder={envOff ? `${service} 在 ${env} 环境已停用` : `问 ${svc?.title ?? "agent"} 点什么…（Enter 发送，Shift+Enter 换行）`}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
             className="block max-h-48 w-full resize-none bg-transparent px-4 pt-3 text-[13.5px] leading-relaxed text-fg outline-none placeholder:text-fg-3" />
           <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
-            <span className="text-[11px] text-fg-3">{locked ? "同一会话内服务、环境、任务、对象固定；要换就开新对话" : subtask && !(tasks ?? []).some((t) => t.name === `${task}:${subtask}`) ? `发送时会按 ${task} 新建子任务 ${task}:${subtask}` : ""}</span>
+            <span className={cn("text-[11px]", missingExtra.length || needObject ? "text-warn" : "text-fg-3")}>
+              {serverLive ? "上一轮还在执行，结束后才能接着问"
+                : needObject ? `先选对象（${taskDef?.object_input}）`
+                : missingExtra.length ? `先在「输入」里填 ${missingExtra.join("、")}`
+                  : locked ? "同一会话内服务、环境、任务、对象固定；要换就开新对话"
+                    : subtask && !(tasks ?? []).some((t) => t.name === `${task}:${subtask}`) ? `发送时会新建对象 ${subtask}（${task} 的子任务）` : ""}
+            </span>
             {/* 输入 / 记忆开关放在发送按钮旁：上面一行只放 服务 / 环境 / 任务 / 对象，不会折成两行 */}
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               {extraFields.length > 0 && (
                 <Popover align="end" trigger={
-                  <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", Object.values(extra).some(Boolean) ? "border-accent/40 bg-accent-soft text-accent" : "border-line text-fg-2 hover:bg-hover")}>
-                    <LuSlidersHorizontal />输入 {Object.values(extra).filter(Boolean).length || ""}
+                  <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5",
+                    missingExtra.length ? "border-warn/40 bg-warn-soft text-warn" : Object.values(extra).some((v) => v !== "" && v != null && v !== false) ? "border-accent/40 bg-accent-soft text-accent" : "border-line text-fg-2 hover:bg-hover")}>
+                    <LuSlidersHorizontal />输入{missingExtra.length ? ` · ${missingExtra.length} 项必填` : ""}
                   </span>
                 }>
-                  <div className="w-72 space-y-3 p-3">
-                    <div className="text-[12px] text-fg-3">任务 {task} 的其它输入，每轮随消息一起发送</div>
+                  <div className="w-80 space-y-3 p-3">
+                    <div className="text-[12px] text-fg-3">{locked ? `${taskDef?.title || task} 的其它输入：不改就沿用上一轮的` : `${taskDef?.title || task} 的其它输入，随消息一起发送`}</div>
                     {extraFields.map(([k, f]) => (
-                      <Field key={k} label={<span className="font-mono">{k}{f.required && <span className="text-bad">*</span>}</span>} help={f.description}>
-                        {f.type === "enum" ? <Select size="sm" value={extra[k] ?? String(f.default ?? "")} onChange={(v) => setExtra({ ...extra, [k]: v })} options={(f.options ?? []).map((o) => ({ value: o, label: o }))} />
-                          : <Input value={extra[k] ?? ""} placeholder={f.default != null ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
-                      </Field>
+                      <InputControl key={k} name={k} field={f} value={extra[k]} error={extraErrors[k]} onChange={(v) => setExtra({ ...extra, [k]: v })} />
                     ))}
                   </div>
                 </Popover>
               )}
-              <Popover align="end" trigger={
-                <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", !memory.recall || !memory.save ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-fg-2 hover:bg-hover")}>
-                  <LuBrain />{memory.recall && memory.save ? "记忆" : !memory.recall && !memory.save ? "不用记忆" : !memory.recall ? "不召回" : "不沉淀"}
-                </span>
-              }>
-                <div className="w-64 space-y-3 p-3">
-                  <Switch checked={memory.recall} onChange={(recall) => { setMemory({ ...memory, recall }); remember({ recall }); }} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查记忆与方法</span></span>} />
-                  <Switch checked={memory.save} onChange={(save) => { setMemory({ ...memory, save }); remember({ save }); }} label={<span>沉淀<span className="ml-1 text-[11.5px] text-fg-3">回答后存可复用结论</span></span>} />
-                  <div className="text-[11.5px] text-fg-3">只影响接下来的消息；平台默认在 设置 → 记忆。</div>
-                </div>
-              </Popover>
-              {streaming ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止"><LuCircleStop /></Button>
-                : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service || !task || envOff || sessionGone} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
+              <MemoryPopover task={taskDef} value={memory} onChange={(m) => { setMemory(m); remember({ recall: m.recall ?? null, save: m.save ?? null }); }} />
+              {busy ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止这一轮" title="停止这一轮"><LuCircleStop /></Button>
+                : <Button size="icon-sm" variant="primary" disabled={!canSend} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
             </div>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+/** 会话里还有一轮在服务端执行（不是这个页面在推流的）：每 2 秒刷一次会话，直到它结束 */
+function useSessionPoll(id: string | undefined, on: boolean) {
+  useEffect(() => {
+    if (!id || !on) return;
+    const t = window.setInterval(() => invalidate("sessions", "one", id), 2000);
+    return () => window.clearInterval(t);
+  }, [id, on]);
+}
+
+/** 记忆开关：默认跟随任务 / 平台；这里改了只影响接下来的消息 */
+function MemoryPopover({ task, value, onChange }: { task: TaskSummary | undefined; value: MemoryOverride; onChange: (v: MemoryOverride) => void }) {
+  const { data: settings } = useSettings();
+  const dflt = (k: "recall" | "save") => task?.memory?.[k] ?? settings?.memory[k];
+  const eff = (k: "recall" | "save") => value[k] ?? dflt(k);
+  const changed = value.recall != null || value.save != null;
+  const label = eff("recall") !== false && eff("save") !== false ? "记忆" : eff("recall") === false && eff("save") === false ? "不用记忆" : eff("recall") === false ? "不召回" : "不沉淀";
+  const row = (k: "recall" | "save", title: string, hint: string) => (
+    <div>
+      <div className="mb-1 flex items-baseline gap-1.5 text-[12.5px] text-fg">{title}<span className="text-[11.5px] text-fg-3">{hint}</span></div>
+      <Segmented size="sm" value={value[k] == null ? "inherit" : value[k] ? "on" : "off"} onChange={(m) => onChange({ ...value, [k]: m === "inherit" ? null : m === "on" })}
+        options={[{ value: "inherit", label: dflt(k) === undefined ? "默认" : `默认（${dflt(k) ? "开" : "关"}）` }, { value: "on", label: "开" }, { value: "off", label: "关" }]} />
+    </div>
+  );
+  return (
+    <Popover align="end" trigger={
+      <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", changed ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-fg-2 hover:bg-hover")}>
+        <LuBrain />{label}
+      </span>
+    }>
+      <div className="w-72 space-y-3 p-3">
+        {row("recall", "召回", "回答前先查以前记下的")}
+        {row("save", "沉淀", "回答后把结论记下来")}
+        <div className="text-[11.5px] text-fg-3">默认 = 任务的设置，任务没写就用平台的（设置 → 记忆）。只影响接下来的消息。</div>
+      </div>
+    </Popover>
   );
 }
 
@@ -399,7 +506,8 @@ function RunLink({ runId }: { runId: string }) {
   return <Link to={`/runs/${runId}`} className="ml-1.5 inline-flex items-center gap-1 text-accent hover:underline"><LuExternalLink className="size-3" />运行详情</Link>;
 }
 
-function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) => void }) {
+/** onCorrect 不给 = 现在不能纠正（会话里还有一轮在跑） */
+function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect?: (text: string) => void }) {
   const [open, setOpen] = useState(false);
   const [correcting, setCorrecting] = useState(false);
   const [correction, setCorrection] = useState("");
@@ -452,8 +560,8 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
           {!turn.streaming && turn.answer && (
             <div className="mt-2 flex items-center gap-0.5 text-fg-3">
               <CopyButton text={turn.answer} />
-              {turn.run_id && <FeedbackButtons runId={turn.run_id} mine={turn.feedback} onCorrect={turn.status === "success" ? onCorrect : undefined} />}
-              {turn.run_id && turn.status === "success" && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPenLine className="size-3" />纠正</button>}
+              {turn.run_id && <FeedbackButtons key={turn.feedback?.updated_at ?? "none"} runId={turn.run_id} mine={turn.feedback} onCorrect={turn.status === "success" ? onCorrect : undefined} />}
+              {turn.run_id && turn.status === "success" && onCorrect && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPenLine className="size-3" />纠正</button>}
               {turn.run_id && <Link to={`/runs/${turn.run_id}`} className="ml-1 inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuExternalLink className="size-3" />运行详情</Link>}
             </div>
           )}
@@ -461,13 +569,13 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect: (text: string) =
             <div className="mt-2 space-y-2 rounded-lg border border-line bg-panel p-3">
               <Textarea rows={2} autoFocus value={correction} onChange={(e) => setCorrection(e.target.value)} placeholder="哪里不对？例如：收益要按交易日统计，不按自然日"
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && correction.trim()) { e.preventDefault(); onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && correction.trim() && onCorrect) { e.preventDefault(); onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }
                 }} />
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11.5px] text-fg-3">会在本会话开新一轮（Ctrl+Enter 提交）；成功后上一轮沉淀的记忆被取代</span>
+                <span className="text-[11.5px] text-fg-3">在本会话开新一轮重答（Ctrl+Enter 提交）；成功后这一轮记下的东西被新的取代</span>
                 <div className="flex gap-2">
                   <Button size="sm" variant="ghost" onClick={() => setCorrecting(false)}>取消</Button>
-                  <Button size="sm" variant="primary" disabled={!correction.trim()} onClick={() => { onCorrect(correction.trim()); setCorrecting(false); setCorrection(""); }}>提交纠正</Button>
+                  <Button size="sm" variant="primary" disabled={!correction.trim() || !onCorrect} onClick={() => { onCorrect?.(correction.trim()); setCorrecting(false); setCorrection(""); }}>提交纠正</Button>
                 </div>
               </div>
             </div>

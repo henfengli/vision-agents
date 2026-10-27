@@ -11,12 +11,13 @@ export interface UiState {
   theme: Theme;
   env: string;
   sidebarCollapsed: boolean;
-  chat: { service: string; env: string; task: string; recall: boolean; save: boolean };
+  /** recall / save：null = 跟随任务与平台的默认 */
+  chat: { service: string; env: string; task: string; recall: boolean | null; save: boolean | null };
 }
 
 const KEY = "ap.ui";
 export const UI_DEFAULTS: UiState = {
-  theme: "system", env: "", sidebarCollapsed: false, chat: { service: "", env: "", task: "", recall: true, save: true },
+  theme: "system", env: "", sidebarCollapsed: false, chat: { service: "", env: "", task: "", recall: null, save: null },
 };
 
 function read(): UiState {

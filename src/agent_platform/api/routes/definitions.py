@@ -31,10 +31,12 @@ KINDS = {"services": "service", "roles": "role", "tasks": "task"}
 # ———————— 服务 ————————
 
 async def _service_summaries(rt: Runtime, names: set[str] | None = None) -> list[dict]:
+    """task_count = 本服务专属的任务；generic_task_count = 通用任务（service="*"，每个服务都能调用）。都不含子任务。"""
     envs = (await rt.registry.envs()).items
     health = await runs.service_health()
     tasks = [t for t in await rt.registry.tasks() if not t.spec.extends]
-    return [views.service_summary(s, envs, health, sum(1 for t in tasks if t.spec.service == s.name))
+    generic = sum(1 for t in tasks if t.spec.service == "*")
+    return [views.service_summary(s, envs, health, sum(1 for t in tasks if t.spec.service == s.name), generic)
             for s in await rt.registry.services() if names is None or s.name in names]
 
 

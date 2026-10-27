@@ -1,7 +1,9 @@
 /**
  * API 密钥：每个调用方（项目、脚本、Webhook、人）一把。密钥名就是调用身份，写进运行记录。
- * 密钥只标识身份、不分权限；明文只在创建时显示一次；可改备注与过期时间、可吊销。
+ * 密钥只标识身份、不分权限；明文只在创建时显示一次（那个对话框只能点「我已保存」关掉）；可改备注与过期时间、可吊销。
+ * 已吊销 / 已过期的默认收起。
  */
+import { Dialog as HDialog, DialogBackdrop, DialogPanel, DialogTitle } from "@headlessui/react";
 import { useState } from "react";
 import { LuKeyRound, LuPlus } from "react-icons/lu";
 
@@ -9,36 +11,46 @@ import { api, useApiKeys } from "@/api/hooks";
 import type { ApiKey } from "@/api/types";
 import { Button, LinkButton } from "@/components/ui/button";
 import { CopyButton, Table, Td, Th, Tr } from "@/components/ui/data";
-import { Field, Input } from "@/components/ui/form";
+import { Field, Input, Switch } from "@/components/ui/form";
 import { Dialog, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, Empty, ErrorState, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime } from "@/lib/format";
+import { ago, datetime, dayjs } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { SettingsLayout } from "./layout";
 
 const expired = (k: ApiKey) => !!k.expires_at && new Date(k.expires_at).getTime() < Date.now();
+const inactive = (k: ApiKey) => !!k.revoked_at || expired(k);
 
 export function ApiKeysPage() {
   const { data, loading, error, refetch } = useApiKeys();
   const [editing, setEditing] = useState<ApiKey | "new" | null>(null);
   const [revoking, setRevoking] = useState<number | null>(null);
+  const [showInactive, setShowInactive] = useState(false);
+  const hidden = (data ?? []).filter(inactive).length;
+  const list = (data ?? []).filter((k) => showInactive || !inactive(k));
   const revoke = async (k: ApiKey) => {
-    if (!(await confirm({ title: `吊销 ${k.name}？`, description: "吊销后用这把密钥的调用立即返回 401，不能恢复；同名的密钥也不能再建。", danger: true, confirmText: "吊销", requireText: k.name }))) return;
+    if (!(await confirm({ title: `吊销 ${k.name}？`, description: "吊销后用这把密钥的调用马上被拒绝，不能恢复；同名的密钥也不能再建。", danger: true, confirmText: "吊销", requireText: k.name }))) return;
     setRevoking(k.id);
     try { await api.revokeApiKey(k.id); toast(`已吊销 ${k.name}`); invalidate("settings", "api-keys"); } catch (e) { toast.error("吊销失败", (e as Error).message); } finally { setRevoking(null); }
   };
   return (
-    <SettingsLayout title="API 密钥" description={<>项目通过 <code className="font-mono text-[12px]">Authorization: Bearer &lt;密钥&gt;</code> 调用（GitLab Webhook 用 <code className="font-mono text-[12px]">X-Gitlab-Token</code>）。密钥只标识身份、不分权限：运行记录里的「发起方」就是密钥名。</>}
-      actions={<Button variant="primary" icon={<LuPlus />} onClick={() => setEditing("new")}>新建密钥</Button>}>
+    <SettingsLayout title="API 密钥" description="每个调用方（项目、脚本、Webhook）一把，密钥名会记在运行记录的「发起方」里。"
+      actions={<>
+        {hidden > 0 && <Switch size="sm" checked={showInactive} onChange={setShowInactive} label={<span className="text-[12.5px] text-fg-2">显示已吊销 / 已过期的（{hidden}）</span>} />}
+        <Button variant="primary" icon={<LuPlus />} onClick={() => setEditing("new")}>新建密钥</Button>
+      </>}>
       <Card>
         {error && !data ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows /> : !data?.length ? (
           <Empty icon={<LuKeyRound />} title="还没有密钥" description="除了部署时的引导密钥（root_token），每个调用方都应该有自己的一把"
             action={<Button icon={<LuPlus />} onClick={() => setEditing("new")}>新建密钥</Button>} />
+        ) : !list.length ? (
+          <Empty icon={<LuKeyRound />} title="没有在用的密钥" description={`${hidden} 把已吊销或已过期的收起来了`}
+            action={<Button size="sm" onClick={() => setShowInactive(true)}>显示它们</Button>} />
         ) : (
           <Table>
             <thead><tr><Th>名字</Th><Th>备注</Th><Th>创建</Th><Th>最近使用</Th><Th>过期</Th><Th /></tr></thead>
-            <tbody>{data.map((k) => (
+            <tbody>{list.map((k) => (
               <Tr key={k.id} className={cn(k.revoked_at && "opacity-50")} onClick={k.revoked_at ? undefined : () => setEditing(k)}>
                 <Td>
                   <div className="flex items-center gap-2 font-medium text-fg">
@@ -83,7 +95,11 @@ function KeyDialog({ value, onClose }: { value: ApiKey | "new" | null; onClose: 
     if (value && value !== "new") setD({ name: value.name, note: value.note, expires_at: value.expires_at?.slice(0, 10) ?? "" });
     else setD({ name: "", note: "", expires_at: "" });
   }
-  const valid = NAME_RE.test(d.name);
+  const today = dayjs().format("YYYY-MM-DD");
+  const original = value && value !== "new" ? value.expires_at?.slice(0, 10) ?? "" : "";
+  // 已经过期的密钥原样保存可以；改成别的日期就不能早于今天
+  const dateError = d.expires_at && d.expires_at < today && d.expires_at !== original ? "不能早于今天" : null;
+  const valid = NAME_RE.test(d.name) && !dateError;
   const save = useMutation(async () => {
     try {
       const expires_at = d.expires_at ? new Date(d.expires_at + "T23:59:59").toISOString() : null;
@@ -100,32 +116,53 @@ function KeyDialog({ value, onClose }: { value: ApiKey | "new" | null; onClose: 
     } catch (e) { toast.error("保存失败", (e as Error).message); }
   });
   const submit = () => { if (valid && !save.pending) void save.mutate(undefined); };
-  if (token) {
-    return (
-      <Dialog open onClose={onClose} title="密钥已创建" description="明文只显示这一次，关掉就再也看不到了。"
-        footer={<Button variant="primary" onClick={onClose}>我已保存</Button>}>
-        <div className="flex items-center gap-2 rounded-md border border-line bg-sunken px-3 py-2.5">
-          <code className="min-w-0 flex-1 break-all font-mono text-[12.5px] text-fg">{token}</code>
-          <CopyButton text={token} label="复制密钥" />
-        </div>
-        <div className="mt-3 text-[12px] text-fg-3">调用示例：<code className="break-all font-mono">curl -H "Authorization: Bearer {token.slice(0, 10)}…" …/v1/runs</code></div>
-      </Dialog>
-    );
-  }
+  if (token) return <TokenDialog token={token} onDone={onClose} />;
   return (
     <Dialog open={!!value} onClose={onClose} title={isNew ? "新建 API 密钥" : `编辑 ${d.name}`}
-      description={isNew ? "密钥只标识调用方身份：有效的密钥都能调用全部接口。" : "名字是调用身份，创建后不能改；能改备注与过期时间。"}
+      description={isNew ? "密钥只标识调用方是谁：有效的密钥都能调用全部接口。" : "名字创建后不能改；能改备注和过期时间。"}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={save.pending} onClick={submit}>{isNew ? "创建" : "保存"}</Button></>}>
       <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-        <Field label="名字" required help="调用方的身份，运行记录里显示它；建议用项目名，如 vision-board-backend" error={d.name && !valid ? "2–40 个字母、数字、. _ -" : null}>
+        <Field label="名字" required help="调用方的名字，运行记录里显示它；建议用项目名，如 vision-board-backend" error={d.name && !NAME_RE.test(d.name) ? "2–40 个字母、数字、. _ -" : null}>
           <Input mono autoFocus={isNew} disabled={!isNew} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value.trim() })} />
         </Field>
         <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
           <Field label="备注"><Input value={d.note} onChange={(e) => setD({ ...d, note: e.target.value })} placeholder="谁在用、用来做什么" /></Field>
-          <Field label="过期日期" help="不填 = 不过期"><Input type="date" value={d.expires_at} onChange={(e) => setD({ ...d, expires_at: e.target.value })} /></Field>
+          <Field label="过期日期" help="不填 = 不过期" error={dateError}>
+            <Input type="date" min={today} value={d.expires_at} aria-invalid={!!dateError} onChange={(e) => setD({ ...d, expires_at: e.target.value })} />
+          </Field>
         </div>
         <button type="submit" hidden />
       </form>
     </Dialog>
+  );
+}
+
+/**
+ * 新密钥的明文：只在这里出现一次。点外面、按 Esc 都不关（误关就再也看不到了），只能点「我已保存」。
+ * 共用的 Dialog 没有"禁止外点关闭"的开关，这里直接用 Headless UI 写一个没有关闭按钮的版本。
+ */
+function TokenDialog({ token, onDone }: { token: string; onDone: () => void }) {
+  return (
+    <HDialog open onClose={() => { /* 只能点「我已保存」关掉 */ }} className="relative z-50">
+      <DialogBackdrop className="fixed inset-0 bg-black/30 backdrop-blur-[1px] dark:bg-black/60" />
+      <div className="fixed inset-0 flex items-start justify-center p-4 pt-[8vh]">
+        <DialogPanel className="flex w-full max-w-lg flex-col rounded-xl border border-line bg-raised shadow-[var(--shadow-pop)]">
+          <div className="px-5 pt-4">
+            <DialogTitle className="text-[15px] font-semibold text-fg">密钥已创建</DialogTitle>
+            <div className="mt-1 text-[12.5px] text-fg-3">明文只显示这一次，关掉就再也看不到了。先复制保存好。</div>
+          </div>
+          <div className="px-5 py-4">
+            <div className="flex items-center gap-2 rounded-md border border-line bg-sunken px-3 py-2.5">
+              <code className="min-w-0 flex-1 break-all font-mono text-[12.5px] text-fg">{token}</code>
+              <CopyButton text={token} label="复制密钥" />
+            </div>
+            <div className="mt-3 text-[12px] text-fg-3">调用时放在请求头里：<code className="break-all font-mono">Authorization: Bearer {token.slice(0, 10)}…</code>（GitLab Webhook 填在 Secret token 里）</div>
+          </div>
+          <div className="flex items-center justify-end gap-2 rounded-b-xl border-t border-line bg-sunken/60 px-5 py-3">
+            <Button variant="primary" onClick={onDone}>我已保存</Button>
+          </div>
+        </DialogPanel>
+      </div>
+    </HDialog>
   );
 }

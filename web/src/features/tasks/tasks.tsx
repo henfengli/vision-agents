@@ -5,20 +5,19 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { LuBot, LuChevronDown, LuChevronRight, LuGitBranch, LuListTodo, LuPlay, LuPlus, LuTerminal } from "react-icons/lu";
 
-import { api, useRoles, useServices, useTasks } from "@/api/hooks";
+import { useServices, useTasks } from "@/api/hooks";
 import type { Task, TaskSummary, Trigger } from "@/api/types";
 import { RatioBar } from "@/components/charts";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { RoleChip, RunStatusDot, TRIGGER } from "@/components/status";
+import { EnvBadge, RoleChip, RunStatusDot, TRIGGER } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
-import { Field, FilterSelect, Input, SearchInput, Select, Switch, Textarea } from "@/components/ui/form";
-import { Dialog, Tooltip, toast } from "@/components/ui/overlay";
+import { FilterSelect, SearchInput, Switch } from "@/components/ui/form";
+import { Tooltip } from "@/components/ui/overlay";
 import { Badge, Card, Empty, ErrorState, SkeletonRows } from "@/components/ui/primitives";
 import { describeCron } from "@/lib/cron";
 import { cn } from "@/lib/cn";
-import { ago, pct, until } from "@/lib/format";
-import { invalidate, useMutation } from "@/lib/query";
+import { ago, datetime, pct, until } from "@/lib/format";
 import { Link, navigate, useSearch } from "@/lib/router";
 import { ASK_TASK, RunTaskDialog } from "./run-dialog";
 
@@ -29,8 +28,8 @@ export function TasksPage() {
   const [search, setSearch] = useSearch<{ service: string; trigger: string; q: string; run: string; subs: string }>();
   const { data: tasks, loading, error, refetch } = useTasks();
   const { data: services } = useServices();
-  const [creating, setCreating] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
+  const create = () => navigate("/tasks/_new");
   useEffect(() => { if (search.run) { setRunOpen(true); setSearch({ run: undefined }); } }, [search.run, setSearch]);
 
   const q = (search.q ?? "").toLowerCase();
@@ -72,9 +71,9 @@ export function TasksPage() {
 
   return (
     <Page wide>
-      <PageHeader title="任务" description="要做的事：目标 + 形态 + 输入 + 触发 + 输出。触发全部声明在任务上——API、对话、定时（按环境）、事件。"
+      <PageHeader title="任务" description="要 agent 做的事：谁来做、什么时候跑、结果发到哪。"
         actions={<>
-          <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建任务</Button>
+          <Button icon={<LuPlus />} onClick={create}>新建任务</Button>
           <Button variant="primary" icon={<LuPlay />} onClick={() => setRunOpen(true)}>运行任务</Button>
         </>} />
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -90,12 +89,11 @@ export function TasksPage() {
         {error && !tasks ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={8} /> : groups.length === 0 ? (
           <Empty icon={<LuListTodo />} title={q || search.service || search.trigger ? "没有匹配的任务" : "还没有任务"}
             description={q || search.service || search.trigger ? "换个关键词或放宽筛选" : undefined}
-            action={<Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建任务</Button>} />
+            action={<Button icon={<LuPlus />} onClick={create}>新建任务</Button>} />
         ) : (
           <TasksTable groups={groups} expandAll={expandAll || !!q} />
         )}
       </Card>
-      <CreateTaskDialog open={creating} onClose={() => setCreating(false)} />
       <RunTaskDialog open={runOpen} onClose={() => setRunOpen(false)} />
     </Page>
   );
@@ -153,8 +151,8 @@ export function TasksTable({ groups, expandAll = false, hideService = true }: {
             <Th>触发</Th>
             <Th>角色</Th>
             <Th className="w-[150px]">近 24 小时</Th>
-            <Th>最近</Th>
-            <Th>下次定时</Th>
+            <Th className="w-[100px]">最近一次</Th>
+            <Th className="w-[130px]">下次定时</Th>
           </tr>
         </thead>
         <tbody>
@@ -174,7 +172,7 @@ export function TasksTable({ groups, expandAll = false, hideService = true }: {
                 return (
                   <Fragment key={r.task.name}>
                     <ParentRow row={r} expanded={expanded} hideService={hideService} onToggle={() => toggle(r.task.name)} />
-                    {expanded && r.subs.map((sub) => <SubRow key={sub.name} sub={sub} hideService={hideService} onRun={() => setRunSub(sub)} />)}
+                    {expanded && r.subs.map((sub) => <SubRow key={sub.name} sub={sub} hideService={hideService} parentEnabled={r.task.enabled} onRun={() => setRunSub(sub)} />)}
                   </Fragment>
                 );
               })}
@@ -208,16 +206,17 @@ function Stats24h({ t }: { t: TaskSummary }) {
 }
 
 const LastRun = ({ t }: { t: TaskSummary }) => t.last_run
-  ? <span className="flex items-center gap-1.5 text-[12.5px] text-fg-3"><RunStatusDot status={t.last_run.status} />{ago(t.last_run.created_at)}</span>
+  ? <Link to={`/runs/${t.last_run.run_id}`} onClick={(e) => e.stopPropagation()} className="flex items-center gap-1.5 whitespace-nowrap text-[12.5px] text-fg-3 hover:text-accent"><RunStatusDot status={t.last_run.status} />{ago(t.last_run.created_at)}</Link>
   : <span className="text-fg-3">—</span>;
 
 function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; expanded: boolean; hideService: boolean; onToggle: () => void }) {
   const t = row.task;
-  const n = t.subtask_count || row.subs.length;
+  // 搜索时只列命中的子任务，数字也按列出来的算，不然"3 个子任务"展开只看到 1 个
+  const n = row.hit ? row.subs.length : t.subtask_count || row.subs.length;
   const pending = row.subs.filter((x) => !x.overrides.includes("profile")).length;
   return (
     <Tr onClick={() => navigate(taskHref(t.name))} className={cn(!t.enabled && "opacity-60")}>
-      <Td className="max-w-[380px]">
+      <Td className="min-w-[260px] max-w-[420px]">
         <div className="flex items-center gap-1.5">
           {n > 0 ? (
             <button type="button" aria-label={expanded ? "收起子任务" : "展开子任务"} onClick={(e) => { e.stopPropagation(); onToggle(); }}
@@ -230,28 +229,28 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
           {t.form !== "agent" && <Badge tone="accent" icon={FORM_META[t.form].icon}>{FORM_META[t.form].label}</Badge>}
           {!t.enabled && <Badge tone="idle">已停用</Badge>}
         </div>
-        {t.name === ASK_TASK && <div className="mt-0.5 pl-[22px] text-[11.5px] text-fg-3">通用入口：要定时、事件、投递时再建正式任务</div>}
-        <div className="mt-0.5 flex items-center gap-2 pl-[22px] font-mono text-[11px] text-fg-3">
-          {t.name}
+        {t.name === ASK_TASK && <div className="mt-0.5 pl-[22px] text-[11.5px] text-fg-3">直接提问或交代一件事；要定时、事件、推送时再建正式任务</div>}
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-[22px] text-[11px] text-fg-3">
+          <span className="font-mono">{t.name}</span>
           {n > 0 && (
-            <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex items-center gap-0.5 font-sans hover:text-accent">
+            <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex items-center gap-0.5 whitespace-nowrap hover:text-accent">
               <LuGitBranch className="size-3" />{n} 个子任务{pending > 0 && <span className="text-warn"> · {pending} 个档案待补</span>}
             </button>
           )}
         </div>
       </Td>
-      {!hideService && <Td className="text-fg-2">{t.service === "*" ? "通用" : t.service ?? "平台"}</Td>}
+      {!hideService && <Td className="whitespace-nowrap text-fg-2">{t.service === "*" ? "通用" : t.service ?? "平台"}</Td>}
       <Td><TriggerChips triggers={t.triggers} /></Td>
-      <Td><RoleChip role={t.role} /></Td>
+      <Td className="whitespace-nowrap">{t.form === "builtin" ? <span className="text-[12px] text-fg-3">—</span> : <RoleChip role={t.role} />}</Td>
       <Td><Stats24h t={t} /></Td>
       <Td><LastRun t={t} /></Td>
-      <Td className="text-[12.5px]">{t.next_fire ? <span className="text-fg-2">{until(t.next_fire.at)} <span className="font-mono text-[11px] uppercase text-fg-3">{t.next_fire.env}</span></span> : <span className="text-fg-3">—</span>}</Td>
+      <Td><NextFire t={t} /></Td>
     </Tr>
   );
 }
 
 /** 子任务行：缩进在父任务下面；只显示它自己的信息，跟随父任务的列显示"同父任务" */
-function SubRow({ sub, hideService, onRun }: { sub: TaskSummary; hideService: boolean; onRun: () => void }) {
+function SubRow({ sub, hideService, parentEnabled, onRun }: { sub: TaskSummary; hideService: boolean; parentEnabled: boolean; onRun: () => void }) {
   const ownTriggers = sub.overrides.includes("triggers");
   return (
     <Tr onClick={() => navigate(taskHref(sub.name))} className={cn("bg-sunken/25", !sub.enabled && "opacity-60")}>
@@ -259,93 +258,36 @@ function SubRow({ sub, hideService, onRun }: { sub: TaskSummary; hideService: bo
         <div className="flex items-center gap-2 pl-[22px]">
           <span className="h-4 w-3 shrink-0 rounded-bl border-b border-l border-line-strong" />
           <Link to={taskHref(sub.name)} onClick={(e) => e.stopPropagation()} className="truncate font-mono text-[12.5px] font-medium text-fg hover:text-accent">{objectOf(sub.name)}</Link>
-          {sub.title && sub.title !== objectOf(sub.name) && <span className="truncate text-[12px] text-fg-3">{sub.title}</span>}
-          {sub.auto_created && <Badge tone="warn">自动创建</Badge>}
+          {/* 显示名没自己写的话是父任务的，别当成这个对象的名字 */}
+          {sub.overrides.includes("title") && sub.title && <span className="truncate text-[12px] text-fg-3">{sub.title}</span>}
           {!sub.enabled && <Badge tone="idle">已停用</Badge>}
           {!sub.overrides.includes("profile") && (
-            <Link to={`${taskHref(sub.name)}?tab=profile`} onClick={(e) => e.stopPropagation()} className="shrink-0 text-[11.5px] text-warn hover:underline">档案待补</Link>
+            <Tooltip content={sub.auto_created ? "运行时自动建的对象，还没写专属档案" : "还没写这个对象的专属档案"}>
+              <Link to={`${taskHref(sub.name)}?tab=profile`} onClick={(e) => e.stopPropagation()} className="shrink-0 whitespace-nowrap text-[11.5px] text-warn hover:underline">档案待补</Link>
+            </Tooltip>
           )}
-          <Tooltip content={`运行 ${sub.name}`}>
-            <button type="button" aria-label="运行" disabled={!sub.enabled} onClick={(e) => { e.stopPropagation(); onRun(); }}
+          <Tooltip content={!parentEnabled ? "父任务已停用" : `运行 ${objectOf(sub.name)}`}>
+            <button type="button" aria-label="运行" disabled={!sub.enabled || !parentEnabled} onClick={(e) => { e.stopPropagation(); onRun(); }}
               className="ml-auto rounded p-1 text-fg-3 hover:bg-hover hover:text-accent disabled:opacity-40"><LuPlay className="size-3.5" /></button>
           </Tooltip>
         </div>
       </Td>
       {!hideService && <Td />}
-      <Td>{ownTriggers ? <TriggerChips triggers={sub.triggers} /> : <span className="text-[12px] text-fg-3">同父任务</span>}</Td>
-      <Td><span className="text-[12px] text-fg-3">同父任务</span></Td>
+      <Td>{ownTriggers ? <TriggerChips triggers={sub.triggers} /> : <span className="whitespace-nowrap text-[12px] text-fg-3">同父任务</span>}</Td>
+      <Td>{sub.overrides.includes("role") ? <RoleChip role={sub.role} /> : <span className="whitespace-nowrap text-[12px] text-fg-3">同父任务</span>}</Td>
       <Td><Stats24h t={sub} /></Td>
       <Td><LastRun t={sub} /></Td>
-      <Td className="text-fg-3">—</Td>
+      <Td><NextFire t={sub} /></Td>
     </Tr>
   );
 }
 
-function CreateTaskDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { data: services } = useServices();
-  const { data: roles } = useRoles();
-  const [name, setName] = useState("");
-  const [title, setTitle] = useState("");
-  const [service, setService] = useState<string>("*");
-  const [role, setRole] = useState<string>("");
-  const [form, setForm] = useState<Task["form"]>("agent");
-  const [handler, setHandler] = useState("");
-  const [description, setDescription] = useState("");
-  // 每次打开都是空表单（上次取消时填的不留着）
-  useEffect(() => {
-    if (!open) return;
-    setName(""); setTitle(""); setService("*"); setRole(""); setForm("agent"); setHandler(""); setDescription("");
-  }, [open]);
-  const valid = /^[a-z][a-z0-9-]{1,48}$/.test(name);
-  /** 与后端一致：单角色任务要角色，内建任务要处理器名 */
-  const complete = form === "agent" ? !!role : !!handler.trim();
-  const create = useMutation(async () => {
-    try {
-      await api.create("tasks", {
-        name, title, description, service: service === "_platform" ? null : service, form, triggers: [{ id: "api", type: "api" }],
-        role: form === "agent" ? role || null : null, handler: form === "builtin" ? handler.trim() : null,
-      });
-      invalidate("tasks");
-      toast("任务已创建", { description: "接着配置输入、触发与输出" });
-      onClose();
-      navigate(`/tasks/${name}?tab=definition`); // 新任务先去补输入、触发与投递
-    } catch (e) {
-      toast.error("创建失败", (e as Error).message);
-    }
-  });
+function NextFire({ t }: { t: TaskSummary }) {
+  if (!t.next_fire) return <span className="text-fg-3">—</span>;
   return (
-    <Dialog open={open} onClose={onClose} title="新建任务" size="lg"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid || !complete} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
-      <div className="grid gap-4 md:grid-cols-2">
-        <Field label="任务名" required help="小写字母、数字、连字符；子任务请在父任务页里建" error={name && !valid ? "格式不对：小写字母开头，可含数字与连字符" : null}>
-          <Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="web-inspection" />
-        </Field>
-        <Field label="显示名"><Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Web 日常巡检" /></Field>
-        <Field label="归属" help="专属任务只在该服务上跑；通用任务调用时指定服务；平台任务不涉及业务服务">
-          <Select value={service} onChange={setService} options={[
-            ...(services ?? []).map((s) => ({ value: s.name, label: s.title, hint: "专属 · " + s.name })),
-            { value: "*", label: "通用任务", hint: "调用时指定服务" },
-            { value: "_platform", label: "平台任务", hint: "不涉及业务服务" },
-          ]} />
-        </Field>
-        <Field label="形态">
-          <Select value={form} onChange={(v) => setForm(v as Task["form"])} options={[
-            { value: "agent", label: "单角色", hint: "一个角色完成整件事（最常用）" },
-            { value: "builtin", label: "内建处理器", hint: "不过模型的确定性维护作业" },
-          ]} />
-        </Field>
-        {form !== "builtin" ? (
-          <Field label="角色" required={form === "agent"} className="md:col-span-2">
-            <Select value={role || null} onChange={setRole} placeholder="选择执行角色"
-              options={(roles ?? []).map((r) => ({ value: r.name, label: r.title || r.name, hint: r.description }))} />
-          </Field>
-        ) : (
-          <Field label="处理器名" required className="md:col-span-2" help="不过模型的确定性作业，处理器在内核代码里登记">
-            <Input mono value={handler} onChange={(e) => setHandler(e.target.value)} placeholder="memory-gardener" />
-          </Field>
-        )}
-        <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个任务要达成什么" /></Field>
-      </div>
-    </Dialog>
+    <Tooltip content={datetime(t.next_fire.at, true)}>
+      <span className="flex items-center gap-1.5 whitespace-nowrap text-[12.5px] text-fg-2">{until(t.next_fire.at)}<EnvBadge env={t.next_fire.env} /></span>
+    </Tooltip>
   );
 }
+
