@@ -6,7 +6,7 @@ import { del, get, patch, post, put } from "./client";
 import type {
   ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigMasked, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
   ConfigVersion, ConfigVersionContent, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters,
-  MemoryHealth, Meta, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
+  Meta, Page, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
   RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire,
   Version, VersionStat,
 } from "./types";
@@ -96,7 +96,6 @@ export const api = {
 
   // —— 记忆（agent 记下的：事实 / 教训）与方法；档案在服务 / 任务定义里 ——
   knowledge: (f: KnowledgeFilters) => get<Knowledge[]>("/v1/knowledge", { ...f }),
-  knowledgeHealth: (f: { service?: string; env?: string }) => get<MemoryHealth>("/v1/knowledge/health", f),
   /** 近 30 天被 ≥5 次运行召回、没挨过 👎 的事实：值得升格进档案 */
   knowledgePromotable: (f: { service?: string; env?: string }) => get<Knowledge[]>("/v1/knowledge/promotable", f),
   knowledgeEntry: (id: number) => get<Knowledge>(`/v1/knowledge/${id}`),
@@ -104,8 +103,6 @@ export const api = {
   createKnowledge: (body: KnowledgeCreate) => post<Knowledge>("/v1/knowledge", body),
   patchKnowledge: (id: number, body: { content?: string; status?: "active" | "expired" }) => patch<Knowledge>(`/v1/knowledge/${id}`, body),
   promoteKnowledge: (id: number, body: KnowledgePromote) => post<KnowledgePromoted>(`/v1/knowledge/${id}/promote`, body),
-  searchKnowledge: (body: { query: string; service: string; env: string; task?: string }) =>
-    post<{ hits: (Knowledge & { rank: number })[]; block: string }>("/v1/knowledge/search", body),
   assets: (f: MemoryFilters & { kind?: string }) => get<Asset[]>("/v1/assets", { ...f }),
   createAsset: (body: Pick<Asset, "service" | "env" | "task" | "kind" | "name" | "summary" | "content">) => post<Asset>("/v1/assets", body),
   patchAsset: (id: number, body: { summary?: string; content?: string; status?: "active" | "superseded" }) => patch<Asset>(`/v1/assets/${id}`, body),

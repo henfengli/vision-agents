@@ -39,6 +39,11 @@ class RunSpec(BaseModel):
     code_paths: list[str] = Field(default_factory=list)
 
     @property
+    def replay_of(self) -> str | None:
+        """回归重放出来的运行：被重放的原运行。记忆按它隔离（见 orchestration/replay.py）。"""
+        return self.trigger.id if self.trigger.type == "replay" else None
+
+    @property
     def error_text(self) -> str:
         """事件类任务约定把报错放在 input.error：案例召回与沉淀都按它的指纹。"""
         return str(self.input.get("error") or "")

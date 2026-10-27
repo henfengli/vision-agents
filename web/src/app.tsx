@@ -18,12 +18,10 @@ import { ApiKeysPage } from "./features/settings/api-keys";
 import {
   EnvsSettingsPage, MemorySettingsPage, NotificationsSettingsPage, PromptsSettingsPage,
 } from "./features/settings/platform";
-import { PreferencesPage } from "./features/settings/preferences";
 import { RoleDetailPage, RolesPage } from "./features/settings/roles";
 import { TaskDetailPage } from "./features/tasks/task-detail";
 import { TasksPage } from "./features/tasks/tasks";
 import { navigate, Routes, useLocation, type RouteDef } from "./lib/router";
-import { getUi } from "./lib/store";
 
 const routes: RouteDef[] = [
   { path: "/", component: OverviewPage },
@@ -38,8 +36,8 @@ const routes: RouteDef[] = [
   // /chat 与 /chat/<会话> 是同一条路由：新对话发完第一条把地址换成 /chat/<会话> 时页面不重新挂载
   { path: "/chat/*", component: ChatPage },
   { path: "/memory", component: MemoryPage },
-  { path: "/settings", component: PreferencesPage },
-  { path: "/settings/preferences", component: PreferencesPage },
+  // /settings 本身就是第一个平台设置页（环境）
+  { path: "/settings", component: EnvsSettingsPage },
   { path: "/settings/envs", component: EnvsSettingsPage },
   { path: "/settings/notifications", component: NotificationsSettingsPage },
   { path: "/settings/memory", component: MemorySettingsPage },
@@ -55,10 +53,6 @@ function NotFound() {
 
 export function App() {
   const { path } = useLocation();
-  useEffect(() => {
-    // 个人偏好"打开控制台时进入"：只在刚打开、落在根路径时跳一次
-    if (path === "/" && getUi().landing !== "/") navigate(getUi().landing, { replace: true });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onUnauthorized = () => navigate("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search), { replace: true, force: true });
     window.addEventListener("ap:unauthorized", onUnauthorized);

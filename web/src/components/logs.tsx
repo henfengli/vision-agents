@@ -1,10 +1,11 @@
 /**
- * 日志（服务定义的 logs、各环境覆盖、服务×环境视图）：{名字: 文件路径 | docker:<容器名>}，agent 的 logs 工具按名字读。
+ * 日志（服务定义的 logs、各环境覆盖、服务×环境视图）：{名字: 文件路径（可带 * 通配，取最新的那个）| docker:<容器名> | journal:<systemd 单元>}，
+ * agent 的 logs 工具按名字读。
  * - LogList：只读展示，名字 → 目标
  * - LogsEditor：名字 + 目标的小列表编辑器；环境覆盖时按名字覆盖基座，目标留空 = 本环境没有这个日志
  */
 import { useEffect, useState } from "react";
-import { LuBox, LuFileText, LuPlus, LuTrash2 } from "react-icons/lu";
+import { LuBox, LuFileText, LuPlus, LuServer, LuTrash2 } from "react-icons/lu";
 
 import { cn } from "@/lib/cn";
 import { Button } from "./ui/button";
@@ -17,7 +18,8 @@ export function logError(name: string, target: string, override = false): string
   if (!LOG_NAME_RE.test(name)) return `日志名不合法：${name || "（空）"}（小写字母开头，可含数字 _ -，最多 31 个字符）`;
   if (!target) return override ? null : `日志 ${name} 要写目标`;
   if (target.startsWith("docker:")) return target.length > 7 ? null : `日志 ${name}：docker: 后面写容器名`;
-  if (!target.startsWith("/") && !target.startsWith("~")) return `日志 ${name} 要写绝对路径（可以 ~ 开头）或 docker:<容器名>`;
+  if (target.startsWith("journal:")) return target.length > 8 ? null : `日志 ${name}：journal: 后面写 systemd 单元`;
+  if (!target.startsWith("/") && !target.startsWith("~")) return `日志 ${name} 要写绝对路径（可以 ~ 开头，可带 * 通配）、docker:<容器名> 或 journal:<systemd 单元>`;
   return null;
 }
 
@@ -32,9 +34,9 @@ export function logsError(logs: Record<string, string> | undefined, override = f
 
 function TargetBadge({ target, className }: { target: string; className?: string }) {
   if (!target) return <Badge tone="idle" className={className}>本环境没有</Badge>;
-  return target.startsWith("docker:")
-    ? <Badge tone="info" icon={<LuBox />} className={className}>容器</Badge>
-    : <Badge tone="outline" icon={<LuFileText />} className={className}>文件</Badge>;
+  if (target.startsWith("docker:")) return <Badge tone="info" icon={<LuBox />} className={className}>容器</Badge>;
+  if (target.startsWith("journal:")) return <Badge tone="info" icon={<LuServer />} className={className}>systemd</Badge>;
+  return <Badge tone="outline" icon={<LuFileText />} className={className}>文件</Badge>;
 }
 
 /** 服务×环境视图里的日志：名字 → 渲染后的目标 */
@@ -66,7 +68,7 @@ const toRecord = (rows: Row[]) => {
 const same = (a: Record<string, string>, b: Record<string, string>) => JSON.stringify(a) === JSON.stringify(b);
 
 /** 常见的几种写法：给新加的一行当占位 */
-const PLACEHOLDERS = ["~/deploy/xxx/app.log", "docker:xxx-webserver", "/var/log/nginx/error.log"];
+const PLACEHOLDERS = ["~/deploy/xxx/app.log", "docker:xxx-webserver", "journal:xxx.service", "~/deploy/xxx/logs/app-*.log"];
 
 /**
  * base：环境覆盖时的基座日志（给占位与"覆盖 / 本环境没有"的快捷按钮）。

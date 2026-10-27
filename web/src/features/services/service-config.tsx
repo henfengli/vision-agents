@@ -30,12 +30,12 @@ export const PROFILE_SUGGESTIONS: KvSuggestion[] = [
 ];
 
 /** mcp 单独编辑（每个 server 一段 JSON 文本，保存时才解析），不放进草稿 */
-type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "python" | "env_vars" | "urls" | "hosts" | "databases" | "configs" | "hidden" | "logs" | "envs" | "profile">;
+type Draft = Pick<Service, "title" | "description" | "root" | "code_paths" | "python" | "env_vars" | "urls" | "databases" | "configs" | "hidden" | "logs" | "envs" | "profile">;
 
 function toDraft(s: ServiceSummary): Draft {
   return structuredClone({
     title: s.title, description: s.description, root: s.root, code_paths: s.code_paths, python: s.python ?? "",
-    env_vars: s.env_vars ?? {}, urls: s.urls ?? {}, hosts: s.hosts, databases: s.databases ?? {}, configs: s.configs ?? [], hidden: s.hidden ?? [],
+    env_vars: s.env_vars ?? {}, urls: s.urls ?? {}, databases: s.databases ?? {}, configs: s.configs ?? [], hidden: s.hidden ?? [],
     logs: s.logs ?? {}, envs: s.envs, profile: s.profile,
   });
 }
@@ -190,7 +190,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
             <Field label="代码目录" help="线上部署的代码，agent 只读；可写 {env}、~"><Input mono value={draft.root} placeholder="~/deploy/xxx" onChange={(e) => set("root", e.target.value)} /></Field>
             <Field label="说明" className="md:col-span-2"><Textarea rows={2} value={draft.description} onChange={(e) => set("description", e.target.value)} /></Field>
             <Field label="其他代码目录" help="回车添加；缺省 = 代码目录"><TagInput mono value={draft.code_paths} onChange={(v) => set("code_paths", v)} placeholder="~/deploy/xxx-lib" suggestions={draft.root && !draft.code_paths.includes(draft.root) ? [draft.root] : []} /></Field>
-            <Field label="部署主机" help="host_metrics 查监控用；可按环境覆盖"><TagInput mono value={draft.hosts} onChange={(v) => set("hosts", v)} placeholder="172.24.16.100" /></Field>
             <Field label="项目 Python" help={`${PYTHON_HELP}；可按环境覆盖`}>
               <Input mono value={draft.python} onChange={(e) => set("python", e.target.value.trim())} placeholder="~/miniconda3/envs/xxx/bin/python" />
             </Field>
@@ -224,7 +223,7 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
           </div>
         </Section>
 
-        <Section id="logs" icon={<LuScrollText />} title="日志" description={<>agent 的 logs 工具能读的线上日志：{"{名字: 目标}"}。目标写文件路径（绝对路径，可以 ~ 开头、写 {"{env}"}）或 <code className="font-mono">docker:&lt;容器名&gt;</code>；文件要平台用户有读权限，docker 要平台用户能用 docker。各环境在下面「环境」里按名字覆盖。</>}>
+        <Section id="logs" icon={<LuScrollText />} title="日志" description={<>agent 的 logs 工具能读的线上日志：{"{名字: 目标}"}。目标写文件路径（绝对路径，可以 ~ 开头、写 {"{env}"}；可带 <code className="font-mono">*</code> 通配，取匹配到的最新那个文件）、<code className="font-mono">docker:&lt;容器名&gt;</code> 或 <code className="font-mono">journal:&lt;systemd 单元&gt;</code>；文件要平台用户有读权限，docker 要平台用户能用 docker。各环境在下面「环境」里按名字覆盖。</>}>
           <LogsEditor value={draft.logs} onChange={(v) => set("logs", v)} />
         </Section>
 
@@ -290,7 +289,6 @@ export function ServiceConfigEditor({ svc, onSaved }: { svc: ServiceSummary; onS
                     <Field label="解释器" help="该环境单独的 Python；空 = 用基本信息里的项目 Python">
                       <Input mono value={o.python ?? ""} onChange={(ev) => setO({ python: ev.target.value.trim() || undefined })} placeholder={draft.python || "python3（继承基座）"} />
                     </Field>
-                    <Field label="主机"><TagInput mono value={o.hosts ?? []} onChange={(v) => setO({ hosts: v })} placeholder={draft.hosts.join(", ") || "继承基座"} /></Field>
                     <Field label="只读库覆盖" className="md:col-span-2" help="按库名覆盖上面「只读库」里的同名项；连接串留空 = 这个环境没有这个库">
                       <DatabasesEditor value={o.databases ?? {}} onChange={(v) => setO({ databases: v })} base={draft.databases} />
                     </Field>

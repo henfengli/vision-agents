@@ -117,11 +117,21 @@ def scope_env(env: dict[str, str], limits: LimitsConfig | None) -> dict[str, str
 
 
 def wrap_argv(argv: list[str], scratch_dir: str, hidden=(), allow=(), *,
-              limits: LimitsConfig | None = None, require: bool = True) -> list[str]:
-    """bash 命令：命令即 init。没有 bwrap 时 require=True 抛 SandboxUnavailable，否则原样返回。"""
+              limits: LimitsConfig | None = None, require: bool = True, workdir: str | None = None) -> list[str]:
+    """bash 命令：命令即 init。没有 bwrap 时 require=True 抛 SandboxUnavailable，否则原样返回。
+    scratch_dir 整个可写（db_query 的结果文件在它下面）；workdir 是命令的当前目录（本会话的工作目录）。"""
     if not has_bwrap():
         if require:
             raise SandboxUnavailable("没有 bwrap（bubblewrap），按部署配置 require_sandbox 拒绝执行")
         return argv
-    inner = bwrap_argv(argv, scratch=scratch_dir, hidden=hidden, allow=allow, pid1=True)
+    inner = bwrap_argv(argv, scratch=scratch_dir, hidden=hidden, allow=allow, pid1=True, workdir=workdir)
     return limit_argv(inner, limits, memory=limits.bash_memory if limits else "")
+
+
+def work_dir(scratch_dir: str, key: str) -> str:
+    """会话的工作目录 <scratch>/work/<会话×服务×环境>：bash 的当前目录、py 内核和 bash 里的 $SCRATCH。
+    同一台主机上并发的运行各写各的，不会互相覆盖同名文件；同一会话的 bash 和 py 共用。"""
+    import hashlib
+    import re
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key)[:80]
+    return os.path.join(scratch_dir, "work", f"{safe}-{hashlib.sha1(key.encode()).hexdigest()[:8]}")

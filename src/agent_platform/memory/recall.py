@@ -8,6 +8,10 @@
    本环境的 + 所有环境通用的；code_ref 对不上当前代码的当场标为过期、不再使用；本任务谱系沉淀的排前面
 
 命中的条目写 recall_hits（记忆页的"30 天命中"、零召回、可升格统计都来自它；运行被 👎 时也据此给召回的条目扣分）。
+
+回归重放（exclude_run = 被重放的原运行）：三层都去掉原运行自己沉淀的；交接摘要不含原会话自己的那条，
+也只要原运行之前就有的（before）；只读——不记命中、不标过期（过期的照样不用）。
+同一个 key 后来被别的运行改写过的，按最后写入者算，不再当作原运行的沉淀。
 """
 
 from __future__ import annotations
@@ -27,17 +31,22 @@ class Recalled:
 
 async def recall(*, env: str, service: str, task: str, query: str, error_text: str = "",
                  code_paths: list[str], session_id: str | None, run_id: str | None,
-                 limit: int = 5, embedder=None, source: str = "recall") -> Recalled:
-    """source="playground" 表示控制台试检索，不计入命中统计。"""
+                 limit: int = 5, embedder=None, exclude_run: str | None = None,
+                 before: str | None = None) -> Recalled:
+    """exclude_run：回归重放的原运行（见模块说明）；before：原运行的创建时间，交接摘要只要那之前就有的。"""
     sections: list[str] = []
     out = Recalled()
+    readonly = exclude_run is not None
 
     if session_id and session_id.count(":") >= 2:
-        summaries = await knowledge_store.latest_session_summaries(env, service, session_id.rsplit(":", 1)[0])
+        summaries = await knowledge_store.latest_session_summaries(
+            env, service, session_id.rsplit(":", 1)[0], exclude_session=session_id if readonly else None,
+            before=before if readonly else None)
         if summaries:
             sections.append("[前序会话交接摘要]\n" + "\n\n".join(s["content"] for s in summaries))
 
-    lesson = await knowledge_store.lessons.search_by_error(env, service, error_text) if error_text else None
+    lesson = (await knowledge_store.lessons.search_by_error(env, service, error_text, exclude_run=exclude_run)
+              if error_text else None)
     if lesson:
         out.case_id = lesson["id"]
         sections.append(f"[同类报错的教训——{lesson['date'][:10]} 记下，类别 {lesson['category'] or '—'}；"
@@ -46,12 +55,13 @@ async def recall(*, env: str, service: str, task: str, query: str, error_text: s
     hits: list[dict] = [{"id": lesson["id"], "key": lesson["key"]}] if lesson else []
     if limit:
         fresh = []
-        for e in await knowledge_store.search(env, service, query, limit=limit, embedder=embedder):
+        for e in await knowledge_store.search(env, service, query, limit=limit, embedder=embedder,
+                                              exclude_run=exclude_run):
             if lesson and e["id"] == lesson["id"]:
                 continue
             if await asyncio.to_thread(knowledge_store.is_entry_fresh, e["code_ref"], code_paths):
                 fresh.append(e)
-            else:
+            elif not readonly:
                 await knowledge_store.mark_expired(e["id"])
         if fresh:
             base = task.split(":")[0]
@@ -73,7 +83,7 @@ async def recall(*, env: str, service: str, task: str, query: str, error_text: s
 
     out.knowledge = [{"id": e["id"], "key": e["key"], "kind": e.get("kind", "lesson"), "rank": i + 1}
                      for i, e in enumerate(hits)]
-    if hits and (run_id or source != "recall"):
-        await knowledge_store.record_hits(env, service, hits, run_id=run_id, source=source)
+    if hits and run_id and not readonly:
+        await knowledge_store.record_hits(env, service, hits, run_id=run_id)
     out.text = "\n\n".join(sections)
     return out

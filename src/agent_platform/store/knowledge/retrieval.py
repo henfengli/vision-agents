@@ -87,11 +87,12 @@ def _unchanged_since(base: str, recorded: str, head: str, path: str) -> bool:
 
 
 async def search(env: str, service: str, query: str, limit: int = 5,
-                 embedder=None) -> list[dict]:
+                 embedder=None, exclude_run: str | None = None) -> list[dict]:
     """混合召回：pg_trgm 关键词 + pgvector 语义，RRF 融合。
 
     - 未配置嵌入模型 / pgvector 缺失 / 向量无结果 → 退化 trgm（再退 ILIKE）
     - 过期（expired）与被取代（valid_to 非空）的条目不召回
+    - exclude_run：这次运行沉淀的不召回（回归重放：不能把原答案抄回来）。候选取 2×limit，过滤后再截断
     RRF: score = Σ 1/(k+rank)，k=60——只认排名不认分数，对尺度差异鲁棒。
     """
     terms = [t for t in query.replace("？", " ").split() if len(t) >= 2][:5]
@@ -112,6 +113,8 @@ async def search(env: str, service: str, query: str, limit: int = 5,
         candidates = vec_rows
     else:
         candidates = _rrf_merge(trgm_rows, vec_rows, limit * 2)
+    if exclude_run:
+        candidates = [r for r in candidates if r[4] != exclude_run]      # r[4] = source_run
     rows = await _weight_by_feedback(candidates, limit)
     return [
         {"id": i, "key": k, "content": c,

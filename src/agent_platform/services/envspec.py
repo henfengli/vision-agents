@@ -20,8 +20,10 @@ import os
 
 from ..config import Settings
 from ..domain import EnvDef, Rejected, ServiceDef, ServiceView
+from ..domain.services import LOG_PREFIXES
 from ..registry import Registry
 from ..store import service_configs
+from .hostlocal import resolve_file
 
 
 def _tag(service: str, env: str, key: str) -> str:
@@ -85,7 +87,7 @@ def masked_configs(spec: ServiceDef, env: str, envs: list[EnvDef]) -> set[str]:
 
 async def sandbox_paths(registry: Registry, settings: Settings, env: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """bash 沙箱：(遮蔽, home 下挂回的目录)。遮蔽各服务的配置文件（按 masked_configs）；挂回本主机负责的各服务的
-    代码目录（跨服务排查要能读别的服务的代码）与方法目录。"""
+    代码目录（跨服务排查要能读别的服务的代码）、解释器所在的环境（bash 里的 python / pytest 用项目的）与方法目录。"""
     envs = (await registry.envs()).items
     hidden = set(settings.always_hidden)
     allow = {settings.assets_dir, *map(os.path.expanduser, settings.home_allow)}
@@ -94,8 +96,21 @@ async def sandbox_paths(registry: Registry, settings: Settings, env: str) -> tup
         for e in envs:
             v = s.spec.view(s.name, e.name)
             if v.enabled and settings.serves(s.name, e.name):
-                allow |= {p for p in (v.root, *v.code_paths) if p}
+                allow |= {p for p in (v.root, *v.code_paths, *python_dirs(v.python)) if p}
     return tuple(sorted(hidden)), tuple(sorted(allow))
+
+
+def log_sinks(view: ServiceView) -> list[str]:
+    """服务声明的日志文件（通配的取当前最新那个）：内核里换成可写的 /dev/null。"""
+    out = []
+    for t in view.logs.values():
+        if t.startswith(LOG_PREFIXES):
+            continue
+        try:
+            out.append(resolve_file(t))
+        except FileNotFoundError:
+            continue
+    return sorted(set(out))
 
 
 async def runtime_spec(registry: Registry, settings: Settings, service: str, env: str) -> dict:
@@ -125,10 +140,11 @@ async def runtime_spec(registry: Registry, settings: Settings, service: str, env
     hidden = sorted(settings.always_hidden | others)
     allow = sorted({p for p in (view.root, *view.code_paths) if p} | set(python_dirs(view.python))
                    | {settings.assets_dir} | {os.path.expanduser(p) for p in settings.home_allow})
-    # 服务声明的日志文件：项目自己往里写（Django 的文件日志一配置就打开），内核里换成可写的 /dev/null，免得 import 就报只读
-    sinks = sorted(t for t in view.logs.values() if not t.startswith("docker:"))
-    digest = hashlib.sha1(json.dumps([view.python, protected, versions, view.env_vars, view.root, hidden, allow, sinks],
-                                     sort_keys=True).encode()).hexdigest()[:12]
+    # 服务声明的日志文件：项目自己往里写（Django 的文件日志一配置就打开），内核里换成可写的 /dev/null，免得 import 就报只读。
+    # 摘要按声明的写法算，不按解析出来的文件：日志按日期滚动时不该把会话内核重启掉
+    sinks = log_sinks(view)
+    digest = hashlib.sha1(json.dumps([view.python, protected, versions, view.env_vars, view.root, hidden, allow,
+                                      sorted(view.logs.values())], sort_keys=True).encode()).hexdigest()[:12]
     return {"service": service, "env": env, "python": view.python, "env_vars": view.env_vars,
             "workdir": view.root or None, "binds": binds, "hidden": hidden, "allow": allow, "sinks": sinks,
             "digest": digest, "protected": protected}

@@ -94,13 +94,13 @@ export function EnvsSettingsPage() {
               {d.items.map((e, i) => {
                 const patch = (p: Partial<typeof e>) => set({ ...d, items: d.items.map((x, j) => (j === i ? { ...x, ...p } : x)) });
                 return (
-                  <div key={i} className="grid gap-3 px-4 py-3.5 md:grid-cols-[110px_1fr_auto]">
+                  /* 第一行 名字 / 显示名 / 说明（说明占满剩下的宽度，长说明不被截断），第二行 颜色 / 受保护 / 默认 / 移除 */
+                  <div key={i} className="grid gap-3 px-4 py-3.5 md:grid-cols-[110px_160px_1fr]">
                     <Field label="名字"><Input mono value={e.name} placeholder="staging" onChange={(ev) => patch({ name: ev.target.value.trim().toLowerCase() })} /></Field>
-                    <div className="grid gap-3 sm:grid-cols-[140px_1fr]">
-                      <Field label="显示名"><Input value={e.title} onChange={(ev) => patch({ title: ev.target.value })} /></Field>
-                      <Field label="说明"><Input value={e.description} onChange={(ev) => patch({ description: ev.target.value })} /></Field>
-                    </div>
-                    <div className="flex items-end gap-4 pb-1">
+                    <Field label="显示名"><Input value={e.title} onChange={(ev) => patch({ title: ev.target.value })} /></Field>
+                    <Field label="说明"><Input value={e.description} onChange={(ev) => patch({ description: ev.target.value })} /></Field>
+                    <div className="flex flex-wrap items-center gap-4 md:col-span-3">
+                      <span className="text-[12px] text-fg-3">颜色</span>
                       <div className="flex items-center gap-1">
                         {COLORS.map((c) => (
                           <button key={c} type="button" title={c} onClick={() => patch({ color: c })}
@@ -113,7 +113,7 @@ export function EnvsSettingsPage() {
                       <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-fg-2">
                         <input type="radio" checked={d.default === e.name} onChange={() => set({ ...d, default: e.name })} className="accent-[var(--color-accent)]" />默认
                       </label>
-                      <Button size="icon-sm" variant="ghost" title="移除" disabled={d.items.length <= 1}
+                      <Button size="icon-sm" variant="ghost" title="移除" className="ml-auto" disabled={d.items.length <= 1}
                         onClick={async () => {
                           if (e.name && !(await confirm({ title: `移除环境 ${e.name}？`, description: "移除后：引用它的任务环境限制、定时触发会保存失败，需要先改掉；历史运行与记忆不受影响。", danger: true, confirmText: "移除" }))) return;
                           set({ ...d, items: d.items.filter((_, j) => j !== i), default: d.default === e.name ? d.items.find((_, j) => j !== i)!.name : d.default });

@@ -57,13 +57,13 @@ class Maintenance:
 
 
 def purge_dir(root: str, days: int) -> int:
-    """工作目录里超过 days 天没动过的文件和目录删掉（queries/<run_id>/ 按目录算）。→ 删掉的项数。"""
+    """工作目录里超过 days 天没动过的文件和目录删掉（queries/<run_id>/、work/<会话>/ 按目录算）。→ 删掉的项数。"""
     if days <= 0 or not os.path.isdir(root):
         return 0
     cutoff = time.time() - days * 86400
     removed = 0
     for top in os.scandir(root):
-        entries = list(os.scandir(top.path)) if top.is_dir() and top.name == "queries" else [top]
+        entries = list(os.scandir(top.path)) if top.is_dir() and top.name in ("queries", "work") else [top]
         for e in entries:
             try:
                 if e.stat(follow_symlinks=False).st_mtime >= cutoff:

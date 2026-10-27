@@ -31,7 +31,7 @@ from ...store import assets as assets_store
 from .. import scope as run_scope
 from . import bash as bash_mod
 from . import db as db_mod
-from . import hostinfo
+from .sandbox import work_dir
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,11 @@ ASSET_KINDS = ("procedure", "script", "query", "baseline")
 ALIASES = {"sql_query": "db_query"}       # 旧角色定义里的写法
 
 Fn = Callable[..., Awaitable[str]]
+
+
+def _work_dir(s: Settings, sc: run_scope.RunScope) -> str:
+    """本会话×服务×环境的工作目录（和项目内核的 $SCRATCH 是同一个）。"""
+    return work_dir(s.scratch_dir, kernel_key(sc.session_id, sc.service or "-", sc.env))
 
 
 @dataclass(frozen=True)
@@ -160,7 +165,8 @@ class Toolbox:
                 spec = await envspec.runtime_spec(reg, s, sc.service, sc.env)
                 if restart or not kernels.alive(key, spec["digest"]):
                     # 文件类方法（沉淀的脚本）的目录放上 sys.path：内核里直接 import，不用复制一遍
-                    methods = await assets_store.search_active(sc.env, sc.service, sc.task.split(":")[0], limit=20)
+                    methods = await assets_store.search_active(sc.env, sc.service, sc.task.split(":")[0], limit=20,
+                                                               exclude_run=sc.replay_of)
                     spec["method_paths"] = [m["path"] for m in methods if m.get("path")]
                 return await kernels.execute(key, spec, code, timeout=max(1, min(timeout, 1800)), hidden=sc.hidden,
                                              restart=restart, tools=toolbox.host_tools(sc.tools, sc.extra_tools))
@@ -170,11 +176,21 @@ class Toolbox:
         async def bash(command: str, timeout: int = 60) -> str:
             """在沙箱里执行 shell 命令：全盘只读（可读服务代码；home 下其他目录、平台密钥看不到；生产环境的配置文件
             也看不到，配置用 service_info 读）、只有工作目录和 /tmp 可写、调用结束后台进程全灭、内存有上限；网络照常。
-            stdout 和 stderr 合在一起，超过 8000 字只留开头和结尾：大输出先写进文件，再 head / grep 着看。"""
+            当前目录是本会话的工作目录（$SCRATCH，和 py 共用，跨调用保留）；每次调用是新的 shell，cd、export 不会带到
+            下一次，要连着做的写进同一条命令（&&）。PATH 最前面是本服务的项目解释器所在目录：python / pip / pytest
+            用的是项目的环境。stdout 和 stderr 合在一起，超过 8000 字只留开头和结尾：大输出先写进文件，再 head / grep 着看。"""
             sc = run_scope.current()
+            work = _work_dir(s, sc)
+            env = bash_mod.build_safe_env()
+            env["SCRATCH"] = work
+            if sc.view is not None:
+                env.update(sc.view.env_vars)
+                if os.path.isabs(sc.view.python):
+                    env["PATH"] = os.path.dirname(sc.view.python) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
             r = await asyncio.to_thread(
                 bash_mod.run_command, command, max(1, min(timeout, 600)), s.scratch_dir,
-                hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox)
+                hidden=sc.hidden, allow=sc.allow, limits=s.limits, require_sandbox=s.require_sandbox, env=env,
+                workdir=work)
             return bash_mod.format_result(r)
 
         async def service_info(what: str = "overview", path: str = "") -> str:
@@ -208,9 +224,10 @@ class Toolbox:
             return "\n".join(lines)
 
         async def logs(name: str = "", lines: int = 200, grep: str = "", since: str = "") -> str:
-            """读本服务本环境线上的日志（服务定义里声明过的：应用日志、nginx、docker 容器……）。name 不填列出有哪些。
-            lines：最后多少行（最多 2000）；grep：按正则过滤（不分大小写，在最后 lines 行里找）；
-            since：只对 docker 日志有效，如 30m、2h。看报错先 grep error|exception|traceback。"""
+            """读本服务本环境线上的日志（服务定义里声明过的：应用日志、nginx、docker 容器、systemd 单元）。
+            name 不填列出有哪些。lines：最多返回多少行（最多 2000）。grep：正则（不分大小写）——文件日志在整个文件里搜
+            （超大的只搜末尾 512MB），docker / systemd 在最后 5 万行里搜，返回最后 lines 条匹配和匹配总数。
+            since：只对 docker / systemd 有效，如 30m、2h、"2026-10-21 08:00:00"。看报错先 grep error|exception|traceback。"""
             sc = run_scope.current()
             available = sc.view.logs if sc.view else {}
             if not available:
@@ -222,10 +239,13 @@ class Toolbox:
             return await asyncio.to_thread(hostlocal.read_log, available[name], lines=lines, grep=grep, since=since)
 
         async def host_status() -> str:
-            """本服务本环境部署主机（就是你所在的这台）的现状：负载、内存、磁盘、占内存最多的进程、docker 容器、nginx。"""
+            """本服务本环境部署主机（就是你所在的这台）的现状：负载、内存、磁盘、占内存最多的进程；本服务的进程、
+            监听端口、本用户的 crontab、本服务容器的 CPU / 内存；全部 docker 容器、nginx。"""
             sc = run_scope.current()
-            paths = [sc.view.root] if sc.view and sc.view.root else []
-            return await asyncio.to_thread(hostlocal.host_status, paths)
+            v = sc.view
+            paths = list(dict.fromkeys(p for p in ([v.root, *v.code_paths] if v else []) if p))
+            containers = [t[7:] for t in (v.logs.values() if v else []) if t.startswith("docker:")]
+            return await asyncio.to_thread(hostlocal.host_status, paths, containers=containers)
 
         async def db_query(query: str, db: str = "") -> str:
             """查本服务本环境登记的只读库（库名与类型见 [运行环境]）。query：一条 SQL（PostgreSQL / MySQL / MariaDB /
@@ -246,25 +266,9 @@ class Toolbox:
                 url = credentials.expand(dbs[name])
             except credentials.MissingSecret as e:
                 return f"[未配置] 库 {name} 的口令取不到：{e}"
-            out_dir = os.path.join(s.scratch_dir, "queries", sc.run_id)
+            # 结果文件放在本会话工作目录下：bash / py 里按相对路径就能读，save_asset 也能收编
+            out_dir = os.path.join(_work_dir(s, sc), "queries", sc.run_id)
             return await db_mod.run_query(name, url, query, out_dir)
-
-        async def host_metrics() -> str:
-            """本服务本环境部署主机的实时资源：内存使用率、系统负载、根盘使用率（Grafana / node_exporter）。"""
-            sc = run_scope.current()
-            if s.grafana is None:
-                return "[未配置] 平台未接入 Grafana"
-            hosts = sc.view.hosts if sc.view else []
-            if not hosts:
-                return f"[无数据] 服务 {sc.service or '—'} 在 {sc.env} 没有登记主机"
-            g = s.grafana
-
-            async def fetch(expr: str) -> dict[str, float]:
-                return await hostinfo.grafana_query(g.url, g.datasource_uid, g.token, expr)
-            try:
-                return await hostinfo.collect(fetch, hosts)
-            except Exception as e:  # noqa: BLE001 —— 监控故障如实返回，不炸运行
-                return f"[监控不可用] {type(e).__name__}: {str(e)[:300]}"
 
         async def save_asset(name: str, kind: str, summary: str, content: str = "",
                              files: list[str] | None = None, task_specific: bool = True) -> str:
@@ -272,8 +276,10 @@ class Toolbox:
             kind：procedure（方法/SOP）| script（脚本）| query（查询）| baseline（基线数据）。
             name 在同类里唯一，重复保存即整体更新（旧版留档）；summary 一句话写清何时用（召回靠它）。
             content 是正文；脚本等文件先写进工作目录并跑通，再用 files（相对路径列表）收编，
-            .py 收编前会做编译检查。task_specific=false 表示服务级通用方法。"""
+            files 相对工作目录（$SCRATCH）；.py 收编前会做编译检查。task_specific=false 表示服务级通用方法。"""
             sc = run_scope.current()
+            if sc.replay_of:
+                return "[回归重放] 这是对比用的重跑，不沉淀方法（记忆保持不变），直接给出结论即可"
             if kind not in ASSET_KINDS:
                 return f"[失败] kind 须为 {'/'.join(ASSET_KINDS)}"
             if not name.strip() or not summary.strip():
@@ -286,13 +292,14 @@ class Toolbox:
             path = None
             n_files = n_bytes = 0
             if files:
-                errors = await asyncio.to_thread(assets_store.python_lint_errors, s.scratch_dir, files)
+                work = _work_dir(s, sc)          # 相对路径按本会话的工作目录解析
+                errors = await asyncio.to_thread(assets_store.python_lint_errors, work, files)
                 if errors:
                     return "[失败] 编译检查未通过，修好后再收编：\n" + "\n".join(errors[:10])
                 try:
                     path, n_files, n_bytes = await asyncio.to_thread(
                         assets_store.collect_files, s.assets_dir, sc.env, sc.service, task, kind,
-                        name.strip(), files, s.scratch_dir)
+                        name.strip(), files, work)
                 except ValueError as e:
                     return f"[失败] {e}"
             await assets_store.upsert(sc.env, sc.service, task, kind, name.strip(), summary.strip(), content,
@@ -305,6 +312,8 @@ class Toolbox:
         async def notify(title: str, content: str) -> str:
             """发一条 markdown 通知到本任务的通知渠道（任务投递渠道，未配置则用名为 default 的渠道）。"""
             sc = run_scope.current()
+            if sc.replay_of:
+                return "[回归重放] 这是对比用的重跑，不发通知；要通知的内容写进最终回答"
             channel = sc.notify_channel or "default"
             body = f"{content}\n\n> {sc.service or '平台'} · {sc.env} · 运行 {sc.run_id}"
             try:
@@ -321,11 +330,11 @@ class Toolbox:
                       summary="在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留")
         self._add(bash, "Shell", "core", dangerous=True, summary="bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭")
         self._add(service_info, "服务信息", "service", summary="本运行服务×环境的目录、配置内容（打码）、git 状态")
-        self._add(logs, "看日志", "service", summary="读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤")
-        self._add(host_status, "主机状况", "service", summary="部署主机的负载、内存、磁盘、大进程、docker 容器、nginx")
+        self._add(logs, "看日志", "service",
+                  summary="读本服务本环境线上的日志（文件 / docker 容器 / systemd 单元），按行数取尾部或在整个文件里按正则搜")
+        self._add(host_status, "主机状况", "service",
+                  summary="部署主机的负载、内存、磁盘、大进程；本服务的进程、监听端口、crontab、容器资源；nginx")
         self._add(db_query, "只读查库", "service",
                   summary="本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件")
-        if s.grafana is not None:
-            self._add(host_metrics, "主机指标", "service", summary="部署主机内存/负载/根盘（Grafana）")
         self._add(save_asset, "沉淀方法", "memory", summary="把可复用的方法/脚本/查询/基线存入记忆")
         self._add(notify, "发通知", "notify", summary="发 markdown 通知到任务的通知渠道")

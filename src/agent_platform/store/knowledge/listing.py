@@ -1,4 +1,4 @@
-"""记忆列表与健康度：控制台记忆页与 /v1/knowledge 的读口。
+"""记忆列表与可升格的：控制台记忆页与 /v1/knowledge 的读口。
 
 env 过滤 = 对该环境成立的条目：该环境自己的 + 所有环境通用的（env=''）。只看通用的传 env="*"。
 交接摘要（kind=handoff）是会话内部用的，默认不在列表里。
@@ -30,6 +30,8 @@ def _where(env: str | None, service: str | None, task: str | None, status: str |
         conds.append(f"{alias}.expired")
     elif status == "superseded":
         conds.append(f"{alias}.valid_to IS NOT NULL")
+    elif status == "negative":         # 生效中、挨过 👎 的：最该人工看一眼的
+        conds.append(f"NOT {alias}.expired AND {alias}.valid_to IS NULL AND {alias}.feedback_score < 0")
     if q:
         conds.append(f"({alias}.key ILIKE %s OR {alias}.content ILIKE %s)"); params += [f"%{q}%", f"%{q}%"]
     if kind:
@@ -42,7 +44,8 @@ def _where(env: str | None, service: str | None, task: str | None, status: str |
 async def list_entries(env: str | None = None, service: str | None = None, task: str | None = None,
                        status: str | None = None, q: str | None = None, kind: str | None = None,
                        limit: int = 300) -> list[dict]:
-    """status：active（默认）/ expired / superseded / all；kind：fact / lesson / handoff（不给 = 事实与教训）。"""
+    """status：active（默认）/ negative（生效中挨过 👎 的）/ expired / superseded / all；
+    kind：fact / lesson / handoff（不给 = 事实与教训）。"""
     where, params = _where(env, service, task, status, q, kind)
     return await _select(where, params, limit)
 
@@ -72,32 +75,6 @@ async def _select(where: str, params: list, limit: int) -> list[dict]:
              "code_ref": r[7], "status": r[8], "feedback_score": r[9], "hits_30d": r[10],
              "last_hit_at": r[11].isoformat() if r[11] else None, "updated_at": r[12].isoformat(),
              "kind": r[13], "fingerprint": r[14], "category": r[15], "superseded_by": r[16]} for r in rows]
-
-
-async def health(env: str | None = None, service: str | None = None) -> dict:
-    conds, params = ["kind <> 'handoff'"], []
-    if env:
-        conds.append("env IN ('', %s)"); params.append(env)
-    if service:
-        conds.append("service=%s"); params.append(service)
-    where = " WHERE " + " AND ".join(conds)
-    async with pool().connection() as conn:
-        cur = await conn.execute(
-            f"SELECT count(*) FILTER (WHERE NOT expired AND valid_to IS NULL),"
-            f" count(*) FILTER (WHERE NOT expired AND valid_to IS NULL AND id NOT IN ("
-            f"   SELECT entry_id FROM recall_hits WHERE source='recall' AND created_at > now() - interval '30 days')),"
-            f" count(*) FILTER (WHERE feedback_score < 0 AND NOT expired AND valid_to IS NULL),"
-            f" count(*) FILTER (WHERE expired),"
-            f" count(*) FILTER (WHERE kind='lesson' AND NOT expired AND valid_to IS NULL),"
-            f" count(*) FILTER (WHERE kind='fact' AND feedback_score >= 0 AND NOT expired AND valid_to IS NULL AND id IN ("
-            f"   SELECT entry_id FROM recall_hits WHERE source='recall' AND created_at > now() - interval '30 days'"
-            f"   GROUP BY entry_id HAVING count(DISTINCT run_id) >= 5))"
-            f" FROM knowledge{where}", params)
-        active, zero, negative, drifted, lessons, frequent = await cur.fetchone()
-    from .crud import similar_pairs
-    conflicts = len(await similar_pairs(env, service)) if env else 0
-    return {"active": active, "zero_recall": zero, "negative": negative, "drifted": drifted, "conflicts": conflicts,
-            "lessons": lessons, "promotable": frequent}
 
 
 async def promotable(service: str | None = None, env: str | None = None, min_runs: int = 5, limit: int = 30) -> list[dict]:

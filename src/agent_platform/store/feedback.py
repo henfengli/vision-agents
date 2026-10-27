@@ -107,10 +107,38 @@ async def shift_memory_weight(env: str, run_id: str, old: int | None, new: int |
                            (delta, env, run_id))
 
 
+# agent 运行：有角色、不是规则命中 / 内建（失败的 agent 运行 resolution 是空的：只有成功才落）
+_AGENT_RUN = "r.role IS NOT NULL AND COALESCE(r.resolution, 'agent') = 'agent'"
+
+
+async def recent_agent_runs(*, task: str | None = None, service: str | None = None, env: str | None = None,
+                            hours: int | None = None, limit: int = 30) -> list[str]:
+    """最近结束的 agent 运行（不含重放出来的），新的在前。回归重放"看有没有退步"的样本。
+    只取会话的第一轮：重放在新会话里跑，对话的后续轮次（"那换成上周呢"）没有前文，比不出东西。"""
+    conds, params = [_AGENT_RUN, "r.trigger_type <> 'replay'", "r.status IN ('success', 'failed')",
+                     "NOT EXISTS (SELECT 1 FROM runs p WHERE p.session_id = r.session_id AND p.created_at < r.created_at)"], []
+    for clause, val in (("r.service=%s", service), ("r.env=%s", env)):
+        if val:
+            conds.append(clause)
+            params.append(val)
+    if task:
+        conds.append("(r.task=%s OR r.task LIKE %s)")
+        params += [task, task + ":%"]
+    if hours:
+        conds.append("r.created_at > now() - make_interval(hours => %s)")
+        params.append(hours)
+    async with pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT r.run_id FROM runs r WHERE {' AND '.join(conds)} ORDER BY r.created_at DESC LIMIT %s",
+            (*params, max(1, min(limit, 200))))
+        return [r[0] for r in await cur.fetchall()]
+
+
 async def negative_runs(*, task: str | None = None, service: str | None = None, env: str | None = None,
                         hours: int | None = None, limit: int = 30) -> list[str]:
     """被 👎 过（整次或某一步）的 agent 运行，最近被评的在前。回归重放的默认样本。"""
-    conds, params = ["f.score < 0", "r.resolution = 'agent'", "r.trigger_type <> 'replay'"], []
+    conds, params = ["f.score < 0", _AGENT_RUN, "r.trigger_type <> 'replay'",
+                     "r.status IN ('success', 'failed', 'cancelled')"], []
     for clause, val in (("r.service=%s", service), ("r.env=%s", env)):
         if val:
             conds.append(clause)

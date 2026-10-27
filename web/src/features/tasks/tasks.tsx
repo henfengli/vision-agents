@@ -224,7 +224,7 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
               className="-ml-1 rounded p-0.5 text-fg-3 hover:bg-hover hover:text-fg">
               {expanded ? <LuChevronDown className="size-3.5" /> : <LuChevronRight className="size-3.5" />}
             </button>
-          ) : <span className="w-[18px] shrink-0" />}
+          ) : <span className="w-[14px] shrink-0" />}
           <Link to={taskHref(t.name)} onClick={(e) => e.stopPropagation()} className="truncate font-medium text-fg hover:text-accent">{t.title || t.name}</Link>
           {t.name === ASK_TASK && <Badge tone="accent">通用入口</Badge>}
           {t.form !== "agent" && <Badge tone="accent" icon={FORM_META[t.form].icon}>{FORM_META[t.form].label}</Badge>}

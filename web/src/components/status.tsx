@@ -99,8 +99,20 @@ export const REPLAY_VERDICT: Record<ReplayVerdict | "pending", { label: string; 
   pending: { label: "判定中", tone: "info", icon: <LuLoaderCircle className="animate-spin" /> },
 };
 
-export function VerdictBadge({ verdict, className }: { verdict: ReplayVerdict | null; className?: string }) {
-  const v = REPLAY_VERDICT[verdict ?? "pending"];
+/** 原运行没被 👎 的条目：把原答案当参照，判定读作"有没有退步" */
+export const REPLAY_VERDICT_REGRESSION: typeof REPLAY_VERDICT = {
+  ...REPLAY_VERDICT,
+  fixed: { ...REPLAY_VERDICT.fixed, label: "更好" },
+  same: { label: "持平", tone: "idle", icon: <LuCircleMinus /> },
+  worse: { ...REPLAY_VERDICT.worse, label: "退步" },
+};
+
+export function verdictMeta(verdict: ReplayVerdict | "pending" | null, regression = false) {
+  return (regression ? REPLAY_VERDICT_REGRESSION : REPLAY_VERDICT)[verdict ?? "pending"];
+}
+
+export function VerdictBadge({ verdict, regression, className }: { verdict: ReplayVerdict | null; regression?: boolean; className?: string }) {
+  const v = verdictMeta(verdict, regression);
   return <Badge tone={v.tone} icon={v.icon} className={className}>{v.label}</Badge>;
 }
 

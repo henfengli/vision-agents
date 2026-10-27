@@ -26,7 +26,7 @@ import time
 from typing import Any
 
 from ..config import Settings
-from ..domain import PromptsConfig, ResolvedRole
+from ..domain import PromptsConfig, Rejected, ResolvedRole
 from ..store import runs
 from .tools.catalog import Toolbox
 
@@ -34,6 +34,9 @@ log = logging.getLogger(__name__)
 
 SUBMIT_TOOL = "submit_result"
 _ACCEPTED = "已收到结构化结果"
+# LangGraph 的步数上限（每次模型调用、每批工具调用各算一步）：一次运行最多约 100 轮"想 → 调工具"
+STEP_LIMIT = 200
+SUBAGENT_STEP_LIMIT = 120
 
 
 def system_prompt(role: ResolvedRole, subagents: list[ResolvedRole], prompts: PromptsConfig,
@@ -189,7 +192,13 @@ def _task_tool(subs: dict[str, tuple[Any, str]]) -> Any:
         hit = subs.get(subagent)
         if hit is None:
             return f"[参数] 没有子代理 {subagent}（可选：{'、'.join(subs)}）"
-        result = await hit[0].ainvoke({"messages": [HumanMessage(content=description)]}, {"recursion_limit": 120})
+        from langgraph.errors import GraphRecursionError
+        try:
+            result = await hit[0].ainvoke({"messages": [HumanMessage(content=description)]},
+                                          {"recursion_limit": SUBAGENT_STEP_LIMIT})
+        except GraphRecursionError:
+            return (f"[子代理步数用完] {subagent} 走了 {SUBAGENT_STEP_LIMIT} 步还没结束（可能在原地打转）。"
+                    "把子问题拆小、写清楚要交回什么再委派，或者自己接着做")
         for m in reversed(result.get("messages") or []):
             if isinstance(m, AIMessage) and _text(m.content).strip():
                 return _text(m.content)
@@ -224,9 +233,14 @@ def _submit_tool(schema: dict) -> Any:
 async def invoke(agent: Any, run_id: str, thread_id: str, prompt: str | None, structured: bool = False) -> dict:
     """执行一次（prompt=None 表示从 checkpoint 续跑），事件实时落 run_events。
     → {"answer": 文字结论, "data": 结构化结果（声明了 output_schema 才有；没交成是 None）}。"""
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 200}
+    from langgraph.errors import GraphRecursionError
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": STEP_LIMIT}
     payload = None if prompt is None else {"messages": [{"role": "user", "content": prompt}]}
-    await _stream(agent, run_id, payload, config)
+    try:
+        await _stream(agent, run_id, payload, config)
+    except GraphRecursionError:
+        raise Rejected("step_limit", f"agent 走了 {STEP_LIMIT} 步（模型调用 + 工具调用）还没结束，可能在原地打转："
+                                     "看最后几步在做什么，改提示词或把问题拆小；续跑会从断点再给这么多步") from None
     messages = await _messages(agent, config)
     out: dict[str, Any] = {"answer": _answer(messages)}
     if structured:

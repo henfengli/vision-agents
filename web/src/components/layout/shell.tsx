@@ -68,7 +68,7 @@ function Sidebar() {
   );
 }
 
-/** 侧栏底部：当前身份 + 主题 / 个人偏好 / 退出（收起时只剩图标） */
+/** 侧栏底部：当前身份 + 主题 / 退出（收起时只剩图标） */
 function ThemeMenu({ collapsed }: { collapsed: boolean }) {
   const { theme } = useUi();
   const { data: meta } = useMeta();
@@ -81,7 +81,7 @@ function ThemeMenu({ collapsed }: { collapsed: boolean }) {
   const name = meta?.me.name ?? "—";
   return (
     <Menu align="start" trigger={
-      <button type="button" title={`${name} · 主题与账户`} aria-label={`${name}：主题、个人偏好与退出`}
+      <button type="button" title={`${name} · 主题与账户`} aria-label={`${name}：主题与退出`}
         className={cn("inline-flex h-7 min-w-0 items-center gap-1.5 rounded-md text-xs text-fg-3 hover:bg-hover hover:text-fg [&_svg]:size-3.5", collapsed ? "w-7 justify-center" : "px-2")}>
         {icon}{!collapsed && <span className="truncate">{name}</span>}
       </button>
@@ -90,7 +90,6 @@ function ThemeMenu({ collapsed }: { collapsed: boolean }) {
       { label: "深色", icon: <LuMoon />, onClick: set("dark") },
       { label: "跟随系统", icon: <LuMonitor />, onClick: set("system") },
       { separator: true, label: "" },
-      { label: "个人偏好", icon: <LuSettings />, onClick: () => navigate("/settings/preferences") },
       { label: "退出登录", icon: <LuLogOut />, onClick: logout },
     ]} />
   );

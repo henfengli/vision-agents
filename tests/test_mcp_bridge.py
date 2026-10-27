@@ -109,7 +109,6 @@ class McpBridgeTest(unittest.TestCase):
 
 
 class _Settings:
-    grafana = None
     scratch_dir = assets_dir = "."
 
 

@@ -70,7 +70,7 @@ async def build_spec(reg: Registry, run: dict) -> RunSpec:
         role=task.role, rule_output=run["output"] if by_rule else None,
         service=run["service"], env=run["env"], input=run["input"],
         question=question_text(run["task"], task, run["input"]), trigger=trigger, timeout_s=task.timeout_s,
-        # 回归重放：不投递、不沉淀（对比用，不该改动记忆或打扰群）
+        # 回归重放：不投递、不沉淀（对比用，不该改动记忆或打扰群）；召回的隔离见 prepare
         deliver=None if replay or not task.deliver else task.deliver.model_dump(exclude_none=True),
         recall=_pick(wanted.get("recall"), task.memory.recall, memory.recall),
         save=False if replay else _pick(wanted.get("save"), task.memory.save, memory.save),
@@ -158,9 +158,13 @@ class Pipeline:
 
         if spec.recall and spec.service:
             memory = await d.registry.config("memory")
+            # 回归重放：用现在的记忆，去掉原运行自己沉淀的；交接摘要按原运行的会话找前序会话；只读，不记命中
+            source = await runs.get(spec.replay_of) if spec.replay_of else None
             found = await recall(env=spec.env, service=spec.service, task=spec.task, query=spec.question,
-                                 error_text=spec.error_text, code_paths=spec.code_paths, session_id=spec.session_id,
-                                 run_id=spec.run_id, limit=memory.knowledge_limit, embedder=d.model_pool.embed)
+                                 error_text=spec.error_text, code_paths=spec.code_paths,
+                                 session_id=source["session_id"] if source else spec.session_id,
+                                 run_id=spec.run_id, limit=memory.knowledge_limit, embedder=d.model_pool.embed,
+                                 exclude_run=spec.replay_of, before=source["created_at"] if source else None)
             if found.text:
                 parts.append(found.text)
                 facts = sum(1 for h in found.knowledge if h["kind"] == "fact")
@@ -169,11 +173,13 @@ class Pipeline:
                     "stage": "recall", "title": f"召回 · 事实 {facts} 条 · 教训 {lessons} 条"
                     + ("（含同类报错命中）" if found.case_id else ""),
                     "content": found.text, "hits": found.knowledge, "lesson_id": found.case_id})
-            methods = await assets_store.search_active(spec.env, spec.service, spec.task.split(":")[0], limit=memory.asset_limit)
+            methods = await assets_store.search_active(spec.env, spec.service, spec.task.split(":")[0],
+                                                       limit=memory.asset_limit, exclude_run=spec.replay_of)
             if methods:
                 block = _methods_block(methods)
                 parts.append(block)
-                await assets_store.mark_used([a["id"] for a in methods])
+                if not spec.replay_of:
+                    await assets_store.mark_used([a["id"] for a in methods])
                 await runs.log_event(spec.run_id, "stage", {
                     "stage": "assets", "title": f"方法 · {len(methods)} 条", "content": block,
                     "assets": [{"id": a["id"], "kind": a["kind"], "name": a["name"]} for a in methods]})
@@ -353,7 +359,8 @@ async def _scope(d: Deps, spec: RunSpec, tools: list[str], extra: tuple = ()) ->
     return run_scope.RunScope(
         run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
-        extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=hidden, allow=allow)
+        extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=hidden, allow=allow,
+        replay_of=spec.replay_of)
 
 
 async def _cancelled(run_id: str) -> bool:

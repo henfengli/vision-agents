@@ -30,7 +30,8 @@ class RunScope:
     extra_tools: tuple = field(default_factory=tuple)       # 运行所在服务的 MCP 工具（角色带服务工具时），内核里同样可调
     notify_channel: str | None = None                       # notify 工具发往的渠道（任务投递渠道）
     hidden: tuple[str, ...] = field(default_factory=tuple)  # bash 沙箱 / 项目内核里遮蔽的路径（配置文件、docker…）
-    allow: tuple[str, ...] = field(default_factory=tuple)   # bash 沙箱里 home 下挂回的目录（各服务的代码目录、方法目录）
+    allow: tuple[str, ...] = field(default_factory=tuple)   # bash 沙箱里 home 下挂回的目录（代码目录、解释器环境、方法目录）
+    replay_of: str | None = None                            # 回归重放：原运行。沉淀方法、发通知不执行，方法不含原运行沉淀的
 
 
 _current: ContextVar[RunScope | None] = ContextVar("run_scope", default=None)

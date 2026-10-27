@@ -1,7 +1,7 @@
 /**
  * 反馈收件箱：大家对运行（或其中一步）的评价，默认只看 👎。
  * 用来回答"agent 最近哪里做得不好"：按服务 / 环境 / 任务 / 问题类型筛，点进运行看现场。
- * 改完提示词 / 任务定义 / 档案后，「用当前定义重放」带上当前筛选把这些 👎 重跑一遍（见 replays.tsx）。
+ * 改完提示词 / 任务定义 / 档案 / 记忆后，「重放」带上当前筛选把过去的运行重跑一遍（见 replays.tsx）。
  */
 import { useState } from "react";
 import { LuFlaskConical, LuMessageSquareWarning } from "react-icons/lu";
@@ -34,7 +34,7 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
   };
   const { data, loading } = useFeedbackInbox(filters);
   const active = !!(s.service || s.env || s.task || s.reason);
-  /** 重放只看 👎：带上服务 / 环境 / 任务 / 时间筛选（问题类型不参与选样） */
+  /** 重放带上服务 / 环境 / 任务 / 时间筛选（问题类型不参与选样）；样本（被 👎 的 / 最近的）在对话框里选 */
   const preset: ReplayRequest = {
     ...(s.task ? { task: s.task } : {}), ...(s.service ? { service: s.service } : {}), ...(env ? { env } : {}),
     ...(Number(s.hours) ? { hours: Number(s.hours) } : {}),
@@ -58,10 +58,8 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
           {score !== "1" && <FilterSelect label="问题" allLabel="全部" value={s.reason ?? ""} onChange={(v) => set({ reason: v })}
             options={(meta?.feedback_reasons ?? []).map((r) => ({ value: r.value, label: r.label }))} />}
         </FilterBar>
-        {score !== "1" && (
-          <Button size="sm" className="ml-auto" icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
-            title="改完提示词 / 任务定义 / 档案后，拿这些 👎 过的运行用当前定义重跑，看问题改好没有">用当前定义重放</Button>
-        )}
+        <Button size="sm" className="ml-auto" icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
+          title="改完提示词 / 任务定义 / 档案 / 记忆后，按当前的服务 / 环境 / 任务 / 时间筛选重跑过去的运行：被 👎 的看改好没有，最近的看有没有退步">重放</Button>
       </div>
       <Card>
         {loading && !data ? <SkeletonRows /> : !data?.length ? (
@@ -85,7 +83,7 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
         )}
       </Card>
       <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={preset}
-        hint={s.reason ? "问题类型筛选不参与选样：范围内被 👎 的 agent 运行都会重放" : "只重放被 👎 的 agent 运行，同一条运行只算一次"} />
+        hint={s.reason ? "问题类型筛选不参与选样；同一条运行只算一次" : "按上面的服务 / 环境 / 任务 / 时间筛选选样，同一条运行只算一次"} />
     </div>
   );
 }

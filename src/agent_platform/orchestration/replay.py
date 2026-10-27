@@ -1,14 +1,20 @@
-"""回归重放：改了角色提示词 / 任务定义 / 档案之后，拿被 👎 过的运行用当前定义重跑，看问题改好没有。
+"""回归重放：改了提示词 / 任务定义 / 档案 / 记忆（包括 👎 带来的扣分）之后，拿过去的运行用现在的一切重跑，
+看问题改好没有、别的有没有退步。
 
-为什么只看 👎：没人会闲着点 👍，但被指出问题的运行自带"错在哪"（问题类型 + 说明 + 哪一步），
-正好当判卷标准——不需要另外维护一套带标准答案的评测集。
+样本两种：
+- 被 👎 的（默认）：自带"错在哪"（问题类型 + 说明 + 哪一步），正好当判卷标准，不用另外维护评测集
+- 最近的 agent 运行（negative_only=false）或直接点名的任意运行：没人指出问题的，把原答案当参照，看有没有退步
 
 一次重放 = 一批：
-1. 选样：默认是一段时间内被 👎 的 agent 运行（可按任务 / 服务 / 环境筛），也可以直接点名运行
-2. 每条原运行用同样的输入开一个重放运行（trigger=replay：新会话、不沉淀记忆、不投递）
-3. 重放运行结束后，一次模型调用对照"原答案 + 人指出的问题 + 新答案"判定：
-   fixed（问题解决了）/ same（问题还在）/ worse（更糟或引入新错）/ unclear（判断不了）
-4. 页面上并排看原答案与新答案、判定理由，以及两边的配方（任务 / 角色 / 子代理 / 服务 / 平台提示词各是第几版）
+1. 选样：按任务 / 服务 / 环境 / 时间筛，也可以直接点名运行
+2. 每条原运行用同样的输入开一个重放运行（trigger=replay：新会话、不投递）
+3. 记忆隔离（pipeline / recall / 工具里按 RunSpec.replay_of 处理）：
+   - 召回用现在的记忆，但去掉原运行自己沉淀的（事实、教训、交接摘要、方法）——不然等于把原答案抄回来
+   - 交接摘要按原运行的会话找"前序会话"，只要原运行之前就有的、不含原会话自己的（和原运行当时看到的一致）
+   - 只读：不沉淀、不记召回命中、不记方法复用、不标过期；save_asset / notify 不执行
+4. 重放运行结束后，一次模型调用对照"原答案 + 人指出的问题 + 新答案"判定：
+   fixed（问题解决了 / 明显更好）/ same（问题还在 / 没有退步）/ worse（更糟或引入新错）/ unclear（判断不了）
+5. 页面上并排看原答案与新答案、判定理由，以及两边的配方（任务 / 角色 / 子代理 / 服务 / 平台提示词各是第几版）
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import json
 import logging
 
 from ..domain import FEEDBACK_REASONS, Caller, Rejected
+from ..domain.prompts import REPLAY_JUDGE, REPLAY_JUDGE_V1
 from ..registry import Registry
 from ..store import feedback as feedback_store
 from ..store import replays as replays_store
@@ -39,14 +46,18 @@ class Replayer:
 
     async def start(self, *, caller: Caller, run_ids: list[str] | None = None, task: str | None = None,
                     service: str | None = None, env: str | None = None, hours: int | None = None,
-                    limit: int = 20, title: str = "", note: str = "") -> dict:
+                    negative_only: bool = True, limit: int = 20, title: str = "", note: str = "") -> dict:
         filter_ = {k: v for k, v in {"run_ids": run_ids, "task": task, "service": service, "env": env,
                                      "hours": hours, "limit": limit}.items() if v}
-        sources = list(dict.fromkeys(run_ids)) if run_ids else await feedback_store.negative_runs(
+        if not run_ids and not negative_only:
+            filter_["negative_only"] = False
+        pick = feedback_store.negative_runs if negative_only else feedback_store.recent_agent_runs
+        sources = list(dict.fromkeys(run_ids)) if run_ids else await pick(
             task=task, service=service, env=env, hours=hours, limit=limit)
         if not sources:
-            raise Rejected("nothing_to_replay", "没有符合条件的被 👎 的运行")
-        auto = f"指定的 {len(sources)} 条运行" if run_ids else _title(task, service, env, len(sources))
+            raise Rejected("nothing_to_replay", "没有符合条件的" + ("被 👎 的运行" if negative_only else " agent 运行"))
+        auto = (f"指定的 {len(sources)} 条运行" if run_ids
+                else _title(task, service, env, len(sources), "👎" if negative_only else "最近运行"))
         replay_id = await replays_store.create(title=title or auto,
                                                filter_=filter_, note=note, by=caller.name, source_runs=sources)
         for run_id in sources:
@@ -89,6 +100,8 @@ class Replayer:
             return
         issues = await feedback_store.negatives_of(old["run_id"])
         template = (await self._registry.config("prompts")).replay_judge
+        if template.strip() == REPLAY_JUDGE_V1.strip():
+            template = REPLAY_JUDGE          # 存着的还是旧版默认（只会判 👎 的）：换成现在的默认
         prompt = template.format(
             task=old["task"], where=f"{old['service'] or '平台'} · {old['env']}",
             input=json.dumps(old["input"], ensure_ascii=False, indent=1)[:3000],
@@ -102,9 +115,9 @@ class Replayer:
         await replays_store.judge(item["id"], verdict, reason)
 
 
-def _title(task: str | None, service: str | None, env: str | None, n: int) -> str:
+def _title(task: str | None, service: str | None, env: str | None, n: int, what: str) -> str:
     scope = " · ".join(x for x in (task, service, env) if x) or "全部"
-    return f"{scope} · {n} 条 👎"
+    return f"{scope} · {n} 条{what}"
 
 
 def _answer(run: dict) -> str:
@@ -114,7 +127,7 @@ def _answer(run: dict) -> str:
 
 def _issues(items: list[dict]) -> str:
     if not items:
-        return "（没有具体说明，只知道被 👎）"
+        return "（无：这次运行没人指出问题。把旧答案当参照，看新答案有没有退步）"
     lines = []
     for f in items:
         where = "整次回答" if f["step_seq"] == 0 else f"第 {f['step_seq']} 步（{f['step_kind'] or '?'}：{_step(f['step'])}）"

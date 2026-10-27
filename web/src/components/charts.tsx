@@ -8,22 +8,24 @@ import { useMemo, useRef, useState, useLayoutEffect } from "react";
 import { cn } from "@/lib/cn";
 import { dayjs } from "@/lib/format";
 
-function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
+function useSize<T extends HTMLElement>(): [React.RefObject<T | null>, number, number] {
   const ref = useRef<T>(null);
-  const [w, setW] = useState(0);
+  const [size, setSize] = useState({ w: 0, h: 0 });
   useLayoutEffect(() => {
     if (!ref.current) return;
-    const ro = new ResizeObserver(([e]) => setW(e.contentRect.width));
+    const ro = new ResizeObserver(([e]) => setSize({ w: e.contentRect.width, h: e.contentRect.height }));
     ro.observe(ref.current);
     return () => ro.disconnect();
   }, []);
-  return [ref, w];
+  return [ref, size.w, size.h];
 }
 
 export interface StackPoint { t: string; success: number; failed: number; other: number }
 
-export function RunsChart({ data, height = 140, className }: { data: StackPoint[]; height?: number; className?: string }) {
-  const [ref, width] = useWidth<HTMLDivElement>();
+/** height 不给 = 撑满容器（容器要有高度，比如 flex-1）：和旁边的卡片同高时不留空白 */
+export function RunsChart({ data, height: fixed, className }: { data: StackPoint[]; height?: number; className?: string }) {
+  const [ref, width, measured] = useSize<HTMLDivElement>();
+  const height = fixed ?? Math.max(120, measured);
   const [hover, setHover] = useState<number | null>(null);
   const pad = { l: 28, r: 4, t: 6, b: 18 };
   const { x, y, max } = useMemo(() => {
@@ -39,9 +41,9 @@ export function RunsChart({ data, height = 140, className }: { data: StackPoint[
   const h = hover !== null ? data[hover] : null;
   void max;
   return (
-    <div ref={ref} className={cn("relative select-none", className)} style={{ height }} onMouseLeave={() => setHover(null)}>
+    <div ref={ref} className={cn("relative select-none", className)} style={fixed ? { height: fixed } : undefined} onMouseLeave={() => setHover(null)}>
       {width > 0 && (
-        <svg width={width} height={height} className="overflow-visible">
+        <svg width={width} height={height} className="absolute inset-x-0 top-0 overflow-visible">
           {ticks.map((t) => (
             <g key={t}>
               <line x1={pad.l} x2={width - pad.r} y1={y(t)} y2={y(t)} className="stroke-line" strokeDasharray={t === 0 ? undefined : "2 3"} />

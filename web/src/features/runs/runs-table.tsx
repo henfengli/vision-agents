@@ -1,8 +1,6 @@
 /**
  * 运行表格：运行页、服务页、任务页、概览复用。列可按场景裁剪。
  */
-import { LuArrowUpRight } from "react-icons/lu";
-
 import type { RunListItem } from "@/api/types";
 import { EnvBadge, ResolutionTag, RunStatusBadge, TriggerBadge } from "@/components/status";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
@@ -85,9 +83,11 @@ export function RunMiniList({ runs, limit = 6 }: { runs: RunListItem[] | undefin
               <div className="truncate text-[13px] text-fg group-hover:text-accent" title={r.summary || r.task_title}>{r.summary || r.task_title}</div>
               <div className="mt-0.5 truncate text-[11.5px] text-fg-3">{r.task_title || r.task}{r.service ? ` · ${r.service}` : ""}</div>
             </div>
-            <EnvBadge env={r.env} />
-            <span className="w-[72px] text-right text-[11.5px] text-fg-3">{ago(r.created_at)}</span>
-            <LuArrowUpRight className="size-3.5 text-fg-3 opacity-0 group-hover:opacity-100" />
+            {/* 环境和时间叠在右边：窄卡片里把宽度留给标题 */}
+            <div className="flex shrink-0 flex-col items-end gap-0.5">
+              <EnvBadge env={r.env} />
+              <span className="whitespace-nowrap text-[11px] text-fg-3">{ago(r.created_at)}</span>
+            </div>
           </Link>
         </li>
       ))}

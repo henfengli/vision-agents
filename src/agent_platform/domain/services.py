@@ -1,7 +1,7 @@
 """服务：agent 所在主机上实际部署着的一个业务项目（Python 项目）。
 
 一份定义同时服务两件事：
-- agent 看到什么：线上的代码目录、配置（生产是给 agent 的只读版，测试是真实的）、只读库、日志、主机、档案
+- agent 看到什么：线上的代码目录、配置（生产是给 agent 的只读版，测试是真实的）、只读库、日志、档案
 - 项目内核：用该环境的解释器、在该环境的代码目录、带着该环境的配置跑一段 Python（py 工具）
 
 同机部署：项目部署在哪台主机上，那台主机上就装着管这个环境的 agent 服务（部署配置 env / services）。
@@ -68,13 +68,19 @@ def _absolute(path: str) -> bool:
     return path.startswith(("/", "~")) or os.path.isabs(path)
 
 
+LOG_PREFIXES = ("docker:", "journal:")
+
+
 def _check_logs(v: dict[str, str] | None) -> dict[str, str]:
-    """日志：{名字: 文件路径 | docker:<容器名>}。值写空串 = （环境覆盖里）本环境没有这个日志。"""
+    """日志：{名字: 文件路径（可带 * 通配，取最新的那个）| docker:<容器名> | journal:<systemd 单元>}。
+    值写空串 = （环境覆盖里）本环境没有这个日志。"""
     for name, target in (v or {}).items():
         if not LOG_NAME_RE.match(name):
             raise ValueError(f"日志名不合法：{name!r}（小写字母开头，可含数字 _ -）")
-        if target and not (_absolute(target) or (target.startswith("docker:") and len(target) > 7)):
-            raise ValueError(f"日志 {name} 要写绝对路径（可以 ~ 开头）或 docker:<容器名>，不是 {target!r}")
+        prefixed = any(target.startswith(p) and len(target) > len(p) for p in LOG_PREFIXES)
+        if target and not (_absolute(target) or prefixed):
+            raise ValueError(f"日志 {name} 要写绝对路径（可以 ~ 开头，可带 * 通配）、docker:<容器名> 或 "
+                             f"journal:<systemd 单元>，不是 {target!r}")
     return v or {}
 
 
@@ -105,7 +111,6 @@ class EnvOverride(BaseModel):
 
     enabled: bool = True
     root: str | None = None                   # 这个环境的代码目录（不写跟随服务的 root）
-    hosts: list[str] | None = None
     databases: dict[str, str] = Field(default_factory=dict)   # 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
     code_paths: list[str] | None = None
     python: str | None = None                 # 这个环境的解释器（不写跟随服务的 python）
@@ -136,7 +141,6 @@ class ServiceView(BaseModel):
     python: str
     env_vars: dict[str, str]
     urls: dict[str, str]
-    hosts: list[str]
     databases: dict[str, str]                # 本环境的只读库：{库名: 连接串}（口令是 ${VAR} 占位，用到时才展开）
     config_files: list[dict[str, str]]       # [{key: 定义里的写法, path: 渲染后的路径}]；内容按 key 存库
     logs: dict[str, str]                     # {名字: 渲染后的文件路径 | docker:<容器>}
@@ -188,7 +192,6 @@ class ServiceDef(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)   # 服务级环境变量（可写 {env}）：项目内核带上
     # 有名字的地址（可写 {env}）：线上部署的页面 / API……给 agent 看，也可在 mcp 配置里用 {url:名字} 引用
     urls: dict[str, str] = Field(default_factory=dict)
-    hosts: list[str] = Field(default_factory=list)
     # 只读库：{库名: 连接串}，scheme 决定类型（postgresql / mysql / mariadb / doris / clickhouse(s) / mongodb）。
     # 口令写 ${VAR}，真实值放 secrets.env；各环境在 envs[env].databases 里按库名覆盖
     databases: dict[str, str] = Field(default_factory=dict)
@@ -242,7 +245,7 @@ class ServiceDef(BaseModel):
             service=name, env=env, title=self.title or name, enabled=self.enabled and o.enabled,
             root=root, code_paths=[render(p, env) for p in code_paths],
             python=python, env_vars={k: render(v, env, python=python) for k, v in self.env_vars.items()},
-            urls=self.urls_for(env), hosts=o.hosts if o.hosts is not None else self.hosts,
+            urls=self.urls_for(env),
             databases={k: v for k, v in {**self.databases, **o.databases}.items() if v},
             config_files=[{"key": c, "path": render(c, env)} for c in self.configs],
             logs=logs, mcp_servers=list(self.mcp), profile={**self.profile, **o.profile},

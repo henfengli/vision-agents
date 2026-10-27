@@ -1,6 +1,6 @@
 /**
  * 运行页三个标签：
- * - 运行：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上；环境默认跟随顶栏，每页条数取个人偏好。
+ * - 运行：状态 / 时间 / 服务 / 环境 / 任务 / 触发 / 发起方 筛选全部在 URL 上；环境默认跟随顶栏，每页 50 条。
  * - 反馈：大家点的 👍👎（默认只看 👎），见 feedback-inbox.tsx。
  * - 回归重放：拿被 👎 的运行用当前定义重跑、看问题改好没有，见 replays.tsx。
  */
@@ -29,6 +29,8 @@ const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
 
 const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"];
 
+const PAGE_SIZE = 50;
+
 type View = "runs" | "feedback" | "replays";
 
 type Search = { status: string; hours: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
@@ -38,7 +40,7 @@ export function RunsPage() {
   const view: View = s.view === "feedback" || s.view === "replays" ? s.view : "runs";
   return (
     <Page wide>
-      <PageHeader title="运行" description="每一次执行的事实记录：配方钉死用到的每样定义的版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义后在「回归重放」里拿 👎 过的运行重跑验证" />
+      <PageHeader title="运行" description="每一次执行的事实记录：配方钉死用到的每样定义的版本，全过程事件可回放；人给的评价集中在「反馈」，改完定义或记忆后在「回归重放」里拿过去的运行重跑验证" />
       <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
@@ -55,7 +57,7 @@ function RunList() {
   const env = envOf(s.env, ui.env);
   const filters: RunFilters = {
     status: (s.status as RunStatus) || "", hours: Number(s.hours) || undefined, service: s.service, env: env || undefined,
-    task: s.task, trigger: s.trigger, caller: s.caller, q: s.q, session_id: s.session_id, cursor: s.cursor, limit: ui.pageSize,
+    task: s.task, trigger: s.trigger, caller: s.caller, q: s.q, session_id: s.session_id, cursor: s.cursor, limit: PAGE_SIZE,
   };
   const { data, loading, fetching, refetch } = useRuns(filters);
   const { data: tasks } = useTasks();
@@ -83,7 +85,7 @@ function RunList() {
           ]} />
           <SearchInput value={s.q ?? ""} onChange={(v) => set({ q: v || undefined })} placeholder="运行 id 或问题关键词" className="w-60" />
           <div className="ml-auto flex items-center gap-2 text-xs text-fg-3">
-            {ui.autoRefresh && <><Dot tone="ok" pulse /> 实时</>}
+            <><Dot tone="ok" pulse /> 实时</>
             {data && <span>共 {data.total} 条</span>}
             <Button variant="ghost" size="sm" icon={<LuRefreshCw className={cn(fetching && "animate-spin")} />} onClick={() => refetch()}>刷新</Button>
           </div>
@@ -105,7 +107,7 @@ function RunList() {
           empty={<Empty icon={<LuActivity />} title="没有符合条件的运行" description={active ? "试试放宽筛选条件" : "任务运行后会出现在这里"} />} />
         {data && (data.next_cursor || data.prev_cursor) && (
           <div className="flex items-center justify-between border-t border-line px-4 py-2.5">
-            <span className="text-xs text-fg-3">共 {data.total} 条 · 每页 {ui.pageSize} 条</span>
+            <span className="text-xs text-fg-3">共 {data.total} 条 · 每页 {PAGE_SIZE} 条</span>
             <div className="flex gap-1.5">
               <Button size="sm" icon={<LuChevronLeft />} disabled={!data.prev_cursor} onClick={() => setS({ cursor: data.prev_cursor ?? undefined }, false)}>上一页</Button>
               <Button size="sm" disabled={!data.next_cursor} onClick={() => setS({ cursor: data.next_cursor ?? undefined }, false)}>下一页<LuChevronRight /></Button>

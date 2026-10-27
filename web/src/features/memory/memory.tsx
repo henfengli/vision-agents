@@ -3,18 +3,18 @@
  *   档案 = 人写的：服务 / 任务定义里的 profile，逐字置顶注入（在服务、任务页编辑）
  *   记忆 = agent 记下的：事实 / 报错教训（交接摘要是会话内部用的，不在列表里）
  *   方法 = 可执行的做法与脚本
- * 标签：记忆 · 方法 · 可升格（被反复召回、没挨过 👎 的事实，值得写进档案）· 检索试用。
+ * 标签：记忆 · 方法 · 可升格（被反复召回、没挨过 👎 的事实，值得写进档案）。
  * 记忆按服务分区：env 为空的条目对该服务所有环境成立；选某个环境 = 该环境的 + 通用的。
  * 记忆列表与方法列表也被服务 / 任务详情页的「记忆」标签复用。
  */
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  LuArrowUpFromLine, LuBookOpen, LuBrain, LuCircleAlert, LuFile, LuGitBranch, LuHistory, LuLightbulb, LuPlus, LuScrollText, LuSearch,
+  LuArrowUpFromLine, LuBookOpen, LuBrain, LuCircleAlert, LuFile, LuGitBranch, LuHistory, LuLightbulb, LuPlus, LuScrollText,
   LuThumbsDown, LuWrench,
 } from "react-icons/lu";
 
 import { api, useAssets, useEnvs, useKnowledge, usePromotable, useServices, useTasks } from "@/api/hooks";
-import type { Asset, AssetKind, Knowledge, KnowledgeKind, KnowledgePromote, LessonCategory, MemoryFilters, MemoryHealth } from "@/api/types";
+import type { Asset, AssetKind, Knowledge, KnowledgeKind, KnowledgePromote, LessonCategory, MemoryFilters } from "@/api/types";
 import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { EnvBadge } from "@/components/status";
@@ -29,7 +29,7 @@ import { invalidate, useMutation, useQuery } from "@/lib/query";
 import { Link, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 
-type Tab = "knowledge" | "assets" | "promotable" | "playground";
+type Tab = "knowledge" | "assets" | "promotable";
 /** 列表的类型筛选：全部（事实 + 教训）/ 事实 / 教训 */
 export type KindFilter = "" | "fact" | "lesson";
 
@@ -58,28 +58,25 @@ export function MemoryPage() {
         { value: "knowledge", label: "记忆", icon: <LuBrain /> },
         { value: "assets", label: "方法", icon: <LuWrench /> },
         { value: "promotable", label: "可升格", icon: <LuArrowUpFromLine />, count: promotable?.length || null },
-        { value: "playground", label: "检索试用", icon: <LuSearch /> },
       ]} />
       <div className="mb-3">
         <FilterBar active={active} onClear={clear}>
           <ServiceFilter value={s.service ?? ""} onChange={(v) => setS({ service: v, task: undefined })} />
           <EnvFilter value={env} onChange={(v) => setS({ env: envParam(v, ui.env) })} includeShared={memoryTab} />
-          {(tab === "knowledge" || tab === "assets" || tab === "playground") && <TaskFilter value={s.task ?? ""} service={s.service} onChange={(v) => setS({ task: v })} />}
+          {(tab === "knowledge" || tab === "assets") && <TaskFilter value={s.task ?? ""} service={s.service} onChange={(v) => setS({ task: v })} />}
           {tab === "knowledge" && <FilterSelect label="状态" allLabel="生效中" value={s.status ?? ""} onChange={(v) => setS({ status: v })}
-            options={[{ value: "expired", label: "已过期" }, { value: "superseded", label: "被取代" }, { value: "all", label: "全部" }]} />}
+            options={[{ value: "negative", label: "挨过 👎" }, { value: "expired", label: "已过期" }, { value: "superseded", label: "被取代" }, { value: "all", label: "全部" }]} />}
           {tab === "assets" && <FilterSelect label="类型" allLabel="全部" value={s.kind ?? ""} onChange={(v) => setS({ kind: v })}
             options={ASSET_KINDS.map((k) => ({ value: k, label: ASSET_KIND[k] }))} />}
           {(tab === "knowledge" || tab === "assets") && <SearchInput value={s.q ?? ""} onChange={(v) => setS({ q: v })} placeholder="关键词…" className="w-56" />}
         </FilterBar>
       </div>
       {tab === "knowledge" && (
-        <KnowledgeList filters={filters} scope={{}} openId={openId} showHealth
-          kind={(s.kind === "fact" || s.kind === "lesson" ? s.kind : "") as KindFilter} onKindChange={(v) => setS({ kind: v })}
-          onShowPromotable={() => setS({ tab: "promotable", kind: undefined })} />
+        <KnowledgeList filters={filters} scope={{}} openId={openId}
+          kind={(s.kind === "fact" || s.kind === "lesson" ? s.kind : "") as KindFilter} onKindChange={(v) => setS({ kind: v })} />
       )}
       {tab === "assets" && <AssetList filters={{ ...filters, kind: s.kind }} scope={{}} openId={openId} />}
       {tab === "promotable" && <PromotableList service={s.service} env={env || undefined} />}
-      {tab === "playground" && <Playground service={s.service} env={env} task={s.task} />}
     </Page>
   );
 }
@@ -159,16 +156,14 @@ function targetLabel(target: string): string {
  * openId：从别处（运行详情的召回列表、全局搜索）链接过来时直接打开该条（不在当前筛选里也能打开）。
  * kind / onKindChange：给了就受控（记忆页放在 URL 里），否则组件自己记。
  */
-export function KnowledgeList({ filters, scope, openId, showHealth, kind, onKindChange, onShowPromotable }: {
-  filters: MemoryFilters; scope: MemoryScope; openId?: number; showHealth?: boolean;
-  kind?: KindFilter; onKindChange?: (v: KindFilter) => void; onShowPromotable?: () => void;
+export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
+  filters: MemoryFilters; scope: MemoryScope; openId?: number;
+  kind?: KindFilter; onKindChange?: (v: KindFilter) => void;
 }) {
   const [localKind, setLocalKind] = useState<KindFilter>("");
   const k = onKindChange ? kind ?? "" : localKind;
   const setKind = onKindChange ?? setLocalKind;
   const { data, loading } = useKnowledge({ ...filters, kind: k || undefined });
-  const { data: health } = useQuery(["memory", "health", filters.service, filters.env],
-    () => api.knowledgeHealth({ service: filters.service, env: filters.env }), { enabled: !!showHealth });
   const [selected, setSelected] = useState<number | null>(openId ?? null);
   /** 已在记忆页时再从全局搜索 / 链接点进另一条：跟着打开 */
   useEffect(() => { if (openId) setSelected(openId); }, [openId]);
@@ -185,7 +180,6 @@ export function KnowledgeList({ filters, scope, openId, showHealth, kind, onKind
           <Segmented size="sm" value={k} onChange={setKind} options={[{ value: "", label: "全部" }, { value: "fact", label: "事实" }, { value: "lesson", label: "教训" }]} />
           <Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>新建记忆</Button>
         </>} />
-      {showHealth && health && <HealthBar health={health} onShowPromotable={onShowPromotable} />}
       {loading ? <SkeletonRows /> : !data?.length ? (
         <Empty icon={<LuBrain />} title={k === "lesson" ? "没有教训" : k === "fact" ? "没有事实" : "没有记忆条目"}
           description="运行结束后会自动记下可复用的结论与报错教训；也可以手动录入" />
@@ -219,27 +213,6 @@ export function KnowledgeList({ filters, scope, openId, showHealth, kind, onKind
       <KnowledgeDialog open={creating} scope={scope} defaultKind={k === "lesson" ? "lesson" : "fact"} onClose={() => setCreating(false)} />
       <PromoteDialog entry={promoting} onClose={() => setPromoting(null)} />
     </Card>
-  );
-}
-
-function HealthBar({ health, onShowPromotable }: { health: MemoryHealth; onShowPromotable?: () => void }) {
-  const cells: [string, number, "" | "warn" | "bad" | "ok", (() => void)?][] = [
-    ["生效", health.active, ""], ["其中教训", health.lessons, ""], ["可升格", health.promotable, "ok", onShowPromotable],
-    ["零召回 30 天", health.zero_recall, "warn"], ["挨过 👎", health.negative, "bad"],
-    ["代码漂移", health.drifted, "warn"], ["疑似矛盾", health.conflicts, "warn"],
-  ];
-  return (
-    <div className="grid grid-cols-4 divide-x divide-line border-b border-line text-center sm:grid-cols-7">
-      {cells.map(([label, n, tone, onClick]) => {
-        const body = <>
-          <div className={cn("text-[17px] font-semibold tabular-nums", n > 0 && tone === "bad" ? "text-bad" : n > 0 && tone === "warn" ? "text-warn" : n > 0 && tone === "ok" ? "text-ok" : "text-fg")}>{n}</div>
-          <div className="text-[11.5px] text-fg-3">{label}</div>
-        </>;
-        return onClick && n > 0
-          ? <button key={label} type="button" onClick={onClick} className="px-3 py-2.5 hover:bg-hover/70">{body}</button>
-          : <div key={label} className="px-3 py-2.5">{body}</div>;
-      })}
-    </div>
   );
 }
 
@@ -704,48 +677,5 @@ function AssetDrawer({ asset, onClose }: { asset: Asset | null; onClose: () => v
         </div>
       )}
     </Drawer>
-  );
-}
-
-// ———————— 检索试用 ————————
-
-function Playground({ service, env, task }: { service?: string; env?: string; task?: string }) {
-  const [query, setQuery] = useState("");
-  const [res, setRes] = useState<Awaited<ReturnType<typeof api.searchKnowledge>> | null>(null);
-  const run = useMutation(() => api.searchKnowledge({ query, service: service ?? "", env: env ?? "", task }));
-  const ready = !!service && !!env && env !== "*";
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <Card>
-        <CardHeader title="检索试用" description="直接跑召回本身：混合检索 + 新鲜度校验 + 👎 扣分 + 任务谱系排序。不计入命中统计。" />
-        <div className="space-y-3 p-4">
-          {!ready && <div className="rounded-md bg-sunken px-3 py-2 text-[12.5px] text-fg-3">召回按 服务×环境 进行（该环境的 + 所有环境通用的）：先在上方选定服务和一个具体环境；选了任务则按该任务的谱系排序。</div>}
-          <Textarea rows={3} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="输入一个问题，看 agent 会被喂什么" />
-          <div className="flex justify-end">
-            <Button variant="primary" icon={<LuSearch />} disabled={!query.trim() || !ready} loading={run.pending}
-              onClick={async () => { try { setRes(await run.mutate(undefined)); } catch (e) { toast.error("检索失败", (e as Error).message); } }}>检索</Button>
-          </div>
-          {res && (
-            <ol className="space-y-2 pt-2">
-              {res.hits.length === 0 && <div className="text-[12.5px] text-fg-3">没有命中</div>}
-              {res.hits.map((h) => (
-                <li key={h.id} className="rounded-md border border-line p-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-[11px] text-fg-3">#{h.rank}</span><KindBadge kind={h.kind} />
-                    {h.kind === "lesson" ? <LessonMeta k={h} /> : <code className="font-mono text-[12.5px] text-fg">{h.key}</code>}
-                    <ScopeEnv env={h.env} />
-                  </div>
-                  <div className="mt-1 text-[12.5px] text-fg-2">{h.content}</div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </div>
-      </Card>
-      <Card>
-        <CardHeader title="注入的提示词块" description="角色实际看到的文本" />
-        <div className="p-4">{res ? (res.block ? <CodeBlock code={res.block} wrap maxHeight={520} /> : <div className="text-[12.5px] text-fg-3">无命中，不注入</div>) : <div className="text-[12.5px] text-fg-3">检索后在这里显示</div>}</div>
-      </Card>
-    </div>
   );
 }

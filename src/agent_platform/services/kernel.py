@@ -35,12 +35,13 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from ..agent.tools.bash import build_safe_env
-from ..agent.tools.sandbox import bwrap_argv, has_bwrap, limit_argv, scope_env
+from ..agent.tools.sandbox import bwrap_argv, has_bwrap, limit_argv, scope_env, work_dir
 from ..config import LimitsConfig
 
 log = logging.getLogger(__name__)
 
 MAX_RESULT_CHARS = 20_000
+ROOM_WAIT_S = 120              # 内核数到上限且都在执行时，新会话的 py 调用最多等这么久
 
 DRIVER = r'''
 import ast, io, json, os, signal, sys, time, traceback
@@ -217,16 +218,28 @@ class KernelManager:
         hidden：本运行 bash 沙箱的遮蔽（所有服务的配置），和 spec 的合并。
         tools：内核里可调用的平台工具（名字 → async 实现），在调用方的上下文（RunScope）里执行。"""
         notice = ""
-        async with self._starting:
-            if restart:
-                await self.shutdown(key)
-            k = self._kernels.get(key)
-            if k is not None and k.alive and k.digest != spec.get("digest", "") and not k.lock.locked():
-                await self.shutdown(key)                # 配置 / 解释器换了：import 过的还是旧的，重启
-                k = None
-                notice = "[内核已重启：本环境的配置、解释器或可见范围变了，之前的变量已清空]\n"
-            if k is None or not k.alive:
-                k = await self._start(key, spec, hidden)
+        waited = 0.0
+        while True:
+            async with self._starting:
+                if restart:
+                    await self.shutdown(key)
+                    restart = False
+                k = self._kernels.get(key)
+                if k is not None and k.alive and k.digest != spec.get("digest", "") and not k.lock.locked():
+                    await self.shutdown(key)                # 配置 / 解释器换了：import 过的还是旧的，重启
+                    k = None
+                    notice = "[内核已重启：本环境的配置、解释器或可见范围变了，之前的变量已清空]\n"
+                if k is None or not k.alive:
+                    k = await self._start(key, spec, hidden) if await self._make_room() else None
+            if k is not None:
+                break
+            # 内核数到上限且都在执行代码：不打断别人，在锁外等一个空位（别的会话的 py 调用照常进出）
+            if waited >= ROOM_WAIT_S:
+                raise KernelError(f"项目内核已满（{self._max} 个都在执行代码），等了 {int(waited)}s 还没有空位，稍后再试")
+            await asyncio.sleep(2)
+            waited += 2
+        if waited:
+            notice += f"[等了 {int(waited)}s 内核空位]\n"
         tools = tools or {}
         async with k.lock:
             k.last_used = time.monotonic()
@@ -296,10 +309,10 @@ class KernelManager:
         python = spec["python"]
         if not (shutil.which(python) or os.path.isfile(python)):
             raise KernelError(f"找不到 {spec['service']} 在 {spec['env']} 的解释器 {python}（服务定义 → python）")
-        await self._make_room()
-        os.makedirs(self._scratch, exist_ok=True)
+        work = work_dir(self._scratch, key)          # 本会话的工作目录，和 bash 共用；scratch 整个可写
+        os.makedirs(work, exist_ok=True)
         env = {**build_safe_env(), **spec.get("env_vars", {}), "SVC_ENV": spec["env"], "SVC_NAME": spec["service"],
-               "SCRATCH": self._scratch, "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
+               "SCRATCH": work, "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
                "AGENT_METHOD_PATHS": os.pathsep.join(spec.get("method_paths") or [])}
         argv = [python, "-u", "-c", DRIVER]
         workdir = spec.get("workdir") or None
@@ -329,14 +342,16 @@ class KernelManager:
         log.info("项目内核已启动 %s（%s，pid %s）", key, python, proc.pid)
         return k
 
-    async def _make_room(self) -> None:
+    async def _make_room(self) -> bool:
+        """到上限时回收最久没用的空闲内核。都在执行代码时不打断别人，返回 False（调用方等一会儿再来）。"""
         while len(self._kernels) >= self._max:
             idle = [k for k in self._kernels.values() if not k.lock.locked()]
-            if not idle:                              # 都在执行：不打断别人的运行
-                raise KernelError(f"项目内核已满（{self._max} 个都在执行代码），稍后再试")
+            if not idle:
+                return False
             oldest = min(idle, key=lambda k: k.last_used)
             log.info("内核数到上限 %d，回收最久没用的 %s", self._max, oldest.key)
             await self.shutdown(oldest.key)
+        return True
 
     async def _reap_forever(self) -> None:
         while self._kernels:

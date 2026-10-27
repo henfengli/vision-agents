@@ -82,11 +82,12 @@ function Header({ run }: { run: Run }) {
   };
   const [correcting, setCorrecting] = useState(false);
   const [replaying, setReplaying] = useState(false);
-  /** 回归重放只收被 👎 过的 agent 运行 */
-  const replayable = !live && run.resolution === "agent" && run.feedback.some((f) => f.score < 0);
   /** 内建任务（失败时 resolution 还是空，看任务定义）：后端不支持续跑，纠正也没有意义 */
   const { data: tasks } = useTasks();
   const builtin = run.resolution === "builtin" || tasks?.find((t) => t.name === run.task.split(":")[0])?.form === "builtin";
+  /** 回归重放：任何结束了的 agent 运行（规则命中、内建、本身就是重放出来的除外） */
+  const replayable = !live && !builtin && run.resolution !== "rule" && !run.replay_of;
+  const disliked = run.feedback.some((f) => f.score < 0);
   const failed = run.status === "failed" && !builtin;
   /** 失败的续跑（同一个 run 从断点继续）；其余重跑（新 run、新会话，跳过去重） */
   const again = async () => {
@@ -129,7 +130,9 @@ function Header({ run }: { run: Run }) {
         )}
         {run.trigger.type === "chat" && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
         {!live && !builtin && <Button icon={<LuPencilLine />} onClick={() => setCorrecting(true)}>纠正</Button>}
-        {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)} title="改完提示词 / 任务定义 / 档案后，用当前定义重跑这条，看 👎 指出的问题改好没有">重放</Button>}
+        {replayable && <Button icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
+          title={disliked ? "改完提示词 / 任务定义 / 档案 / 记忆后，用现在的一切重跑这条，看 👎 指出的问题改好没有"
+            : "改完提示词 / 任务定义 / 档案 / 记忆后，用现在的一切重跑这条，把这次的答案当参照看有没有退步"}>重放</Button>}
         {live ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消</Button>
           : <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} onClick={again}>{failed ? "续跑" : "重跑"}</Button>}
         <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
@@ -378,8 +381,9 @@ function ModelMeta({ p, className }: { p: RunEvent["payload"]; className?: strin
 
 function Sidebar({ run }: { run: Run }) {
   const c = run.context;
+  /* 宽屏时侧栏贴顶、自己滚：时间线短的时候左边不会空一大截，时间线长的时候侧栏一直看得见 */
   return (
-    <div className="min-w-0 space-y-4">
+    <div className="min-w-0 space-y-4 xl:sticky xl:top-0 xl:max-h-[calc(100dvh-48px-3.5rem)] xl:self-start xl:overflow-y-auto xl:pr-0.5">
       <Card>
         <CardHeader title="输入" />
         <div className="p-3"><JsonView value={run.input} maxHeight={260} /></div>

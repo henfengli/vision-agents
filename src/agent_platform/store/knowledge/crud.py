@@ -241,35 +241,6 @@ async def evolution_chain(env: str, service: str, key: str) -> list[dict]:
     return chain
 
 
-async def similar_pairs(env: str, service: str | None = None,
-                        threshold: float = 0.85, limit: int = 20) -> list[dict]:
-    """疑似矛盾/重复对：同域两条生效条目向量余弦相似度超阈值。
-    pgvector 缺失或无向量时返回空（不造数据）。"""
-    where = "a.env=%s AND a.service=b.service AND a.id<b.id" \
-            " AND a.expired=false AND a.valid_to IS NULL" \
-            " AND b.expired=false AND b.valid_to IS NULL" \
-            " AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL"
-    params: list = [env]
-    if service:
-        where += " AND a.service=%s"
-        params.append(service)
-    params += [threshold, limit]
-    try:
-        async with pool().connection() as conn:
-            cur = await conn.execute(
-                "SELECT a.id, a.key, a.content, b.id, b.key, b.content,"
-                " 1 - (a.embedding <=> b.embedding) AS sim"
-                " FROM knowledge a JOIN knowledge b ON " + where +
-                " AND 1 - (a.embedding <=> b.embedding) > %s"
-                " ORDER BY sim DESC LIMIT %s", tuple(params))
-            rows = await cur.fetchall()
-    except Exception:  # noqa: BLE001 —— 无 pgvector 时矛盾检测不可用
-        return []
-    return [{"a": {"id": r[0], "key": r[1], "content": r[2]},
-             "b": {"id": r[3], "key": r[4], "content": r[5]},
-             "similarity": round(float(r[6]), 3)} for r in rows]
-
-
 async def update_content(entry_id: int, content: str,
                          embedder=None) -> None:
     """网页编辑：改内容并刷新有效期（视为人工纠正，重新生效）。

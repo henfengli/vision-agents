@@ -132,7 +132,8 @@ export function RoleDetailPage() {
         <>
           {tab === "overview" && (
             <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
-              <Card>
+              {/* 不跟右边一起拉高（提示词短时卡片底下不留空），滚动时贴顶 */}
+              <Card className="xl:sticky xl:top-0 xl:self-start">
                 <CardHeader title="生效的系统提示" description={resolved && resolved.lineage.length > 1 ? `沿继承链合并：${resolved.lineage.join(" → ")}` : "执行时作为该角色的系统提示"} />
                 <div className="p-4">{resolved ? <CodeBlock code={resolved.prompt} wrap maxHeight={640} /> : <Skeleton className="h-64" />}</div>
               </Card>

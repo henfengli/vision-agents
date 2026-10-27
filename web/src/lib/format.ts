@@ -2,18 +2,15 @@ import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import "dayjs/locale/zh-cn";
 
-import { getUi } from "./store";
-
 dayjs.extend(relativeTime);
 dayjs.locale("zh-cn");
 
 export { dayjs };
 
-/** 相对时间："3 分钟前"；超过 7 天给日期。个人偏好选了"绝对时间"则一律给日期时间 */
+/** 相对时间："3 分钟前"；超过 7 天给日期 */
 export function ago(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = dayjs(iso);
-  if (getUi().timeFormat === "absolute") return d.format(d.year() === dayjs().year() ? "MM-DD HH:mm" : "YYYY-MM-DD HH:mm");
   if (Math.abs(dayjs().diff(d, "day")) >= 7) return d.format("MM-DD HH:mm");
   return d.fromNow();
 }

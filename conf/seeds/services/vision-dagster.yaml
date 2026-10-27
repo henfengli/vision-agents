@@ -35,12 +35,10 @@ mcp:
     envs: {prod: {}, test: {}}
 envs:
   prod:
-    hosts: [172.24.16.100]
     urls: {deployed: "https://vision-dagster-prod.ipa.zs:9902"}
     databases:
       ck: "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default"
   test:
-    hosts: [172.24.24.136]
     urls: {deployed: "https://vision-dagster-test.ipa.zs:9901"}
 profile:
   env_notes: 线上是 docker 部署（docker-compose.template.yaml 生成 docker-compose.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。*.india 模板是印度部署的，不用

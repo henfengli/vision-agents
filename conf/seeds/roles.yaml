@@ -1,5 +1,5 @@
 # 角色 = 怎么干活：系统提示 + 工具 + 可委派的子代理。与服务无关；服务特有的能力（服务定义里的 mcp）自动带上。
-# 工具：py bash service_info logs host_status db_query host_metrics save_asset notify + 平台 MCP 工具；
+# 工具：py bash service_info logs host_status db_query save_asset notify + 平台 MCP 工具；
 #   "*" = 全部；"mcp:<server>" = 某个平台 MCP server 的全部工具（如 mcp:browser）。
 # py 是项目内核：在线上的代码目录和解释器里跑代码（生产的配置换成给 agent 的只读版，测试用真实配置），import 项目模块、调项目函数；
 #   角色的其他工具在里面是同名函数（批量 / 循环调工具写一段 py 即可）。读写文件用 bash。
@@ -22,7 +22,7 @@ generalist:
 ops_analyst:
   title: 运维分析
   description: 报错定位与根因分析：看线上日志与主机、读代码、在项目环境里复现、查库
-  tools: [py, bash, service_info, logs, host_status, db_query, host_metrics, save_asset, notify]
+  tools: [py, bash, service_info, logs, host_status, db_query, save_asset, notify]
   subagents: [data_searcher]
   prompt: |
     你是运维分析工程师，就在出问题的服务的部署主机上。拿到一次失败时：
@@ -62,7 +62,7 @@ inspector:
   title: 巡检
   description: 按沉淀的方法做日常巡检，异常才通知
   extends: ops_analyst
-  tools: [py, bash, service_info, logs, host_status, db_query, host_metrics, save_asset, notify]
+  tools: [py, bash, service_info, logs, host_status, db_query, save_asset, notify]
   subagents: []
   prompt_append: |
     你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。

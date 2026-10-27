@@ -89,10 +89,9 @@ const TOOLS: ToolInfo[] = [
   { name: "py", title: "项目内核", description: "在线上的代码目录和解释器里执行代码（生产的配置换成只读版，测试用真实配置）：import 项目模块、调项目函数，变量会话内保留", group: "service", dangerous: true },
   { name: "bash", title: "Shell", description: "bwrap 沙箱：全盘只读、home 只露代码目录、工作目录和 /tmp 可写、调用结束进程全灭", group: "core", dangerous: true },
   { name: "service_info", title: "服务信息", description: "本运行服务×环境的目录、配置内容（打码）、git 状态", group: "service", dangerous: false },
-  { name: "logs", title: "看日志", description: "读本服务本环境线上的日志（文件 / docker 容器），可按行数、正则过滤", group: "service", dangerous: false },
-  { name: "host_status", title: "主机状况", description: "部署主机的负载、内存、磁盘、大进程、docker 容器、nginx", group: "service", dangerous: false },
+  { name: "logs", title: "看日志", description: "读本服务本环境线上的日志（文件 / docker 容器 / systemd 单元），按行数取尾部或在整个文件里按正则搜", group: "service", dangerous: false },
+  { name: "host_status", title: "主机状况", description: "部署主机的负载、内存、磁盘、大进程；本服务的进程、监听端口、crontab、容器资源；nginx", group: "service", dangerous: false },
   { name: "db_query", title: "只读查库", description: "本服务本环境登记的只读库：PostgreSQL / MySQL / MariaDB / Doris / ClickHouse / MongoDB；大结果写文件", group: "service", dangerous: false },
-  { name: "host_metrics", title: "主机指标", description: "部署主机内存/负载/根盘（Grafana）", group: "service", dangerous: false },
   { name: "save_asset", title: "沉淀方法", description: "把可复用的方法/脚本/查询/基线存入记忆", group: "memory", dangerous: false },
   { name: "notify", title: "发通知", description: "发 markdown 通知到任务的通知渠道", group: "notify", dangerous: false },
   { name: "browser_navigate", title: "browser_navigate", description: "打开一个网址（@playwright/mcp）", group: "mcp", dangerous: false, server: "browser" },
@@ -143,7 +142,7 @@ function viewOf(s: Svc, env: string) {
   const codePaths = o.code_paths ?? (s.code_paths.length ? s.code_paths : rawRoot ? [rawRoot] : []);
   return {
     enabled: envEnabled(s, env), root: render(rawRoot, env), code_paths: codePaths.map((p) => render(p, env)),
-    python: pythonOf(s, env), urls: urlsOf(s, env), hosts: o.hosts ?? s.hosts,
+    python: pythonOf(s, env), urls: urlsOf(s, env),
     // 基座 + 环境覆盖（按库名 / 日志名），空串 = 本环境没有
     databases: Object.fromEntries(Object.entries({ ...s.databases, ...(o.databases ?? {}) }).filter(([, v]) => v)),
     logs: Object.fromEntries(Object.entries({ ...s.logs, ...(o.logs ?? {}) }).filter(([, v]) => v).map(([k, v]) => [k, render(v, env)])),
@@ -174,11 +173,12 @@ function checkDbs(dbs: Record<string, string> | undefined, where: string) {
   }
 }
 const absolute = (p: string) => p.startsWith("/") || p.startsWith("~");
-/** 日志：{名字: 文件路径 | docker:<容器名>}；环境覆盖里值写空串 = 本环境没有这个日志（与后端 _check_logs 一致） */
+/** 日志：{名字: 文件路径（可带 * 通配）| docker:<容器名> | journal:<systemd 单元>}；环境覆盖里值写空串 = 本环境没有这个日志（与后端 _check_logs 一致） */
 function checkLogs(logs: Record<string, string> | undefined, where: string) {
   for (const [name, target] of Object.entries(logs ?? {})) {
     if (!/^[a-z][a-z0-9_-]{0,30}$/.test(name)) throw invalid(`${where}日志名不合法：'${name}'（小写字母开头，可含数字 _ -）`);
-    if (target && !(absolute(target) || (target.startsWith("docker:") && target.length > 7))) throw invalid(`${where}日志 ${name} 要写绝对路径（可以 ~ 开头）或 docker:<容器名>，不是 '${target}'`);
+    const prefixed = ["docker:", "journal:"].some((p) => target.startsWith(p) && target.length > p.length);
+    if (target && !(absolute(target) || prefixed)) throw invalid(`${where}日志 ${name} 要写绝对路径（可以 ~ 开头，可带 * 通配）、docker:<容器名> 或 journal:<systemd 单元>，不是 '${target}'`);
   }
 }
 /** configs / hidden：绝对路径（可以 ~ 开头），去重 */
@@ -248,7 +248,7 @@ on("POST", "/v1/services", (_p, _q, body) => {
   if (db.services.some((s) => s.name === body.name)) throw new ApiError(409, "conflict", `服务 ${body.name} 已存在`);
   if (!/^[a-z][a-z0-9._-]{1,40}$/.test(String(body.name ?? ""))) throw invalid(`服务名不合法：'${body.name}'（小写字母开头，可含数字 . _ -，2~41 字符）`);
   const s: Service = {
-    title: "", description: "", root: "", code_paths: [], python: "", env_vars: {}, urls: {}, hosts: [], databases: {},
+    title: "", description: "", root: "", code_paths: [], python: "", env_vars: {}, urls: {}, databases: {},
     configs: [], hidden: [], logs: {}, mcp: {}, envs: {}, profile: {}, enabled: true, ...body, version: 1, updated_by: ME.name, updated_at: now(),
   };
   db.services.push(s);
@@ -308,7 +308,7 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
   const prot = envProtected(p.env);
   return {
     service: s.name, env: p.env, enabled: v.enabled, protected: prot, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
-    mcp_servers: Object.keys(s.mcp ?? {}), hosts: v.hosts, databases: redactDbs(v.databases), logs: v.logs, profile: v.profile,
+    mcp_servers: Object.keys(s.mcp ?? {}), databases: redactDbs(v.databases), logs: v.logs, profile: v.profile,
     // 不受保护的环境用真实配置：没有给 agent 的版本
     config_files: v.config_files.map((c) => {
       const last = prot ? lastRow(s.name, p.env, c.key) : undefined;
@@ -719,12 +719,16 @@ function submitRun(body: SubmitBody, trigger: string, manual = false): RunAccept
 
 const answerOf = (r: db.MockRun) => { const o = db.detailOf(r).output; return o?.answer ?? o?.error ?? null; };
 
+const disliked = (r: db.MockRun) => r.feedback.some((x) => x.score < 0);
+/** agent 运行：有角色、不是规则命中 / 内建（失败的 agent 运行 resolution 是空的） */
+const agentRun = (r: db.MockRun) => !!r.role && (r.resolution ?? "agent") === "agent" && r.trigger.type !== "replay";
+
 function replayItemOf(it: db.MockReplayItem): ReplayItem {
   const src = findRun(it.source_run);
   const next = it.new_run ? db.runs.find((r) => r.run_id === it.new_run) : undefined;
   return {
     id: it.id, source_run: it.source_run, new_run: it.new_run, verdict: it.verdict, reason: it.reason, judged_at: it.judged_at,
-    task: src.task, service: src.service, env: src.env, summary: src.summary,
+    task: src.task, service: src.service, env: src.env, summary: src.summary, negative: disliked(src),
     before: { task_version: src.task_version, role_version: src.role_version, recipe: src.recipe, answer: answerOf(src), status: src.status },
     after: next ? { task_version: next.task_version, role_version: next.role_version, recipe: next.recipe, answer: answerOf(next), status: next.status }
       : { task_version: null, role_version: null, recipe: null, answer: null, status: null },
@@ -735,6 +739,7 @@ function replaySummaryOf(r: db.MockReplay): ReplaySummary {
   const n = (v: ReplayVerdict | null) => r.items.filter((i) => i.verdict === v).length;
   return {
     id: r.id, title: r.title, filter: r.filter, note: r.note, created_by: r.created_by, created_at: r.created_at,
+    regression: r.items.some((i) => !disliked(findRun(i.source_run))),
     counts: { total: r.items.length, fixed: n("fixed"), same: n("same"), worse: n("worse"), unclear: n("unclear") + n("error"), pending: n(null) },
   };
 }
@@ -749,15 +754,26 @@ const JUDGE: Record<Exclude<ReplayVerdict, "error">, string> = {
 };
 
 /** 判定一条（重放运行已结束才判）：没成功结束 → 原运行成功则 worse 否则 same；其余按运行 id 确定性地给 */
+const JUDGE_REGRESSION: Record<Exclude<ReplayVerdict, "error">, string> = {
+  fixed: "新答案结论与原答案一致，依据更充分（多给了 SQL 与时间范围）。",
+  same: "新答案与原答案结论一致、质量相当，没有退步。",
+  worse: "新答案的结论和原答案矛盾，又没给出更充分的依据。",
+  unclear: "要看实际数据才能确认哪个答案对。",
+};
+
 function judgeItem(it: db.MockReplayItem) {
   const next = it.new_run ? db.runs.find((r) => r.run_id === it.new_run) : undefined;
   if (!next || !["success", "failed", "cancelled"].includes(next.status)) return;
   it._attempts = (it._attempts ?? 0) + 1;
+  const src = findRun(it.source_run);
   let verdict: Exclude<ReplayVerdict, "error">;
   let reason: string;
   if (next.status !== "success") {
-    verdict = findRun(it.source_run).status === "success" ? "worse" : "same";
+    verdict = src.status === "success" ? "worse" : "same";
     reason = `重放没有成功结束：${answerOf(next) ?? next.status}`.slice(0, 500);
+  } else if (!disliked(src)) {
+    verdict = (["same", "same", "fixed", "worse"] as const)[(next.run_id.charCodeAt(0) + it._attempts) % 4];
+    reason = JUDGE_REGRESSION[verdict];
   } else {
     verdict = (["fixed", "fixed", "same", "unclear"] as const)[(next.run_id.charCodeAt(0) + it._attempts) % 4];
     reason = JUDGE[verdict];
@@ -777,9 +793,18 @@ function finishLater(it: db.MockReplayItem, delay = 6000 + Math.random() * 3000)
 for (const r of db.replays) for (const it of r.items) if (it.verdict === null) finishLater(it, 8000);
 
 /** 被 👎 过（整次或某一步）的 agent 运行，最近被评的在前（不含重放运行本身） */
+/** 最近结束的 agent 运行（不限 👎），新的在前 */
+function recentRuns(f: ReplayFilter): string[] {
+  return db.runs
+    .filter((r) => agentRun(r) && (r.status === "success" || r.status === "failed")
+      && (!f.service || r.service === f.service) && (!f.env || r.env === f.env) && taskMatch(f.task, r.task)
+      && (!f.hours || within(r.created_at, Number(f.hours))))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, Math.max(1, Math.min(100, f.limit ?? 20))).map((r) => r.run_id);
+}
+
 function negativeRuns(f: ReplayFilter): string[] {
   return db.runs
-    .filter((r) => r.resolution === "agent" && r.trigger.type !== "replay" && r.feedback.some((x) => x.score < 0)
+    .filter((r) => agentRun(r) && !["queued", "running"].includes(r.status) && disliked(r)
       && (!f.service || r.service === f.service) && (!f.env || r.env === f.env) && taskMatch(f.task, r.task)
       && (!f.hours || r.feedback.some((x) => x.score < 0 && within(x.updated_at, Number(f.hours)))))
     .map((r) => ({ id: r.run_id, at: r.feedback.filter((x) => x.score < 0).map((x) => x.updated_at).sort().pop() ?? "" }))
@@ -789,14 +814,17 @@ function negativeRuns(f: ReplayFilter): string[] {
 on("GET", "/v1/replays", (_p, q) => [...db.replays].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, Number(q.limit) || 50).map(replaySummaryOf));
 on("POST", "/v1/replays", (_p, _q, body) => {
   const limit = Number(body.limit ?? 20);
-  const filter: ReplayFilter = Object.fromEntries(Object.entries({ run_ids: body.run_ids?.length ? body.run_ids : undefined, task: body.task, service: body.service, env: body.env, hours: body.hours, limit })
+  const named = !!body.run_ids?.length;
+  const negativeOnly = body.negative_only !== false;
+  const filter: ReplayFilter = Object.fromEntries(Object.entries({ run_ids: named ? body.run_ids : undefined, task: body.task, service: body.service, env: body.env, hours: body.hours, limit,
+    negative_only: !named && !negativeOnly ? false : undefined })
     .filter(([, v]) => v !== undefined && v !== null && v !== "")) as ReplayFilter;
-  const sources: string[] = body.run_ids?.length ? [...new Set<string>(body.run_ids)] : negativeRuns(filter);
-  if (!sources.length) throw new ApiError(400, "nothing_to_replay", "没有符合条件的被 👎 的运行");
+  const sources: string[] = named ? [...new Set<string>(body.run_ids)] : negativeOnly ? negativeRuns(filter) : recentRuns(filter);
+  if (!sources.length) throw new ApiError(400, "nothing_to_replay", negativeOnly ? "没有符合条件的被 👎 的运行" : "没有符合条件的 agent 运行");
   for (const id of sources) findRun(id);          // 点名的运行要存在
   const scope = [body.task, body.service, body.env].filter(Boolean).join(" · ") || "全部";
   const replay: db.MockReplay = {
-    id: Math.max(0, ...db.replays.map((r) => r.id)) + 1, title: String(body.title || `${scope} · ${sources.length} 条 👎`), filter,
+    id: Math.max(0, ...db.replays.map((r) => r.id)) + 1, title: String(body.title || (named ? `指定的 ${sources.length} 条运行` : `${scope} · ${sources.length} 条${negativeOnly ? "👎" : "最近运行"}`)), filter,
     note: String(body.note ?? ""), created_by: ME.name, created_at: now(), items: [],
   };
   for (const runId of sources) {
@@ -806,7 +834,9 @@ on("POST", "/v1/replays", (_p, _q, body) => {
     const src = db.runs.find((r) => r.run_id === runId);
     const task = src && db.tasks.find((t) => t.name === src.task.split(":")[0]);
     const svc = src?.service ? db.services.find((s) => s.name === src.service) : undefined;
-    const why = !src ? `运行 ${runId} 不存在` : !task ? `任务 ${src.task} 已不存在` : !task.enabled ? `任务 ${task.name} 已停用`
+    const why = !src ? `运行 ${runId} 不存在` : src.trigger.type === "replay" ? "这是重放出来的运行，请重放它的原运行"
+      : !agentRun(src) || ["queued", "running"].includes(src.status) ? "只能重放已经结束的 agent 运行（内建任务、规则命中、还在跑的不行）"
+      : !task ? `任务 ${src.task} 已不存在` : !task.enabled ? `任务 ${task.name} 已停用`
       : svc && !envEnabled(svc, src.env) ? `服务 ${svc.name} 在 ${src.env} 环境已停用` : null;
     if (why || !src) { Object.assign(item, { verdict: "error", reason: why, judged_at: now() }); continue; }
     const run = db.replayRunOf(src, now(), "running", ME.name);
@@ -841,20 +871,15 @@ const envMatch = (wanted: unknown, env: string) => !wanted || (wanted === "*" ? 
 /** kind 不给 = 事实与教训（交接摘要是会话内部用的） */
 const kindMatch = (wanted: unknown, kind: Knowledge["kind"]) => (wanted ? kind === wanted : kind !== "handoff");
 
+/** status：空 = 生效中；negative = 生效中且挨过 👎（feedback_score < 0）；all = 全部；其余按状态精确匹配 */
+const statusMatch = (wanted: unknown, k: Knowledge) =>
+  wanted === "all" || (wanted === "negative" ? k.status === "active" && k.feedback_score < 0 : wanted ? k.status === wanted : k.status === "active");
+
 on("GET", "/v1/knowledge", (_p, q) => db.knowledge.filter((k) =>
   (!q.service || k.service === q.service) && envMatch(q.env, k.env) && taskMatch(q.task, k.task) && kindMatch(q.kind, k.kind)
-  && (q.status === "all" || (q.status ? k.status === q.status : k.status === "active"))
+  && statusMatch(q.status, k)
   && (!q.q || k.key.includes(String(q.q)) || k.content.includes(String(q.q))))
   .sort((a, b) => a.service.localeCompare(b.service) || a.kind.localeCompare(b.kind) || a.key.localeCompare(b.key)));
-on("GET", "/v1/knowledge/health", (_p, q) => {
-  const ks = db.knowledge.filter((k) => k.kind !== "handoff" && (!q.service || k.service === q.service) && (!q.env || k.env === "" || k.env === q.env));
-  const active = ks.filter((k) => k.status === "active");
-  return {
-    active: active.length, zero_recall: active.filter((k) => k.hits_30d === 0).length, negative: active.filter((k) => k.feedback_score < 0).length,
-    drifted: ks.filter((k) => k.status === "expired").length, conflicts: q.env ? 1 : 0,
-    lessons: active.filter((k) => k.kind === "lesson").length, promotable: active.filter(db.isPromotable).length,
-  };
-});
 on("GET", "/v1/knowledge/promotable", (_p, q) => db.knowledge
   .filter((k) => db.isPromotable(k) && (!q.service || k.service === q.service) && envMatch(q.env, k.env))
   .sort((a, b) => b.hits_30d - a.hits_30d).slice(0, 30));
@@ -908,11 +933,6 @@ on("PATCH", "/v1/knowledge/:id", (p, _q, body) => {
   return k;
 });
 on("DELETE", "/v1/knowledge/:id", (p) => Object.assign(findKnowledge(p.id), { status: "expired", updated_at: now() }));
-on("POST", "/v1/knowledge/search", (_p, _q, body) => {
-  const words = String(body.query || "").split(/\s+/).filter(Boolean);
-  const hits = db.knowledge.filter((k) => k.status === "active" && k.kind !== "handoff" && k.service === body.service && envMatch(body.env, k.env) && words.some((w) => (k.key + k.content).includes(w))).slice(0, 5);
-  return { hits: hits.map((k, i) => ({ ...k, rank: i + 1 })), block: hits.length ? "[历史记忆——过去运行记下的，可能过时；与代码或数据矛盾时以实际为准]\n" + hits.map((k) => `- ${k.kind === "lesson" ? "[教训] " : ""}${k.key}: ${k.content}`).join("\n") : "" };
-});
 
 /** 同一个键已有内容就接在后面（已经包含就不重复）——与后端 _merged 一致 */
 const mergedProfile = (profile: Record<string, string>, key: string, text: string) => {

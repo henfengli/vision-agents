@@ -1,6 +1,6 @@
 """召回埋点与使用统计：记忆运营的事实源。
 
-写入方只有 recall_block（线上召回与页面检索试用两条路径，source 区分）；
+写入方只有运行前的召回（memory/recall.py；回归重放的运行不写）；
 埋点失败只告警不打断召回——统计永远不该拖垮主链路。
 """
 
@@ -34,7 +34,7 @@ async def record_hits(env: str, service: str, entries: list[dict],
 
 async def usage_map(env: str, days: int = 30) -> dict[int, dict]:
     """近 N 天每条目的使用统计：{entry_id: {hits, runs, last_hit}}。
-    只算真实召回（playground 试用不算使用）。"""
+    只算运行时的召回（source='recall'）。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT entry_id, COUNT(*), COUNT(DISTINCT run_id), MAX(created_at)"

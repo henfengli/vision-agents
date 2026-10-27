@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS recall_hits (
     service    TEXT NOT NULL,
     entry_id   BIGINT NOT NULL,
     run_id     TEXT,
-    source     TEXT NOT NULL DEFAULT 'recall',   -- recall / playground
+    source     TEXT NOT NULL DEFAULT 'recall',   -- recall（旧版本还有控制台试检索写的 playground，统计不算）
     rank       INT,
     created_at TIMESTAMPTZ DEFAULT now()
 );

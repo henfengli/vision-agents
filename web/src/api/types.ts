@@ -187,7 +187,6 @@ export type Databases = Record<string, string>;
 export interface ServiceEnvOverride {
   enabled?: boolean;            // false = 该服务在这个环境不接收运行、不起项目内核
   root?: string | null;         // 这个环境的代码目录；不写跟随服务的 root
-  hosts?: string[] | null;
   databases?: Databases;        // 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
   code_paths?: string[] | null;
   python?: string | null;       // 该环境的解释器；空 = 跟随服务的 python
@@ -209,7 +208,6 @@ export interface Service extends Ledger {
   env_vars: Record<string, string>;   // 服务级环境变量（可写 {env}）：项目内核带上；不支持 ${VAR}
   /** 有名字的地址（可写 {env}）：线上部署的页面 / API；mcp 配置里用 {url:名字} 引用 */
   urls: Record<string, string>;
-  hosts: string[];
   databases: Databases;  // 只读库（db_query 查询）；各环境在 envs[env].databases 里按库名覆盖
   /**
    * 项目读的配置文件路径（绝对路径，可写 ~、{env}）。受保护的环境（生产）：真实内容平台不读不显示，
@@ -218,7 +216,7 @@ export interface Service extends Ledger {
   configs: string[];
   /** 代码目录里其他含口令的文件或目录：生产只遮蔽、不替换；测试不遮 */
   hidden: string[];
-  /** 日志：{名字: 文件路径 | docker:<容器名>}，可写 {env}、~ */
+  /** 日志：{名字: 文件路径（可带 * 通配，取最新的那个）| docker:<容器名> | journal:<systemd 单元>}，可写 {env}、~ */
   logs: Record<string, string>;
   /** 服务自己的 MCP server：{名字: 连接配置}。字符串里可写 {env}、{url:名字}、${VAR}、{platform}、{platform_python} */
   mcp: Record<string, McpConnection>;
@@ -250,9 +248,8 @@ export interface ServiceView {
   code_paths: string[];
   urls: Record<string, string>;   // 该环境的地址（已渲染）
   mcp_servers: string[];          // 服务自己声明的 MCP server（运行在本服务上时工具自动出现）
-  hosts: string[];
   databases: Databases;           // 本环境的只读库（基座 + 覆盖，去掉空值；口令已打码）
-  logs: Record<string, string>;   // 本环境的日志：{名字: 渲染后的路径 | docker:<容器>}
+  logs: Record<string, string>;   // 本环境的日志：{名字: 渲染后的路径 | docker:<容器> | journal:<单元>}
   profile: Record<string, string>;
   config_files: ConfigFileStatus[];
 }
@@ -642,6 +639,8 @@ export interface ReplayFilter {
   service?: string;
   env?: string;
   hours?: number;
+  /** false = 选最近的 agent 运行（不限 👎），看改动有没有带来退步；不写 = 只选被 👎 的 */
+  negative_only?: boolean;
   limit?: number;
 }
 
@@ -662,6 +661,8 @@ export interface ReplaySummary {
   created_by: string;
   created_at: ISODate;
   counts: ReplayCounts;
+  /** 有没被 👎 的条目：判定读作"有没有退步"（fixed 更好 / same 持平 / worse 退步） */
+  regression: boolean;
 }
 
 export interface ReplaySide {
@@ -682,6 +683,8 @@ export interface ReplayItem {
   service: string | null;
   env: string;
   summary: string;
+  /** 原运行被 👎 过：判定看"问题改好没有"；否则把原答案当参照看"有没有退步" */
+  negative: boolean;
   before: ReplaySide & { status: RunStatus };
   after: ReplaySide & { status: RunStatus | null };
 }
@@ -690,7 +693,8 @@ export interface ReplayDetail extends ReplaySummary {
   items: ReplayItem[];
 }
 
-/** POST /v1/replays：不给 run_ids 就按条件选被 👎 的 agent 运行；没有符合条件的返回 400 nothing_to_replay */
+/** POST /v1/replays：不给 run_ids 就按条件选（默认被 👎 的，negative_only=false 选最近的）agent 运行；
+ *  run_ids 可以点名任何结束了的 agent 运行。没有符合条件的返回 400 nothing_to_replay */
 export interface ReplayRequest extends ReplayFilter {
   title?: string;
   note?: string;
@@ -827,16 +831,6 @@ export interface MemoryFilters {
 /** 记忆列表的筛选：kind 不给 = 事实与教训（不含交接摘要） */
 export interface KnowledgeFilters extends MemoryFilters {
   kind?: KnowledgeKind;
-}
-
-export interface MemoryHealth {
-  active: number;
-  zero_recall: number;
-  negative: number;
-  drifted: number;
-  conflicts: number;
-  lessons: number;              // 生效中的教训数
-  promotable: number;           // 可升格进档案的事实数
 }
 
 // ———————————————————— 统计 / 搜索 ————————————————————

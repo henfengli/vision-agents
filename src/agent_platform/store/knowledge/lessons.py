@@ -40,15 +40,17 @@ async def add(env: str, service: str, error_text: str, category: str, conclusion
                  category=category or "code")
 
 
-async def search_by_error(env: str, service: str, error_text: str) -> dict | None:
-    """同类报错的教训：本环境的优先，其次所有环境通用的。"""
+async def search_by_error(env: str, service: str, error_text: str, exclude_run: str | None = None) -> dict | None:
+    """同类报错的教训：本环境的优先，其次所有环境通用的。exclude_run：不要这次运行沉淀的（回归重放）。"""
     fp = fingerprint(error_text)
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, key, category, content, created_at, feedback_score FROM knowledge"
             " WHERE kind='lesson' AND service=%s AND env IN ('', %s) AND fingerprint=%s"
-            " AND NOT expired AND valid_to IS NULL ORDER BY (env = %s) DESC, created_at DESC LIMIT 1",
-            (service, env, fp, env))
+            # 不重放时参数是 NULL：整个条件为真（人工录入的教训 source_run 是 NULL，不能被滤掉）
+            " AND NOT expired AND valid_to IS NULL AND (%s::text IS NULL OR source_run IS DISTINCT FROM %s)"
+            " ORDER BY (env = %s) DESC, created_at DESC LIMIT 1",
+            (service, env, fp, exclude_run, exclude_run, env))
         row = await cur.fetchone()
     if not row:
         return None

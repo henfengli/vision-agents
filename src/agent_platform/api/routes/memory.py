@@ -3,11 +3,10 @@
 记忆 = agent 记下的事，一张表三种 kind：fact 事实 / lesson 报错教训 / handoff 交接摘要（列表默认不含）。
 按服务分区；env 为空的条目对所有环境成立，env 过滤 = 该环境的 + 通用的（env=* 只看通用的）。
 
-    GET    /v1/knowledge                service env task kind(fact|lesson|handoff) status(active|expired|superseded|all) q
+    GET    /v1/knowledge                service env task kind(fact|lesson|handoff)
+                                        status(active|negative|expired|superseded|all) q
     POST   /v1/knowledge                人工录入 {service, env?, kind, key, content, task, error?, category?}
-    GET    /v1/knowledge/health         service env
     GET    /v1/knowledge/promotable     service env：近 30 天被 ≥5 次运行召回、没挨过 👎 的事实（值得升格进档案）
-    POST   /v1/knowledge/search         试检索：这条问题运行时会召回什么 {query, service, env, task}
     GET    /v1/knowledge/{id}
     PATCH  /v1/knowledge/{id}           {content?, status?: active|expired}
     DELETE /v1/knowledge/{id}           作废（= status expired，可恢复）
@@ -25,24 +24,20 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...domain import Rejected
-from ...memory import recall
 from ...store import assets as assets_store
 from ...store import knowledge as knowledge_store
 from ..deps import RT, WHO, Caller, Runtime
-from ..schemas import AssetCreate, AssetPatch, KnowledgeCreate, KnowledgePatch, KnowledgePromote, KnowledgeSearch
+from ..schemas import AssetCreate, AssetPatch, KnowledgeCreate, KnowledgePatch, KnowledgePromote
 
 router = APIRouter(prefix="/v1")
 
 
-async def _scope(rt: Runtime, service: str, env: str) -> list[str]:
-    """确认服务与环境存在，返回该环境的代码目录（试检索的 code_ref 校验用）。env 空 = 不限环境。"""
-    s = await rt.registry.service(service)
-    if s is None:
+async def _scope(rt: Runtime, service: str, env: str) -> None:
+    """确认服务与环境存在。env 空 = 所有环境通用。"""
+    if await rt.registry.service(service) is None:
         raise Rejected.not_found(f"服务 {service}")
-    if not env:
-        return []
-    await rt.registry.env(env)
-    return s.spec.view(service, env).code_paths
+    if env:
+        await rt.registry.env(env)
 
 
 # ———————— 记忆 ————————
@@ -53,27 +48,9 @@ async def list_knowledge(service: str | None = None, env: str | None = None, tas
     return await knowledge_store.list_entries(env=env, service=service, task=task, kind=kind, status=status, q=q)
 
 
-@router.get("/knowledge/health")
-async def knowledge_health(service: str | None = None, env: str | None = None, _: Caller = WHO):
-    return await knowledge_store.health(env, service)
-
-
 @router.get("/knowledge/promotable")
 async def knowledge_promotable(service: str | None = None, env: str | None = None, _: Caller = WHO):
     return await knowledge_store.promotable(service, env)
-
-
-@router.post("/knowledge/search")
-async def search_knowledge(body: KnowledgeSearch, rt: Runtime = RT, _: Caller = WHO):
-    code_paths = await _scope(rt, body.service, body.env)
-    memory = await rt.registry.config("memory")
-    found = await recall(env=body.env, service=body.service, task=body.task, query=body.query, code_paths=code_paths,
-                         session_id=None, run_id=None, limit=memory.knowledge_limit,
-                         embedder=rt.model_pool.embed, source="playground")
-    ranks = {h["id"]: h["rank"] for h in found.knowledge}
-    hits = [{**e, "rank": ranks[e["id"]]} for e in
-            [await knowledge_store.entry(i) for i in ranks] if e is not None]
-    return {"hits": sorted(hits, key=lambda h: h["rank"]), "block": found.text}
 
 
 @router.post("/knowledge", status_code=201)

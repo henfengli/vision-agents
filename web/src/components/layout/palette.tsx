@@ -69,7 +69,6 @@ export function CommandPalette() {
       { id: "nav-memory", label: "记忆", hint: "记忆 · 方法 · 可升格", icon: <LuBrain />, group: "跳转", run: go("/memory"), keywords: "memory knowledge asset 方法" },
       { id: "nav-roles", label: "角色", icon: <LuBot />, group: "跳转", run: go("/settings/roles"), keywords: "roles" },
       { id: "nav-settings", label: "设置", icon: <LuSettings />, group: "跳转", run: go("/settings"), keywords: "settings" },
-      { id: "nav-prefs", label: "个人偏好", icon: <LuSettings />, group: "跳转", run: go("/settings/preferences"), keywords: "preferences theme" },
       { id: "nav-envs", label: "环境设置", icon: <LuLayers />, group: "跳转", run: go("/settings/envs"), keywords: "envs" },
       { id: "nav-notify", label: "通知设置", icon: <LuBell />, group: "跳转", run: go("/settings/notifications"), keywords: "notifications dingtalk 钉钉" },
       { id: "nav-mem-settings", label: "记忆设置", icon: <LuBrain />, group: "跳转", run: go("/settings/memory"), keywords: "memory recall" },

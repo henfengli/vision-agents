@@ -1,7 +1,8 @@
 /**
- * 回归重放：改完提示词 / 任务定义 / 档案后，拿被 👎 的运行用当前定义重跑，看问题改好没有。
- * 只看 👎：被指出问题的运行自带"错在哪"（问题类型 + 说明），正好当判卷标准；
- * 模型对照"原答案 + 人指出的问题 + 新答案"给出判定。
+ * 回归重放：改完提示词 / 任务定义 / 档案 / 记忆后，拿过去的运行用现在的一切重跑。
+ * - 被 👎 的（默认样本）：自带"错在哪"，判定看问题改好没有（已改好 / 没改好 / 更差）
+ * - 没被 👎 的（选"最近的运行"或点名任意一条）：原答案当参照，判定看有没有退步（更好 / 持平 / 退步）
+ * 记忆隔离：召回用现在的记忆，但不含原运行自己沉淀的；重放只读（不沉淀、不记命中、不发通知、不沉淀方法）。
  *
  * - ReplayList          运行页「回归重放」标签：重放批次列表
  * - ReplayDetailPage    /replays/:id：逐条并排看原答案与新答案、判定与理由；有没判完的每 5 秒刷新
@@ -14,7 +15,7 @@ import { ApiError } from "@/api/client";
 import { api, useReplay, useReplays } from "@/api/hooks";
 import type { Recipe, ReplayCounts, ReplayFilter, ReplayItem, ReplayRequest, ReplaySide, ReplayVerdict, RunStatus } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, REPLAY_VERDICT, RunStatusBadge, VerdictBadge } from "@/components/status";
+import { EnvBadge, RunStatusBadge, VerdictBadge, verdictMeta } from "@/components/status";
 import { Button, LinkButton } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/data";
 import { Field, Input, Segmented, Textarea } from "@/components/ui/form";
@@ -39,11 +40,11 @@ const COUNTS: { key: Exclude<keyof ReplayCounts, "total">; verdict: ReplayVerdic
   { key: "pending", verdict: "pending", bar: "bg-info/40" },
 ];
 
-export function ReplayCountBadges({ counts, className }: { counts: ReplayCounts; className?: string }) {
+export function ReplayCountBadges({ counts, regression, className }: { counts: ReplayCounts; regression?: boolean; className?: string }) {
   return (
     <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
       {COUNTS.filter((c) => counts[c.key] > 0).map((c) => {
-        const v = REPLAY_VERDICT[c.verdict];
+        const v = verdictMeta(c.verdict, regression);
         return <Badge key={c.key} tone={v.tone} icon={v.icon}><span className="tabular-nums">{counts[c.key]}</span> {v.label}</Badge>;
       })}
       <span className="text-[11.5px] tabular-nums text-fg-3">共 {counts.total} 条</span>
@@ -52,11 +53,11 @@ export function ReplayCountBadges({ counts, className }: { counts: ReplayCounts;
 }
 
 /** 判定分布条：绿 / 琥珀 / 红 / 灰 / 淡蓝（判定中） */
-function VerdictBar({ counts, className }: { counts: ReplayCounts; className?: string }) {
+function VerdictBar({ counts, regression, className }: { counts: ReplayCounts; regression?: boolean; className?: string }) {
   return (
     <div className={cn("flex h-1.5 w-full overflow-hidden rounded-full bg-sunken", className)}>
       {counts.total > 0 && COUNTS.map((c) => counts[c.key] > 0 && (
-        <div key={c.key} className={c.bar} style={{ width: `${(counts[c.key] / counts.total) * 100}%` }} />
+        <div key={c.key} className={regression && c.key === "same" ? "bg-fg-3/40" : c.bar} style={{ width: `${(counts[c.key] / counts.total) * 100}%` }} />
       ))}
     </div>
   );
@@ -70,11 +71,12 @@ function filterChips(f: ReplayFilter): string[] {
   if (f.service) out.push(`服务 ${f.service}`);
   if (f.env) out.push(`环境 ${f.env}`);
   if (f.hours) out.push(f.hours % 24 === 0 ? `最近 ${f.hours / 24} 天` : `最近 ${f.hours} 小时`);
+  if (!named) out.push(f.negative_only === false ? "最近的 agent 运行（不限 👎）" : "被 👎 的");
   if (f.limit && !named) out.push(`最多 ${f.limit} 条`);
   return out;
 }
 
-function FilterChips({ filter, className, empty = "全部被 👎 的 agent 运行" }: { filter: ReplayFilter; className?: string; empty?: string }) {
+function FilterChips({ filter, className, empty = "全部 agent 运行" }: { filter: ReplayFilter; className?: string; empty?: string }) {
   const chips = filterChips(filter);
   return (
     <span className={cn("flex flex-wrap items-center gap-1", className)}>
@@ -93,13 +95,13 @@ export function ReplayList() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-fg-3">
         <LuFlaskConical className="size-4 shrink-0" />
-        <span className="min-w-0 flex-1">改完提示词 / 任务定义 / 档案后，拿被 👎 的运行用当前定义重跑；模型对照原答案、人指出的问题和新答案判定改好没有。</span>
+        <span className="min-w-0 flex-1">改完提示词 / 任务定义 / 档案 / 记忆后，拿过去的运行用现在的一切重跑：被 👎 的看问题改好没有，没被 👎 的看有没有退步。重放只读，看不到原运行自己沉淀的记忆。</span>
         <LinkButton size="sm" to="/runs?view=feedback" icon={<LuThumbsDown />}>去反馈里发起</LinkButton>
       </div>
       <Card>
         {loading && !data ? <SkeletonRows /> : !data?.length ? (
           <Empty icon={<LuFlaskConical />} title="还没有回归重放"
-            description="在「反馈」里筛出要验证的 👎（服务 / 环境 / 任务），点「用当前定义重放」；也可以在被 👎 的运行详情里单独重放一条。" />
+            description="在「反馈」里按服务 / 环境 / 任务筛好，点「重放」（可选只重放被 👎 的，或最近的运行）；也可以在任意一条结束了的运行详情里单独重放。" />
         ) : (
           <ul className="divide-y divide-line">
             {data.map((r) => (
@@ -113,10 +115,10 @@ export function ReplayList() {
                   </div>
                   {r.note && <div className="mt-1 line-clamp-2 text-[12.5px] text-fg-2">{r.note}</div>}
                   <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                    <ReplayCountBadges counts={r.counts} />
+                    <ReplayCountBadges counts={r.counts} regression={r.regression} />
                     <FilterChips filter={r.filter} className="ml-auto" />
                   </div>
-                  <VerdictBar counts={r.counts} className="mt-2.5" />
+                  <VerdictBar counts={r.counts} regression={r.regression} className="mt-2.5" />
                 </Link>
               </li>
             ))}
@@ -137,21 +139,23 @@ export function ReplaysRedirect() {
 
 /**
  * 发起一次重放。preset：反馈收件箱传当前的服务 / 环境 / 任务 / 时间筛选；运行详情传 {run_ids: [id]}。
- * 成功后跳到详情；没有符合条件的 👎 运行时后端返回 400 nothing_to_replay。
+ * 按条件选时可以选样本：被 👎 的（默认）或最近的 agent 运行。
+ * 成功后跳到详情；没有符合条件的运行时后端返回 400 nothing_to_replay。
  */
 export function StartReplayDialog({ open, onClose, preset, hint }: { open: boolean; onClose: () => void; preset: ReplayRequest; hint?: ReactNode }) {
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
   const [limit, setLimit] = useState("20");
+  const [sample, setSample] = useState<"negative" | "recent">("negative");
   useEffect(() => {
     if (!open) return;
-    setTitle(""); setNote(""); setLimit(String(preset.limit ?? 20));
+    setTitle(""); setNote(""); setLimit(String(preset.limit ?? 20)); setSample(preset.negative_only === false ? "recent" : "negative");
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const named = !!preset.run_ids?.length;
   const n = Math.min(100, Math.max(1, Number(limit) || 20));
 
   const start = useMutation(async () => {
-    const body: ReplayRequest = { ...preset, ...(named ? {} : { limit: n }) };
+    const body: ReplayRequest = { ...preset, ...(named ? {} : { limit: n, negative_only: sample === "negative" }) };
     if (title.trim()) body.title = title.trim();
     if (note.trim()) body.note = note.trim();
     try {
@@ -162,7 +166,7 @@ export function StartReplayDialog({ open, onClose, preset, hint }: { open: boole
       navigate(`/replays/${r.id}`);
     } catch (e) {
       if (e instanceof ApiError && e.code === "nothing_to_replay") {
-        toast.error("没有可重放的运行", named ? "这条运行没有被 👎，或者不是 agent 运行" : "当前筛选下没有被 👎 的 agent 运行，放宽服务 / 环境 / 任务 / 时间试试");
+        toast.error("没有可重放的运行", sample === "negative" ? "当前筛选下没有被 👎 的 agent 运行：放宽服务 / 环境 / 任务 / 时间，或改选「最近的运行」" : "当前筛选下没有结束了的 agent 运行，放宽服务 / 环境 / 任务 / 时间试试");
       } else {
         toast.error("发起失败", (e as Error).message);
       }
@@ -170,8 +174,8 @@ export function StartReplayDialog({ open, onClose, preset, hint }: { open: boole
   });
 
   return (
-    <Dialog open={open} onClose={onClose} title="用当前定义重放"
-      description="拿被 👎 的运行，用现在的提示词 / 任务定义 / 档案重跑一遍（新会话、不沉淀记忆、不投递）；模型对照原答案、人指出的问题和新答案，判定问题改好没有。"
+    <Dialog open={open} onClose={onClose} title="用现在的定义和记忆重放"
+      description="同样的输入，用现在的提示词 / 任务定义 / 档案 / 记忆重跑一遍（新会话、不投递）。模型对照原答案和新答案判定：被 👎 的看问题改好没有，没被 👎 的看有没有退步。"
       footer={<>
         <Button onClick={onClose}>取消</Button>
         <Button variant="primary" icon={<LuFlaskConical />} loading={start.pending} onClick={() => start.mutate(undefined)}>开始重放</Button>
@@ -179,15 +183,24 @@ export function StartReplayDialog({ open, onClose, preset, hint }: { open: boole
       <div className="space-y-4">
         <div className="rounded-md border border-line bg-sunken/50 px-3 py-2.5">
           <div className="mb-1.5 text-[11.5px] font-medium text-fg-3">重放范围</div>
-          <FilterChips filter={{ ...preset, limit: named ? undefined : n }} />
+          <FilterChips filter={{ ...preset, limit: named ? undefined : n, negative_only: named ? undefined : sample === "negative" }} />
           {hint && <div className="mt-1.5 text-[11.5px] text-fg-3">{hint}</div>}
         </div>
         {!named && (
-          <Field label="最多条数" help="1~100，最近被 👎 的在前">
+          <Field label="样本" help={sample === "negative" ? "被 👎 的运行，最近被评的在前：验证问题改好没有" : "最近结束的 agent 运行（不管有没有被评）：验证改动有没有带来退步"}>
+            <Segmented value={sample} onChange={setSample} options={[{ value: "negative", label: "被 👎 的" }, { value: "recent", label: "最近的运行" }]} />
+          </Field>
+        )}
+        {!named && (
+          <Field label="最多条数" help="1~100">
             <Input className="w-24" inputMode="numeric" value={limit} onChange={(e) => setLimit(e.target.value.replace(/\D/g, ""))} />
           </Field>
         )}
-        <Field label="标题" help="不填按范围自动生成，如「data-qa · vision-board · 12 条 👎」">
+        <div className="rounded-md bg-sunken/60 px-3 py-2 text-[12px] leading-relaxed text-fg-3">
+          记忆隔离：召回用现在的记忆（含之后的修正和 👎 扣分），但去掉原运行自己沉淀的事实、教训、交接摘要和方法；
+          重放只读，不沉淀、不记召回命中、不发通知。服务自己的工具（比如 dagster 的重跑作业）照常可用。
+        </div>
+        <Field label="标题" help="不填按范围自动生成，如「data-qa · vision-board · 12 条👎」">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="data_searcher 提示词 v5 回归" />
         </Field>
         <Field label="这次改了什么" help="写给以后回看的人：改了哪个角色的提示词、哪个任务的档案…">
@@ -233,6 +246,7 @@ export function ReplayDetailPage() {
   const tab: VerdictTab = s.verdict ?? "all";
   const items = r.items.filter((it) => matches(it, tab));
   const c = r.counts;
+  const regression = r.regression;
 
   return (
     <Page wide>
@@ -258,12 +272,13 @@ export function ReplayDetailPage() {
           <div className="whitespace-pre-wrap px-4 py-3 text-[13px] leading-relaxed text-fg-2">{r.note || <span className="text-fg-3">发起时没写备注</span>}</div>
         </Card>
         <Card>
-          <CardHeader icon={<LuScale />} title="判定" description="模型对照原答案、人指出的问题和新答案给出" />
+          <CardHeader icon={<LuScale />} title="判定"
+            description={regression ? "被 👎 的看问题改好没有；没被 👎 的把原答案当参照，看有没有退步" : "模型对照原答案、人指出的问题和新答案给出"} />
           <div className="space-y-3 px-4 py-3">
-            <VerdictBar counts={c} className="h-2" />
+            <VerdictBar counts={c} regression={regression} className="h-2" />
             <div className="grid grid-cols-5 gap-2">
               {COUNTS.map((x) => {
-                const v = REPLAY_VERDICT[x.verdict];
+                const v = verdictMeta(x.verdict, regression);
                 return (
                   <div key={x.key} className="min-w-0">
                     <div className={cn("text-[20px] font-semibold tabular-nums leading-tight", c[x.key] ? (TONE_TEXT[v.tone] ?? "text-fg") : "text-fg-3")}>{c[x.key]}</div>
@@ -279,9 +294,9 @@ export function ReplayDetailPage() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Segmented size="sm" value={tab} onChange={(v) => setS({ verdict: v === "all" ? undefined : v })} options={[
           { value: "all", label: `全部 ${c.total}` },
-          ...COUNTS.filter((x) => c[x.key] > 0).map((x) => ({ value: x.key as VerdictTab, label: `${REPLAY_VERDICT[x.verdict].label} ${c[x.key]}` })),
+          ...COUNTS.filter((x) => c[x.key] > 0).map((x) => ({ value: x.key as VerdictTab, label: `${verdictMeta(x.verdict, regression).label} ${c[x.key]}` })),
         ]} />
-        <span className="ml-auto text-xs text-fg-3">左边是被 👎 的原答案，右边是用当前定义重答的新答案</span>
+        <span className="ml-auto text-xs text-fg-3">左边是原答案，右边是用现在的定义和记忆重答的新答案</span>
       </div>
 
       {items.length === 0 ? <Card><Empty icon={<LuFlaskConical />} title="这一类没有条目" /></Card> : (
@@ -293,11 +308,11 @@ export function ReplayDetailPage() {
 
 function ReplayItemCard({ item }: { item: ReplayItem }) {
   const running = !!item.after.status && LIVE.includes(item.after.status);
-  const reasonTone = { fixed: "bg-ok-soft/50", same: "bg-warn-soft/50", worse: "bg-bad-soft/50", unclear: "bg-sunken/60", error: "bg-sunken/60" }[item.verdict ?? "unclear"];
+  const reasonTone = { fixed: "bg-ok-soft/50", same: item.negative ? "bg-warn-soft/50" : "bg-sunken/60", worse: "bg-bad-soft/50", unclear: "bg-sunken/60", error: "bg-sunken/60" }[item.verdict ?? "unclear"];
   return (
     <Card>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line px-4 py-2.5">
-        <VerdictBadge verdict={item.verdict} className="h-6 px-2 text-[12px]" />
+        <VerdictBadge verdict={item.verdict} regression={!item.negative} className="h-6 px-2 text-[12px]" />
         <Link to={`/tasks/${encodeURIComponent(item.task)}`} className="font-mono text-[12.5px] text-fg-2 hover:text-accent">{item.task}</Link>
         <span className="text-[12.5px] text-fg-3">{item.service ?? "平台"}</span>
         <EnvBadge env={item.env} />
@@ -312,9 +327,9 @@ function ReplayItemCard({ item }: { item: ReplayItem }) {
         </div>
       )}
       <div className="grid divide-y divide-line md:grid-cols-2 md:divide-x md:divide-y-0">
-        <AnswerPane title="原答案" hint={<LuThumbsDown className="size-3.5 text-bad" />} runId={item.source_run} answer={item.before.answer}
-          status={item.before.status} empty="原运行没有输出" />
-        <AnswerPane title="新答案" hint={<span className="text-[11px] text-fg-3">当前定义</span>} runId={item.new_run} answer={item.after.answer}
+        <AnswerPane title="原答案" hint={item.negative ? <Tooltip content="被 👎 过"><LuThumbsDown className="size-3.5 text-bad" /></Tooltip> : <span className="text-[11px] text-fg-3">参照</span>}
+          runId={item.source_run} answer={item.before.answer} status={item.before.status} empty="原运行没有输出" />
+        <AnswerPane title="新答案" hint={<span className="text-[11px] text-fg-3">现在的定义和记忆</span>} runId={item.new_run} answer={item.after.answer}
           status={item.after.status} empty={!item.new_run ? "没有建成重放运行" : running ? "重放运行中…结束后自动判定" : "重放运行没有输出"} />
       </div>
     </Card>

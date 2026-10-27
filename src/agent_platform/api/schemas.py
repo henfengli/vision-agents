@@ -54,13 +54,14 @@ class CorrectBody(BaseModel):
 
 
 class ReplayBody(BaseModel):
-    """POST /v1/replays：不给 run_ids 就按条件选被 👎 的 agent 运行。"""
+    """POST /v1/replays：不给 run_ids 就按条件选 agent 运行（默认只选被 👎 的）。"""
 
-    run_ids: list[str] | None = Field(None, description="直接点名要重放的运行")
+    run_ids: list[str] | None = Field(None, description="直接点名要重放的运行（任何结束了的 agent 运行）")
     task: str | None = Field(None, description="父任务名即包含其子任务")
     service: str | None = None
     env: str | None = None
-    hours: int | None = Field(None, ge=1, description="只看最近多少小时内被 👎 的")
+    hours: int | None = Field(None, ge=1, description="只看最近多少小时内的（👎 按评价时间，其余按运行时间）")
+    negative_only: bool = Field(True, description="true 只选被 👎 的；false 选最近的 agent 运行，看改动有没有带来退步")
     limit: int = Field(20, ge=1, le=100)
     title: str = ""
     note: str = Field("", description="这次改了什么，方便回看")
@@ -98,13 +99,6 @@ class KnowledgePromote(BaseModel):
     key: str = Field(min_length=1, max_length=60, description="档案的键，如 conventions / pitfalls / 自定义")
     task: str = Field("", description="target=task 时写进哪个任务；不填用条目的来源任务")
     content: str | None = Field(None, description="写进档案的文字；不填用条目原文")
-
-
-class KnowledgeSearch(BaseModel):
-    query: str = Field(min_length=1)
-    service: str
-    env: str
-    task: str = ""
 
 
 class AssetCreate(BaseModel):

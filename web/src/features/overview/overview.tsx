@@ -28,7 +28,7 @@ export function OverviewPage() {
   const { data: envs } = useEnvs();
   const [hours, setHours] = useState<"24" | "72">("24");
   const { data: stats, error, refetch } = useStats({ hours: Number(hours), env: env || undefined });
-  const { data: recent } = useRuns({ env, limit: 8 });
+  const { data: recent } = useRuns({ env, limit: 12 });
   const [runOpen, setRunOpen] = useState(false);
   const t = stats?.totals;
   const finished = t ? t.success + t.failed : 0;
@@ -54,22 +54,26 @@ export function OverviewPage() {
       </Card>
 
       <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_360px]">
-        <Card>
+        {/* 图撑满卡片：和右边「即将触发」同高时底下不留空白 */}
+        <Card className="flex flex-col">
           <CardHeader title="运行趋势" description="按小时统计：成功 / 失败 / 进行中与其他" actions={<Legend />} />
-          <div className="px-4 pb-3 pt-4">{stats ? <RunsChart data={stats.series} height={180} /> : <Skeleton className="h-[180px]" />}</div>
+          <div className="flex min-h-[220px] flex-1 flex-col px-4 pb-3 pt-4">
+            {stats ? <RunsChart data={stats.series} className="min-h-0 flex-1" /> : <Skeleton className="min-h-0 flex-1" />}
+          </div>
         </Card>
         <Upcoming items={stats?.upcoming} />
       </div>
 
       <HealthMatrix />
 
+      {/* 底下三张卡同高（宽屏），列表在卡片里滚动：条数不同也不会有一张底下空一大截 */}
       <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1fr_360px]">
-        <Card>
+        <Card className={ROW_CARD}>
           <CardHeader title="失败聚焦" description="按任务聚合，最近一次的错误" actions={<LinkButton to={`/runs?status=failed&hours=${hours}`} size="xs" variant="ghost">全部 <LuArrowRight /></LinkButton>} />
           {!stats ? <div className="p-4"><Skeleton className="h-24" /></div> : stats.top_failures.length === 0 ? (
             <Empty icon={<LuCircleCheck className="text-ok" />} title="没有失败" description={`近 ${hours} 小时全部成功`} />
           ) : (
-            <ul className="divide-y divide-line">
+            <ul className="min-h-0 flex-1 divide-y divide-line overflow-y-auto">
               {stats.top_failures.map((f) => (
                 <li key={f.task + f.service}>
                   <Link to={`/runs?status=failed&hours=${hours}&task=${encodeURIComponent(f.task)}${f.service ? "&service=" + encodeURIComponent(f.service) : ""}`} className="block px-4 py-2.5 hover:bg-hover/70">
@@ -85,9 +89,9 @@ export function OverviewPage() {
             </ul>
           )}
         </Card>
-        <Card>
+        <Card className={ROW_CARD}>
           <CardHeader title="最近运行" actions={<LinkButton to="/runs" size="xs" variant="ghost">全部 <LuArrowRight /></LinkButton>} />
-          <RunMiniList runs={recent?.items} limit={7} />
+          <div className="min-h-0 flex-1 overflow-y-auto"><RunMiniList runs={recent?.items} limit={12} /></div>
         </Card>
         <RecentNegative env={env} />
       </div>
@@ -107,15 +111,20 @@ function Legend() {
   );
 }
 
+const UPCOMING_MAX = 6;
+/** 底下一排卡片：宽屏同高，内容在卡片里滚动 */
+const ROW_CARD = "flex flex-col lg:h-[440px]";
+
 function Upcoming({ items }: { items: UpcomingFire[] | undefined }) {
+  const more = (items?.length ?? 0) - UPCOMING_MAX;
   return (
-    <Card>
+    <Card className="flex flex-col">
       <CardHeader title="即将触发" icon={<LuCalendarClock />} description="定时任务的下一次运行（按环境展开）" />
       {!items ? <div className="p-4"><Skeleton className="h-32" /></div> : items.length === 0 ? (
         <Empty title="没有定时任务" />
       ) : (
         <ul className="divide-y divide-line">
-          {items.map((u) => (
+          {items.slice(0, UPCOMING_MAX).map((u) => (
             <li key={`${u.task}/${u.trigger_id}/${u.env}`}>
               <Link to={`/tasks/${encodeURIComponent(u.task)}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-hover/70">
                 <div className="w-[52px] text-center">
@@ -131,6 +140,11 @@ function Upcoming({ items }: { items: UpcomingFire[] | undefined }) {
             </li>
           ))}
         </ul>
+      )}
+      {more > 0 && (
+        <Link to="/tasks" className="mt-auto border-t border-line px-4 py-2 text-center text-[12px] text-fg-3 hover:text-accent">
+          还有 {more} 次 · 看全部定时任务
+        </Link>
       )}
     </Card>
   );
@@ -209,15 +223,15 @@ function RecentNegative({ env }: { env: string }) {
   const { data: meta } = useMeta();
   const reason = (r: string) => meta?.feedback_reasons.find((x) => x.value === r)?.label ?? r;
   return (
-    <Card>
+    <Card className={ROW_CARD}>
       <CardHeader title="最近的 👎" icon={<LuThumbsDown />} description="近 3 天对运行或某一步的负反馈"
         actions={<LinkButton to="/runs?view=feedback" size="xs" variant="ghost">反馈 <LuArrowRight /></LinkButton>} />
       {error ? <div className="px-4 py-6 text-center text-xs text-bad">加载失败：{error.message}</div>
         : !data ? <div className="p-4"><Skeleton className="h-24" /></div> : data.length === 0 ? (
           <Empty icon={<LuCircleCheck className="text-ok" />} title="没有负反馈" description="近 3 天没有人点 👎" />
         ) : (
-          <ul className="divide-y divide-line">
-            {data.slice(0, 6).map((f) => (
+          <ul className="min-h-0 flex-1 divide-y divide-line overflow-y-auto">
+            {data.slice(0, 12).map((f) => (
               <li key={`${f.run_id}/${f.step_seq}/${f.created_by}`}>
                 <Link to={`/runs/${f.run_id}`} className="block px-4 py-2.5 hover:bg-hover/70">
                   <div className="flex items-center gap-1.5 text-[11.5px] text-fg-3">

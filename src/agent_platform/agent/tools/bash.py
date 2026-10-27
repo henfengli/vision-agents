@@ -77,15 +77,21 @@ class _Capture:
 
 def run_command(command: str, timeout: int = 60, cwd: str | None = None, *, hidden: tuple[str, ...] = (),
                 allow: tuple[str, ...] = (), limits: LimitsConfig | None = None,
-                require_sandbox: bool = True) -> BashResult:
-    """同步执行 shell 命令并截断输出。cwd（= scratch 目录）给定时经沙箱执行。"""
+                require_sandbox: bool = True, env: dict[str, str] | None = None,
+                workdir: str | None = None) -> BashResult:
+    """同步执行 shell 命令并截断输出。cwd（= scratch 目录，沙箱里整个可写）给定时经沙箱执行；
+    workdir：命令的当前目录（本会话的工作目录，默认 = cwd）。
+    env：子进程的完整环境（不给 = 白名单 build_safe_env）；调用方在白名单之上加项目的 PATH 与环境变量。"""
     from .sandbox import SandboxUnavailable, scope_env, wrap_argv
+    workdir = workdir or cwd
     try:
         argv = (wrap_argv(["bash", "-c", command], cwd, hidden=hidden, allow=allow, limits=limits,
-                          require=require_sandbox) if cwd else ["bash", "-c", command])
+                          require=require_sandbox, workdir=workdir) if cwd else ["bash", "-c", command])
     except SandboxUnavailable as e:
         return BashResult(command, 126, f"[不可用] {e}", False)
-    proc = subprocess.Popen(argv, cwd=cwd, env=scope_env(build_safe_env(), limits), stdin=subprocess.DEVNULL,
+    if workdir:
+        os.makedirs(workdir, exist_ok=True)
+    proc = subprocess.Popen(argv, cwd=workdir, env=scope_env(env or build_safe_env(), limits), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     cap = _Capture(proc.stdout)
     try:

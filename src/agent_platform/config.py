@@ -99,12 +99,6 @@ class RetentionConfig(BaseModel):
     scratch_days: int = 7           # 工作目录（db_query 的结果文件、agent 写的临时文件），每台主机清自己的
 
 
-class GrafanaConfig(BaseModel):
-    url: str
-    datasource_uid: str
-    token: str = ""
-
-
 def _default_hidden() -> list[str]:
     """agent 沙箱里看不到的 home 以外的路径（home 本身在沙箱里整个换成空目录，只挂回需要的目录）：
     docker 的 socket（能 docker exec 进容器改东西、拿到真实配置）。服务声明的配置文件按环境遮蔽，不用写在这里。"""
@@ -130,7 +124,6 @@ class Settings(BaseModel):
     home_allow: list[str] = Field(default_factory=list)   # 沙箱里额外挂回的 home 下的目录（只读），比如 ~/.local/lib
     otel: OtelConfig = OtelConfig()
     retention: RetentionConfig = RetentionConfig()
-    grafana: GrafanaConfig | None = None
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
     hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
 

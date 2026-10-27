@@ -27,7 +27,7 @@ import { cn } from "@/lib/cn";
 import { ago } from "@/lib/format";
 import { invalidate } from "@/lib/query";
 import { Link, navigate, useLocation, useParams, useSearch } from "@/lib/router";
-import { useUi } from "@/lib/store";
+import { getUi, setUi, useUi, type UiState } from "@/lib/store";
 import { ASK_TASK } from "../tasks/run-dialog";
 
 /** broken：推流中断（stream_broken）时后端给的说明；运行照常在跑，结果去运行详情看 */
@@ -141,8 +141,13 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
   const bottom = useRef<HTMLDivElement>(null);
   const streaming = turns.some((t) => t.streaming);
   const locked = turns.length > 0;
+  /** 新对话里改了服务 / 环境 / 任务 / 记忆开关：记在这台浏览器，下次新对话默认用上次的；已有会话里改的不记 */
+  const remember = (patch: Partial<UiState["chat"]>) => {
+    if (sessionId || Object.values(patch).some((v) => v === "")) return;
+    setUi({ chat: { ...getUi().chat, ...patch } });
+  };
 
-  // 已有会话：维度取自会话；新会话：取个人偏好里的对话默认项
+  // 已有会话：维度取自会话；新会话：取上次新对话用的（见 remember）
   useEffect(() => {
     // 正在流式回答时不拿服务端的版本覆盖（切回窗口会后台刷新）：会丢掉"回答中"的状态和停止按钮
     if (!detail || turns.some((t) => t.streaming)) return;
@@ -286,55 +291,56 @@ function Conversation({ sessionId, onSession }: { sessionId?: string; onSession?
         <div className="mx-auto max-w-[820px] rounded-xl border border-line bg-panel shadow-[var(--shadow-pop)] focus-within:border-accent">
           <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-2">
             <Dim label="服务" locked={locked}>
-              <Select size="sm" className="w-36" value={service || null} disabled={locked} onChange={(v) => { setService(v); setSubtask(""); }}
+              <Select size="sm" className="w-36" value={service || null} disabled={locked} onChange={(v) => { setService(v); setSubtask(""); remember({ service: v }); }}
                 options={(services ?? []).filter((s) => s.enabled).map((s) => ({ value: s.name, label: s.name, hint: s.title }))} />
             </Dim>
             <Dim label="环境" locked={locked}>
-              <Select size="sm" className="w-24" value={env || null} disabled={locked} onChange={setEnv}
+              <Select size="sm" className="w-24" value={env || null} disabled={locked} onChange={(v) => { setEnv(v); remember({ env: v }); }}
                 options={(envs ?? []).map((e) => ({ value: e.name, label: <span className="font-mono uppercase">{e.name}</span>, hint: svc?.health[e.name]?.enabled === false ? "该服务在此环境已停用" : e.title }))} />
             </Dim>
             <Dim label="任务" locked={locked} hint="问哪一类问题：服务上声明了「对话」触发的任务都能选，不同任务用不同的角色与档案；拿不准就用「问一下」（通用入口，什么都能问、能交代事）">
-              <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); }}
+              <Select size="sm" className="w-40" value={task || null} disabled={locked} onChange={(v) => { setTask(v); setSubtask(""); setExtra({}); remember({ task: v }); }}
                 placeholder="该服务没有对话任务" options={chatTasks.map(chatTaskOption)} />
             </Dim>
             <Dim label="对象" locked={locked} hint={`可选：针对 ${taskDef?.title || task || "该任务"} 的某个具体对象（一个资产、一张表、一个报表）问。会带上这个对象的专属档案，沉淀的记忆也记在它名下；输入新名字会自动建一个子任务。`}>
               {locked ? <span className="font-mono text-[12px] text-fg-2">{subtask || "—"}</span> : <SubtaskPicker task={task} value={subtask} onChange={setSubtask} />}
             </Dim>
-            {extraFields.length > 0 && (
-              <Popover align="start" trigger={
-                <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", Object.values(extra).some(Boolean) ? "border-accent/40 bg-accent-soft text-accent" : "border-line text-fg-2 hover:bg-hover")}>
-                  <LuSlidersHorizontal />输入 {Object.values(extra).filter(Boolean).length || ""}
-                </span>
-              }>
-                <div className="w-72 space-y-3 p-3">
-                  <div className="text-[12px] text-fg-3">任务 {task} 的其它输入，每轮随消息一起发送</div>
-                  {extraFields.map(([k, f]) => (
-                    <Field key={k} label={<span className="font-mono">{k}{f.required && <span className="text-bad">*</span>}</span>} help={f.description}>
-                      {f.type === "enum" ? <Select size="sm" value={extra[k] ?? String(f.default ?? "")} onChange={(v) => setExtra({ ...extra, [k]: v })} options={(f.options ?? []).map((o) => ({ value: o, label: o }))} />
-                        : <Input value={extra[k] ?? ""} placeholder={f.default != null ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
-                    </Field>
-                  ))}
-                </div>
-              </Popover>
-            )}
-            <Popover align="start" trigger={
-              <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", !memory.recall || !memory.save ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-fg-2 hover:bg-hover")}>
-                <LuBrain />{memory.recall && memory.save ? "记忆" : !memory.recall && !memory.save ? "不用记忆" : !memory.recall ? "不召回" : "不沉淀"}
-              </span>
-            }>
-              <div className="w-64 space-y-3 p-3">
-                <Switch checked={memory.recall} onChange={(recall) => setMemory({ ...memory, recall })} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查记忆与方法</span></span>} />
-                <Switch checked={memory.save} onChange={(save) => setMemory({ ...memory, save })} label={<span>沉淀<span className="ml-1 text-[11.5px] text-fg-3">回答后存可复用结论</span></span>} />
-                <div className="text-[11.5px] text-fg-3">只影响接下来的消息；平台默认在 设置 → 记忆。</div>
-              </div>
-            </Popover>
           </div>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} aria-label="消息" placeholder={envOff ? `${service} 在 ${env} 环境已停用` : `问 ${svc?.title ?? "agent"} 点什么…（Enter 发送，Shift+Enter 换行）`}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
             className="block max-h-48 w-full resize-none bg-transparent px-4 pt-3 text-[13.5px] leading-relaxed text-fg outline-none placeholder:text-fg-3" />
           <div className="flex items-center gap-2 px-3 pb-2.5 pt-1">
             <span className="text-[11px] text-fg-3">{locked ? "同一会话内服务、环境、任务、对象固定；要换就开新对话" : subtask && !(tasks ?? []).some((t) => t.name === `${task}:${subtask}`) ? `发送时会按 ${task} 新建子任务 ${task}:${subtask}` : ""}</span>
-            <div className="ml-auto">
+            {/* 输入 / 记忆开关放在发送按钮旁：上面一行只放 服务 / 环境 / 任务 / 对象，不会折成两行 */}
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              {extraFields.length > 0 && (
+                <Popover align="end" trigger={
+                  <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", Object.values(extra).some(Boolean) ? "border-accent/40 bg-accent-soft text-accent" : "border-line text-fg-2 hover:bg-hover")}>
+                    <LuSlidersHorizontal />输入 {Object.values(extra).filter(Boolean).length || ""}
+                  </span>
+                }>
+                  <div className="w-72 space-y-3 p-3">
+                    <div className="text-[12px] text-fg-3">任务 {task} 的其它输入，每轮随消息一起发送</div>
+                    {extraFields.map(([k, f]) => (
+                      <Field key={k} label={<span className="font-mono">{k}{f.required && <span className="text-bad">*</span>}</span>} help={f.description}>
+                        {f.type === "enum" ? <Select size="sm" value={extra[k] ?? String(f.default ?? "")} onChange={(v) => setExtra({ ...extra, [k]: v })} options={(f.options ?? []).map((o) => ({ value: o, label: o }))} />
+                          : <Input value={extra[k] ?? ""} placeholder={f.default != null ? String(f.default) : ""} onChange={(e) => setExtra({ ...extra, [k]: e.target.value })} />}
+                      </Field>
+                    ))}
+                  </div>
+                </Popover>
+              )}
+              <Popover align="end" trigger={
+                <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] [&_svg]:size-3.5", !memory.recall || !memory.save ? "border-warn/40 bg-warn-soft text-warn" : "border-line text-fg-2 hover:bg-hover")}>
+                  <LuBrain />{memory.recall && memory.save ? "记忆" : !memory.recall && !memory.save ? "不用记忆" : !memory.recall ? "不召回" : "不沉淀"}
+                </span>
+              }>
+                <div className="w-64 space-y-3 p-3">
+                  <Switch checked={memory.recall} onChange={(recall) => { setMemory({ ...memory, recall }); remember({ recall }); }} label={<span>召回<span className="ml-1 text-[11.5px] text-fg-3">先查记忆与方法</span></span>} />
+                  <Switch checked={memory.save} onChange={(save) => { setMemory({ ...memory, save }); remember({ save }); }} label={<span>沉淀<span className="ml-1 text-[11.5px] text-fg-3">回答后存可复用结论</span></span>} />
+                  <div className="text-[11.5px] text-fg-3">只影响接下来的消息；平台默认在 设置 → 记忆。</div>
+                </div>
+              </Popover>
               {streaming ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止"><LuCircleStop /></Button>
                 : <Button size="icon-sm" variant="primary" disabled={!text.trim() || !service || !task || envOff || sessionGone} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
             </div>

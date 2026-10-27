@@ -143,8 +143,8 @@ export function TaskDetailPage() {
 
 function TaskRuns({ name }: { name: string }) {
   // 和运行页一样跟随顶栏的环境视角（"查看全部运行"跳过去看到的是同一批）
-  const { pageSize, env } = useUi();
-  const { data, loading } = useRuns({ task: name, env: env || undefined, limit: pageSize });
+  const { env } = useUi();
+  const { data, loading } = useRuns({ task: name, env: env || undefined, limit: 30 });
   return (
     <Card>
       {env && <div className="border-b border-line px-4 py-2 text-xs text-fg-3">只看 {env} 的运行（顶栏的环境视角）</div>}

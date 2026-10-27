@@ -168,7 +168,7 @@ function RunsTab({ service, env }: { service: string; env: string }) {
 
 function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc: ServiceSummary; env: string; onOpenEnvs: () => void; onOpenTools: () => void; onOpenConfig: () => void }) {
   const { data: view } = useServiceEnv(svc.name, env);
-  const { data: recent } = useRuns({ service: svc.name, env, limit: 8 });
+  const { data: recent } = useRuns({ service: svc.name, env, limit: 20 });
   const [peek, setPeek] = useState<string | null>(null);
   const h = svc.health[env];
   return (
@@ -186,28 +186,30 @@ function OverviewTab({ svc, env, onOpenEnvs, onOpenTools, onOpenConfig }: { svc:
             {!view ? <Skeleton className="h-48" /> : <ViewList svc={svc} view={view} onOpenTools={onOpenTools} onOpenConfig={onOpenConfig} onPeek={setPeek} />}
           </div>
         </Card>
-      </div>
-      <div className="min-w-0 space-y-4">
-        <Card>
-          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} />
-          <RunMiniList runs={recent?.items} limit={8} />
-        </Card>
         <Card>
           <CardHeader title="服务档案" description={`置顶逐字注入该服务在 ${env} 的每次运行`} icon={<LuScrollText />} />
           <div className="p-4">
             {!view ? <Skeleton className="h-24" /> : Object.keys(view.profile).length === 0 ? (
               <div className="text-[12.5px] text-fg-3">还没有档案。在「配置 → 服务定义 → 服务档案」里补上代码和配置读不出来的事实：口径、禁区、环境差异、踩过的坑。</div>
             ) : (
-              <dl className="space-y-3">
+              <dl className="grid gap-x-6 gap-y-3 md:grid-cols-2">
                 {Object.entries(view.profile).map(([k, v]) => (
-                  <div key={k}>
+                  <div key={k} className="min-w-0">
                     <dt className="text-[11.5px] font-medium text-fg-3">{PROFILE_LABEL[k] ?? k}</dt>
-                    <dd className="mt-0.5"><Markdown text={v} className="text-[13px]" /></dd>
+                    <dd className="mt-0.5 break-words"><Markdown text={v} className="text-[13px]" /></dd>
                   </div>
                 ))}
               </dl>
             )}
           </div>
+        </Card>
+      </div>
+      {/* 宽屏时和左边一样高、列表在卡片里滚动：两栏底部对齐，不会一边空一大截 */}
+      <div className="relative min-w-0 xl:min-h-[360px]">
+        <Card className="flex flex-col xl:absolute xl:inset-0">
+          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} />
+          <div className="min-h-0 flex-1 overflow-y-auto"><RunMiniList runs={recent?.items} limit={20} /></div>
+          <Link to={`/runs?service=${encodeURIComponent(svc.name)}&env=${env}`} className="border-t border-line px-4 py-2 text-center text-[12px] text-fg-3 hover:text-accent">看全部运行</Link>
         </Card>
       </div>
       <ConfigPeek service={svc.name} env={env} path={peek} onClose={() => setPeek(null)} />
@@ -261,7 +263,6 @@ function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
           <span className="text-[11.5px] text-fg-3">MCP，运行里自动带上</span>
         </button>
       ) : <span className="text-fg-3">无（可在「配置 → 服务定义 → MCP」声明）</span>],
-      ["主机", view.hosts.length ? <span className="font-mono text-[12px]">{view.hosts.join("、")}</span> : <span className="text-fg-3">未登记（host_metrics 不可用；host_status 照常）</span>],
       ...(svc.hidden?.length ? [["遮蔽", <span className="text-[12px] text-fg-3">另有 {svc.hidden.length} 个含口令的文件对 agent 遮蔽</span>] as [string, React.ReactNode]] : []),
     ]} />
   );
@@ -394,12 +395,12 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
           const on = h?.enabled !== false;
           const has = (v: unknown) => !!v && (typeof v !== "object" || Object.keys(v as object).length > 0);
           const overrides = [
-            has(o.root) && "代码目录", has(o.python) && "解释器", has(o.hosts) && "主机", has(o.databases) && "只读库",
+            has(o.root) && "代码目录", has(o.python) && "解释器", has(o.databases) && "只读库",
             has(o.code_paths) && "其他代码目录", has(o.logs) && "日志", has(o.urls) && "地址", has(o.profile) && "档案",
           ].filter(Boolean);
           return (
             <li key={e.name} className={cn("flex flex-wrap items-center gap-4 px-4 py-3.5", !on && "bg-sunken/50")}>
-              <EnvBadge env={e.name} className="h-6 px-2 text-[12px]" />
+              <span className="w-[72px] shrink-0"><EnvBadge env={e.name} className="h-6 px-2 text-[12px]" /></span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-[13px] font-medium text-fg">
                   {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">已停用</Badge>}

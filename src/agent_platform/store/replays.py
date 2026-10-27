@@ -8,6 +8,11 @@ from datetime import datetime
 from .db import pool
 
 
+# 批次里有没被 👎 的原运行：这样的条目判定读作"有没有退步"（更好 / 持平 / 退步），页面据此换说法
+_REGRESSION = ("COALESCE(bool_or(i.id IS NOT NULL AND NOT EXISTS ("
+               "SELECT 1 FROM feedback f WHERE f.run_id = i.source_run AND f.score < 0)), false)")
+
+
 def _iso(v: datetime | None) -> str | None:
     return v.isoformat() if v else None
 
@@ -58,7 +63,7 @@ async def listing(limit: int = 50) -> list[dict]:
             "SELECT r.id, r.title, r.filter, r.note, r.created_by, r.created_at, count(i.id),"
             " count(*) FILTER (WHERE i.verdict='fixed'), count(*) FILTER (WHERE i.verdict='same'),"
             " count(*) FILTER (WHERE i.verdict='worse'), count(*) FILTER (WHERE i.verdict IN ('unclear','error')),"
-            " count(*) FILTER (WHERE i.verdict IS NULL)"
+            f" count(*) FILTER (WHERE i.verdict IS NULL), {_REGRESSION}"
             " FROM replays r LEFT JOIN replay_items i ON i.replay_id = r.id"
             " GROUP BY r.id ORDER BY r.created_at DESC LIMIT %s", (max(1, min(limit, 200)),))
         rows = await cur.fetchall()
@@ -71,7 +76,7 @@ async def get(replay_id: int) -> dict | None:
             "SELECT r.id, r.title, r.filter, r.note, r.created_by, r.created_at, count(i.id),"
             " count(*) FILTER (WHERE i.verdict='fixed'), count(*) FILTER (WHERE i.verdict='same'),"
             " count(*) FILTER (WHERE i.verdict='worse'), count(*) FILTER (WHERE i.verdict IN ('unclear','error')),"
-            " count(*) FILTER (WHERE i.verdict IS NULL)"
+            f" count(*) FILTER (WHERE i.verdict IS NULL), {_REGRESSION}"
             " FROM replays r LEFT JOIN replay_items i ON i.replay_id = r.id WHERE r.id=%s GROUP BY r.id", (replay_id,))
         row = await cur.fetchone()
     return _summary(row) if row else None
@@ -83,7 +88,8 @@ async def items(replay_id: int) -> list[dict]:
         cur = await conn.execute(
             "SELECT i.id, i.source_run, i.new_run, i.verdict, i.reason, i.judged_at,"
             " s.task, s.service, s.env, s.summary, s.task_version, s.role_version, s.output, s.status,"
-            " n.task_version, n.role_version, n.output, n.status, s.recipe, n.recipe"
+            " n.task_version, n.role_version, n.output, n.status, s.recipe, n.recipe,"
+            " EXISTS (SELECT 1 FROM feedback f WHERE f.run_id = i.source_run AND f.score < 0)"
             " FROM replay_items i JOIN runs s ON s.run_id = i.source_run LEFT JOIN runs n ON n.run_id = i.new_run"
             " WHERE i.replay_id=%s ORDER BY i.id", (replay_id,))
         rows = await cur.fetchall()
@@ -92,6 +98,7 @@ async def items(replay_id: int) -> list[dict]:
         out.append({
             "id": r[0], "source_run": r[1], "new_run": r[2], "verdict": r[3], "reason": r[4], "judged_at": _iso(r[5]),
             "task": r[6], "service": r[7], "env": r[8], "summary": r[9],
+            "negative": r[20],          # 原运行被 👎 过：判定看"问题改好没有"；否则看"有没有退步"
             "before": {"task_version": r[10], "role_version": r[11], "answer": _answer(r[12]), "status": r[13],
                        "recipe": r[18]},
             "after": {"task_version": r[14], "role_version": r[15], "answer": _answer(r[16]), "status": r[17],
@@ -108,5 +115,5 @@ def _answer(output: dict | None) -> str | None:
 
 def _summary(r) -> dict:
     return {"id": r[0], "title": r[1], "filter": r[2] or {}, "note": r[3], "created_by": r[4],
-            "created_at": r[5].isoformat(),
+            "created_at": r[5].isoformat(), "regression": bool(r[12]),
             "counts": {"total": r[6], "fixed": r[7], "same": r[8], "worse": r[9], "unclear": r[10], "pending": r[11]}}

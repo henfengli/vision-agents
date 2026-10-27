@@ -76,7 +76,7 @@ export const services: Service[] = [
     description: "Vision 的数据编排（Dagster）：资产、调度、传感器；docker 部署，国内生产 / 测试各一套",
     root: "~/deploy/vision-dagster", code_paths: [],
     python: "~/miniconda3/envs/vision-dagster/bin/python",
-    env_vars: {}, urls: {}, hosts: [],
+    env_vars: {}, urls: {},
     databases: { ck: CK_TEST },
     configs: ["~/deploy/vision-dagster/.env", "~/deploy/vision-dagster/dagster.yaml"],
     hidden: ["~/deploy/vision-dagster/docker-compose.yaml"],
@@ -88,8 +88,8 @@ export const services: Service[] = [
       },
     },
     envs: {
-      prod: { hosts: ["172.24.16.100"], urls: { deployed: "https://vision-dagster-prod.ipa.zs:9902" }, databases: { ck: CK_PROD } },
-      test: { hosts: ["172.24.24.136"], urls: { deployed: "https://vision-dagster-test.ipa.zs:9901" } },
+      prod: { urls: { deployed: "https://vision-dagster-prod.ipa.zs:9902" }, databases: { ck: CK_PROD } },
+      test: { urls: { deployed: "https://vision-dagster-test.ipa.zs:9901" } },
     },
     profile: {
       env_notes: "线上是 docker 部署（docker-compose.template.yaml 生成 docker-compose.yaml）：国内生产 172.24.16.100、国内测试 172.24.24.136。*.india 模板是印度部署的，不用",
@@ -106,7 +106,7 @@ export const services: Service[] = [
     root: "~/deploy/vision-board", code_paths: [],
     python: "~/miniconda3/envs/vision-board/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}" },
-    urls: {}, hosts: ["172.21.0.45"],
+    urls: {},
     databases: { ck: CK_TEST },
     configs: ["~/deploy/vision-board/vision_board/settings-{env}.py"],
     hidden: [],
@@ -116,8 +116,8 @@ export const services: Service[] = [
     },
     mcp: {},
     envs: {
-      prod: { hosts: ["172.24.16.100"], urls: { site: "https://vision-board.moon-prod.ipa.zs/" }, databases: { ck: CK_PROD } },
-      test: { hosts: ["172.21.0.45"], urls: { site: "https://vision-board.ipa.zs/" } },
+      prod: { urls: { site: "https://vision-board.moon-prod.ipa.zs/" }, databases: { ck: CK_PROD } },
+      test: { urls: { site: "https://vision-board.ipa.zs/" } },
     },
     profile: {
       conventions: "每个环境一份 settings：vision_board/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_board.settings-{环境}；manage.py 命令都按它的配置走",
@@ -135,7 +135,7 @@ export const services: Service[] = [
     root: "~/deploy/vision-web", code_paths: [],
     python: "~/miniconda3/envs/vision-web/bin/python",
     env_vars: { DJANGO_SETTINGS_MODULE: "vision_web.settings-{env}" },
-    urls: {}, hosts: [],
+    urls: {},
     databases: {},
     configs: ["~/deploy/vision-web/vision_web/settings-{env}.py"],
     hidden: [],
@@ -247,7 +247,7 @@ export const roles: Role[] = [
   {
     name: "ops_analyst", title: "运维分析", description: "报错定位与根因分析：看线上日志与主机、读代码、在项目环境里复现、查库",
     prompt: "你是运维分析工程师，就在出问题的服务的部署主机上。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 看线上现场：logs 看应用 / nginx / 容器日志（先 grep error|exception|traceback），host_status 看内存、磁盘、\n   容器状态；服务有自己的工具（如 dagster 的运行记录）时先用它；\n3. 读相关代码和本环境的配置，定位出错的步骤；用 py 直接调用出错的函数复现。只复现读的部分：生产的库是只读账号，\n   写库的步骤会失败，这是预期的；测试用的是真实配置，账号能写，写库的步骤一律跳过不调；数据假设要验证时委派给 data_searcher；\n4. 确认可以安全重跑时（档案或任务说明允许），用服务工具在线上重跑（如 dagster 的 reexecute_run），并跟踪结果；\n5. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
-    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "host_metrics", "save_asset", "notify"],
+    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "save_asset", "notify"],
     subagents: ["data_searcher"], service_tools: null,
     extends: null, prompt_append: "", version: 6, ...by("gaodl", 3 * DAY),
   },
@@ -266,7 +266,7 @@ export const roles: Role[] = [
   {
     name: "inspector", title: "巡检", description: "按沉淀的方法做日常巡检，异常才通知",
     prompt: "",
-    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "host_metrics", "save_asset", "notify"], subagents: [], service_tools: null,
+    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "save_asset", "notify"], subagents: [], service_tools: null,
     extends: "ops_analyst",
     prompt_append: "你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。\n没有既定方法时先探索（数据新鲜度、页面、日志里的错误、主机资源），结束后用 save_asset 沉淀成方法。输出控制在 15 行以内。", version: 3, ...by("liyd", 8 * DAY),
   },

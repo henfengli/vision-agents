@@ -129,17 +129,19 @@ async def restore_content(env: str, service: str, task: str, kind: str,
 
 
 async def search_active(env: str, service: str, task: str,
-                        limit: int = 8) -> list[dict]:
-    """prepare 注入用：任务级资产优先，其次服务通用；同类内按复用数/反馈排。"""
+                        limit: int = 8, exclude_run: str | None = None) -> list[dict]:
+    """prepare 注入用：任务级资产优先，其次服务通用；同类内按复用数/反馈排。
+    exclude_run：回归重放时去掉原运行沉淀的。"""
     async with pool().connection() as conn:
         cur = await conn.execute(
             "SELECT id, task, kind, name, summary, content, use_count,"
             " feedback_score, source_run, path FROM assets"
             " WHERE env=%s AND service=%s AND task IN (%s, '')"
-            " AND valid_to IS NULL"
+            # 不重放时参数是 NULL：整个条件为真（人工登记的 source_run 也是 NULL，不能被滤掉）
+            " AND valid_to IS NULL AND (%s::text IS NULL OR source_run IS DISTINCT FROM %s)"
             " ORDER BY CASE WHEN task=%s THEN 0 ELSE 1 END, use_count DESC,"
             " COALESCE(feedback_score,0) DESC, created_at DESC LIMIT %s",
-            (env, service, task, task, limit * 2))
+            (env, service, task, exclude_run, exclude_run, task, limit * 2))
         rows = await cur.fetchall()
     rows = sorted(rows, key=lambda r: (
         0 if r[1] == task else 1, _KIND_ORDER.get(r[2], 9)))[:limit]

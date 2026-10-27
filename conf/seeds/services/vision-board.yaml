@@ -6,7 +6,6 @@ root: ~/deploy/vision-board
 python: ~/miniconda3/envs/vision-board/bin/python
 # 项目约定：每个环境一份 vision_board/settings{后缀}.py，DJANGO_SETTINGS_MODULE 指过去
 env_vars: {DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}"}
-hosts: [172.21.0.45]
 databases:
   ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
 # 生产的 settings agent 看不到，py 里盖上控制台填的只读版（库口令换成只读账号；STATIC_ROOT、认证照抄即可）；
@@ -21,12 +20,10 @@ logs:
   nginx_error: /var/log/nginx/error.log
 envs:
   prod:
-    hosts: [172.24.16.100]
     urls: {site: "https://vision-board.moon-prod.ipa.zs/"}
     databases:
       ck: "clickhouse://${CK_RO_USER}:${CK_PROD_RO_PASSWORD}@172.168.0.125:8123/default"
   test:
-    hosts: [172.21.0.45]
     urls: {site: "https://vision-board.ipa.zs/"}
 profile:
   conventions: 每个环境一份 settings：vision_board/settings-{环境}.py，DJANGO_SETTINGS_MODULE=vision_board.settings-{环境}；manage.py 命令都按它的配置走

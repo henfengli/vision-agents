@@ -56,13 +56,6 @@ retention:
   recall_hits_days: 90              # 召回埋点
   scratch_days: 7                   # 本机的工作目录（db_query 结果文件、agent 写的临时文件）
 
-# Grafana（host_metrics 工具用）：datasource_uid 是 Prometheus 数据源的 uid，token 用只读账号。整段不配则工具不出现。
-# 同机部署时本机状况已经有 host_status 工具（不用 Grafana）
-# grafana:
-#   url: http://grafana.internal:3000
-#   datasource_uid: prometheus
-#   token: "${GRAFANA_TOKEN}"
-
 # 平台 MCP（可选）：通用能力，{名字: langchain-mcp-adapters 连接配置}。角色里写工具名，或 "mcp:<名字>" 引用整个 server。
 # 某个服务特有的能力（比如 dagster 的 GraphQL）写在服务定义的 mcp 里，运行在该服务上时自动出现，不用写进角色。
 # 这里也能写 service（只在该服务的运行里可用）和 envs（每个环境一份连接，调用按运行的环境路由）。

@@ -156,6 +156,13 @@ class Submitter:
     async def replay(self, run_id: str, caller: Caller) -> Accepted:
         """回归重放：同样的输入用当前定义重跑一次（新会话、不沉淀、不投递），供并排对比。"""
         old = await self._existing(run_id)
+        if old["trigger"]["type"] == "replay":
+            raise Rejected("conflict", "这是重放出来的运行，请重放它的原运行", 409)
+        entry = await self._reg.task(old["task"])
+        # 失败的 agent 运行没有 resolution（只有成功才落），所以看"不是规则 / 内建"+ 任务现在是 agent 形态
+        if old["resolution"] not in (None, "agent") or old["status"] not in TERMINAL or (
+                entry is not None and entry.spec.form != "agent"):
+            raise Rejected("conflict", "只能重放已经结束的 agent 运行（内建任务、规则命中、还在跑的不行）", 409)
         req = RunRequest(task=old["task"], service=old["service"], env=old["env"], input=old["input"])
         return await self._relaunch(req, old, RunTrigger(type="replay", id=run_id, caller=caller.name), caller)
 

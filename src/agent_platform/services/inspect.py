@@ -103,5 +103,5 @@ def view_dict(view: ServiceView, configs: list[dict], protected: bool) -> dict:
     return {"service": view.service, "env": view.env, "enabled": view.enabled, "protected": protected,
             "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "urls": view.urls, "mcp_servers": view.mcp_servers,
-            "hosts": view.hosts, "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
+            "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
             "logs": view.logs, "profile": view.profile, "config_files": configs}
