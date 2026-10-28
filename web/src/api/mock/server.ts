@@ -691,6 +691,8 @@ on("PATCH", "/v1/tasks/:name", (p, _q, body) => {
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) { own.delete(k); next[k] = structuredClone((parent as unknown as Record<string, unknown>)[k]); } else { own.add(k); next[k] = v; }
     }
+    // 与后端 registry._check_task 一致：上限按父任务算（连同子任务），子任务不能单独设
+    if (own.has("concurrency") && next.concurrency != null) throw invalid("同时执行上限按父任务算（连同子任务），子任务不能单独设");
     if (own.size) checkTask(effective({ ...cur, ...next, _own: [...own] } as MockTask), own.has("triggers"));
     if (own.has("triggers")) checkAfter(p.name, { ...cur, ...next } as Task);
     return taskSummary(bump("tasks/" + p.name, cur, { ...next, auto_created: false, _own: [...own] } as Partial<Task>));
@@ -794,8 +796,8 @@ for (const [kind, find] of [["services", findService], ["roles", findRole], ["ta
 const errorCodeOf = (r: db.MockRun): string | null => r._error_code ?? (r.status === "cancelled" ? "cancelled"
   : r.status === "failed" ? String(db.eventsOf(r).find((e) => e.kind === "error")?.payload.title ?? "error") : null);
 const listItem = (r: db.MockRun): RunListItem => {
-  const { _events, _answer, _output, _error_code, _scenario, _priority, _ckey, _climit, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
-  void _events; void _answer; void _output; void _error_code; void _scenario; void _priority; void _ckey; void _climit; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
+  const { _events, _answer, _output, _error_code, _scenario, _priority, _queuedAt, _ckey, _climit, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
+  void _events; void _answer; void _output; void _error_code; void _scenario; void _priority; void _queuedAt; void _ckey; void _climit; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
   return { ...rest, error_code: errorCodeOf(r) };
 };
 const findRun = (id: string) => db.runs.find((x) => x.run_id === id) ?? (() => { throw notFound("运行 " + id); })();
@@ -818,6 +820,7 @@ function runDetail(r: db.MockRun): Run {
       concurrency: r._climit ? { limit: r._climit, running: db.runs.filter((x) => x.status === "running" && x._ckey === r._ckey).length } : null,
       hosts: serving(r.env, r.service).map((w) => ({ host: w.host, running: w.running, max_concurrent: w.max_concurrent })),
       priority: r._priority ?? 1,
+      since: r._queuedAt ?? r.created_at,
     } : null,
   };
 }
@@ -863,7 +866,13 @@ const TERMINAL = ["success", "failed", "cancelled"];
 on("POST", "/v1/runs/:id/rerun", (p) => {
   const r = findRun(p.id);
   const [task, subtask] = r.task.split(":");
-  return submitRun({ task, subtask, service: r.service, env: r.env, input: r.input, memory: r.memory }, "rerun");
+  const accepted = submitRun({ task, subtask, service: r.service, env: r.env, input: r.input, memory: r.memory }, "rerun");
+  // 与后端 Submitter.rerun 一致：原运行还等着自动重试的，重试取消掉（不然同一份输入跑两遍），原运行就此算失败
+  if (r.status === "failed" && r.retry_at) {
+    r.retry_at = null;
+    appendEvent(r, "stage", { stage: "retry", title: `自动重试已取消（${ME.name} 改为重跑 ${accepted.run_id.slice(0, 8)}）` });
+  }
+  return accepted;
 });
 /** 与后端 submitter.resume 一致：同一个 run_id 接着跑，事件接在后面（页面按 after=seq 增量取）；没走到 agent 的从头执行。
  *  auto：任务配置的自动重试发起的；人点续跑时顺手取消还在等的自动重试（attempt +1、retry_at 清掉） */
@@ -879,7 +888,7 @@ function resumeRun(r: db.MockRun, auto = false): RunAccepted {
   const started = prev.some((e) => e.kind === "model_call" || e.kind === "thought" || (e.kind === "stage" && e.payload.stage === "system"));
   const how = auto ? `自动重试（第 ${r.attempt + 1} 次执行）` : `续跑（${ME.name}）`;
   appendEvent(r, "stage", { stage: "resume", title: started ? how : `${how}；上次没走到 agent，从头开始` });
-  Object.assign(r, { status: "running", finished_at: null, _error_code: undefined, duration_ms: null, attempt: r.attempt + 1, retry_at: null });
+  Object.assign(r, { status: "running", finished_at: null, _error_code: undefined, duration_ms: null, attempt: r.attempt + 1, retry_at: null, _queuedAt: now() });
   settled.delete(r.run_id);
   setTimeout(() => {
     if (r.status !== "running") return;
@@ -1041,8 +1050,12 @@ function workersNow() {
   });
 }
 
-/** 排着队的能不能开始：点名的上游都成功了、任务并发没满、有在线的主机负责 */
+/** 服务在这个环境暂停了自动触发 */
+const paused = (service: string | null, env: string) => !!db.services.find((s) => s.name === service)?.envs[env]?.triggers_paused;
+
+/** 排着队的能不能开始：点名的上游都成功了、任务并发没满、有在线的主机负责；暂停了自动触发的那里，自动触发建的先不认领 */
 function claimable(r: db.MockRun): boolean {
+  if (AUTOMATIC.includes(r.trigger.type) && paused(r.service, r.env)) return false;
   if (r.depends_on.some((id) => db.runs.find((x) => x.run_id === id)?.status !== "success")) return false;
   if (r._climit && db.runs.filter((x) => x.status === "running" && x._ckey === r._ckey).length >= r._climit) return false;
   return serving(r.env, r.service).length > 0;
@@ -1101,7 +1114,8 @@ function considerAfter(r: db.MockRun, depth: number, down: string, tr: AfterTrig
   const values: Record<string, unknown> = { ...fields };
   if (tr.mode === "all") {
     const window = tr.window_s ?? 86400;
-    const lastFire = db.runs.filter((x) => x.task === down && x.trigger.type === "after" && x.trigger.id === tr.id && x.env === r.env).map((x) => x.created_at).sort().pop();
+    // 下游按对象字段落到子任务时运行记在「任务:对象」上：连同子任务一起算（与 store/runs.last_after_fire 一致）
+    const lastFire = db.runs.filter((x) => (x.task === down || x.task.startsWith(down + ":")) && x.trigger.type === "after" && x.trigger.id === tr.id && x.env === r.env).map((x) => x.created_at).sort().pop();
     const since = [new Date(Date.now() - window * 1000).toISOString(), lastFire ?? ""].sort().pop()!;
     const missing: string[] = [];
     for (const up of tr.tasks) {
@@ -1156,6 +1170,12 @@ setInterval(() => {
   for (const r of db.runs.filter((x) => x.status === "failed" && x.retry_at && x.retry_at <= now())) {
     const common = { kind: "retry" as const, task: r.task, trigger_id: null, env: r.env, source: r.run_id, run_id: r.run_id };
     const attempt = r.attempt;
+    // 与后端 scheduler._retry_one 一致：暂停了自动触发的，顺延 5 分钟
+    if (paused(r.service, r.env)) {
+      r.retry_at = new Date(Date.now() + 300_000).toISOString();
+      addTick({ ...common, outcome: "skipped", reason: `服务 ${r.service} 在 ${r.env} 暂停了自动触发，重试顺延` });
+      continue;
+    }
     try {
       resumeRun(r, true);
       addTick({ ...common, outcome: "fired", reason: `第 ${attempt} 次执行失败后自动重试` });

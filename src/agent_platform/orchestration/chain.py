@@ -100,10 +100,14 @@ class Chainer:
             return
 
         values = dict(fields)
+        submit_key = key
         if t.mode == "all":
             since = datetime.now(timezone.utc) - timedelta(seconds=t.window_s)
-            if last := await runs.last_after_fire(downstream, t.id, env):
+            last = await runs.last_after_fire(downstream, t.id, env)
+            if last:
                 since = max(since, datetime.fromisoformat(last))
+            # 全部模式按「轮」幂等：两个上游几乎同时结束、两边都判定齐了时，读到的上一次触发相同，只建一条
+            submit_key = f"after-all:{downstream}:{t.id}:{env}:{last or '-'}"
             missing = []
             for upstream in t.tasks:
                 if run_fields_match(run, upstream):
@@ -132,7 +136,7 @@ class Chainer:
         req = RunRequest(task=base, subtask=obj or None, env=env, service=service, input=input_data)
         trigger = RunTrigger(type="after", id=t.id, source=run["run_id"], caller=run["trigger"]["caller"] or "after")
         try:
-            accepted = await self._submitter.submit(req, trigger=trigger, idempotency_key=key)
+            accepted = await self._submitter.submit(req, trigger=trigger, idempotency_key=submit_key)
         except Rejected as e:
             await ticks.record(outcome="rejected", reason=e.message, detail={"code": e.code}, key=key, **common)
             return

@@ -140,7 +140,7 @@ export function TaskDetailPage() {
               { label: "新建下游任务", icon: <LuWorkflow />, onClick: () => navigate(`/tasks/_new?after=${encodeURIComponent(name)}`) },
             ] : []),
             { label: "查看全部运行", icon: <LuActivity />, onClick: () => navigate(`/runs?task=${encodeURIComponent(name)}`) },
-            { label: "查看触发记录", icon: <LuRadar />, onClick: () => navigate(`/runs?tab=ticks&task=${encodeURIComponent(name)}`) },
+            { label: "查看触发记录", icon: <LuRadar />, onClick: () => navigate(`/runs?view=ticks&task=${encodeURIComponent(name)}`) },
             { separator: true, label: "" },
             { label: task?.enabled ? (isSub ? "停用子任务" : "停用任务") : (isSub ? "启用子任务" : "启用任务"), icon: <LuPower />, danger: !!task?.enabled, onClick: toggle },
             { label: isSub ? "删除子任务" : "删除任务", icon: <LuTrash2 />, danger: true, onClick: remove },

@@ -147,7 +147,7 @@ function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
   const rerun = async () => {
     const ok = await confirm(rule
       ? { title: "交给 agent 分析一遍？", description: "这次是规则直接给的结论。重跑会用同样的输入新开一次运行，这回交给 agent 分析（不再走规则）。", confirmText: "重跑" }
-      : { title: "重跑？", description: `新开一次运行（新会话），沿用任务、服务、环境和输入；不走去重。${resumable ? "想从这次的断点接着走，用「续跑」。" : ""}`, confirmText: "重跑" });
+      : { title: "重跑？", description: `新开一次运行（新会话），沿用任务、服务、环境和输入；不走去重。${run.retry_at ? "这次等着的自动重试会取消（不然同一份输入跑两遍），这次运行就此算失败。" : resumable ? "想从这次的断点接着走，用「续跑」。" : ""}`, confirmText: "重跑" });
     if (!ok) return;
     setBusy("again");
     try {
@@ -192,7 +192,8 @@ function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
         )}
         {run.attempt > 1 && <Tooltip content="续跑 / 自动重试都在同一个运行上接着跑"><span>第 {run.attempt} 次执行</span></Tooltip>}
         <TimeAgo at={run.created_at} />
-        <span>{live ? <>{run.status === "queued" ? "已排队" : "已运行"} <Elapsed since={run.created_at} /></> : <>耗时 {duration(run.duration_ms)}</>}</span>
+        {/* 排队时长从这一次进队列算（续跑、自动重试会重新进），不从建运行时算 */}
+        <span>{live ? <>{run.status === "queued" ? "已排队" : "已运行"} <Elapsed since={run.status === "queued" ? run.queue?.since ?? run.created_at : run.created_at} /></> : <>耗时 {duration(run.duration_ms)}</>}</span>
         {!!run.tokens && <span>{num(run.tokens)} tokens</span>}
         <IdCopy value={run.run_id} />
       </>}

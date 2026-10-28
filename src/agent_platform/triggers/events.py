@@ -85,9 +85,22 @@ class EventRouter:
         return {**item, "run_id": accepted.run_id, "status": accepted.status, "dedup": accepted.dedup, "error": None}
 
 
+_SECRET_KEY = re.compile(r"password|passwd|secret|token|api_?key|access_key|private_key|authorization", re.IGNORECASE)
+_URL_PASSWORD = re.compile(r"(\w+://[^:/@\s]+:)[^@\s]+@")
+_SECRET_ASSIGN = re.compile(r"((?:password|passwd|secret|token|api_?key)\s*[=:]\s*)\S+", re.IGNORECASE)
+
+
 def _brief(event: Event) -> dict:
-    """触发记录里留的事件字段（长文本截短：报错堆栈动辄几十 KB）。"""
-    return {k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v) for k, v in list(event.data.items())[:20]}
+    """触发记录里留的事件字段（任何密钥都能经 /v1/ticks 读到，存 30 天）：长文本截短（报错堆栈动辄几十 KB），
+    像密钥的字段整个打码，文本里连接串的口令、password=… 这类赋值也打码。"""
+    def clean(k: str, v):
+        if _SECRET_KEY.search(k):
+            return "***"
+        if not isinstance(v, str):
+            return v
+        v = _SECRET_ASSIGN.sub(r"\1***", _URL_PASSWORD.sub(r"\1***@", v))
+        return v[:300] + "…" if len(v) > 300 else v
+    return {k: clean(k, v) for k, v in list(event.data.items())[:20]}
 
 
 def _first_rule(t: EventTrigger, error: str) -> dict | None:

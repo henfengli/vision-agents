@@ -133,8 +133,8 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 | `ticks(*, task=None, kind=None, outcome=None, env=None, hours=None, limit=100)` | 触发记录：定时 / 事件 / 联动 / 自动重试每次判定建了哪条运行、为什么没建（`outcome` 如 `fired` `filtered` `rejected` `unmatched`）。排查「为什么没跑」先看它 |
 
 运行详情里和调度有关的几项：`attempt`（第几次执行，续跑 / 自动重试 +1）、`retry_at`（失败了、等着在这个时刻自动重试；
-这时 `status` 是 `failed` 但还不是最终结果，`wait` 不会替你等重试）、`lineage`（触发它的上游运行、它点名等的、它引出的）、
-`queue`（排队中才有：在等哪个上游、任务并发、有没有在线主机负责）。
+这时 `status` 是 `failed` 但还不是最终结果，`run(wait=True)` / `wait()` 会接着等重试的结果，传了超时就等到超时为止）、
+`lineage`（触发它的上游运行、它点名等的、它引出的）、`queue`（排队中才有：在等哪个上游、任务并发、有没有在线主机负责、`since` 这次进队列的时刻）。
 
 ### 事件
 

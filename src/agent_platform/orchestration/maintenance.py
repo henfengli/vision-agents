@@ -47,9 +47,12 @@ class Maintenance:
 
     async def _recover_orphans(self) -> None:
         for run_id in await runs.fail_orphans(ORPHAN_AFTER_S):
-            await runs.log_event(run_id, "error", {"title": "orphaned", "content": "执行进程中断，可在详情页续跑"})
-            if self._orphaned is not None:
-                await self._orphaned(run_id)
+            try:                                     # 一条出错不耽误别的孤儿
+                await runs.log_event(run_id, "error", {"title": "orphaned", "content": "执行进程中断，可在详情页续跑"})
+                if self._orphaned is not None:
+                    await self._orphaned(run_id)
+            except Exception:  # noqa: BLE001
+                log.exception("孤儿运行 %s 的收尾失败", run_id)
 
     async def _upstream_sweep(self) -> None:
         for run_id, upstream, status in await runs.blocked_by_upstream():

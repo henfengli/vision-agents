@@ -131,7 +131,9 @@ async def _queue_state(run: dict) -> dict:
     return {"waiting_for": [{"run_id": r["run_id"], "status": r["status"], "task": r["task"]} for r in waiting],
             "concurrency": {"limit": run["concurrency_limit"], "running": running} if run.get("concurrency_limit") else None,
             "hosts": [{"host": h["host"], "running": h["running"], "max_concurrent": h["max_concurrent"]} for h in hosts],
-            "priority": run.get("priority", 1)}
+            "priority": run.get("priority", 1),
+            # 这一次进队列的时刻（续跑、自动重试会重新进）：「已排队多久」从它算
+            "since": run.get("queued_at") or run["created_at"]}
 
 
 def chat_turn(run: dict, events: list[dict], feedback: dict | None) -> dict:

@@ -15,6 +15,8 @@ kind ∈ services / roles / tasks。服务与任务的列表与单个带统计�
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Body
 
 from ... import credentials
@@ -24,6 +26,7 @@ from .. import views
 from ..deps import RT, WHO, Caller, Runtime
 
 router = APIRouter(prefix="/v1")
+log = logging.getLogger(__name__)
 
 KINDS = {"services": "service", "roles": "role", "tasks": "task"}
 
@@ -180,6 +183,8 @@ def _writes(plural: str, kind: str) -> None:
 
     async def update(name: str, body: dict = Body(...), rt: Runtime = RT, who: Caller = WHO):
         await rt.registry.update(kind, name, await unmasked(rt, name, body), who.name)
+        if "concurrency" in body:
+            await _requeue_limits(rt, kind, name)
         return await _shaped(rt, kind, name)
 
     async def delete(name: str, rt: Runtime = RT, who: Caller = WHO):
@@ -196,6 +201,7 @@ def _writes(plural: str, kind: str) -> None:
 
     async def restore(name: str, version: int, rt: Runtime = RT, who: Caller = WHO):
         await rt.registry.restore(kind, name, version, who.name)
+        await _requeue_limits(rt, kind, name)
         return await _shaped(rt, kind, name)
 
     async def version_stats(name: str, _: Caller = WHO):
@@ -209,6 +215,19 @@ def _writes(plural: str, kind: str) -> None:
     router.add_api_route(f"/{plural}/{{name}}/versions/{{version}}/restore", restore, methods=["POST"])
     if kind in ("task", "role"):
         router.add_api_route(f"/{plural}/{{name}}/version-stats", version_stats, methods=["GET"])
+
+
+async def _requeue_limits(rt: Runtime, kind: str, name: str) -> None:
+    """父任务的同时执行上限改了（或恢复了老版本）：已经排着的运行按新的上限算，不用等它们跑完。"""
+    if kind != "task" or ":" in name:
+        return
+    entry = await rt.registry.task(name)
+    if entry is None:
+        return
+    try:                                         # 定义已经存好了：这一步失败只是排着的按旧上限跑，不让保存报错
+        await runs.requeue_limits(name, entry.spec.concurrency)
+    except Exception:  # noqa: BLE001
+        log.warning("任务 %s 改了同时执行上限，更新排队中的运行失败", name, exc_info=True)
 
 
 for _plural, _kind_name in KINDS.items():

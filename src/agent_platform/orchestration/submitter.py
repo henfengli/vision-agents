@@ -167,11 +167,17 @@ class Submitter:
     # ———————— 已有运行上的动作 ————————
 
     async def rerun(self, run_id: str, caller: Caller) -> Accepted:
-        """同样的任务、服务、环境、输入，开一个新运行（新会话）。过开关，不再过触发声明。"""
+        """同样的任务、服务、环境、输入，开一个新运行（新会话）。过开关，不再过触发声明。
+        原运行失败后还等着自动重试的：重试取消掉（不然到点它也会续跑，同一份输入跑两遍），原运行就此算失败。"""
         old = await self._existing(run_id)
         req = RunRequest(task=old["task"], service=old["service"], env=old["env"], input=old["input"],
                          memory=old.get("memory") or {})
-        return await self._relaunch(req, old, RunTrigger(type="rerun", caller=caller.name), caller)
+        accepted = await self._relaunch(req, old, RunTrigger(type="rerun", caller=caller.name), caller)
+        if old["status"] == "failed" and old.get("retry_at") and await runs.clear_retry(run_id):
+            await runs.log_event(run_id, "stage", {"stage": "retry", "title": f"自动重试已取消（{caller.name} 改为重跑 {accepted.run_id[:8]}）"})
+            if self.on_failed_final is not None:
+                await self.on_failed_final(run_id)
+        return accepted
 
     async def correct(self, run_id: str, correction: str, caller: Caller) -> Accepted:
         """纠正：在同一会话里开新一轮，带上纠正内容；成功后取代被纠正的那一轮（trigger.id）沉淀的记忆。"""
@@ -224,7 +230,7 @@ class Submitter:
             raise Rejected("conflict", "只有单角色任务支持续跑；内建任务请用重跑", 409)
         if run["resolution"] == "rule":
             raise Rejected("conflict", "规则命中的运行没有可续的步骤，请用重跑", 409)
-        if live := await runs.live_in_session(run["session_id"]):
+        if live := await runs.live_in_session(run["session_id"], exclude=run_id):
             # 续跑接着写同一个会话 thread：会话里另有一轮在跑时两轮会交错
             raise Rejected("conflict", f"这个会话还有一轮在执行（{live['run_id'][:8]}），等它结束或先停止", 409)
         await gates.check_switches(self._reg, task_name=run["task"], task=entry.spec, service=run["service"], env=run["env"])
@@ -232,9 +238,12 @@ class Submitter:
         started = await runs.reached_agent(run_id)
         nth = run.get("attempt", 1) + 1
         how = f"自动重试（第 {nth} 次执行）" if auto else f"续跑（{caller.name}）"
+        # 先记事件再入队：worker 一认领就会往后写，时间线上「续跑」要排在它前面
         await runs.log_event(run_id, "stage", {"stage": "resume", "title": how if started
                                                else f"{how}；上次没走到 agent，从头开始"})
-        await runs.enqueue(run_id, resume=started)
+        # 只改还是 failed 的：两个人同时点续跑只算一次；自动重试还要求重试没在这之间被取消
+        if not await runs.enqueue(run_id, resume=started, auto=auto):
+            raise Rejected("conflict", "运行刚刚变了（已经续跑，或自动重试被取消了），刷新后再看", 409)
         return Accepted(run_id, run["session_id"], "queued")
 
     async def cancel(self, run_id: str, caller: Caller) -> dict:
@@ -259,12 +268,13 @@ class Submitter:
         return await runs.get(run_id)
 
     async def wait(self, run_id: str, timeout_s: float) -> dict:
-        """等到终态或超时，返回当前台账行。"""
+        """等到最终结束或超时，返回当前台账行。失败了、还等着自动重试的不算结束，接着等。"""
         deadline = asyncio.get_running_loop().time() + timeout_s
         delay = 0.3
         while True:
             run = await runs.get(run_id)
-            if run["status"] in TERMINAL or asyncio.get_running_loop().time() >= deadline:
+            done = run["status"] in TERMINAL and not (run["status"] == "failed" and run.get("retry_at"))
+            if done or asyncio.get_running_loop().time() >= deadline:
                 return run
             await asyncio.sleep(delay)
             delay = min(delay * 1.5, 2.0)

@@ -639,6 +639,7 @@ export interface RunQueueState {
   concurrency: { limit: number; running: number } | null;               // 任务的并发上限
   hosts: { host: string; running: number; max_concurrent: number }[];   // 在线、负责它的主机
   priority: number;                                                      // 0 对话 / 1 接口 / 2 定时、事件、联动
+  since: ISODate;                                                        // 这一次进队列的时刻（续跑、自动重试会重新进）
 }
 
 /** 定义的某一版 */

@@ -127,23 +127,41 @@ class Scheduler:
     # —— 自动重试 ——
 
     async def retry_due(self) -> int:
-        """到点的自动重试：领走（几台主机只有一台拿到）→ 续跑。开始不了（任务停用了、会话里有别的轮在跑…）就按最终失败收尾。"""
+        """到点的自动重试：领走（几台主机只有一台拿到；领走 = 把 retry_at 往后推当租约）→ 续跑。
+        - 服务在这个环境暂停了自动触发：顺延，不开始（维护窗口过了再跑）
+        - 开始不了（任务停用了、会话里有别的轮在跑…）：取消重试、按最终失败收尾。重试已经被人取消了的不再收一次
+        - 其他异常（库连不上…）：留着租约，到期后再领；一条出错不耽误同一批别的"""
         started = 0
         for run_id in await runs.claim_due_retries():
-            run = await runs.get(run_id)
-            common = {"kind": "retry", "task": run["task"] if run else None, "env": run["env"] if run else None,
-                      "source": run_id, "run_id": run_id}
             try:
-                await self._submitter.resume(run_id, RETRY, auto=True)
-            except Rejected as e:
+                started += await self._retry_one(run_id)
+            except Exception:  # noqa: BLE001
+                log.exception("自动重试 %s 没能开始，租约到期后再试", run_id)
+        return started
+
+    async def _retry_one(self, run_id: str) -> int:
+        run = await runs.get(run_id)
+        if run is None or run["status"] != "failed" or not run.get("retry_at"):
+            return 0
+        common = {"kind": "retry", "task": run["task"], "env": run["env"], "source": run_id, "run_id": run_id}
+        if run["service"] and (svc := await self._reg.service(run["service"])) is not None \
+                and svc.spec.view(run["service"], run["env"]).triggers_paused:
+            await runs.postpone_retry(run_id, runs.RETRY_LEASE_S)
+            await ticks.record(outcome="skipped", reason=f"服务 {run['service']} 在 {run['env']} 暂停了自动触发，重试顺延",
+                               **common)
+            return 0
+        try:
+            await self._submitter.resume(run_id, RETRY, auto=True)
+        except Rejected as e:
+            # 先把重试取消掉再收尾：取消成功才说明还归这里收（人恰好在这时取消了重试的，取消那边已经收过了）
+            if await runs.clear_retry(run_id):
                 await runs.log_event(run_id, "stage", {"stage": "retry", "title": "自动重试没能开始", "content": e.message})
                 await ticks.record(outcome="rejected", reason=e.message, detail={"code": e.code}, **common)
                 if self.settle_failed is not None:
                     await self.settle_failed(run_id)
-                continue
-            await ticks.record(outcome="fired", reason=f"第 {(run or {}).get('attempt', 1)} 次执行失败后自动重试", **common)
-            started += 1
-        return started
+            return 0
+        await ticks.record(outcome="fired", reason=f"第 {run.get('attempt') or 1} 次执行失败后自动重试", **common)
+        return 1
 
     async def upcoming(self, limit: int | None = None) -> list[dict]:
         """接下来的触发（按 cron 算）：[{task, trigger_id, service, env, at}]，按时间排序。"""

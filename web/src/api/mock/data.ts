@@ -510,6 +510,7 @@ export interface MockRun extends Run {
   _error_code?: string;
   _scenario?: number;          // 选中的场景下标（问答、失败分析）
   _priority?: number;          // 认领顺序：0 对话 / 1 接口 / 2 定时、事件、联动（与 domain/runs.PRIORITY 一致）
+  _queuedAt?: string;          // 这一次进队列的时刻（续跑、自动重试会重新进）；不写 = created_at
   _ckey?: string;              // 任务并发：<父任务>@<环境>
   _climit?: number;
 }

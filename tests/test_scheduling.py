@@ -195,6 +195,19 @@ class ChainTest(unittest.TestCase):
         kw = self.ticks.record.await_args.kwargs
         self.assertEqual((kw["outcome"], kw["reason"]), ("rejected", "暂停了"))
 
+    def test_all_mode_uses_round_key(self):
+        """全部模式按「轮」幂等：两个上游几乎同时结束、各自判定齐了，读到的上一次触发相同，提交的是同一把键"""
+        self.declare(mode="all", tasks=["frontend-smoke", "failure-analysis"])
+        self.runs.latest_finished = mock.AsyncMock(return_value=a_run(run_id="up2", task="failure-analysis"))
+        self.runs.last_after_fire = mock.AsyncMock(return_value="2026-10-21T08:00:00+00:00")
+        self.finish(a_run())
+        first = self.sub.submit.await_args.kwargs["idempotency_key"]
+        self.runs.latest_finished = mock.AsyncMock(return_value=a_run())
+        self.finish(a_run(run_id="up2", task="failure-analysis"))
+        second = self.sub.submit.await_args.kwargs["idempotency_key"]
+        self.assertEqual(first, second)
+        self.assertEqual(first, "after-all:daily-inspection:after-x:test:2026-10-21T08:00:00+00:00")
+
 
 class RunDependencyTest(unittest.TestCase):
     def setUp(self):
@@ -269,6 +282,95 @@ class RetryTest(unittest.TestCase):
         self.notifier.emit.assert_awaited()
         self.assertIsNone(self.fail("timeout"))
         self.assertIsNone(self.fail("error", trigger="replay"))
+
+    def test_interactive_turns_do_not_retry(self):
+        """对话、纠正：人在页面上看着，不自动重试（等重试期间会话的下一条会被挡住）"""
+        self.assertIsNone(self.fail("error", trigger="chat"))
+        self.assertIsNone(self.fail("error", trigger="correction"))
+        self.assertEqual(self.fail("error", trigger="web"), 30)
+
+
+class RetryDueTest(unittest.TestCase):
+    """到点的自动重试：领走 → 续跑；开始不了的取消重试再收尾；暂停时顺延；一条出错不耽误别的。"""
+
+    def setUp(self):
+        from agent_platform.orchestration import scheduler as scheduler_mod
+        from agent_platform.orchestration.scheduler import Scheduler
+        self.reg = seeded_registry()
+        self.sub = mock.MagicMock()
+        self.sub.resume = mock.AsyncMock(return_value=Accepted("r1", "r1", "queued"))
+        self.sched = Scheduler(self.reg, self.sub)
+        self.sched.settle_failed = mock.AsyncMock()
+        self.runs = mock.MagicMock()
+        self.runs.RETRY_LEASE_S = 300
+        self.runs.claim_due_retries = mock.AsyncMock(return_value=["r1"])
+        self.runs.get = mock.AsyncMock(return_value=a_run(run_id="r1", task="data-qa", status="failed",
+                                                          retry_at="2026-10-21T10:00:00+00:00"))
+        for f in ("clear_retry", "log_event", "postpone_retry"):
+            setattr(self.runs, f, mock.AsyncMock(return_value=True))
+        self.ticks = mock.MagicMock()
+        self.ticks.record = mock.AsyncMock()
+        for name, value in (("runs", self.runs), ("ticks", self.ticks)):
+            p = mock.patch.object(scheduler_mod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_fires(self):
+        self.assertEqual(run(self.sched.retry_due()), 1)
+        self.sub.resume.assert_awaited()
+        self.assertEqual(self.ticks.record.await_args.kwargs["outcome"], "fired")
+
+    def test_rejected_settles_once(self):
+        self.sub.resume = mock.AsyncMock(side_effect=Rejected("task_disabled", "停用了", 400))
+        run(self.sched.retry_due())
+        self.runs.clear_retry.assert_awaited_with("r1")
+        self.sched.settle_failed.assert_awaited_with("r1")
+        # 人恰好在这时取消了重试（取消那边已经收过尾）：不再收一次
+        self.sched.settle_failed.reset_mock()
+        self.runs.clear_retry = mock.AsyncMock(return_value=False)
+        run(self.sched.retry_due())
+        self.sched.settle_failed.assert_not_awaited()
+
+    def test_paused_postpones(self):
+        run(self.reg.update("service", "vision-board", {"envs": {"test": {"triggers_paused": True}}}, "liyd"))
+        run(self.sched.retry_due())
+        self.sub.resume.assert_not_awaited()
+        self.runs.postpone_retry.assert_awaited()
+        self.assertEqual(self.ticks.record.await_args.kwargs["outcome"], "skipped")
+
+    def test_unexpected_error_keeps_lease_and_continues(self):
+        self.runs.claim_due_retries = mock.AsyncMock(return_value=["r1", "r2"])
+        self.sub.resume = mock.AsyncMock(side_effect=[RuntimeError("db down"), Accepted("r2", "r2", "queued")])
+        self.assertEqual(run(self.sched.retry_due()), 1)
+        self.runs.clear_retry.assert_not_awaited()          # 租约留着，到期后再领
+        self.sched.settle_failed.assert_not_awaited()
+
+
+class PendingRetryActionsTest(unittest.TestCase):
+    """失败了、还等着自动重试的运行：重跑会取消原运行的重试（不然同一份输入跑两遍）。"""
+
+    def setUp(self):
+        self.reg = seeded_registry()
+        self.sub = Submitter(self.reg)
+        self.sub.on_failed_final = mock.AsyncMock()
+        self.runs = mock.MagicMock()
+        for f in ("create", "log_event"):
+            setattr(self.runs, f, mock.AsyncMock(return_value=None))
+        self.runs.clear_retry = mock.AsyncMock(return_value=True)
+        self.runs.get = mock.AsyncMock(return_value={
+            "run_id": "old1", "session_id": "old1", "task": "data-qa", "service": "vision-board", "env": "test",
+            "status": "failed", "retry_at": "2026-10-21T10:00:00+00:00", "input": {"question": "q"}, "summary": "q",
+            "memory": {}, "trigger": {"type": "api"}})
+        p = mock.patch.object(submitter_mod, "runs", self.runs)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_rerun_cancels_pending_retry(self):
+        caller = mock.Mock()
+        caller.name = "liyd"
+        run(self.sub.rerun("old1", caller))
+        self.runs.clear_retry.assert_awaited_with("old1")
+        self.sub.on_failed_final.assert_awaited_with("old1")
 
 
 class PauseAndSourcesTest(unittest.TestCase):

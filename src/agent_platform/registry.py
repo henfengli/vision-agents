@@ -308,6 +308,9 @@ class Registry:
                 raise Rejected("invalid_definition", f"父任务 {base} 不存在", 422)
             if parent.spec.form == "builtin":
                 raise Rejected("invalid_definition", f"{base} 是内建任务，不能建子任务", 422)
+            if "concurrency" in spec.model_fields_set and spec.concurrency is not None:
+                # 上限按「父任务@环境」数（连同所有子任务一起算）：子任务单独设一个更小的会卡住整个家族
+                raise Rejected("invalid_definition", "同时执行上限按父任务算（连同子任务），子任务不能单独设", 422)
             if not _own_fields(spec):
                 # 只有 extends（调用时自动建的）：生效定义就是父任务的，父任务自己的毛病不该挡住新对象的运行
                 # （新规则之前存的父任务可能过不了写入检查，那要在父任务上改）

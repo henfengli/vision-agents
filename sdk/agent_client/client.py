@@ -103,11 +103,13 @@ class AgentClient:
         return self._call("GET", f"/v1/runs/{run_id}")
 
     def wait(self, run_id: str, timeout: float | None = None) -> dict:
-        """等到终态或超时，返回运行详情。timeout=None 一直等。"""
+        """等到最终结束或超时，返回运行详情。timeout=None 一直等。
+        失败了、还等着自动重试的（retry_at 不空）不算结束：接着等重试的结果。"""
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             run = self.get(run_id)
-            if run["status"] in TERMINAL or (deadline is not None and time.monotonic() >= deadline):
+            done = run["status"] in TERMINAL and not (run["status"] == "failed" and run.get("retry_at"))
+            if done or (deadline is not None and time.monotonic() >= deadline):
                 return run
             time.sleep(2 if deadline is None else max(0.0, min(2.0, deadline - time.monotonic())))
 

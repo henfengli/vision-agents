@@ -240,8 +240,9 @@ class CorrectResumeTest(unittest.TestCase):
         self.reg = seeded_registry()
         self.sub = Submitter(self.reg)
         self.runs = mock.MagicMock()
-        for f in ("get", "live_in_session", "create", "reached_agent", "log_event", "enqueue"):
+        for f in ("get", "live_in_session", "create", "reached_agent", "log_event", "clear_retry"):
             setattr(self.runs, f, mock.AsyncMock(return_value=None))
+        self.runs.enqueue = mock.AsyncMock(return_value=True)     # 改到了（还是 failed）
         patcher = mock.patch.object(submitter_mod, "runs", self.runs)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -278,10 +279,21 @@ class CorrectResumeTest(unittest.TestCase):
         self.old(status="failed", resolution=None)
         self.runs.reached_agent.return_value = False
         run(self.sub.resume("old1", mock.Mock()))
-        self.runs.enqueue.assert_awaited_with("old1", resume=False)
+        self.runs.enqueue.assert_awaited_with("old1", resume=False, auto=False)
         self.runs.reached_agent.return_value = True
         run(self.sub.resume("old1", mock.Mock()))
-        self.runs.enqueue.assert_awaited_with("old1", resume=True)
+        self.runs.enqueue.assert_awaited_with("old1", resume=True, auto=False)
+        # 续跑不算自己：会话互斥排除这条运行
+        self.runs.live_in_session.assert_awaited_with(self.runs.get.return_value["session_id"], exclude="old1")
+
+    def test_resume_conflicts_when_run_changed(self):
+        """两个人同时点续跑 / 自动重试刚被取消：入队没改到，返回 409，不当成功"""
+        self.old(status="failed", resolution=None)
+        self.runs.enqueue.return_value = False
+        with self.assertRaises(Rejected) as cm:
+            run(self.sub.resume("old1", mock.Mock(), auto=True))
+        self.assertEqual(cm.exception.status, 409)
+        self.runs.enqueue.assert_awaited_with("old1", resume=None, auto=True)
 
     def test_resume_waits_for_live_turn(self):
         self.old(status="failed", resolution=None)

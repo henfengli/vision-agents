@@ -39,7 +39,7 @@ def _list_row(r) -> dict:
 
 def _row(cur, row) -> dict:
     d = {c.name: v for c, v in zip(cur.description, row)}
-    for k in ("created_at", "started_at", "finished_at", "heartbeat_at", "retry_at", "queue_alerted_at"):
+    for k in ("created_at", "started_at", "finished_at", "heartbeat_at", "retry_at", "queue_alerted_at", "queued_at"):
         d[k] = _iso(d.get(k))
     d["depends_on"] = list(d.get("depends_on") or [])
     d["trigger"] = {"type": d.pop("trigger_type"), "id": d.pop("trigger_id"), "source": d.pop("trigger_source"), "caller": d["caller"]}
@@ -68,15 +68,25 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
             await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
 
+# 失败了、还等着自动重试的运行：还没最终结束。去重、幂等、定时防重叠、会话互斥都要把它当成「还在跑」
+PENDING_RETRY = "(status='failed' AND retry_at IS NOT NULL)"
+
+
 # ———————— 执行队列 ————————
 
-async def enqueue(run_id: str, *, resume: bool = False) -> None:
-    """把一个已有的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉；第几次执行 +1。"""
+async def enqueue(run_id: str, *, resume: bool = False, auto: bool = False) -> bool:
+    """把一个失败的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉；第几次执行 +1。
+    只改还是 failed 的（两个人同时点续跑只算一次）；auto（自动重试）还要求重试没被取消（retry_at 还在）。→ 改到了没有。"""
+    cond = "status='failed' AND retry_at IS NOT NULL" if auto else "status='failed'"
     async with db.pool().connection() as conn:
-        await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL, error_code=NULL,"
-                           " finished_at=NULL, duration_ms=NULL, progress=NULL, retry_at=NULL, queue_alerted_at=NULL,"
-                           " attempt=attempt+1 WHERE run_id=%s", (resume, run_id))
+        cur = await conn.execute(
+            "UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL, error_code=NULL,"
+            " finished_at=NULL, duration_ms=NULL, progress=NULL, retry_at=NULL, queue_alerted_at=NULL,"
+            f" queued_at=now(), attempt=attempt+1 WHERE run_id=%s AND {cond} RETURNING run_id", (resume, run_id))
+        if await cur.fetchone() is None:
+            return False
         await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
+    return True
 
 
 # 认领条件里的两项调度约束：
@@ -89,10 +99,12 @@ _CLAIMABLE = (
     "  AND x.concurrency_key = r.concurrency_key) < r.concurrency_limit)")
 
 
-async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str, ...] = ()) -> str | None:
+async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str, ...] = (),
+                     paused: list[str] | tuple[str, ...] = ()) -> str | None:
     """认领一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。
     顺序：优先级（人在等的先），同优先级先到先得。等上游的、任务并发已满的先跳过。
     env 非空：只认领这个环境的；services 非空：再限这几个服务（平台任务不限）。都空（开发机）：什么都认领。
+    paused：暂停了自动触发的「服务@环境」——那里定时 / 事件 / 联动建的运行留在队列里，恢复后再跑。
     同一环境的认领用一把事务级咨询锁串起来：并发上限要先数再领，两台主机同时数会一起超过上限。"""
     where, params = ["r.status='queued'", _CLAIMABLE], [worker]
     if env:
@@ -101,6 +113,9 @@ async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str
     if services:
         where.append("(r.service IS NULL OR r.service = ANY(%s))")
         params.append(list(services))
+    if paused:
+        where.append("NOT (r.trigger_type IN ('schedule','event','after') AND (r.service || '@' || r.env) = ANY(%s))")
+        params.append(list(paused))
     async with db.pool().connection() as conn:
         await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"claim:{env}",))
         cur = await conn.execute(
@@ -133,12 +148,14 @@ async def fail_dependents(run_id: str, reason: str) -> list[str]:
 
 
 async def blocked_by_upstream() -> list[tuple[str, str, str]]:
-    """排队中、点名的上游里已经有失败 / 取消的（提交端或维护循环漏处理时兜底）→ [(run_id, 上游 id, 上游状态)]。"""
+    """排队中、点名的上游里已经有失败 / 取消的（提交端或维护循环漏处理时兜底）→ [(run_id, 上游 id, 上游状态)]。
+    只看结束了 3 分钟以上的上游：刚落 failed 的可能正在决定要不要自动重试（判成孤儿之后、重试排上之前），
+    那几秒里它看着像最终失败；正常路径（执行端收尾、取消）早就处理了，这里只兜漏掉的。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "SELECT r.run_id, u.run_id, u.status FROM runs r JOIN runs u ON u.run_id = ANY(r.depends_on)"
             " WHERE r.status='queued' AND r.depends_on <> '{}' AND u.status IN ('failed','cancelled')"
-            " AND u.retry_at IS NULL LIMIT 200")
+            " AND u.retry_at IS NULL AND u.finished_at < now() - interval '3 minutes' LIMIT 200")
         return [(a, b, c) for a, b, c in await cur.fetchall()]
 
 
@@ -184,9 +201,10 @@ async def downstream_of(run_id: str) -> list[dict]:
 async def last_after_fire(task: str, trigger_id: str, env: str) -> str | None:
     """上游联动触发器在这个环境上一次建运行的时间（all 模式从这之后重新攒齐）。"""
     async with db.pool().connection() as conn:
+        # 下游按对象字段落到子任务时运行记在「任务:对象」上：连同子任务一起算
         cur = await conn.execute(
-            "SELECT max(created_at) FROM runs WHERE task=%s AND trigger_type='after' AND trigger_id=%s AND env=%s",
-            (task, trigger_id, env))
+            "SELECT max(created_at) FROM runs WHERE (task=%s OR task LIKE %s) AND trigger_type='after'"
+            " AND trigger_id=%s AND env=%s", (task, task + ":%", trigger_id, env))
         row = await cur.fetchone()
     return _iso(row[0]) if row and row[0] else None
 
@@ -202,14 +220,26 @@ async def latest_finished(task: str, env: str, statuses_: list[str], since: str)
     return _row(cur, row) if row else None
 
 
-async def claim_due_retries(limit: int = 20) -> list[str]:
-    """到点了的自动重试：一条 UPDATE 把 retry_at 清掉并领走，几台主机同时扫也只有一台拿到。"""
+RETRY_LEASE_S = 300
+
+
+async def claim_due_retries(limit: int = 20, lease_s: int = RETRY_LEASE_S) -> list[str]:
+    """到点了的自动重试：一条 UPDATE 领走，几台主机同时扫也只有一台拿到。
+    领走不是清空 retry_at，而是往后推 lease_s 秒当租约：重新入队（enqueue）时才清掉。这样领走到入队之间
+    运行仍然算「还没结束」（不会被当成最终失败判掉下游）；这台主机中途出错或退出，租约到期后别的主机再领。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "UPDATE runs SET retry_at=NULL WHERE run_id IN (SELECT run_id FROM runs WHERE status='failed'"
-            " AND retry_at IS NOT NULL AND retry_at <= now() ORDER BY retry_at FOR UPDATE SKIP LOCKED LIMIT %s)"
-            " RETURNING run_id", (limit,))
+            "UPDATE runs SET retry_at = now() + make_interval(secs => %s) WHERE run_id IN (SELECT run_id FROM runs"
+            " WHERE status='failed' AND retry_at IS NOT NULL AND retry_at <= now() ORDER BY retry_at"
+            " FOR UPDATE SKIP LOCKED LIMIT %s) RETURNING run_id", (lease_s, limit))
         return [r[0] for r in await cur.fetchall()]
+
+
+async def postpone_retry(run_id: str, delay_s: int) -> None:
+    """自动重试先不开始（服务在这个环境暂停了自动触发）：顺延。"""
+    async with db.pool().connection() as conn:
+        await conn.execute("UPDATE runs SET retry_at = now() + make_interval(secs => %s)"
+                           " WHERE run_id=%s AND status='failed' AND retry_at IS NOT NULL", (delay_s, run_id))
 
 
 async def schedule_retry(run_id: str, delay_s: int) -> bool:
@@ -229,23 +259,39 @@ async def clear_retry(run_id: str) -> bool:
         return await cur.fetchone() is not None
 
 
+# 排队从什么时候算：这一次进队列的时刻；点名的上游晚于它结束的，从最后一个上游结束算（在那之前是在按规则等）
+_WAITING_SINCE = ("GREATEST(COALESCE(r.queued_at, r.created_at), COALESCE((SELECT max(u.finished_at) FROM runs u"
+                  " WHERE u.run_id = ANY(r.depends_on)), COALESCE(r.queued_at, r.created_at)))")
+
+
 async def queued_too_long(after_s: int, limit: int = 50) -> list[dict]:
-    """排队超过 after_s 秒、还没告警过的运行（等上游的、任务并发已满的不算：那是在按规则等）。领走即标记已告警。"""
+    """排队超过 after_s 秒、还没告警过的运行（等上游的、任务并发已满的不算：那是在按规则等）。领走即标记已告警。
+    时长从这一次进队列（续跑、自动重试会重新进）或最后一个点名的上游结束算起，不从建运行时算。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "UPDATE runs SET queue_alerted_at=now() WHERE run_id IN (SELECT r.run_id FROM runs r"
             f" WHERE r.status='queued' AND r.queue_alerted_at IS NULL AND {_CLAIMABLE}"
-            " AND r.created_at < now() - make_interval(secs => %s) FOR UPDATE SKIP LOCKED LIMIT %s)"
-            " RETURNING run_id, task, service, env, created_at", (after_s, limit))
-        return [{"run_id": a, "task": b, "service": c, "env": d, "created_at": _iso(e)}
+            f" AND {_WAITING_SINCE} < now() - make_interval(secs => %s) FOR UPDATE SKIP LOCKED LIMIT %s)"
+            " RETURNING run_id, task, service, env, COALESCE(queued_at, created_at)", (after_s, limit))
+        return [{"run_id": a, "task": b, "service": c, "env": d, "queued_at": _iso(e)}
                 for a, b, c, d, e in await cur.fetchall()]
+
+
+async def requeue_limits(task: str, limit: int | None) -> int:
+    """任务的同时执行上限改了：已经排着的运行（连同子任务）按新的上限算。→ 改了几条。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "UPDATE runs SET concurrency_limit=%s,"
+            " concurrency_key = CASE WHEN %s::int IS NULL THEN NULL ELSE split_part(task, ':', 1) || '@' || env END"
+            " WHERE status='queued' AND (task=%s OR task LIKE %s)", (limit, limit, task, task + ":%"))
+        return cur.rowcount or 0
 
 
 async def queue_summary() -> dict:
     """排队情况（概览、主机卡片）：排着的总数、排了多久的最老一条、按 环境 / 服务 分组的数量。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT env, service, count(*), min(created_at),"
+            "SELECT env, service, count(*), min(COALESCE(queued_at, created_at)),"
             " count(*) FILTER (WHERE depends_on <> '{}'), count(*) FILTER (WHERE queue_alerted_at IS NOT NULL)"
             " FROM runs WHERE status='queued' GROUP BY env, service ORDER BY env, service")
         rows = await cur.fetchall()
@@ -290,7 +336,7 @@ async def active_of_trigger(task: str, trigger_id: str, env: str) -> str | None:
     async with db.pool().connection() as conn:
         cur = await conn.execute(
             "SELECT run_id FROM runs WHERE task=%s AND trigger_type='schedule' AND trigger_id=%s AND env=%s"
-            " AND status IN ('queued','running') LIMIT 1", (task, trigger_id, env))
+            f" AND (status IN ('queued','running') OR {PENDING_RETRY}) LIMIT 1", (task, trigger_id, env))
         row = await cur.fetchone()
     return row[0] if row else None
 
@@ -354,10 +400,10 @@ async def add_tokens(run_id: str, n: int) -> None:
 
 async def find_dedup(dedup_key: str, window_s: int) -> dict | None:
     """时间窗内同键、没有失败或取消的运行（任务声明的去重）。排队、运行中的也算：
-    重复回调（Dagster 重发、GitLab 重投）不该在前一次还没跑完时再起一份。"""
+    重复回调（Dagster 重发、GitLab 重投）不该在前一次还没跑完时再起一份。等着自动重试的失败也算（还没结束）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT * FROM runs WHERE dedup_key=%s AND status IN ('queued','running','success')"
+            f"SELECT * FROM runs WHERE dedup_key=%s AND (status IN ('queued','running','success') OR {PENDING_RETRY})"
             " AND created_at > now() - make_interval(secs => %s) ORDER BY created_at DESC LIMIT 1", (dedup_key, window_s))
         row = await cur.fetchone()
     return _row(cur, row) if row else None
@@ -374,7 +420,8 @@ async def find_idempotent(key: str) -> dict | None:
     r = _row(cur, row)
     # 失败的运行释放唯一键，允许调用方重提。定时触发除外：各台主机都会按同一个键触发同一个时刻，
     # 释放了，第一台跑失败后别的主机会把这一刻再触发一遍
-    if r["status"] == "failed" and not key.startswith("schedule:"):
+    # 等着自动重试的失败还没结束，不释放
+    if r["status"] == "failed" and not r.get("retry_at") and not key.startswith("schedule:"):
         async with db.pool().connection() as conn:   # 释放唯一键，允许重提
             await conn.execute("UPDATE runs SET idempotency_key=NULL WHERE run_id=%s", (r["run_id"],))
         return None
@@ -449,12 +496,13 @@ async def by_session(session_id: str, exclude: str = "", limit: int = 50) -> lis
         return [_list_row(r) for r in await cur.fetchall()]
 
 
-async def live_in_session(session_id: str) -> dict | None:
-    """会话里还在排队 / 执行的那一轮（同一会话同时只能有一轮）。"""
+async def live_in_session(session_id: str, exclude: str = "") -> dict | None:
+    """会话里还在排队 / 执行的那一轮（同一会话同时只能有一轮）。等着自动重试的那一轮也算：它到点会接着写这个会话。
+    exclude：不算这一条（续跑自己就是那个等着重试的）。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
-            "SELECT run_id, status FROM runs WHERE session_id=%s AND status IN ('queued','running')"
-            " ORDER BY created_at DESC LIMIT 1", (session_id,))
+            f"SELECT run_id, status FROM runs WHERE session_id=%s AND (status IN ('queued','running') OR {PENDING_RETRY})"
+            " AND run_id <> %s ORDER BY created_at DESC LIMIT 1", (session_id, exclude))
         row = await cur.fetchone()
     return {"run_id": row[0], "status": row[1]} if row else None
 

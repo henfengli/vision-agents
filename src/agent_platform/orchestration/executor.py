@@ -68,6 +68,16 @@ class Executor:
     def running(self) -> list[str]:
         return list(self._running)
 
+    async def _paused(self) -> list[str]:
+        """暂停了自动触发的「服务@环境」（服务定义 envs.<env>.triggers_paused）：那里自动触发建的运行先不认领。
+        定义有缓存，每次认领读一遍不贵。"""
+        out = []
+        for e in await self._pipeline.registry.services():
+            for env, o in e.spec.envs.items():
+                if o.triggers_paused and (not self.env or env == self.env):
+                    out.append(f"{e.name}@{env}")
+        return out
+
     # —— 循环 ——
 
     async def _claim_forever(self) -> None:
@@ -75,7 +85,7 @@ class Executor:
             await self._sem.acquire()
             self._wake.clear()
             try:
-                run_id = await runs.claim_next(self.worker_id, self.env, self.services)
+                run_id = await runs.claim_next(self.worker_id, self.env, self.services, paused=await self._paused())
             except Exception:  # noqa: BLE001 —— 库连不上：稍后再试
                 log.exception("认领排队运行失败")
                 run_id = None

@@ -85,6 +85,10 @@ class Pipeline:
     def __init__(self, deps: Deps):
         self._d = deps
 
+    @property
+    def registry(self) -> Registry:
+        return self._d.registry
+
     async def execute(self, run_id: str) -> None:
         run = await runs.get(run_id)
         if run is None or run["status"] != "running":
@@ -108,7 +112,9 @@ class Pipeline:
         except asyncio.CancelledError:
             if await _cancelled(run_id):
                 return                                   # 人取消的：台账已是 cancelled
-            await asyncio.shield(self.fail(spec, "执行进程退出，运行中断（可续跑）", "interrupted"))
+            # 进程要退了：落 interrupted；没排上自动重试的就是最终失败，点名等它的、「失败后」的联动也要处理
+            # （投递是可能慢的 HTTP，退出时不做；孤儿路径同样只在别的主机上补）
+            await asyncio.shield(self._interrupted(spec))
             raise
         except Rejected as e:
             await self.fail(spec, e.message, e.code)
@@ -131,6 +137,12 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 log.exception("运行 %s 结束后的回调失败", spec.run_id)
         await self._after_run(spec.run_id)
+
+    async def _interrupted(self, spec: RunSpec) -> None:
+        await self.fail(spec, "执行进程退出，运行中断（可续跑）", "interrupted")
+        run = await runs.get(spec.run_id)
+        if run is not None and run["status"] == "failed" and not run.get("retry_at"):
+            await self._after_run(spec.run_id)
 
     async def _after_run(self, run_id: str) -> None:
         if self._d.after_run is not None:
@@ -171,8 +183,9 @@ class Pipeline:
         return entry.spec.retry.max if entry and entry.spec.retry else 0
 
     async def _retry_in(self, task_name: str, code: str, attempt: int, trigger_type: str) -> int | None:
-        """这次失败要不要自动重试：任务配了 retry、是 agent 任务、失败是临时性的、还没用完次数。→ 等几秒；None = 不重试。"""
-        if code not in RETRYABLE_CODES or trigger_type == "replay":
+        """这次失败要不要自动重试：任务配了 retry、是 agent 任务、失败是临时性的、还没用完次数。→ 等几秒；None = 不重试。
+        回归重放不重试（对比用）；对话、纠正不重试：人就在页面上看着，等重试期间会话的下一条消息会被挡住，要接着就点续跑。"""
+        if code not in RETRYABLE_CODES or trigger_type in ("replay", "chat", "correction"):
             return None
         entry = await self._d.registry.task(task_name)
         if entry is None or entry.spec.form != "agent" or not entry.spec.retry:

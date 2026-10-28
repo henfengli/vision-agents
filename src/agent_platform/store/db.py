@@ -102,8 +102,10 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS progress JSONB;
 --   depends_on        提交时点名的上游运行：都成功了才认领；有一个失败 / 取消，这条落 failed / upstream_failed
 --   priority          认领顺序（小的先）：人在等的 0、程序调用 1、自动触发和回归重放 2
 --   concurrency_key / concurrency_limit   任务在这个环境同时执行的上限（任务名@环境，连同子任务）；空 = 不限
---   attempt           第几次执行（续跑一次 +1）；retry_at 失败后等着自动重试的时刻（空 = 不重试 / 已经开始重试）
+--   attempt           第几次执行（续跑一次 +1）；retry_at 失败后等着自动重试的时刻（空 = 不重试；领走时往后推一段当租约，
+--                     重新入队时清掉）。status=failed 且 retry_at 不空 = 还没最终结束
 --   queue_alerted_at  排队太久已经告警过（只告一次）
+--   queued_at         这一次进入队列的时刻（新建、续跑、自动重试都会重写）：排队多久从它算，不从 created_at 算
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 1;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
@@ -111,6 +113,7 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS concurrency_limit INT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS attempt INT NOT NULL DEFAULT 1;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS retry_at TIMESTAMPTZ;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS queue_alerted_at TIMESTAMPTZ;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS queued_at TIMESTAMPTZ DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_runs_claim ON runs (env, priority, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_runs_depends ON runs USING gin (depends_on) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_runs_running_key ON runs (concurrency_key) WHERE status = 'running';
