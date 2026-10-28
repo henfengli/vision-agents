@@ -7,8 +7,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleStop, LuExternalLink, LuMessageSquare, LuPenLine,
-  LuPlus, LuSlidersHorizontal, LuSparkles, LuWrench,
+  LuArrowUp, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleStop, LuExternalLink, LuMessageSquare, LuPencilLine,
+  LuPlus, LuSlidersHorizontal, LuSparkles, LuWrench, LuX,
 } from "react-icons/lu";
 
 import { ApiError, stream } from "@/api/client";
@@ -16,7 +16,9 @@ import { api, useEnvs, useServices, useSession, useSessions, useSettings, useSub
 import type { ChatRequest, ChatTurn, MemoryOverride, RunEvent, TaskSummary } from "@/api/types";
 import { EnvFilter, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { FeedbackButtons } from "@/components/feedback";
+import { IdCopy } from "@/components/meta";
 import { EnvBadge } from "@/components/status";
+import { TimeAgo } from "@/components/time";
 import { ToolOutput, isDbTool, summarizeArgs } from "@/components/tool-call";
 import { Button } from "@/components/ui/button";
 import { CopyButton, Markdown } from "@/components/ui/data";
@@ -24,7 +26,7 @@ import { CreatableSelect, FilterSelect, SearchInput, Segmented, Select, Textarea
 import { Popover, Tooltip, toast } from "@/components/ui/overlay";
 import { Badge, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago } from "@/lib/format";
+import { shortId } from "@/lib/format";
 import { invalidate } from "@/lib/query";
 import { Link, navigate, useLocation, useParams, useSearch } from "@/lib/router";
 import { getUi, setUi, useUi, type UiState } from "@/lib/store";
@@ -67,7 +69,10 @@ export function ChatPage() {
   const ui = useUi();
   /** 会话列表和其它列表一样默认跟随顶栏的环境视角 */
   const env = envOf(f.env, ui.env);
-  const { data: sessions } = useSessions({ service: f.service, env: env || undefined, task: f.task, q: q || undefined });
+  const { data: sessions, error: sessionsError, refetch: refetchSessions } = useSessions({ service: f.service, env: env || undefined, task: f.task, q: q || undefined });
+  /** 侧栏的筛选（环境跟随顶栏视角不算）：空态分"还没有会话"和"没有符合条件的" */
+  const filtered = !!(f.service || f.env || f.task || q);
+  const clearFilters = () => { setQ(""); setF({ service: undefined, env: undefined, task: undefined }); };
   /** 打开会话、开新对话时带上侧栏的筛选，不然一点就被清掉 */
   const { search } = useLocation();
   const keep = search.toString() ? "?" + search.toString() : "";
@@ -103,8 +108,20 @@ export function ChatPage() {
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-          {!sessions ? <div className="space-y-2 p-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-10" />)}</div>
-            : !sessions.length ? <div className="px-3 py-6 text-center text-[12.5px] text-fg-3">没有符合条件的会话</div>
+          {/* 出错先判：查询层出错时 data 是 undefined，不判的话骨架一直转 */}
+          {sessionsError && !sessions ? (
+            <div className="px-3 py-6 text-center text-[12.5px]">
+              <div className="text-bad">会话列表加载失败</div>
+              <div className="mt-0.5 break-words text-[11.5px] text-fg-3">{sessionsError.message}</div>
+              <Button size="xs" className="mt-2" onClick={() => void refetchSessions()}>重试</Button>
+            </div>
+          ) : !sessions ? <div className="space-y-2 p-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-10" />)}</div>
+            : !sessions.length ? (
+              <div className="px-3 py-6 text-center text-[12.5px] text-fg-3">
+                {filtered ? "没有符合条件的会话" : "还没有会话"}
+                {filtered && <div className="mt-2"><Button size="xs" icon={<LuX />} onClick={clearFilters}>清除筛选</Button></div>}
+              </div>
+            )
               : groups.map(([label, items]) => items.length > 0 && (
                 <div key={label} className="mb-2">
                   <div className="px-2 pb-1 pt-2 text-[11px] font-semibold text-fg-3">{label}</div>
@@ -113,9 +130,9 @@ export function ChatPage() {
                       className={cn("block rounded-md px-2.5 py-2 hover:bg-hover", session === s.session_id && "bg-accent-soft hover:bg-accent-soft")}>
                       <div className={cn("truncate text-[13px]", session === s.session_id ? "font-medium text-accent" : "text-fg")}>{s.title}</div>
                       <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-3">
-                        <span className="truncate">{s.service ?? "平台"}</span><span className="shrink-0 font-mono uppercase">{s.env}</span>
+                        <span className="truncate">{s.service ?? "平台"}</span><EnvBadge env={s.env} className="h-4 px-1 text-[10px]" />
                         {s.task.includes(":") && <span className="truncate font-mono">{s.task.split(":")[1]}</span>}
-                        <span className="shrink-0">· {s.runs} 轮</span><span className="ml-auto shrink-0">{ago(s.last_at)}</span>
+                        <span className="shrink-0">· {s.runs} 轮</span><span className="ml-auto shrink-0"><TimeAgo at={s.last_at} /></span>
                       </div>
                     </Link>
                   ))}
@@ -243,6 +260,14 @@ function Conversation({ sessionId, onSession, prefer }: { sessionId?: string; on
   /** 链接里的会话不存在（或加载失败）：不能往一个不存在的会话里续 */
   const sessionGone = !!sessionId && !!sessionError && !detail;
   const canSend = !!text.trim() && !busy && !!service && !!task && !envOff && !sessionGone && !missingExtra.length && !needObject;
+  /** 写了内容却发不出去的原因（悬停发送按钮时看到）；还没写内容就只是灰着 */
+  const sendBlocked = !text.trim() || busy ? null
+    : sessionGone ? "会话不存在，开个新对话"
+      : !service ? "先选服务"
+        : envOff ? `${service} 在 ${env} 已停用`
+          : !task ? "这个服务没有对话任务"
+            : needObject ? `先选对象（${taskDef?.object_input}）`
+              : missingExtra.length ? `先在「输入」里填 ${missingExtra.join("、")}` : null;
 
   const patchTurn = (key: string, fn: (t: LiveTurn) => LiveTurn) => setTurns((all) => all.map((t) => (t.key === key ? fn(t) : t)));
 
@@ -277,7 +302,7 @@ function Conversation({ sessionId, onSession, prefer }: { sessionId?: string; on
         runId = String(ev.run_id);
         patchLast((t) => ({ ...t, run_id: runId }));
         if (!sid) setSid(String(ev.session_id));
-        if (ev.subtask_created) toast(`已按 ${task} 新建子任务`, { description: String(ev.subtask_created) });
+        if (ev.subtask_created) toast(`已新建子任务 ${String(ev.subtask_created)}`, { description: `${task} 的对象，档案待补` });
       } else if (type === "error" && ev.code === "stream_broken") {
         // 推流断了（库连接断开），运行没失败、还在跑：不标失败，给运行详情的链接
         patchLast((t) => ({ ...t, broken: String(ev.message), streaming: false }));
@@ -342,7 +367,7 @@ function Conversation({ sessionId, onSession, prefer }: { sessionId?: string; on
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel/60 px-5 text-[12.5px] text-fg-3">
         <LuMessageSquare className="size-4" />
         <span className="truncate text-fg">{detail?.title ?? (turns[0]?.question.slice(0, 40) || "新对话")}</span>
-        {sid && <span className="hidden font-mono text-[11px] sm:inline">{sid.slice(0, 12)}</span>}
+        {sid && <span className="hidden sm:inline-flex"><IdCopy value={sid} className="text-[11px]">{shortId(sid)}</IdCopy></span>}
         <div className="ml-auto flex items-center gap-2">{service && <span className="truncate">{svc?.title ?? service}</span>}{env && <EnvBadge env={env} />}</div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -410,8 +435,8 @@ function Conversation({ sessionId, onSession, prefer }: { sessionId?: string; on
                 </Popover>
               )}
               <MemoryPopover task={taskDef} value={memory} onChange={(m) => { setMemory(m); remember({ recall: m.recall ?? null, save: m.save ?? null }); }} />
-              {busy ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止这一轮" title="停止这一轮"><LuCircleStop /></Button>
-                : <Button size="icon-sm" variant="primary" disabled={!canSend} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
+              {busy ? <Button size="icon-sm" variant="secondary" onClick={stop} aria-label="停止这一轮" tip="停止这一轮"><LuCircleStop /></Button>
+                : <Button size="icon-sm" variant="primary" disabled={!canSend} reason={sendBlocked ?? undefined} onClick={send} aria-label="发送"><LuArrowUp /></Button>}
             </div>
           </div>
         </div>
@@ -491,7 +516,7 @@ function Welcome({ service, title, onPick }: { service: string; title: string; o
     <div className="pt-12 text-center">
       <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-accent-soft text-accent"><LuSparkles className="size-5" /></div>
       <div className="mt-4 text-[17px] font-semibold text-fg">问 {title || "agent"}</div>
-      <div className="mt-1 text-[13px] text-fg-3">口径以档案为准，取数只走该环境登记的只读库；每一步都能在运行详情里回放</div>
+      <div className="mt-1 text-[13px] text-fg-3">口径以档案为准，取数只走该环境配置的只读库；每一步都能在运行详情里回放</div>
       <div className="mx-auto mt-6 grid max-w-lg gap-2 sm:grid-cols-2">
         {examples.map((e) => (
           <button key={e} type="button" onClick={() => onPick(e)} className="rounded-lg border border-line bg-panel px-3 py-2.5 text-left text-[12.5px] text-fg-2 transition-colors hover:border-accent hover:text-fg">{e}</button>
@@ -561,7 +586,7 @@ function Turn({ turn, onCorrect }: { turn: LiveTurn; onCorrect?: (text: string) 
             <div className="mt-2 flex items-center gap-0.5 text-fg-3">
               <CopyButton text={turn.answer} />
               {turn.run_id && <FeedbackButtons key={turn.feedback?.updated_at ?? "none"} runId={turn.run_id} mine={turn.feedback} onCorrect={turn.status === "success" ? onCorrect : undefined} />}
-              {turn.run_id && turn.status === "success" && onCorrect && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPenLine className="size-3" />纠正</button>}
+              {turn.run_id && turn.status === "success" && onCorrect && <button type="button" onClick={() => setCorrecting(!correcting)} className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuPencilLine className="size-3" />纠正</button>}
               {turn.run_id && <Link to={`/runs/${turn.run_id}`} className="ml-1 inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11.5px] hover:bg-hover hover:text-fg"><LuExternalLink className="size-3" />运行详情</Link>}
             </div>
           )}

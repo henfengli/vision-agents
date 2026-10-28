@@ -7,13 +7,15 @@ import { LuDatabase, LuFolder, LuListTodo, LuPlus, LuScrollText, LuServer } from
 import { api, useEnvs, useServices } from "@/api/hooks";
 import type { ServiceSummary } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, RUN_STATUS } from "@/components/status";
+import { MetaVersion } from "@/components/meta";
+import { EmptyFiltered } from "@/components/states";
+import { DisabledBadge, EnvBadge, FailCount, RUN_STATUS, RunStatusDot } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Input, SearchInput, Textarea } from "@/components/ui/form";
 import { Dialog, Tooltip, toast } from "@/components/ui/overlay";
-import { Badge, Card, Empty, ErrorState, Skeleton } from "@/components/ui/primitives";
+import { Card, Empty, ErrorState, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime } from "@/lib/format";
+import { ago } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate } from "@/lib/router";
 import { ServiceAvatar } from "../overview/overview";
@@ -37,7 +39,8 @@ export function ServicesPage() {
       {error && !data ? <Card><ErrorState error={error} onRetry={refetch} /></Card> : loading ? (
         <div className="grid gap-4 md:grid-cols-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-52 rounded-lg" />)}</div>
       ) : list.length === 0 ? (
-        <Card><Empty icon={<LuServer />} title={q ? "没有匹配的服务" : "还没有服务"} description="一个服务就是一个线上部署的业务项目" action={!q && <Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} /></Card>
+        <Card>{q ? <EmptyFiltered what="服务" icon={<LuServer />} onClear={() => setQ("")} />
+          : <Empty icon={<LuServer />} title="还没有服务" description="一个服务就是一个线上部署的业务项目" action={<Button icon={<LuPlus />} onClick={() => setCreating(true)}>新建服务</Button>} />}</Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">{list.map((s) => <ServiceCard key={s.name} s={s} />)}</div>
       )}
@@ -66,7 +69,7 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[14px] font-semibold text-fg group-hover:text-accent">{s.title || s.name}</span>
-            {!s.enabled && <Badge tone="idle">服务已停用</Badge>}
+            {!s.enabled && <DisabledBadge scope="service" />}
           </div>
           <div className="mt-0.5 line-clamp-1 text-[12.5px] text-fg-3" title={s.description || undefined}>{s.description || "—"}</div>
         </div>
@@ -80,25 +83,25 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
       <div className="mt-3 grid border-t border-line" style={{ gridTemplateColumns: `repeat(${envs?.length || 3}, minmax(0, 1fr))` }}>
         {(envs ?? []).map((e, i) => {
           const h = s.health[e.name];
-          const st = h?.last_run ? RUN_STATUS[h.last_run.status] : null;
-          // 只看该环境自己的开关：服务整体停用在卡片标题上说一次，不把每个环境都标成未启用
+          const last = h?.last_run;
+          // 只看该环境自己的开关：服务整体停用在卡片标题上说一次，不把每个环境都标成已停用
           if (h && !h.env_enabled) {
             return (
               <Link key={e.name} to={`/services/${s.name}?tab=envs`} className={cn("bg-sunken/50 px-4 py-3 hover:bg-hover/60", i > 0 && "border-l border-line")}>
                 <EnvBadge env={e.name} />
-                <div className="mt-2 text-[12px] text-fg-3">该环境未启用</div>
+                <div className="mt-2"><DisabledBadge scope="env" /></div>
               </Link>
             );
           }
           return (
             <Link key={e.name} to={`/services/${s.name}?env=${e.name}`} className={cn("px-4 py-3 hover:bg-hover/60", i > 0 && "border-l border-line")}>
               <div className="flex items-center justify-between"><EnvBadge env={e.name} />
-                {st && <span className={cn("[&_svg]:size-3.5", { ok: "text-ok", bad: "text-bad", warn: "text-warn", info: "text-info", idle: "text-idle", neutral: "", accent: "", outline: "" }[st.tone])} title={`最近一次：${st.label}`}>{st.icon}</span>}
+                {last && <RunStatusDot status={last.status} hint={`最近一次：${RUN_STATUS[last.status].label} · ${ago(last.created_at)}`} />}
               </div>
               <div className="mt-2 flex items-baseline gap-1">
                 <span className="text-[16px] font-semibold tabular-nums text-fg">{h?.runs_24h ?? 0}</span>
                 <span className="text-[11.5px] text-fg-3">次 · 近 24 小时</span>
-                {!!h?.failed_24h && <span className="ml-auto text-[11.5px] font-medium text-bad">{h.failed_24h} 失败</span>}
+                <FailCount n={h?.failed_24h} className="ml-auto self-center" />
               </div>
             </Link>
           );
@@ -106,7 +109,7 @@ function ServiceCard({ s }: { s: ServiceSummary }) {
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-2 text-[11.5px] text-fg-3">
         <span className="truncate font-mono">{s.name}</span>
-        <span className="shrink-0" title={datetime(s.updated_at, true)}>v{s.version} · {s.updated_by} · {ago(s.updated_at)}</span>
+        <MetaVersion className="shrink-0" version={s.version} by={s.updated_by} at={s.updated_at} />
       </div>
     </Card>
   );
@@ -137,7 +140,7 @@ function CreateServiceDialog({ open, onClose }: { open: boolean; onClose: () => 
         envs: Object.fromEntries(off.map((e) => [e, { enabled: false }])),
       });
       invalidate("services");
-      toast("服务已创建", { description: "概览页列出了还要补的配置" });
+      toast(`已创建服务 ${name}`, { description: "概览页列出了还要补的配置" });
       onClose();
       navigate(`/services/${name}`);
     } catch (e) {

@@ -11,9 +11,10 @@ import type { FeedbackFilters, ReplayRequest } from "@/api/types";
 import { FeedbackItem } from "@/components/feedback";
 import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { EnvBadge, RunStatusDot } from "@/components/status";
+import { ListState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { FilterSelect, Segmented } from "@/components/ui/form";
-import { Card, Empty, SkeletonRows } from "@/components/ui/primitives";
+import { Card, Empty } from "@/components/ui/primitives";
 import { Link } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { StartReplayDialog } from "./replays";
@@ -32,8 +33,11 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
     score: score === "all" ? undefined : (Number(score) as 1 | -1), service: s.service, env: env || undefined, task: s.task, reason: s.reason,
     hours: Number(s.hours) || undefined,
   };
-  const { data, loading } = useFeedbackInbox(filters);
-  const active = !!(s.service || s.env || s.task || s.reason);
+  const query = useFeedbackInbox(filters);
+  /** 时间范围也算筛选：「清除」一起清掉（👍 / 👎 是看哪一类，不算） */
+  const active = !!(s.service || s.env || s.task || s.reason || s.hours);
+  const clear = () => set({ service: undefined, env: undefined, task: undefined, reason: undefined, hours: undefined });
+  const kindLabel = score === "1" ? "👍 反馈" : score === "-1" ? "👎 反馈" : "反馈";
   /** 重放带上服务 / 环境 / 任务 / 时间筛选（问题类型不参与选样）；样本（被 👎 的 / 最近的）在对话框里选 */
   const preset: ReplayRequest = {
     ...(s.task ? { task: s.task } : {}), ...(s.service ? { service: s.service } : {}), ...(env ? { env } : {}),
@@ -50,7 +54,7 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
         <Segmented size="sm" value={s.hours ?? ""} onChange={(v) => set({ hours: v || undefined })} options={[
           { value: "24", label: "24h" }, { value: "168", label: "7d" }, { value: "720", label: "30d" }, { value: "", label: "全部" },
         ]} />
-        <FilterBar active={active} onClear={() => set({ service: undefined, env: undefined, task: undefined, reason: undefined })}>
+        <FilterBar active={active} onClear={clear}>
           <ServiceFilter value={s.service ?? ""} onChange={(v) => set({ service: v })} />
           <EnvFilter value={env} onChange={(v) => set({ env: envParam(v, globalEnv) })} />
           <FilterSelect label="任务" allLabel="全部" value={s.task ?? ""} onChange={(v) => set({ task: v })}
@@ -58,13 +62,15 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
           {score !== "1" && <FilterSelect label="问题" allLabel="全部" value={s.reason ?? ""} onChange={(v) => set({ reason: v })}
             options={(meta?.feedback_reasons ?? []).map((r) => ({ value: r.value, label: r.label }))} />}
         </FilterBar>
-        <Button size="sm" className="ml-auto" icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
-          title="改完提示词 / 任务定义 / 档案 / 记忆后，按当前的服务 / 环境 / 任务 / 时间筛选重跑过去的运行：被 👎 的看改好没有，最近的看有没有退步">重放</Button>
+        {/* 带提示的按钮外面包了一层 span：靠右用占位撑开，不靠按钮自己的 ml-auto */}
+        <span className="ml-auto" />
+        <Button size="sm" icon={<LuFlaskConical />} onClick={() => setReplaying(true)}
+          tip="改完提示词 / 任务定义 / 档案 / 记忆后，按当前的服务 / 环境 / 任务 / 时间筛选重跑过去的运行：被 👎 的看改好没有，最近的看有没有退步">重放</Button>
       </div>
       <Card>
-        {loading && !data ? <SkeletonRows /> : !data?.length ? (
-          <Empty icon={<LuMessageSquareWarning />} title="没有符合条件的反馈" description="运行详情、对话里的 👍👎 都会出现在这里" />
-        ) : (
+        <ListState query={query} what={kindLabel} icon={<LuMessageSquareWarning />} filtered={active} onClear={clear}
+          empty={<Empty icon={<LuMessageSquareWarning />} title={`还没有${kindLabel}`} description="运行详情、对话里的 👍👎 都会出现在这里" />}>
+          {(data) => (
           <ul className="divide-y divide-line">
             {data.map((f) => (
               <li key={`${f.run_id}/${f.step_seq}/${f.created_by}`} className="px-4 py-3">
@@ -80,7 +86,8 @@ export function FeedbackInbox({ s, set }: { s: Partial<InboxSearch>; set: (patch
               </li>
             ))}
           </ul>
-        )}
+          )}
+        </ListState>
       </Card>
       <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={preset}
         hint={s.reason ? "问题类型筛选不参与选样；同一条运行只算一次" : "按上面的服务 / 环境 / 任务 / 时间筛选选样，同一条运行只算一次"} />

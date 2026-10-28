@@ -7,12 +7,19 @@ dayjs.locale("zh-cn");
 
 export { dayjs };
 
-/** 相对时间："3 分钟前"；超过 7 天给日期 */
+/** 相对时间："3 分钟前"；超过 7 天给日期（不是今年的带上年份） */
 export function ago(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = dayjs(iso);
-  if (Math.abs(dayjs().diff(d, "day")) >= 7) return d.format("MM-DD HH:mm");
+  if (Math.abs(dayjs().diff(d, "day")) >= 7) return d.format(d.year() === dayjs().year() ? "MM-DD HH:mm" : "YYYY-MM-DD");
   return d.fromNow();
+}
+
+/** 一个时刻落在哪天："今天 09:00" / "明天 09:00" / "10-28 09:00"（定时预览共用） */
+export function slot(iso: string): string {
+  const d = dayjs(iso);
+  const days = d.startOf("day").diff(dayjs().startOf("day"), "day");
+  return days === 0 ? `今天 ${d.format("HH:mm")}` : days === 1 ? `明天 ${d.format("HH:mm")}` : d.format("MM-DD HH:mm");
 }
 
 /** 未来时间："5 分钟后"、"22 小时后"、"3 天后"（dayjs 的 fromNow 把 22 小时说成「1 天内」，读起来像是随时会跑） */

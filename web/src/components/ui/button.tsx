@@ -4,6 +4,7 @@ import { LuLoaderCircle } from "react-icons/lu";
 
 import { cn } from "@/lib/cn";
 import { Link } from "@/lib/router";
+import { Tooltip } from "./overlay";
 
 export const buttonVariants = cva(
   "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-[background,color,border,box-shadow] select-none disabled:opacity-50 disabled:pointer-events-none [&_svg]:size-[15px] [&_svg]:shrink-0",
@@ -36,17 +37,28 @@ type Variants = VariantProps<typeof buttonVariants>;
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>, Variants {
   loading?: boolean;
   icon?: ReactNode;
+  /**
+   * 现在不能用的原因：给了就禁用，悬停显示原因（按钮留在原位，不随状态消失）。
+   * 禁用按钮带 pointer-events-none，原生 title 不会出现，所以原因一律走这里，不要写在 title 上。
+   */
+  reason?: ReactNode;
+  /** 能用时的悬停说明（和 reason 同一个提示框） */
+  tip?: ReactNode;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { className, variant, size, loading, icon, children, disabled, type = "button", ...props }, ref,
+  { className, variant, size, loading, icon, children, disabled, reason, tip, type = "button", ...props }, ref,
 ) {
-  return (
-    <button ref={ref} type={type} className={cn(buttonVariants({ variant, size }), className)} disabled={disabled || loading} {...props}>
+  const btn = (
+    <button ref={ref} type={type} className={cn(buttonVariants({ variant, size }), className)} disabled={disabled || loading || !!reason}
+      aria-disabled={reason ? true : undefined} {...props}>
       {loading ? <LuLoaderCircle className="animate-spin" /> : icon}
       {children}
     </button>
   );
+  const hint = reason || tip;
+  // 禁用的按钮收不到鼠标事件：Tooltip 的悬停挂在它外面那层 span 上
+  return hint ? <Tooltip content={hint}>{btn}</Tooltip> : btn;
 });
 
 export function LinkButton({ to, className, variant, size, icon, children, ...rest }: { to: string; icon?: ReactNode; children?: ReactNode; className?: string; target?: string } & Variants) {

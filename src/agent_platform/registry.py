@@ -264,6 +264,11 @@ class Registry:
             return tasks + roles
         if kind == "service":
             return [f"任务 {t.name}" for t in await self.tasks() if t.spec.service == name]
+        if kind == "task":
+            # 别的任务声明了「在它结束后跑」：删了它，那些联动就悬空了（删子任务时，写了子任务全名的才算）
+            gone = {name} if ":" in name else {name, *(s.name for s in await self.subtasks(name))}
+            return [f"任务 {t.name} 的联动 {tr.id}" for t in await self.tasks() if t.name not in gone
+                    for tr in t.spec.triggers if tr.type == "after" and gone & set(tr.tasks)]
         return []
 
     async def _check(self, kind: str, name: str, spec: BaseModel) -> None:
@@ -339,6 +344,22 @@ class Registry:
             if target and await self.entry("service", target) is None:
                 raise Rejected("invalid_definition", f"触发器 {t.id} 指定的服务 {target} 不存在", 422)
         await self._check_envs(envs)
+        if any(t.type == "after" for t in spec.triggers):
+            await self._check_after(name, spec)
+
+    async def _check_after(self, name: str, spec: TaskDef) -> None:
+        """上游联动：上游任务都存在、不是自己，加上它之后整张联动图不能有环（A 结束跑 B、B 结束又跑 A）。"""
+        base = split_subtask_name(name)[0]
+        all_tasks = {e.name: e.spec for e in await self.tasks()}
+        for t in (t for t in spec.triggers if t.type == "after"):
+            for up in t.tasks:
+                if split_subtask_name(up)[0] == base:
+                    raise Rejected("invalid_definition", f"联动 {t.id} 的上游不能是这个任务自己（{up}）", 422)
+                if up not in all_tasks:
+                    raise Rejected("invalid_definition", f"联动 {t.id} 的上游任务 {up} 不存在", 422)
+        graph = after_graph({**all_tasks, name: spec})
+        if cycle := find_cycle(graph):
+            raise Rejected("invalid_definition", "联动成环了：" + " → ".join(cycle) + "（上游结束触发下游，绕一圈又回到自己）", 422)
 
     async def _check_envs(self, names: list[str]) -> None:
         known = (await self.envs()).names
@@ -438,6 +459,41 @@ class Registry:
             return self._stored(kind, self._validate(MODELS[kind], body))
         except Rejected:
             return None
+
+
+def after_graph(tasks: dict[str, TaskDef]) -> dict[str, set[str]]:
+    """联动图：上游（父任务名）→ 下游（父任务名）。子任务算在父任务头上——有环就是有环，不管落在哪个对象上。"""
+    graph: dict[str, set[str]] = {}
+    for name, spec in tasks.items():
+        down = split_subtask_name(name)[0]
+        for t in spec.triggers:
+            if t.type == "after":
+                for up in t.tasks:
+                    graph.setdefault(split_subtask_name(up)[0], set()).add(down)
+    return graph
+
+
+def find_cycle(graph: dict[str, set[str]]) -> list[str] | None:
+    """有环就返回一条环上的路径（首尾相同），没有返回 None。"""
+    state: dict[str, int] = {}          # 1 = 在当前路径上，2 = 查完了
+    path: list[str] = []
+
+    def visit(node: str) -> list[str] | None:
+        state[node] = 1
+        path.append(node)
+        for nxt in sorted(graph.get(node, ())):
+            if state.get(nxt) == 1:
+                return path[path.index(nxt):] + [nxt]
+            if state.get(nxt) is None and (found := visit(nxt)):
+                return found
+        state[node] = 2
+        path.pop()
+        return None
+
+    for node in sorted(graph):
+        if state.get(node) is None and (found := visit(node)):
+            return found
+    return None
 
 
 def _own_fields(spec: TaskDef) -> set[str]:

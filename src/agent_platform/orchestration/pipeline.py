@@ -22,7 +22,7 @@ from .. import __version__, observability
 from ..agent import factory as agent_factory
 from ..agent import scope as run_scope
 from ..config import Settings
-from ..domain import BUILTIN_HANDLERS, Rejected, RunTrigger, compose_profile, question_text
+from ..domain import BUILTIN_HANDLERS, RETRYABLE_CODES, Rejected, RunTrigger, compose_profile, question_text
 from ..memory import distill, recall
 from ..memory.gardener import run_gardener
 from ..notify import Message, Notifier
@@ -48,6 +48,8 @@ class Deps:
     model_pool: Any
     service_mcp: Any = None                                           # agent.tools.mcp_bridge.ServiceMcp
     on_finished: Callable[[RunSpec], Awaitable[None]] | None = None   # 回归重放的判定挂在这里
+    # 运行最终结束之后（成功 / 最终失败 / 准备阶段就失败）：上游联动和点名等它的运行（orchestration/chain.py）
+    after_run: Callable[[str], Awaitable[None]] | None = None
 
 
 def _pick(*values: bool | None) -> bool:
@@ -92,6 +94,7 @@ class Pipeline:
         except Rejected as e:
             await runs.log_event(run_id, "error", {"title": e.code, "content": e.message})
             await runs.set_status(run_id, "failed", output={"error": e.message}, error_code=e.code)
+            await self._after_run(run_id)
             return
         try:
             spec = await self.prepare(spec)
@@ -114,12 +117,67 @@ class Pipeline:
         except Exception as e:  # noqa: BLE001 —— 模型 / 工具 / 框架的错误：记下来，交给人续跑或重跑
             log.exception("运行 %s 失败", run_id)
             await self.fail(spec, f"{type(e).__name__}: {e}", "error")
+        await self._settle(spec)
+
+    async def _settle(self, spec: RunSpec) -> None:
+        """运行最终结束后的旁路：投递、回归重放的判定、上游联动。失败后还要自动重试的先不做（重试完再说）。"""
+        run = await runs.get(spec.run_id)
+        if run is None or run["status"] == "cancelled" or (run["status"] == "failed" and run.get("retry_at")):
+            return
         await self.deliver(spec)
         if self._d.on_finished is not None:
             try:
                 await self._d.on_finished(spec)
             except Exception:  # noqa: BLE001
-                log.exception("运行 %s 结束后的回调失败", run_id)
+                log.exception("运行 %s 结束后的回调失败", spec.run_id)
+        await self._after_run(spec.run_id)
+
+    async def _after_run(self, run_id: str) -> None:
+        if self._d.after_run is not None:
+            try:
+                await self._d.after_run(run_id)
+            except Exception:  # noqa: BLE001
+                log.exception("运行 %s 的上游联动失败", run_id)
+
+    async def settle_failed(self, run_id: str) -> None:
+        """在执行流程之外最终失败的运行（判成孤儿后不再重试、自动重试没能开始、人取消了等着的重试）：
+        补上失败通知、投递和联动。"""
+        run = await runs.get(run_id)
+        if run is None or run["status"] != "failed" or run.get("retry_at"):
+            return
+        try:
+            spec = await build_spec(self._d.registry, run)
+        except Rejected:
+            await self._after_run(run_id)            # 任务都删了：只处理等它的运行
+            return
+        output = run.get("output") or {}
+        await _announce(self._d, spec, "run_failed", "运行失败", f"`{run.get('error_code')}` {str(output.get('error', ''))[:1200]}")
+        await self._settle(spec)
+
+    async def orphaned(self, run_id: str) -> None:
+        """维护循环把心跳停了的运行判成孤儿（执行进程崩溃 / 被杀）之后：任务配了自动重试就排上，否则按最终失败收尾。"""
+        run = await runs.get(run_id)
+        if run is None:
+            return
+        delay = await self._retry_in(run["task"], "orphaned", run.get("attempt") or 1, run["trigger"]["type"])
+        if delay and await runs.schedule_retry(run_id, delay):
+            await runs.log_event(run_id, "stage", {"stage": "retry", "title": _retry_title(run.get("attempt") or 1, delay,
+                                                                                           await self._retry_max(run["task"]))})
+            return
+        await self.settle_failed(run_id)
+
+    async def _retry_max(self, task_name: str) -> int:
+        entry = await self._d.registry.task(task_name)
+        return entry.spec.retry.max if entry and entry.spec.retry else 0
+
+    async def _retry_in(self, task_name: str, code: str, attempt: int, trigger_type: str) -> int | None:
+        """这次失败要不要自动重试：任务配了 retry、是 agent 任务、失败是临时性的、还没用完次数。→ 等几秒；None = 不重试。"""
+        if code not in RETRYABLE_CODES or trigger_type == "replay":
+            return None
+        entry = await self._d.registry.task(task_name)
+        if entry is None or entry.spec.form != "agent" or not entry.spec.retry:
+            return None
+        return entry.spec.retry.delay_s if attempt <= entry.spec.retry.max else None
 
     async def _limited(self, spec: RunSpec, coro: Awaitable[dict]) -> dict:
         return await asyncio.wait_for(coro, min(spec.timeout_s, MAX_EXEC_S))
@@ -279,11 +337,19 @@ class Pipeline:
         await _announce(d, spec, "run_succeeded", "运行成功", str(output.get("answer") or output)[:1500])
 
     async def fail(self, spec: RunSpec, message: str, code: str) -> None:
+        """落失败。任务配了自动重试、失败又是临时性的：同时定好重试时刻，这次先不发失败通知（重试用完还失败才发）。"""
         if await _cancelled(spec.run_id):
             return
         await runs.log_event(spec.run_id, "error", {"title": code, "content": message[:4000]})
-        if await runs.set_status(spec.run_id, "failed", output={"error": message[:4000]}, error_code=code):
-            await _announce(self._d, spec, "run_failed", "运行失败", f"`{code}` {message[:1200]}")
+        run = await runs.get(spec.run_id)
+        attempt = (run or {}).get("attempt") or 1
+        delay = await self._retry_in(spec.task, code, attempt, spec.trigger.type)
+        if await runs.set_status(spec.run_id, "failed", output={"error": message[:4000]}, error_code=code, retry_in=delay):
+            if delay:
+                await runs.log_event(spec.run_id, "stage", {"stage": "retry", "title": _retry_title(
+                    attempt, delay, await self._retry_max(spec.task))})
+            else:
+                await _announce(self._d, spec, "run_failed", "运行失败", f"`{code}` {message[:1200]}")
 
     async def deliver(self, spec: RunSpec) -> None:
         """按任务声明把终态结果推出去（通知渠道 / HTTP 回调）。重试 3 次；失败只留事件，不改运行结果。"""
@@ -380,6 +446,12 @@ async def _announce(d: Deps, spec: RunSpec, event: str, title: str, text: str) -
         title=f"{title}：{spec.task}", text=f"{spec.service or '平台'} · {spec.env} · {spec.trigger.type}\n\n{text}",
         link=d.notifier.link(f"/runs/{spec.run_id}"), link_title="查看运行"),
         service=spec.service, env=spec.env, task=spec.task, trigger=spec.trigger.type)
+
+
+def _retry_title(attempt: int, delay: int, max_retries: int) -> str:
+    left = max(0, max_retries - attempt)
+    return (f"第 {attempt} 次执行失败，{delay} 秒后自动重试"
+            + (f"（之后还能再重试 {left} 次）" if left else "（最后一次）"))
 
 
 _WEEKDAYS = "一二三四五六日"

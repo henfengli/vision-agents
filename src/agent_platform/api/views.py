@@ -26,7 +26,7 @@ def service_summary(entry: Entry, envs: list[EnvDef], health: dict, task_count: 
         h = health.get((entry.name, env), {})
         per_env[env] = {
             "enabled": view.enabled, "env_enabled": override.enabled if override is not None else True,
-            "python": view.python,
+            "triggers_paused": view.triggers_paused, "python": view.python,
             "runs_24h": h.get("runs_24h", 0), "failed_24h": h.get("failed_24h", 0), "last_run": h.get("last_run"),
         }
     return {**credentials.redact_service(entry.dump()), "task_count": task_count,
@@ -103,7 +103,35 @@ async def run_detail(run: dict, titles: dict[str, str]) -> dict:
         },
         # 执行中的工具（bash / py 跑得久时每几秒一条输出尾部）：{键: {tool, title, output, ms, at}}；结束了就没有
         "progress": run.get("progress") or None,
+        "lineage": await _lineage(run, titles),
+        "queue": await _queue_state(run) if run["status"] == "queued" else None,
     }
+
+
+async def _lineage(run: dict, titles: dict[str, str]) -> dict:
+    """前后关系：触发它的上游运行（上游联动）、它点名等的运行（depends_on），以及它引出的运行。"""
+    upstream_ids = list(run.get("depends_on") or [])
+    via = run["trigger"]["source"] if run["trigger"]["type"] == "after" else None
+    found = await runs.statuses([*upstream_ids, *([via] if via else [])])
+    brief = lambda rid: {**found[rid], "task_title": titles.get(found[rid]["task"]) or titles.get(  # noqa: E731
+        found[rid]["task"].split(":")[0]) or found[rid]["task"].split(":")[0]} if rid in found else {"run_id": rid}
+    downstream = [list_item(r, titles) for r in await runs.downstream_of(run["run_id"])]
+    return {"triggered_by": brief(via) if via else None, "depends_on": [brief(r) for r in upstream_ids],
+            "downstream": downstream}
+
+
+async def _queue_state(run: dict) -> dict:
+    """排着队的运行在等什么：点名的上游没成功 / 任务并发满了 / 没有在线的主机负责 / 只是在排队。"""
+    from ..store import workers
+    waiting = [r for r in (await runs.statuses(run.get("depends_on") or [])).values() if r["status"] != "success"]
+    hosts = workers.serving(await workers.list_workers(), run["env"], run["service"])
+    running = None
+    if run.get("concurrency_limit"):
+        running = await runs.running_with_key(run["concurrency_key"])
+    return {"waiting_for": [{"run_id": r["run_id"], "status": r["status"], "task": r["task"]} for r in waiting],
+            "concurrency": {"limit": run["concurrency_limit"], "running": running} if run.get("concurrency_limit") else None,
+            "hosts": [{"host": h["host"], "running": h["running"], "max_concurrent": h["max_concurrent"]} for h in hosts],
+            "priority": run.get("priority", 1)}
 
 
 def chat_turn(run: dict, events: list[dict], feedback: dict | None) -> dict:

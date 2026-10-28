@@ -117,7 +117,8 @@ export function Popover({ trigger, children, className, align = "start" }: { tri
 
 // ———————— Tooltip ————————
 
-export function Tooltip({ content, children, side = "top" }: { content: ReactNode; children: ReactElement; side?: "top" | "bottom" | "right" | "left" }) {
+/** className：加在包住 children 的那层 span 上——它才是父级 flex 里的那一项，ml-auto / shrink-0 这类布局类要给它 */
+export function Tooltip({ content, children, side = "top", className }: { content: ReactNode; children: ReactElement; side?: "top" | "bottom" | "right" | "left"; className?: string }) {
   const [open, setOpen] = useState(false);
   const { refs, floatingStyles, context } = useFloating({
     open, onOpenChange: setOpen, placement: side, whileElementsMounted: autoUpdate,
@@ -128,7 +129,7 @@ export function Tooltip({ content, children, side = "top" }: { content: ReactNod
   if (!content) return children;
   return (
     <>
-      <span ref={refs.setReference} className="inline-flex max-w-full" {...getReferenceProps()}>{children}</span>
+      <span ref={refs.setReference} className={cn("inline-flex max-w-full", className)} {...getReferenceProps()}>{children}</span>
       {open && (
         <div ref={refs.setFloating} style={floatingStyles} {...getFloatingProps()}
           className="pointer-events-none z-[60] max-w-xs animate-in rounded-md bg-[#111318] px-2 py-1 text-xs leading-snug text-white shadow-lg dark:bg-[#2a2c33]">

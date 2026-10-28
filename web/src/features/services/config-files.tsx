@@ -2,7 +2,7 @@
  * 给 agent 的只读版配置（服务×环境）：只有受保护的环境（生产）要填。服务定义里声明的每个配置路径，在这个环境给 agent 填一份内容。
  * 项目内核启动时平台把它盖在那个路径上——agent 的项目代码照常 import、照常连库，连上去的是只读账号；
  * 线上那份真实配置平台不读、不显示。内容存库、每次保存一个新版本（内容没变不加版本）。
- * 历史里每一版都能看、和当前版对比、载入编辑器再保存（= 恢复）。
+ * 「版本」里每一版都能看、和当前版对比、载入编辑器再保存（= 恢复）。
  * 不受保护的环境（测试）直接用项目的真实配置：这里只列出路径，不能填（接口返回 409 config_not_used）。
  */
 import { useEffect, useState } from "react";
@@ -10,21 +10,23 @@ import { LuCircleAlert, LuFileText, LuGitCompare, LuHistory, LuInfo, LuRefreshCw
 
 import { api, useConfigHistory, useConfigRaw, useServiceEnv } from "@/api/hooks";
 import type { ConfigFileStatus, ConfigRaw, ServiceSummary } from "@/api/types";
+import { MetaVersion } from "@/components/meta";
+import { TimeAgo } from "@/components/time";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, DiffView } from "@/components/ui/data";
 import { Segmented, Textarea } from "@/components/ui/form";
-import { Drawer, toast } from "@/components/ui/overlay";
+import { Drawer, Tooltip, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, bytes, datetime } from "@/lib/format";
+import { bytes, datetime } from "@/lib/format";
 import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { useLeaveGuard } from "@/lib/router";
 
-/** 一个配置路径的状态徽标：给 agent 填到第几版 / 未填。只用在受保护的环境（不受保护的不用填） */
+/** 一个配置路径的状态徽标：给 agent 填到哪一版 / 未填。只用在受保护的环境（不受保护的不用填） */
 export function ConfigStatusBadges({ file }: { file: ConfigFileStatus }) {
   return file.version != null
-    ? <Badge tone="ok" title={`${file.updated_by ?? ""} 更新于 ${datetime(file.updated_at)}`}>已填第 {file.version} 版</Badge>
-    : <Badge tone="warn" title="还没填只读版：agent 在这个环境跑不了项目代码">未填</Badge>;
+    ? <Tooltip content={`${file.updated_by ?? ""} · ${datetime(file.updated_at)}`}><Badge tone="ok">已填 v{file.version}</Badge></Tooltip>
+    : <Tooltip content="还没填只读版：agent 在这个环境跑不了项目代码"><Badge tone="warn">未填</Badge></Tooltip>;
 }
 
 export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSummary; env: string; onOpenDefinition: () => void }) {
@@ -69,7 +71,7 @@ export function ConfigFilesView({ svc, env, onOpenDefinition }: { svc: ServiceSu
                       <ConfigStatusBadges file={f} />
                     </div>
                     <div className="mt-0.5 truncate font-mono text-[11px] text-fg-3" title={f.path}>{f.path}</div>
-                    {f.version != null && <div className="text-[11px] text-fg-3">{f.updated_by} · {ago(f.updated_at)}</div>}
+                    {f.version != null && <div className="text-[11px] text-fg-3">{f.updated_by} · <TimeAgo at={f.updated_at} /></div>}
                   </button>
                 </li>
               ))}
@@ -142,7 +144,7 @@ function ConfigEditor({ svc, env, file }: { svc: ServiceSummary; env: string; fi
       const res = await api.saveConfig(svc.name, env, { path, content: draft });
       setBase({ content: draft });
       setQueryData<ConfigRaw>(key, (old) => ({ ...old!, content: draft, exists: true, version: res.version }));
-      if (res.changed) toast(`已保存为第 ${res.version} 版`, { description: `${env} 下次运行就用新内容` });
+      if (res.changed) toast(`已保存为 v${res.version}`, { description: `${env} 下次运行就用新内容` });
       else toast.info("内容没变", "没有加新版本");
       invalidate("services", svc.name);
     } catch (e) {
@@ -156,18 +158,20 @@ function ConfigEditor({ svc, env, file }: { svc: ServiceSummary; env: string; fi
     <Card className="min-w-0">
       <CardHeader icon={<LuFileText />} title={<span className="font-mono">{file.path}</span>}
         description={data && (data.exists
-          ? <>第 {data.version} 版 · {data.updated_by ?? "—"} 更新于 {ago(data.updated_at)}{file.key !== file.path && <> · 定义里写作 <span className="font-mono">{file.key}</span></>}</>
+          ? <span className="inline-flex flex-wrap items-center gap-x-1"><MetaVersion version={data.version} by={data.updated_by ?? "—"} at={data.updated_at} />{file.key !== file.path && <> · 定义里写作 <span className="font-mono">{file.key}</span></>}</span>
           : <>还没有填{file.key !== file.path && <> · 定义里写作 <span className="font-mono">{file.key}</span></>}</>)}
         actions={<>
-          <Button size="sm" variant="ghost" icon={<LuHistory />} onClick={() => setHistoryOpen(true)} disabled={!data?.exists}>历史</Button>
-          <Button size="icon-sm" variant="ghost" aria-label="重新载入" title={dirty ? "重新载入会丢掉未保存的修改" : "重新载入"} onClick={() => void reload()}><LuRefreshCw /></Button>
+          {/* 还没填过时也留在原位，灰着说明原因 */}
+          <Button size="sm" variant="ghost" icon={<LuHistory />} onClick={() => setHistoryOpen(true)} disabled={!data}
+            reason={data && !data.exists ? "还没有版本：保存一次就有 v1" : undefined}>版本</Button>
+          <Button size="icon-sm" variant="ghost" aria-label="重新载入" tip={dirty ? "重新载入会丢掉未保存的修改" : "重新载入"} onClick={() => void reload()}><LuRefreshCw /></Button>
         </>} />
       {error ? <ErrorState error={error} onRetry={refetch} /> : !data || !base ? <div className="p-4"><Skeleton className="h-80" /></div> : (
         <div className="space-y-3 p-4">
           {!data.exists && (
             <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft/60 px-3 py-2 text-[12.5px] text-warn">
               <LuCircleAlert className="mt-0.5 size-4 shrink-0" />
-              <span>还没有填：agent 在 {env} 跑不了项目代码。把线上那份复制过来、口令换成只读账号，保存就是第 1 版。</span>
+              <span>还没有填：agent 在 {env} 跑不了项目代码。把线上那份复制过来、口令换成只读账号，保存就是 v1。</span>
             </div>
           )}
           <Textarea mono value={draft} spellCheck={false} aria-label={`编辑 ${file.path}`} placeholder={"# 照抄线上的配置，库口令换成只读账号"}
@@ -175,19 +179,19 @@ function ConfigEditor({ svc, env, file }: { svc: ServiceSummary; env: string; fi
           <div className="flex flex-wrap items-center gap-2">
             <span className="flex items-center gap-1 text-[11.5px] text-warn"><LuTriangleAlert className="size-3.5" />按原文显示，密钥没有打码</span>
             <span className="ml-auto text-[11.5px] text-fg-3">{dirty ? "有未保存的修改" : ""}</span>
-            <Button size="sm" disabled={!dirty || saving} onClick={() => setDraft(base.content)}>还原</Button>
-            <Button size="sm" variant="primary" loading={saving} disabled={!dirty || (!data.exists && !draft.trim())} onClick={save}>{data.exists ? "保存为新版本" : "保存为第 1 版"}</Button>
+            <Button size="sm" disabled={!dirty || saving} onClick={() => setDraft(base.content)}>放弃修改</Button>
+            <Button size="sm" variant="primary" loading={saving} disabled={!dirty || (!data.exists && !draft.trim())} onClick={save}>{data.exists ? `保存为 v${(data.version ?? 0) + 1}` : "保存为 v1"}</Button>
           </div>
         </div>
       )}
       <HistoryDrawer svc={svc} env={env} file={file} current={data?.exists ? { version: data.version, content: data.content } : null}
         open={historyOpen} onClose={() => setHistoryOpen(false)}
-        onLoad={(content, version) => { setDraft(content); setHistoryOpen(false); toast.info(`已把第 ${version} 版载入编辑器`, "检查无误后点保存（= 恢复成新版本）"); }} />
+        onLoad={(content, version) => { setDraft(content); setHistoryOpen(false); toast.info(`已把 v${version} 载入编辑器`, "检查无误后点保存（= 恢复成新版本）"); }} />
     </Card>
   );
 }
 
-/** 版本历史：每次保存一版，新的在前；看内容 / 和当前版对比 / 载入编辑器（再保存 = 恢复） */
+/** 版本：每次保存一版，新的在前；看内容 / 和当前版对比 / 载入编辑器（再保存 = 恢复） */
 function HistoryDrawer({ svc, env, file, current, open, onClose, onLoad }: {
   svc: ServiceSummary; env: string; file: ConfigFileStatus; current: { version: number | null; content: string } | null;
   open: boolean; onClose: () => void; onLoad: (content: string, version: number) => void;
@@ -201,7 +205,7 @@ function HistoryDrawer({ svc, env, file, current, open, onClose, onLoad }: {
     () => api.configVersion(svc.name, env, path, selected!), { enabled: open && selected != null });
   const isCurrent = selected != null && selected === current?.version;
   return (
-    <Drawer open={open} onClose={onClose} width="w-[820px]" title={`${file.path.split("/").pop()} 的历史`} subtitle={`${svc.name} · ${env} · 给 agent 的只读版，每次保存一版`}>
+    <Drawer open={open} onClose={onClose} width="w-[820px]" title={`${file.path.split("/").pop()} 的版本`} subtitle={`${svc.name} · ${env} · 给 agent 的只读版，每次保存一版`}>
       <div className="space-y-3 p-4">
         {error ? <ErrorState error={error} onRetry={refetch} /> : loading ? <SkeletonRows rows={3} className="p-0" /> : !data?.length ? (
           <Empty icon={<LuHistory />} title="还没有版本" description="保存过之后，每一版都留在这里" />
@@ -215,7 +219,7 @@ function HistoryDrawer({ svc, env, file, current, open, onClose, onLoad }: {
                     <span className="w-12 shrink-0 font-medium tabular-nums text-fg">v{v.version}</span>
                     {v.version === current?.version && <Badge tone="ok">当前</Badge>}
                     <span className="text-fg-2">{v.updated_by}</span>
-                    <span className="text-fg-3" title={datetime(v.updated_at, true)}>{ago(v.updated_at)}</span>
+                    <TimeAgo className="text-fg-3" at={v.updated_at} />
                     <span className="ml-auto text-[11.5px] text-fg-3">{bytes(v.size)}</span>
                   </button>
                 </li>
@@ -233,7 +237,8 @@ function HistoryDrawer({ svc, env, file, current, open, onClose, onLoad }: {
                   : <CodeBlock code={version.content} maxHeight={520} />}
                 <div className="flex items-center gap-2">
                   <span className="text-[11.5px] text-warn">按原文显示，密钥没有打码</span>
-                  <Button size="sm" variant="primary" className="ml-auto" disabled={isCurrent} title={isCurrent ? "这就是当前版" : undefined}
+                  <span className="ml-auto" />
+                  <Button size="sm" variant="primary" reason={isCurrent ? "这就是当前版" : undefined}
                     onClick={() => onLoad(version.content, version.version)}>载入编辑器</Button>
                 </div>
               </>

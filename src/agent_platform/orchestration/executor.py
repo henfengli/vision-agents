@@ -1,7 +1,8 @@
 """执行队列的消费端：runs 表就是队列。
 
-- 认领：status=queued 的行按创建时间先到先得，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领；
-  只认领本主机负责的环境（部署配置 env，再按 services 限服务）的运行
+- 认领：status=queued 的行按优先级（人在等的先）再按创建时间，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领；
+  只认领本主机负责的环境（部署配置 env，再按 services 限服务）的运行；点名的上游还没成功的、任务并发已满的先跳过
+- 报到：每 20 秒往 workers 表报一次（负责的环境、服务、在跑几个），控制台据此显示主机在不在线
 - 唤醒：进入 queued 时 pg_notify('runs_queued')，LISTEN 毫秒级唤醒；5 秒轮询兜底
 - 并发：最多 max_concurrent 个运行同时执行，满了就不再认领
 - 心跳：执行中的运行每 20 秒刷新 heartbeat_at（只刷还归本 worker、还在执行的；不归了就停下）；
@@ -17,7 +18,8 @@ import logging
 import os
 import socket
 
-from ..store import db, runs
+from .. import __version__
+from ..store import db, runs, workers
 from .pipeline import Pipeline
 
 log = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class Executor:
         self.env = env
         self.services = list(services or [])
         self._pipeline = pipeline
+        self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._running: dict[str, asyncio.Task] = {}
         self._wake = asyncio.Event()
@@ -51,6 +54,15 @@ class Executor:
             t.cancel()
         if tasks:
             await asyncio.wait(tasks, timeout=grace_s)
+        try:
+            await workers.stopped(self.worker_id)
+        except Exception:  # noqa: BLE001 —— 库已经断了：维护循环按 90 秒没报到判离线
+            log.warning("执行主机下线登记失败", exc_info=True)
+
+    async def report(self) -> None:
+        """报到：这台主机负责的环境、服务、在跑几个（控制台的主机列表、排队太久时的原因说明）。"""
+        await workers.heartbeat(self.worker_id, host=socket.gethostname(), env=self.env, services=self.services,
+                                version=__version__, max_concurrent=self.max_concurrent, running=len(self._running))
 
     @property
     def running(self) -> list[str]:
@@ -110,6 +122,10 @@ class Executor:
 
     async def _heartbeat_forever(self) -> None:
         while True:
+            try:
+                await self.report()
+            except Exception:  # noqa: BLE001
+                log.warning("执行主机报到失败", exc_info=True)
             await asyncio.sleep(HEARTBEAT_S)
             try:
                 stop = await runs.heartbeat(self.worker_id, self.running)

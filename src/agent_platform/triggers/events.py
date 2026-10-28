@@ -17,6 +17,7 @@ from collections import defaultdict
 from ..domain import Caller, EventTrigger, Rejected, RunRequest, RunTrigger
 from ..orchestration.submitter import Submitter
 from ..registry import Registry
+from ..store import ticks
 from .sources import SOURCES, Event
 
 log = logging.getLogger(__name__)
@@ -34,20 +35,31 @@ class EventRouter:
         events = src.parse(body, {k.lower(): v for k, v in headers.items()})
         results = []
         for event in events:
-            for task_name, trigger in await self._matching(source, event):
+            matched, filtered = await self._matching(source, event)
+            brief = _brief(event)
+            for task_name, trigger in filtered:
+                await ticks.record("event", "filtered", task=task_name, trigger_id=trigger.id, env=event.data.get("env"),
+                                   source=source, reason=f"{source}.{event.name} 不满足过滤条件",
+                                   detail={"event": event.name, "data": brief, "filter": trigger.filter})
+            if not matched:
+                await ticks.record("event", "unmatched", env=event.data.get("env"), source=source,
+                                   reason=f"{source}.{event.name} 没有任务接（没有任务声明这个事件，或过滤条件都不满足）",
+                                   detail={"event": event.name, "data": brief})
+            for task_name, trigger in matched:
                 results.append(await self._fire(task_name, trigger, source, event, caller))
         return {"source": source, "events": [e.name for e in events], "matched": results}
 
-    async def _matching(self, source: str, event: Event) -> list[tuple[str, EventTrigger]]:
-        out = []
+    async def _matching(self, source: str, event: Event) -> tuple[list[tuple[str, EventTrigger]], list[tuple[str, EventTrigger]]]:
+        """→ (匹配上的, 事件对上了但过滤条件不满足的)。"""
+        out, filtered = [], []
         for raw in await self._reg.tasks():
             if raw.spec.extends and "triggers" not in raw.spec.model_fields_set:
                 continue                                  # 子任务没声明自己的触发：只由父任务接收
             task = (await self._reg.task(raw.name)).spec
             for t in task.triggers_of("event"):
-                if t.source == source and t.event in (event.name, "*") and t.accepts(event.data):
-                    out.append((raw.name, t))
-        return out
+                if t.source == source and t.event in (event.name, "*"):
+                    (out if t.accepts(event.data) else filtered).append((raw.name, t))
+        return out, filtered
 
     async def _fire(self, task_name: str, t: EventTrigger, source: str, event: Event, caller: Caller) -> dict:
         data = event.data
@@ -59,12 +71,23 @@ class EventRouter:
         trigger = RunTrigger(type="event", id=t.id, source=source, caller=caller.name)
         item = {"task": f"{base}:{req.subtask}" if req.subtask else base, "trigger": t.id,
                 "rule": rule["category"] if rule else None}
+        common = {"task": item["task"], "trigger_id": t.id, "env": req.env, "source": source,
+                  "detail": {"event": event.name, "data": _brief(event), "rule": item["rule"]}}
         try:
             accepted = await self._submitter.submit(req, trigger=trigger, caller=caller, rule=rule)
         except Rejected as e:
             log.info("事件 %s/%s → 任务 %s 被拒：%s", source, event.name, task_name, e.message)
+            await ticks.record("event", "rejected", reason=e.message, **common)
             return {**item, "run_id": None, "status": "rejected", "error": {"code": e.code, "message": e.message}}
+        await ticks.record("event", "deduped" if accepted.dedup else "fired", run_id=accepted.run_id,
+                           reason="命中去重，复用已有的运行" if accepted.dedup
+                           else (f"规则先行命中（{rule['category']}）" if rule else f"{source}.{event.name}"), **common)
         return {**item, "run_id": accepted.run_id, "status": accepted.status, "dedup": accepted.dedup, "error": None}
+
+
+def _brief(event: Event) -> dict:
+    """触发记录里留的事件字段（长文本截短：报错堆栈动辄几十 KB）。"""
+    return {k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v) for k, v in list(event.data.items())[:20]}
 
 
 def _first_rule(t: EventTrigger, error: str) -> dict | None:

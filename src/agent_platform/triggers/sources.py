@@ -28,10 +28,25 @@ class Source:
                 "events": [{"name": n, "title": t, "fields": f} for n, (t, f) in self.events.items()]}
 
 
-def _dagster(body: dict, _headers: dict) -> list[Event]:
-    """Dagster run_failure_sensor 回调：{run_id, asset_key, error, env?, subtask?}。"""
-    return [Event("run_failure", {k: body.get(k) for k in ("run_id", "asset_key", "error", "env", "subtask", "job")
-                                  if body.get(k) is not None})]
+_DAGSTER_FIELDS = {
+    "run_failure": ["run_id", "asset_key", "error", "env", "subtask", "job"],
+    "run_success": ["run_id", "asset_key", "asset_keys", "env", "subtask", "job", "partition"],
+    "asset_check_failed": ["asset_key", "check", "severity", "description", "run_id", "env", "subtask"],
+}
+
+
+def _dagster(body: dict, headers: dict) -> list[Event]:
+    """Dagster 传感器回调。事件名取请求体 event 或请求头 X-Event；不写 = run_failure（老的 run_failure_sensor 回调不用改）：
+    - run_failure：{run_id, asset_key, error, env, subtask?, job?}（run_failure_sensor）
+    - run_success：{run_id, asset_key?, asset_keys?, env, job?, partition?}（run_status_sensor，SUCCESS）
+    - asset_check_failed：{asset_key, check, severity, description, run_id?, env}（asset check 失败，比如新鲜度检查）
+    asset_keys 是列表时拼成逗号分隔的一串，过滤、映射都按文本处理。"""
+    name = str(body.get("event") or headers.get("x-event") or "run_failure")
+    fields = _DAGSTER_FIELDS.get(name, _DAGSTER_FIELDS["run_failure"])
+    data = {k: body.get(k) for k in fields if body.get(k) is not None}
+    if isinstance(data.get("asset_keys"), list):
+        data["asset_keys"] = ",".join(map(str, data["asset_keys"]))
+    return [Event(name, data)]
 
 
 def _gitlab(body: dict, headers: dict) -> list[Event]:
@@ -52,8 +67,11 @@ def _webhook(body: dict, headers: dict) -> list[Event]:
 
 
 SOURCES: dict[str, Source] = {s.name: s for s in [
-    Source("dagster", "Dagster", {"run_failure": ("运行失败", ["run_id", "asset_key", "error", "env", "subtask", "job"])},
-           _dagster, "在 Dagster 里配 run_failure_sensor 回调 POST /v1/events/dagster"),
+    Source("dagster", "Dagster", {
+        "run_failure": ("运行失败", _DAGSTER_FIELDS["run_failure"]),
+        "run_success": ("运行成功", _DAGSTER_FIELDS["run_success"]),
+        "asset_check_failed": ("资产检查失败", _DAGSTER_FIELDS["asset_check_failed"]),
+    }, _dagster, "在 Dagster 里配传感器回调 POST /v1/events/dagster；请求体带 event（不写 = run_failure）"),
     Source("gitlab", "GitLab", {"deployment": ("部署成功", ["project", "ref", "env", "sha", "url", "user"])},
            _gitlab, "项目 Webhook 勾选 Deployment events，地址 /v1/events/gitlab"),
     Source("webhook", "通用 Webhook", {"*": ("任意事件", [])},

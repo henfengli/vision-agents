@@ -14,6 +14,8 @@
 - assets / asset_history   方法（做法/脚本/查询/基线；文件本体在 assets_dir）
 - feedback           反馈（对整次运行或某一步：分数 + 问题类型 + 说明；一人一步一条）
 - replays / replay_items   回归重放：拿被 👎 过的运行用当前定义重跑，并排对比、模型判定有没有改好
+- trigger_ticks      触发记录：定时 / 事件 / 上游联动 / 自动重试的每次判定（建了哪条运行、为什么没建）
+- workers            执行主机：每台 agent 服务的 worker 报到（负责的环境、服务、并发）
 
 档案（人写的）不在库表里，在服务 / 任务定义的 profile 字段。
 schema_version 记录库结构版本。
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -96,6 +98,24 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 -- 执行中的工具（bash / py）每几秒写一次输出尾部：{键: {tool, output, ms, at}}；工具结束删键，运行结束清空
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS progress JSONB;
+-- 调度（v11）：
+--   depends_on        提交时点名的上游运行：都成功了才认领；有一个失败 / 取消，这条落 failed / upstream_failed
+--   priority          认领顺序（小的先）：人在等的 0、程序调用 1、自动触发和回归重放 2
+--   concurrency_key / concurrency_limit   任务在这个环境同时执行的上限（任务名@环境，连同子任务）；空 = 不限
+--   attempt           第几次执行（续跑一次 +1）；retry_at 失败后等着自动重试的时刻（空 = 不重试 / 已经开始重试）
+--   queue_alerted_at  排队太久已经告警过（只告一次）
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS concurrency_limit INT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS attempt INT NOT NULL DEFAULT 1;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS retry_at TIMESTAMPTZ;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS queue_alerted_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_runs_claim ON runs (env, priority, created_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_runs_depends ON runs USING gin (depends_on) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_runs_running_key ON runs (concurrency_key) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_runs_retry ON runs (retry_at) WHERE retry_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_upstream ON runs (trigger_source) WHERE trigger_type = 'after';
 CREATE INDEX IF NOT EXISTS idx_runs_created ON runs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs (task, created_at DESC);
@@ -249,6 +269,40 @@ CREATE TABLE IF NOT EXISTS replay_items (
     UNIQUE (replay_id, source_run)
 );
 CREATE INDEX IF NOT EXISTS idx_replay_items_new_run ON replay_items (new_run);
+
+-- 触发记录：每次定时 tick、收到的每条事件、每次上游联动、每次自动重试的判定（建了运行 / 跳过 / 被拒 …）。
+-- key：同一次判定的去重键（几台主机都会按同一个定时时刻判一遍，只留一条）；按保留期清理
+CREATE TABLE IF NOT EXISTS trigger_ticks (
+    id         BIGSERIAL PRIMARY KEY,
+    at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind       TEXT NOT NULL,                -- schedule / event / after / retry
+    task       TEXT,                         -- 目标任务；没匹配上任何任务的事件为空
+    trigger_id TEXT,
+    env        TEXT,
+    source     TEXT,                         -- 事件来源 / 上游运行 id / 被重试的运行
+    outcome    TEXT NOT NULL,                -- fired / deduped / skipped / filtered / waiting / rejected / unmatched
+    run_id     TEXT,
+    reason     TEXT NOT NULL DEFAULT '',
+    detail     JSONB,
+    key        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ticks_at ON trigger_ticks (at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticks_task ON trigger_ticks (task, at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_key ON trigger_ticks (key) WHERE key IS NOT NULL;
+
+-- 执行主机：每台的 worker 每 20 秒报一次到（负责哪个环境、哪些服务、在跑几个）。排队太久时据此说清是不是没有主机在负责
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id      TEXT PRIMARY KEY,          -- 主机:pid
+    host           TEXT NOT NULL,
+    env            TEXT NOT NULL DEFAULT '',  -- 空 = 开发机（什么都认领）
+    services       TEXT[] NOT NULL DEFAULT '{}',
+    version        TEXT NOT NULL DEFAULT '',
+    max_concurrent INT NOT NULL DEFAULT 0,
+    running        INT NOT NULL DEFAULT 0,
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    stopped_at     TIMESTAMPTZ
+);
 
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;

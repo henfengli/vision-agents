@@ -8,19 +8,22 @@
  * 继承：写了就替换——子角色写了工具 / 子代理 / 自动带服务工具就整体替换父角色的，没写就跟随；提示词在父角色之后追加。
  */
 import { useEffect, useMemo, useState } from "react";
-import { LuAsterisk, LuBot, LuHistory, LuInfo, LuLayoutDashboard, LuPlug, LuPlus, LuSettings, LuTrash2, LuTriangleAlert, LuUsers, LuWrench, LuX } from "react-icons/lu";
+import {
+  LuAsterisk, LuBot, LuCopy, LuEllipsis, LuHistory, LuInfo, LuLayoutDashboard, LuPlug, LuPlus, LuSettings, LuTrash2, LuTriangleAlert, LuUsers,
+  LuWrench, LuX,
+} from "react-icons/lu";
 
 import { api, useMeta, useRole, useRoles, useTasks } from "@/api/hooks";
 import type { Role, ToolInfo } from "@/api/types";
-import { Page } from "@/components/layout/shell";
+import { IdCopy, MetaVersion } from "@/components/meta";
 import { SaveBar } from "@/components/save-bar";
+import { DetailError } from "@/components/states";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
 import { Checkbox, Field, Input, Select, Switch, Textarea } from "@/components/ui/form";
-import { Dialog, Tooltip, confirm, toast } from "@/components/ui/overlay";
+import { Dialog, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
-import { ago } from "@/lib/format";
 import { invalidate, useMutation, useQuery } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { SettingsLayout } from "./layout";
@@ -82,9 +85,10 @@ export function RolesPage() {
               {data.map((r) => {
                 const used = (tasks ?? []).filter((t) => t.role === r.name && !t.extends);
                 return (
-                  <Tr key={r.name} onClick={() => navigate(`/settings/roles/${r.name}`)}>
+                  <Tr key={r.name} href={`/settings/roles/${r.name}`}>
                     <Td className="max-w-[340px]">
-                      <div className="font-medium text-fg">{r.title || r.name}</div>
+                      {/* 首格是真的链接：整行可点只照顾鼠标，键盘和读屏要靠它 */}
+                      <Link to={`/settings/roles/${r.name}`} onClick={(e) => e.stopPropagation()} className="font-medium text-fg hover:text-accent">{r.title || r.name}</Link>
                       <div className="mt-0.5 truncate text-[12px] text-fg-3"><span className="font-mono">{r.name}</span> · {r.description}</div>
                     </Td>
                     <Td>
@@ -96,7 +100,7 @@ export function RolesPage() {
                     <Td className="text-[12px] text-fg-2">{r.subagents?.length ? <span className="font-mono">{r.subagents.join("、")}</span> : <span className="text-fg-3">—</span>}</Td>
                     <Td className="font-mono text-[12px] text-fg-3">{r.extends ?? "—"}</Td>
                     <Td className="text-[12.5px] text-fg-2">{used.length ? used.map((t) => t.name).join("、") : <span className="text-fg-3">未被使用</span>}</Td>
-                    <Td className="text-right text-[12px] text-fg-3">v{r.version} · {ago(r.updated_at)}</Td>
+                    <Td className="whitespace-nowrap text-right text-[12px] text-fg-3"><MetaVersion version={r.version} at={r.updated_at} /></Td>
                   </Tr>
                 );
               })}
@@ -109,22 +113,31 @@ export function RolesPage() {
   );
 }
 
-function CreateRoleDialog({ open, onClose, roles }: { open: boolean; onClose: () => void; roles: Role[] }) {
+/** source：复制为新角色时的原角色——提示词、工具、子代理、继承都照抄，只换名字 */
+function CreateRoleDialog({ open, onClose, roles, source }: { open: boolean; onClose: () => void; roles: Role[]; source?: Role }) {
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [ext, setExt] = useState("");
-  useEffect(() => { if (open) { setName(""); setTitle(""); setExt(""); } }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    setName(source ? `${source.name}_copy` : ""); setTitle(source ? `${source.title || source.name}（副本）` : ""); setExt(source?.extends ?? "");
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const valid = /^[a-z][a-z0-9_]{1,40}$/.test(name);
   const create = useMutation(async () => {
     try {
-      await api.create("roles", { name, title, extends: ext || null });
+      const copied = source ? {
+        description: source.description, prompt: source.prompt, prompt_append: source.prompt_append, tools: source.tools,
+        subagents: source.subagents, service_tools: source.service_tools,
+      } : {};
+      await api.create("roles", { ...copied, name, title, extends: ext || null });
+      toast(`已创建角色 ${name}`, source ? { description: `照抄了 ${source.name} 的提示词、工具和子代理` } : undefined);
       invalidate("roles");
       onClose();
       navigate(`/settings/roles/${name}`);
     } catch (e) { toast.error("创建失败", (e as Error).message); }
   });
   return (
-    <Dialog open={open} onClose={onClose} title="新建角色"
+    <Dialog open={open} onClose={onClose} title={source ? `复制为新角色` : "新建角色"} description={source ? `从 ${source.name} 复制一份，改名后就是一个独立的角色` : undefined}
       footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={create.pending} onClick={() => create.mutate(undefined)}>创建</Button></>}>
       <div className="space-y-3.5">
         <Field label="角色名" required help="小写字母开头，可含数字、下划线；创建后不可改" error={name && !valid ? "格式不对：小写字母开头，可含数字、下划线" : null}><Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.trim())} placeholder="report_checker" /></Field>
@@ -145,7 +158,14 @@ export function RoleDetailPage() {
   const { data: tasks } = useTasks();
   const { data: resolved } = useQuery(["roles", name, "resolved", role?.version], () => api.resolvedRole(name), { enabled: !!role });
   const tab = s.tab ?? "overview";
-  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  const [copying, setCopying] = useState(false);
+  const crumbs = [{ label: "设置", to: "/settings" }, { label: "角色", to: "/settings/roles" }, { label: <span className="font-mono">{name}</span> }];
+  // 出错（含 404）时面包屑照常在，正文给"角色不存在 / 加载失败"和回到列表的入口
+  if (error && !role) return (
+    <SettingsLayout wide crumbs={crumbs} icon={<LuBot />} title={name}>
+      <DetailError error={error} onRetry={refetch} what="角色" back={{ to: "/settings/roles", label: "回到角色列表" }} />
+    </SettingsLayout>
+  );
   const used = (tasks ?? []).filter((t) => t.role === name && !t.extends);
   const delegatedBy = (roles ?? []).filter((r) => r.name !== name && r.subagents?.includes(name));
   const children = (roles ?? []).filter((r) => r.extends === name);
@@ -165,9 +185,18 @@ export function RoleDetailPage() {
     } catch (e) { toast.error("删除失败", (e as Error).message); }
   };
   return (
-    <SettingsLayout wide title={<span className="flex items-center gap-2"><LuBot className="size-5 text-fg-3" />{role?.title || name}</span>}
-      actions={role && <Button variant="danger-ghost" icon={<LuTrash2 />} onClick={remove}>删除角色</Button>}
-      description={role && <span className="flex flex-wrap items-center gap-x-3"><Link to="/settings/roles" className="text-accent hover:underline">← 全部角色</Link><span className="font-mono">{role.name}</span>{role.extends && <span>继承 <Link to={`/settings/roles/${role.extends}`} className="text-accent hover:underline">{role.extends}</Link></span>}<span>v{role.version} · {role.updated_by} · {ago(role.updated_at)}</span>{role.description && <span>{role.description}</span>}</span>}>
+    <SettingsLayout wide crumbs={crumbs} icon={<LuBot />} title={role?.title || name} description={role?.description || undefined}
+      meta={role && <>
+        <IdCopy value={role.name} />
+        {role.extends && <span>继承 <Link to={`/settings/roles/${role.extends}`} className="font-mono text-accent hover:underline">{role.extends}</Link></span>}
+        <MetaVersion version={role.version} by={role.updated_by} at={role.updated_at} />
+      </>}
+      // 危险操作收进 ⋯ 的最后一组；⋯ 一直在，加载中灰着（不是加载完才冒出来）
+      actions={<Menu trigger={<Button size="icon" variant="secondary" aria-label="更多"><LuEllipsis /></Button>} items={[
+        { label: "复制为新角色", icon: <LuCopy />, disabled: !role, onClick: () => setCopying(true) },
+        { separator: true, label: "" },
+        { label: "删除角色", icon: <LuTrash2 />, danger: true, disabled: !role, onClick: remove },
+      ]} />}>
       <Tabs className="mb-5" value={tab} onChange={(v) => setS({ tab: v === "overview" ? undefined : v })} tabs={[
         { value: "overview", label: "概览", icon: <LuLayoutDashboard /> }, { value: "edit", label: "编辑", icon: <LuSettings /> }, { value: "versions", label: "版本", icon: <LuHistory /> },
       ]} />
@@ -203,6 +232,7 @@ export function RoleDetailPage() {
           {tab === "versions" && <VersionHistory kind="roles" name={name} onRestored={refetch} stats />}
         </>
       )}
+      <CreateRoleDialog open={copying} onClose={() => setCopying(false)} roles={roles ?? []} source={role} />
     </SettingsLayout>
   );
 }

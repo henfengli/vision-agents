@@ -72,9 +72,10 @@ class EnvsConfig(BaseModel):
 # ———————— 通知 ————————
 
 NotifyEvent = Literal[
-    "run_failed",            # 运行失败
+    "run_failed",            # 运行失败（配了自动重试的，重试用完还失败才算）
     "run_succeeded",         # 运行成功
     "feedback_negative",     # 有人对一次运行（或其中一步）点了 👎
+    "run_queued_long",       # 排队太久还没开始执行（部署配置 worker.queued_alert_s；通常是负责它的主机没在跑）
 ]
 
 

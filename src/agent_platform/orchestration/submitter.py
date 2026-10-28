@@ -15,10 +15,11 @@ import asyncio
 import logging
 import uuid
 from dataclasses import asdict, dataclass
+from typing import Awaitable, Callable
 
 import psycopg
 
-from ..domain import SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef, object_value
+from ..domain import PRIORITY, SYSTEM, TERMINAL, Caller, Rejected, RunRequest, RunTrigger, TaskDef, object_value
 from ..domain.tasks import check_task_name, split_subtask_name
 from ..registry import Registry
 from ..store import db, runs
@@ -49,6 +50,8 @@ class Accepted:
 class Submitter:
     def __init__(self, registry: Registry):
         self._reg = registry
+        # 运行最终失败（不再自动重试）之后要做的事：通知、投递、「失败后」的联动。由 runtime 接上 Pipeline.settle_failed
+        self.on_failed_final: Callable[[str], Awaitable[None]] | None = None
 
     # ———————— 新提交 ————————
 
@@ -76,6 +79,7 @@ class Submitter:
 
         await gates.admit(self._reg, task_name=task_name, task=task, service=service, env=env,
                           trigger_type=trigger.declared_type())
+        depends_on = await self._check_upstream(req.after)
 
         dedup_key = None
         if task.dedup and (key := task.dedup.key_of(input_data)):
@@ -93,13 +97,26 @@ class Submitter:
                 caller=trigger.caller or caller.name, summary=_summary(input_data, task.title or task_name),
                 input_data=input_data, memory=req.memory.model_dump(exclude_none=True),
                 dedup_key=dedup_key, idempotency_key=idempotency_key,
-                output={"answer": rule["conclusion"], **rule} if rule else None, resolution="rule" if rule else None)
+                output={"answer": rule["conclusion"], **rule} if rule else None, resolution="rule" if rule else None,
+                depends_on=depends_on, **_queue_fields(task_name, task, env, trigger.type))
         except psycopg.errors.UniqueViolation:
             # 同一个幂等键的并发提交（多个 worker 同时触发同一次定时、调用方重试）：返回先到的那条
             if idempotency_key and (hit := await runs.find_idempotent(idempotency_key)):
                 return Accepted.of(hit, dedup=True)
             raise
         return Accepted(run_id, req.session_id or run_id, "queued", subtask_created=created)
+
+    async def _check_upstream(self, after: list[str]) -> list[str]:
+        """提交时点名的上游运行：都要存在；已经失败 / 取消（且没在等自动重试）的直接拒，免得建一条注定不执行的运行。"""
+        wanted = list(dict.fromkeys(a.strip() for a in after if a and a.strip()))
+        if not wanted:
+            return []
+        found = await runs.statuses(wanted)
+        if missing := [a for a in wanted if a not in found]:
+            raise Rejected("unknown_run", f"点名等的运行不存在：{'、'.join(missing)}", 404)
+        if dead := [a for a in wanted if found[a]["status"] in ("failed", "cancelled") and not found[a]["retry_at"]]:
+            raise Rejected("upstream_failed", f"点名等的运行已经失败或取消：{'、'.join(dead)}", 409)
+        return wanted
 
     async def _resolve_task(self, req: RunRequest) -> tuple[str, str, bool]:
         """→ (生效任务名, 父任务名, 是否需要新建子任务)。子任务可以写成 task="父:对象"，也可以 task + subtask。"""
@@ -190,14 +207,18 @@ class Submitter:
         await runs.create(run_id=run_id, session_id=session_id, task=old["task"], role=entry.spec.role,
                           service=old["service"], env=old["env"], trigger_type=trigger.type, trigger_id=trigger.id,
                           trigger_source=None, caller=trigger.caller, summary=_summary(req.input, old["summary"]),
-                          input_data=req.input, memory=req.memory.model_dump(exclude_none=True))
+                          input_data=req.input, memory=req.memory.model_dump(exclude_none=True),
+                          **_queue_fields(old["task"], entry.spec, old["env"], trigger.type))
         return Accepted(run_id, session_id, "queued")
 
-    async def resume(self, run_id: str, caller: Caller) -> Accepted:
-        """失败的运行从断点接着跑（同一个 run_id、同一个会话 thread）。"""
+    async def resume(self, run_id: str, caller: Caller, *, auto: bool = False) -> Accepted:
+        """失败的运行从断点接着跑（同一个 run_id、同一个会话 thread）。
+        auto：任务配置的自动重试发起的（时间线上写「自动重试（第 N 次）」）；人点续跑时顺手取消还在等的自动重试。"""
         run = await self._existing(run_id)
         if run["status"] != "failed":
             raise Rejected("conflict", f"只有失败的运行能续跑（当前 {run['status']}）", 409)
+        if run.get("error_code") == "upstream_failed":
+            raise Rejected("conflict", "这次运行还没执行过（它等的上游失败了）：等上游成功后用重跑", 409)
         entry = await self._reg.task(run["task"])
         if entry is None or entry.spec.form != "agent":
             raise Rejected("conflict", "只有单角色任务支持续跑；内建任务请用重跑", 409)
@@ -209,14 +230,23 @@ class Submitter:
         await gates.check_switches(self._reg, task_name=run["task"], task=entry.spec, service=run["service"], env=run["env"])
         # 上次没走到 agent（准备阶段就失败了：配置没填、服务停用…）：checkpoint 里什么都没有，从头执行
         started = await runs.reached_agent(run_id)
-        await runs.log_event(run_id, "stage", {"stage": "resume", "title": f"续跑（{caller.name}）" if started
-                                               else f"重新执行（{caller.name}；上次没走到 agent，从头开始）"})
+        nth = run.get("attempt", 1) + 1
+        how = f"自动重试（第 {nth} 次执行）" if auto else f"续跑（{caller.name}）"
+        await runs.log_event(run_id, "stage", {"stage": "resume", "title": how if started
+                                               else f"{how}；上次没走到 agent，从头开始"})
         await runs.enqueue(run_id, resume=started)
         return Accepted(run_id, run["session_id"], "queued")
 
     async def cancel(self, run_id: str, caller: Caller) -> dict:
-        """先把台账标成 cancelled（事实源），再通知持有它的 worker 停下。"""
+        """先把台账标成 cancelled（事实源），再通知持有它的 worker 停下。点名等它的排队运行跟着不执行。
+        失败后正等着自动重试的：取消的是这次重试，运行就此失败（照常通知、触发「失败后」的联动）。"""
         run = await self._existing(run_id)
+        if run["status"] == "failed" and run.get("retry_at"):
+            if await runs.clear_retry(run_id):
+                await runs.log_event(run_id, "stage", {"stage": "retry", "title": f"自动重试已取消（{caller.name}）"})
+                if self.on_failed_final is not None:
+                    await self.on_failed_final(run_id)
+            return await runs.get(run_id)
         if run["status"] in TERMINAL:
             raise Rejected("already_finished", f"运行已结束（{run['status']}）", 409)
         await runs.log_event(run_id, "error", {"title": "cancelled", "content": f"被 {caller.name} 取消"})
@@ -225,6 +255,7 @@ class Submitter:
             run = await runs.get(run_id)       # 刚好在这之间结束了
             raise Rejected("already_finished", f"运行已结束（{run['status'] if run else '—'}）", 409)
         await db.notify("run_cancel", run_id)
+        await _fail_dependents(run_id, f"上游运行 {run_id[:8]} 被取消，没有执行")
         return await runs.get(run_id)
 
     async def wait(self, run_id: str, timeout_s: float) -> dict:
@@ -243,6 +274,18 @@ class Submitter:
         if run is None:
             raise Rejected.not_found(f"运行 {run_id}")
         return run
+
+
+async def _fail_dependents(run_id: str, reason: str) -> None:
+    for rid in await runs.fail_dependents(run_id, reason):
+        await runs.log_event(rid, "error", {"title": "upstream_failed", "content": reason})
+
+
+def _queue_fields(task_name: str, task: TaskDef, env: str, trigger_type: str) -> dict:
+    """排队用的几列：优先级按触发类型；任务声明了同时执行上限的，按「父任务@环境」计数（子任务和父任务算一份）。"""
+    base = task_name.partition(":")[0]
+    return {"priority": PRIORITY.get(trigger_type, 1),
+            "concurrency_key": f"{base}@{env}" if task.concurrency else None, "concurrency_limit": task.concurrency}
 
 
 def _summary(input_data: dict, fallback: str) -> str:

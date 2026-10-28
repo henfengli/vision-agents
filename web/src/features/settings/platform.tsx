@@ -4,24 +4,24 @@
  * 页面可以给 validate：有错时保存条上的保存只提示、不提交（错误同时在出错的字段下面标出来）。
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { LuHistory, LuPlus, LuRotateCcw, LuSend, LuTrash2 } from "react-icons/lu";
+import { LuHistory, LuPencilLine, LuPlus, LuRotateCcw, LuSend, LuTrash2 } from "react-icons/lu";
 
 import { api, useMeta, usePromptDefaults, useServices, useSettings, useTasks } from "@/api/hooks";
 import type {
   Channel, ConfigSection, ConfigSections, Env, EnvColor, NotificationsConfig, NotifyEvent, NotifyRule, PromptsConfig,
 } from "@/api/types";
+import { MetaVersion } from "@/components/meta";
 import { SaveBar } from "@/components/save-bar";
-import { EnvBadge } from "@/components/status";
+import { DisabledBadge, EnvBadge } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
-import { Checkbox, Field, Input, Select, Switch, TagInput, Textarea } from "@/components/ui/form";
-import { Tooltip, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton } from "@/components/ui/primitives";
+import { Checkbox, Field, Input, Segmented, Select, Switch, TagInput, Textarea } from "@/components/ui/form";
+import { Tooltip, toast } from "@/components/ui/overlay";
+import { Badge, Card, CardHeader, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
-import { Link, useLeaveGuard } from "@/lib/router";
+import { Link, useLeaveGuard, useSearch } from "@/lib/router";
 import { SettingRow, SettingsLayout } from "./layout";
 
 // ———————— 共用：一节配置的草稿与保存 ————————
@@ -64,8 +64,10 @@ function SectionPage<S extends ConfigSection>({ section, title, description, val
   children: (draft: ConfigSections[S], set: (d: ConfigSections[S]) => void, saved: ConfigSections[S]) => ReactNode;
 }) {
   const s = useSection(section);
-  const [history, setHistory] = useState(false);
-  /** 看版本时保存条收起，草稿还在：离开页面照样要确认 */
+  /** 看哪一面放在 URL 里（?view=versions）：别处（运行详情的配方）能直接链到某一节的版本，回退也能回来 */
+  const [q, setQ] = useSearch<{ view: "edit" | "versions" }>();
+  const history = q.view === "versions";
+  /** 看版本时保存条收起，草稿还在：离开页面照样要确认（只换 view 不算离开） */
   useLeaveGuard(s.dirty && history);
   const onSave = () => {
     const err = s.draft && validate ? validate(s.draft) : null;
@@ -74,10 +76,12 @@ function SectionPage<S extends ConfigSection>({ section, title, description, val
   };
   return (
     <SettingsLayout title={title} description={description}
-      actions={<>
-        {s.entry && <span className="text-[12px] text-fg-3" title={s.entry.updated_at ? datetime(s.entry.updated_at, true) : undefined}>v{s.entry.version} · {s.entry.updated_by || "默认"}{s.entry.updated_at ? ` · ${ago(s.entry.updated_at)}` : ""}</span>}
-        <Button icon={<LuHistory />} variant={history ? "secondary" : "ghost"} onClick={() => setHistory(!history)}>{history ? "返回编辑" : "版本"}</Button>
-      </>}>
+      meta={s.entry && <MetaVersion version={s.entry.version} by={s.entry.updated_by || "默认"} at={s.entry.updated_at || null} />}
+      actions={
+        // 位置和文案都固定：选中态表示现在看的是哪一面，不再是一个文案来回变的按钮
+        <Segmented value={history ? "versions" : "edit"} onChange={(v) => setQ({ view: v === "versions" ? v : undefined }, false)}
+          options={[{ value: "edit", label: "编辑", icon: <LuPencilLine /> }, { value: "versions", label: "版本", icon: <LuHistory /> }]} />
+      }>
       {history ? <VersionHistory kind={`settings/${section}`} stats={section === "prompts"} />
         : s.error ? <Card><ErrorState error={s.error} onRetry={s.refetch} /></Card> : !s.draft || !s.pristine ? <Skeleton className="h-80" /> : (
         <div className="space-y-4 pb-20">{children(s.draft, s.setDraft, s.pristine)}</div>
@@ -103,7 +107,7 @@ function envNameError(items: Env[], i: number): string | null {
 }
 
 export function EnvsSettingsPage() {
-  const { data: services } = useServices();
+  const { data: services, error: servicesError, refetch: refetchServices } = useServices();
   /** 这次新加、还没保存的环境（按对象认）：只有它们的名字能改。保存或放弃后草稿换成新对象，就都不在里面了 */
   const fresh = useRef(new WeakSet<Env>());
   const validate = (d: ConfigSections["envs"]) => {
@@ -137,11 +141,12 @@ export function EnvsSettingsPage() {
                     set({ ...d, default: def, items: d.items.map((x, j) => (j === i ? next : x)) });
                   };
                   const nameErr = isNew && e.name ? envNameError(d.items, i) : null;
-                  const remove = async () => {
-                    if (!isNew && !(await confirm({
-                      title: `移除环境 ${e.name}？`, danger: true, confirmText: "移除",
-                      description: "保存时如果还有服务、任务、通知规则或配置用着它，会保存失败并列出用到它的地方，先把那些改掉。历史运行和记忆不受影响。",
-                    }))) return;
+                  /**
+                   * 删的只是草稿里的一行，保存前不生效、保存条的「放弃修改」就能撤销：不弹确认。
+                   * "还在被引用"留给保存时（服务端会拒并列出用到它的地方）；已保存的环境给一句提示。
+                   */
+                  const remove = () => {
+                    if (!isNew) toast.info(`已删除环境 ${e.name}（未保存）`, "保存后生效；还有服务、任务、通知规则用着它时保存会失败并列出来。点「放弃修改」可以撤销");
                     const rest = d.items.filter((_, j) => j !== i);
                     // 移除的是默认环境：换成一个已保存的环境（没有就第一个有名字的）
                     const def = d.default !== e.name ? d.default
@@ -173,7 +178,9 @@ export function EnvsSettingsPage() {
                           <input type="radio" disabled={!e.name} checked={!!e.name && d.default === e.name} onChange={() => set({ ...d, default: e.name })} className="accent-[var(--color-accent)]" />默认
                         </label>
                         {isNew && <Badge tone="accent">新加的，未保存</Badge>}
-                        <Button size="icon-sm" variant="ghost" title="移除" aria-label={`移除环境 ${e.name || "（未命名）"}`} className="ml-auto" disabled={d.items.length <= 1} onClick={remove}><LuTrash2 /></Button>
+                        <span className="ml-auto" />
+                        <Button size="icon-sm" variant="ghost" aria-label={`删除环境 ${e.name || "（未命名）"}`} tip="删除环境"
+                          reason={d.items.length <= 1 ? "至少保留一个环境" : undefined} onClick={remove}><LuTrash2 /></Button>
                       </div>
                     </div>
                   );
@@ -186,13 +193,17 @@ export function EnvsSettingsPage() {
             </Card>
             <Card>
               <CardHeader title="各服务的启用情况" description="点服务名去服务页修改" />
+              {/* 服务列表单独加载：出错、加载中、没有服务都要有交代，不能只剩一个空表头 */}
+              {servicesError && !services ? <ErrorState error={servicesError} onRetry={() => void refetchServices()} className="py-8" />
+                : !services ? <SkeletonRows rows={3} />
+                  : !services.length ? <Empty title="还没有服务" description="新建服务后，这里列出它在每个环境是否启用" className="py-8" /> : (
               <Table>
                 {/* 编辑中的环境名可能还是空的或重名：按位置做 key */}
                 <thead><tr><Th>服务</Th>{d.items.map((e, i) => <Th key={i} className="text-center">{e.name ? <EnvBadge env={e.name} /> : <span className="text-fg-3">未命名</span>}</Th>)}</tr></thead>
                 <tbody>
-                  {(services ?? []).map((s) => (
+                  {services.map((s) => (
                     <Tr key={s.name} className={cn(!s.enabled && "opacity-60")}>
-                      <Td><Link to={`/services/${s.name}?tab=envs`} className="font-medium text-fg hover:text-accent">{s.name}</Link>{!s.enabled && <Badge tone="idle" className="ml-2">服务已停用</Badge>}</Td>
+                      <Td><Link to={`/services/${s.name}?tab=envs`} className="font-medium text-fg hover:text-accent">{s.name}</Link>{!s.enabled && <DisabledBadge scope="service" className="ml-2" />}</Td>
                       {d.items.map((e, i) => {
                         // 只看该环境自己的开关；服务整体停用在服务名旁边说一次
                         const on = s.envs[e.name]?.enabled !== false;
@@ -202,6 +213,7 @@ export function EnvsSettingsPage() {
                   ))}
                 </tbody>
               </Table>
+              )}
             </Card>
           </>
         );
@@ -216,9 +228,10 @@ const EVENTS: { value: NotifyEvent; label: string; hint: string }[] = [
   { value: "run_failed", label: "运行失败", hint: "" },
   { value: "run_succeeded", label: "运行成功", hint: "量大，建议加范围" },
   { value: "feedback_negative", label: "收到负反馈", hint: "有人对运行或某一步点了 👎" },
+  { value: "run_queued_long", label: "排队太久", hint: "排了 10 分钟还没开始，多半是负责它的主机没在跑" },
 ];
 /** 运行的触发方式（与后端 domain/runs.TriggerType 一致；续跑沿用原运行的触发方式，不单列） */
-const TRIGGERS = ["api", "chat", "schedule", "event", "web", "rerun", "correction", "replay"];
+const TRIGGERS = ["api", "chat", "schedule", "event", "after", "web", "rerun", "correction", "replay"];
 const isHttp = (url: string) => /^https?:\/\//.test(url.trim());
 
 function notificationsError(d: NotificationsConfig): string | null {
@@ -265,13 +278,11 @@ export function NotificationsSettingsPage() {
           fresh.current.add(ch);
           setChannel(freshName(), ch);
         };
-        const removeChannel = async (name: string, ch: Channel) => {
+        /** 和删环境一样：只改草稿、「放弃修改」能撤销，不弹确认；被任务引用留给保存时报 */
+        const removeChannel = (name: string, ch: Channel) => {
           const users = d.rules.filter((r) => r.channel === name).map((r) => `「${r.name || "未命名"}」`);
           if (users.length) { toast.error(`渠道 ${name} 还在用`, `先改掉引用它的规则：${users.join("、")}`); return; }
-          if (!fresh.current.has(ch) && !(await confirm({
-            title: `移除渠道 ${name}？`, danger: true, confirmText: "移除",
-            description: "保存后生效。还有任务把结果投递到它时，保存会失败并列出这些任务。",
-          }))) return;
+          if (!fresh.current.has(ch)) toast.info(`已删除渠道 ${name}（未保存）`, "保存后生效；还有任务把结果投递到它时保存会失败并列出来。点「放弃修改」可以撤销");
           setChannel(name, null);
         };
         const setRule = (i: number, r: NotifyRule | null) => set({ ...d, rules: r ? d.rules.map((x, j) => (j === i ? r : x)) : d.rules.filter((_, j) => j !== i) });
@@ -299,10 +310,8 @@ export function NotificationsSettingsPage() {
                         </Field>
                         <Field className="md:col-span-2" label={ch.type === "dingtalk" ? "机器人 access_token" : "Bearer token（可空）"}><Input mono type="password" value={ch.token} onChange={(e) => setChannel(name, { ...ch, token: e.target.value })} /></Field>
                         <div className="flex justify-end gap-1 md:pt-6">
-                          <Tooltip content={unsaved ? "先保存，再测试" : "发一条测试消息"}>
-                            <span><Button size="sm" icon={<LuSend />} loading={testing === name} disabled={unsaved} onClick={() => test(name)}>测试</Button></span>
-                          </Tooltip>
-                          <Button size="icon-sm" variant="ghost" title="移除" aria-label={`移除渠道 ${name}`} onClick={() => removeChannel(name, ch)}><LuTrash2 /></Button>
+                          <Button size="sm" icon={<LuSend />} loading={testing === name} reason={unsaved ? "先保存，再测试" : undefined} tip="发一条测试消息" onClick={() => test(name)}>测试</Button>
+                          <Button size="icon-sm" variant="ghost" tip="删除渠道" aria-label={`删除渠道 ${name}`} onClick={() => removeChannel(name, ch)}><LuTrash2 /></Button>
                         </div>
                       </div>
                     );
@@ -312,7 +321,7 @@ export function NotificationsSettingsPage() {
             </Card>
             <Card>
               <CardHeader title="规则" description="范围不填就是不限；填了几项，要同时满足"
-                actions={<Button size="sm" icon={<LuPlus />} disabled={!channels.length} onClick={() => set({ ...d, rules: [...d.rules, { name: "新规则", enabled: true, events: ["run_failed"], services: [], envs: [], tasks: [], triggers: [], channel: channels[0][0] }] })}>添加规则</Button>} />
+                actions={<Button size="sm" icon={<LuPlus />} reason={!channels.length ? "先添加一个渠道" : undefined} onClick={() => set({ ...d, rules: [...d.rules, { name: "新规则", enabled: true, events: ["run_failed"], services: [], envs: [], tasks: [], triggers: [], channel: channels[0][0] }] })}>添加规则</Button>} />
               {!d.rules.length ? <Empty title="还没有规则" description="没有规则时不发事件通知（任务的结果投递不受影响）" /> : (
                 <div className="divide-y divide-line">
                   {d.rules.map((r, i) => (
@@ -322,8 +331,8 @@ export function NotificationsSettingsPage() {
                         <span className="text-[12.5px] text-fg-3">发到</span>
                         <Select className="w-40" value={r.channel} onChange={(channel) => setRule(i, { ...r, channel })} options={channels.map(([n, c]) => ({ value: n, label: n, hint: c.type === "dingtalk" ? "钉钉" : "Webhook" }))} />
                         <div className="ml-auto flex items-center gap-2">
-                          <Switch checked={r.enabled} onChange={(enabled) => setRule(i, { ...r, enabled })} size="sm" label={<span className="text-[12px] text-fg-3">{r.enabled ? "启用" : "已关闭"}</span>} />
-                          <Button size="icon-sm" variant="ghost" aria-label={`删除规则 ${r.name}`} onClick={() => setRule(i, null)}><LuTrash2 /></Button>
+                          <Switch checked={r.enabled} onChange={(enabled) => setRule(i, { ...r, enabled })} size="sm" label={<span className="text-[12px] text-fg-3">{r.enabled ? "启用" : "已停用"}</span>} />
+                          <Button size="icon-sm" variant="ghost" tip="删除规则" aria-label={`删除规则 ${r.name}`} onClick={() => setRule(i, null)}><LuTrash2 /></Button>
                         </div>
                       </div>
                       <div>
@@ -440,9 +449,8 @@ export function PromptsSettingsPage() {
           const isDefault = !!defaults && d[p.key] === defaults[p.key];
           return (
             <Field key={p.key} label={p.label} help={p.hint} error={err}
-              aside={<Tooltip content={isDefault ? "已经是默认内容" : "换回平台内置的默认内容（保存后生效）"}>
-                <span><Button size="xs" variant="ghost" icon={<LuRotateCcw />} disabled={!defaults || isDefault} onClick={() => defaults && set({ ...d, [p.key]: defaults[p.key] })}>恢复默认</Button></span>
-              </Tooltip>}>
+              aside={<Button size="xs" variant="ghost" icon={<LuRotateCcw />} disabled={!defaults} reason={isDefault ? "已经是默认内容" : undefined}
+                tip="换回平台内置的默认内容（保存后生效）" onClick={() => defaults && set({ ...d, [p.key]: defaults[p.key] })}>恢复默认</Button>}>
               <Textarea mono rows={p.rows} value={d[p.key]} aria-invalid={!!err} onChange={(e) => set({ ...d, [p.key]: e.target.value })} />
             </Field>
           );

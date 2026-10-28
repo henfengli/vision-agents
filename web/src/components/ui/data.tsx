@@ -8,6 +8,7 @@ import { useMemo, useState, type ReactNode, type ThHTMLAttributes, type TdHTMLAt
 import { LuArrowDown, LuArrowUp, LuCheck, LuCopy, LuPlus, LuTrash2 } from "react-icons/lu";
 
 import { cn } from "@/lib/cn";
+import { navigate } from "@/lib/router";
 import { Button } from "./button";
 import { Tooltip } from "./overlay";
 
@@ -71,11 +72,26 @@ export function Td({ className, ...p }: TdHTMLAttributes<HTMLTableCellElement>) 
   return <td className={cn("h-[var(--row-h)] border-b border-line px-3 py-1.5 align-middle first:pl-4 last:pr-4", className)} {...p} />;
 }
 
+/**
+ * 可点的行：onClick（打开抽屉）或 href（跳转）。整行可点只是给鼠标的便利——
+ * 键盘和读屏够不到 tr，所以首格里还要放一个真正的链接或按钮（RowLink / RowButton）。
+ */
 export function Tr({ className, onClick, href, children }: { className?: string; onClick?: () => void; href?: string; children: ReactNode }) {
+  const go = onClick ?? (href ? () => navigate(href) : undefined);
   return (
-    <tr className={cn("group transition-colors", (onClick || href) && "cursor-pointer hover:bg-hover/70", className)} onClick={onClick}>
+    <tr className={cn("group transition-colors", go && "cursor-pointer hover:bg-hover/70", className)} onClick={go}>
       {children}
     </tr>
+  );
+}
+
+/** 首格里打开抽屉 / 详情的按钮：长得像文字，能 Tab 到、能回车（行本身的 onClick 不重复触发） */
+export function RowButton({ onClick, children, className, label }: { onClick: () => void; children: ReactNode; className?: string; label?: string }) {
+  return (
+    <button type="button" aria-label={label} onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className={cn("min-w-0 max-w-full rounded-sm text-left outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent/50", className)}>
+      {children}
+    </button>
   );
 }
 

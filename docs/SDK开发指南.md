@@ -89,7 +89,7 @@ agent.ask(message, *, task=None, subtask=None, service=None, env=None, new_sessi
 
 ```python
 agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
-          idempotency_key=None, recall=None, save=None) -> dict
+          idempotency_key=None, recall=None, save=None, after=None) -> dict
 ```
 
 | 参数 | 说明 |
@@ -98,6 +98,17 @@ agent.run(task, input=None, *, subtask=None, service=None, env=None, wait=True,
 | `subtask` | 对象名；不存在时按父任务自动创建 |
 | `idempotency_key` | 网络重试安全：同一个键只受理一次 |
 | `recall` / `save` | 这一次的记忆开关；`None` 表示跟随任务和平台默认 |
+| `after` | 点名等的上游运行 id 列表（最多 20 个）：先排队，都成功了才执行；有一个失败或取消，这次不执行（`error_code: upstream_failed`） |
+
+按依赖串几步（A、B 都成功后跑 C）：
+
+```python
+a = agent.run("daily-inspection", env="test", wait=False)
+b = agent.run("frontend-smoke", env="test", wait=False)
+c = agent.run("release-report", {"version": "e5f6a7b"}, env="test", after=[a["run_id"], b["run_id"]])   # 等到 C 结束
+```
+
+每次都这么串的，在控制台给下游任务加「上游任务结束后」触发（上游联动），不用调用方自己串。
 
 SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask", {"question": "…"})`（HTTP 接口不写 `task` 就是 `ask`）。
 
@@ -118,6 +129,12 @@ SDK 的 `task` 必填。不想先建任务时用通用入口：`agent.run("ask",
 | `resume(run_id)` | 失败的运行从断点续跑（如 `interrupted`、`orphaned`、`step_limit`） |
 | `correct(run_id, text)` | 纠正结论：同会话重答，成功后取代被纠正那一轮沉淀的记忆；运行没结束、会话里还有一轮在跑时 409 |
 | `feedback(run_id, score, *, reasons=None, comment="")` | 评价：`1` 有用 / `-1` 有问题；`reasons` 取值见 `/v1/meta` 的 `feedback_reasons`；同一把密钥再评即覆盖 |
+| `graph()` | 任务图：`{nodes, edges}`，边是上游联动（上游结束 → 下游） |
+| `ticks(*, task=None, kind=None, outcome=None, env=None, hours=None, limit=100)` | 触发记录：定时 / 事件 / 联动 / 自动重试每次判定建了哪条运行、为什么没建（`outcome` 如 `fired` `filtered` `rejected` `unmatched`）。排查「为什么没跑」先看它 |
+
+运行详情里和调度有关的几项：`attempt`（第几次执行，续跑 / 自动重试 +1）、`retry_at`（失败了、等着在这个时刻自动重试；
+这时 `status` 是 `failed` 但还不是最终结果，`wait` 不会替你等重试）、`lineage`（触发它的上游运行、它点名等的、它引出的）、
+`queue`（排队中才有：在等哪个上游、任务并发、有没有在线主机负责）。
 
 ### 事件
 
@@ -181,5 +198,7 @@ agent-chat vision-board --resume <会话 id>
 - **想看中间过程**：`ask(on_event=...)`，或者事后 `events(run_id)` 拉全量事件。
 - **并发**：同一个 `AgentClient` 的 `ask` 会续同一个会话，并发提问请用不同的实例。并发多了也快不了：模型账号同时只放 3 个请求，
   prod、test 所有调用共用，多出来的在平台侧排队。
-- **运行一直 `queued`**：负责这个环境的 agent 服务没在跑，平台照常受理，等它起来后接着执行。持续出现就找平台负责人看那台机器上的 `agent-platform`。
+- **运行一直 `queued`**：先看运行详情的 `queue`——`waiting_for` 不空是在等你点名的上游；`concurrency` 满了是任务的同时执行上限；
+  `hosts` 为空是负责这个环境的 agent 服务没在跑（平台照常受理，等它起来后接着执行，控制台概览的「执行主机与排队」能看到）。
+  持续出现就找平台负责人看那台机器上的 `agent-platform`。
 - **嵌入自己的服务**：直接把 `client.py` 拷进去，类名和方法名随意改，只要不破坏 HTTP 契约。

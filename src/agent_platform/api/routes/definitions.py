@@ -102,6 +102,44 @@ async def list_tasks(service: str | None = None, rt: Runtime = RT, _: Caller = W
     return items
 
 
+@router.get("/tasks/_graph")
+async def task_graph(rt: Runtime = RT, _: Caller = WHO):
+    """任务图：节点是父任务（子任务归到父任务上），边是上游联动（上游结束 → 下游）。
+    节点带入口触发（定时 / 事件 / API / 对话）和近 24 小时统计，控制台画图用；_graph 不是合法任务名，不会和任务撞。"""
+    summaries = {t["name"]: t for t in await task_summaries(rt)}
+    nodes, edges = [], []
+    for name, t in summaries.items():
+        if not t.get("extends"):
+            nodes.append({k: t.get(k) for k in ("name", "title", "service", "form", "enabled", "subtask_count",
+                                                 "stats_24h", "last_run", "next_fire")}
+                         | {"entry": _entries(t["triggers"])})
+    for name, t in summaries.items():
+        if t.get("extends") and "triggers" not in t.get("overrides", []):
+            continue
+        down = name.split(":")[0]
+        for tr in t["triggers"]:
+            if tr["type"] != "after":
+                continue
+            for up in tr["tasks"]:
+                edges.append({"from": up.split(":")[0], "to": down, "trigger_id": tr["id"], "mode": tr["mode"],
+                              "on": tr["on"], "enabled": tr.get("enabled", True) and t.get("enabled", True),
+                              "from_object": up.split(":", 1)[1] if ":" in up else None,
+                              "to_object": name.split(":", 1)[1] if ":" in name else None,
+                              "upstreams": len(tr["tasks"])})
+    return {"nodes": nodes, "edges": edges}
+
+
+def _entries(triggers: list[dict]) -> list[dict]:
+    """入口触发（不含上游联动）：图上画在节点里。"""
+    out = []
+    for tr in triggers:
+        if tr["type"] == "after" or tr.get("enabled") is False:
+            continue
+        out.append({"type": tr["type"], "id": tr["id"], **({"cron": tr["cron"]} if tr["type"] == "schedule" else {}),
+                    **({"source": tr["source"], "event": tr["event"]} if tr["type"] == "event" else {})})
+    return out
+
+
 @router.get("/tasks/{name}")
 async def get_task(name: str, rt: Runtime = RT, _: Caller = WHO):
     found = await task_summaries(rt, {name})

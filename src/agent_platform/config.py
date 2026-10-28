@@ -60,6 +60,8 @@ class WorkerConfig(BaseModel):
     """执行队列（runs 表）的消费端：同时执行几个运行。"""
 
     max_concurrent_runs: int = 4
+    # 排队超过这么久（秒）还没被认领就告警一次：通常是负责这个环境（和服务）的主机没在跑。等上游、任务并发满了的不算
+    queued_alert_s: int = 600
 
 
 class KernelConfig(BaseModel):
@@ -96,6 +98,7 @@ class RetentionConfig(BaseModel):
     run_events_days: int = 90       # 运行的过程事件；被 👎 过的运行不清（回归重放要用）
     checkpoints_days: int = 30      # 会话的 LangGraph checkpoint：最后一轮结束这么久后清掉，之后不能再续跑
     recall_hits_days: int = 90      # 召回埋点
+    trigger_ticks_days: int = 30    # 触发记录（定时 / 事件 / 上游联动 / 自动重试的每次判定）
     scratch_days: int = 7           # 工作目录（db_query 的结果文件、agent 写的临时文件），每台主机清自己的
 
 

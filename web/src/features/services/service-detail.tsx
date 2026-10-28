@@ -7,8 +7,8 @@
  */
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  LuBrain, LuCircleAlert, LuCircleDashed, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuHistory, LuListTodo,
-  LuPencilLine, LuPlay, LuPlug, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
+  LuArrowRight, LuBrain, LuCircleAlert, LuCircleDashed, LuEllipsis, LuExternalLink, LuFileText, LuFolder, LuHistory, LuListTodo,
+  LuPause, LuPencilLine, LuPlay, LuPlug, LuPlus, LuPower, LuRefreshCw, LuScrollText, LuServer, LuSettings, LuActivity, LuLayers, LuLayoutDashboard,
   LuTrash2,
 } from "react-icons/lu";
 
@@ -17,7 +17,9 @@ import type { ServiceEnvOverride, ServiceSummary, ServiceView } from "@/api/type
 import { Page, PageHeader } from "@/components/layout/shell";
 import { DbList } from "@/components/databases";
 import { LogList } from "@/components/logs";
-import { EnvBadge } from "@/components/status";
+import { IdCopy, MetaVersion } from "@/components/meta";
+import { DetailError } from "@/components/states";
+import { DisabledBadge, EnvBadge, FailCount } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button, LinkButton } from "@/components/ui/button";
 import { CodeBlock, Markdown, Mono, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
@@ -25,7 +27,6 @@ import { Segmented, Switch } from "@/components/ui/form";
 import { Drawer, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago } from "@/lib/format";
 import { invalidate, setQueryData, useQuery } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -57,26 +58,34 @@ export function ServiceDetailPage() {
   /** 受保护（生产）要填给 agent 的只读版；不受保护（测试）直接用真实配置 */
   const envProtected = !!allEnvs.find((e) => e.name === env)?.protected;
   const tab = (search.tab as TabKey) || "overview";
-  const { data: tasks } = useTasks(name);
+  const tasksQ = useTasks(name);
+  const tasks = tasksQ.data;
   // 进来就把环境写进 URL（替换当前记录，不多一步回退）：页面看的是哪个环境是明确的，
   // 顶栏切环境视角不会悄悄换掉页面内容——配置文件编辑器里没保存的修改也就不会不经确认就丢了
   useEffect(() => { if (!search.env && resolved) setSearch({ env: resolved }); }, [search.env, resolved]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  // 出错（含 404）时面包屑照常在，正文给"服务不存在 / 加载失败"和回到列表的入口
+  if (error && !svc) return (
+    <Page>
+      <PageHeader crumbs={[{ label: "服务", to: "/services" }, { label: name }]} icon={<LuServer />} title={name} />
+      <DetailError error={error} onRetry={refetch} what="服务" back={{ to: "/services", label: "回到服务列表" }} />
+    </Page>
+  );
 
   const open: Open = ({ tab: t, part, env: e }) => setSearch({ tab: t === "overview" ? undefined : t, part, ...(e ? { env: e } : {}) });
 
+  /** 停用可逆（随时能启用回来）：danger 确认就够了，不用输名字（和任务、环境、方法的停用一致） */
   const toggle = async () => {
     if (!svc) return;
     const ok = await confirm({
       title: svc.enabled ? `停用服务 ${svc.name}？` : `启用服务 ${svc.name}？`,
-      description: svc.enabled ? "停用后不再接收新的运行和事件，定时任务暂停；正在跑的不受影响。" : "启用后马上开始接收运行，定时任务恢复。",
-      confirmText: svc.enabled ? "停用" : "启用", danger: svc.enabled, requireText: svc.enabled ? svc.name : undefined,
+      description: svc.enabled ? "停用后不再接收新的运行和事件，定时任务暂停；正在跑的不受影响，随时可以再启用。" : "启用后马上开始接收运行，定时任务恢复。",
+      confirmText: svc.enabled ? "停用" : "启用", danger: svc.enabled,
     });
     if (!ok) return;
     try {
       await api.update("services", svc.name, { enabled: !svc.enabled });
-      toast(svc.enabled ? "服务已停用" : "服务已启用");
+      toast(svc.enabled ? `已停用服务 ${svc.name}` : `已启用服务 ${svc.name}`);
       invalidate("services");
     } catch (e) { toast.error(svc.enabled ? "停用失败" : "启用失败", (e as Error).message); }
   };
@@ -109,18 +118,22 @@ export function ServiceDetailPage() {
       <PageHeader
         crumbs={[{ label: "服务", to: "/services" }, { label: name }]}
         icon={svc ? <ServiceAvatar name={svc.name} disabled={!svc.enabled} className="size-10 text-[16px]" /> : <LuServer />}
-        title={<span className="flex items-center gap-2">{svc?.title ?? name}{svc && !svc.enabled && <Badge tone="idle">服务已停用</Badge>}</span>}
+        title={<span className="flex items-center gap-2">{svc?.title ?? name}{svc && !svc.enabled && <DisabledBadge scope="service" />}</span>}
         description={svc?.description}
         meta={svc && <>
-          <span className="font-mono">{svc.name}</span>
-          <span className="flex items-center gap-1 font-mono"><LuFolder className="size-3.5" />{svc.root || "未配置代码目录"}</span>
-          <span>v{svc.version} · {svc.updated_by} 更新于 {ago(svc.updated_at)}</span>
+          <IdCopy value={svc.name} />
+          {svc.root
+            ? <span className="flex min-w-0 items-center gap-1"><LuFolder className="size-3.5 shrink-0" /><IdCopy value={svc.root} /></span>
+            : <span className="flex items-center gap-1"><LuFolder className="size-3.5" />未配置代码目录</span>}
+          <MetaVersion version={svc.version} by={svc.updated_by} at={svc.updated_at} />
         </>}
         actions={<>
-          <Button icon={<LuPlay />} variant="primary" onClick={() => setRunOpen(true)} disabled={!svc?.enabled}>运行任务</Button>
+          {/* 槽位固定：服务停用时禁用并说明原因（不隐藏）；加载中先灰着 */}
+          <Button icon={<LuPlay />} variant="primary" onClick={() => setRunOpen(true)} disabled={!svc}
+            reason={svc && !svc.enabled ? "服务已停用：先启用服务" : undefined}>运行任务</Button>
+          {/* ⋯ 只放对这个服务的动作，版本走「版本」标签 */}
           <Menu trigger={<Button size="icon" variant="secondary" aria-label="更多"><LuEllipsis /></Button>} items={[
-            { label: svc?.enabled ? "停用服务" : "启用服务", icon: <LuPower />, danger: svc?.enabled, onClick: toggle },
-            { label: "版本历史", icon: <LuHistory />, onClick: () => setSearch({ tab: "versions" }) },
+            { label: svc && !svc.enabled ? "启用服务" : "停用服务", icon: <LuPower />, danger: !!svc?.enabled, disabled: !svc, onClick: toggle },
             { separator: true, label: "" },
             { label: "删除服务", icon: <LuTrash2 />, danger: true, disabled: !svc, onClick: remove },
           ]} />
@@ -135,14 +148,11 @@ export function ServiceDetailPage() {
             // 只看该环境自己的开关；服务整体停用在标题上说一次
             const off = h?.env_enabled === false;
             return (
-              <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })}
-                title={off ? "这个服务在该环境已停用" : undefined}
+              <button key={e.name} type="button" onClick={() => setSearch({ env: e.name })} aria-pressed={env === e.name}
                 className={cn("flex h-7 items-center gap-2 rounded-md px-3 text-[12.5px] transition-colors", env === e.name ? "bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.08)]" : "hover:bg-hover", off && "opacity-55")}>
                 <EnvBadge env={e.name} /><span className={cn(env === e.name ? "text-fg" : "text-fg-3")}>{e.title}</span>
-                {off && <span className="text-[11px] text-fg-3">已停用</span>}
-                {svc && !off && !!h?.failed_24h && (
-                  <span className="rounded bg-bad-soft px-1 text-[11px] font-semibold tabular-nums text-bad" title="近 24 小时失败的运行">{h.failed_24h} 失败</span>
-                )}
+                {off && <DisabledBadge hint="这个服务在该环境已停用" />}
+                {svc && !off && <FailCount n={h?.failed_24h} />}
               </button>
             );
           })}
@@ -165,10 +175,12 @@ export function ServiceDetailPage() {
       {!svc ? <Skeleton className="h-96" /> : (
         <>
           {tab === "overview" && <OverviewTab svc={svc} env={env} open={open} onToggleService={toggle} />}
-          {tab === "envs" && <EnvsTab svc={svc} onSaved={refetch} />}
-          {tab === "tasks" && <Card>{!tasks ? <SkeletonRows rows={4} /> : taskGroups.length ? <TasksTable groups={taskGroups} /> : (
-            <Empty icon={<LuListTodo />} title="还没有任务" description="在任务页新建一个，服务选这个服务" action={<LinkButton size="sm" to="/tasks">去任务页</LinkButton>} />
-          )}</Card>}
+          {tab === "envs" && <EnvsTab svc={svc} onSaved={refetch} onToggleService={toggle} />}
+          {tab === "tasks" && <Card>{tasksQ.error && !tasks ? <ErrorState error={tasksQ.error} onRetry={() => void tasksQ.refetch()} />
+            : !tasks ? <SkeletonRows rows={4} /> : taskGroups.length ? <TasksTable groups={taskGroups} /> : (
+              <Empty icon={<LuListTodo />} title="还没有任务" description="新建一个属于这个服务的任务；通用任务每个服务都能用，也会列在这里"
+                action={<LinkButton size="sm" icon={<LuPlus />} to={`/tasks/_new?service=${encodeURIComponent(svc.name)}`}>新建任务</LinkButton>} />
+            )}</Card>}
           {tab === "runs" && <RunsTab service={svc.name} env={env} />}
           {tab === "memory" && <div className="space-y-4">
             <div className="text-xs text-fg-3">
@@ -197,21 +209,27 @@ export function ServiceDetailPage() {
   );
 }
 
+/** 「全部 →」：卡片头右侧的统一写法（不放卡片底部） */
+const runsHref = (service: string, env: string) => `/runs?service=${encodeURIComponent(service)}&env=${encodeURIComponent(env)}`;
+const AllRuns = ({ service, env }: { service: string; env: string }) => (
+  <LinkButton to={runsHref(service, env)} size="xs" variant="ghost">全部 <LuArrowRight /></LinkButton>
+);
+
 function RunsTab({ service, env }: { service: string; env: string }) {
-  const { data, loading } = useRuns({ service, env, limit: 30 });
+  const { data, loading, error, refetch } = useRuns({ service, env, limit: 30 });
   return (
     <Card>
-      <RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]} />
-      <Link to={`/runs?service=${encodeURIComponent(service)}&env=${encodeURIComponent(env)}`} className="block border-t border-line px-4 py-2 text-center text-[12px] text-fg-3 hover:text-accent">
-        查看全部运行
-      </Link>
+      <CardHeader title="运行" description={`${env} 最近 30 次`} actions={<AllRuns service={service} env={env} />} />
+      {error && !data ? <ErrorState error={error} onRetry={() => void refetch()} />
+        : <RunsTable runs={data?.items} loading={loading} columns={["status", "task", "trigger", "duration", "tokens", "time"]}
+            empty={<Empty icon={<LuActivity />} title="还没有运行" description={`${service} 在 ${env} 还没有运行过`} />} />}
     </Card>
   );
 }
 
 function OverviewTab({ svc, env, open, onToggleService }: { svc: ServiceSummary; env: string; open: Open; onToggleService: () => void }) {
-  const { data: view } = useServiceEnv(svc.name, env);
-  const { data: recent } = useRuns({ service: svc.name, env, limit: 20 });
+  const { data: view, error: viewError, refetch: refetchView } = useServiceEnv(svc.name, env);
+  const { data: recent, error: recentError, refetch: refetchRecent } = useRuns({ service: svc.name, env, limit: 20 });
   const [peek, setPeek] = useState<string | null>(null);
   const h = svc.health[env];
   return (
@@ -228,17 +246,26 @@ function OverviewTab({ svc, env, open, onToggleService }: { svc: ServiceSummary;
             <Button size="sm" onClick={() => open({ tab: "envs" })}>去启用</Button>
           </div>
         )}
+        {svc.enabled && h?.env_enabled && h.triggers_paused && (
+          <div className="flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-soft px-4 py-3 text-[13px] text-warn">
+            <LuPause className="size-4 shrink-0" /><span className="flex-1">{svc.name} 在 {env} 暂停了自动触发：定时、事件、上游联动都不建运行，手动运行和 API 照常。</span>
+            <Button size="sm" onClick={() => open({ tab: "envs" })}>去恢复</Button>
+          </div>
+        )}
         <SetupChecklist svc={svc} open={open} />
         <Card>
           <CardHeader title="环境详情" description={`${env} 里 agent 能读的代码、配置、库和日志`} />
-          <div className="p-4">
-            {!view ? <Skeleton className="h-48" /> : <ViewList svc={svc} view={view} onOpenTools={() => open({ tab: "tools" })} onOpenConfig={() => open({ tab: "config" })} onPeek={setPeek} />}
-          </div>
+          {viewError && !view ? <ErrorState error={viewError} onRetry={() => void refetchView()} /> : (
+            <div className="p-4">
+              {!view ? <Skeleton className="h-48" /> : <ViewList svc={svc} view={view} onOpenTools={() => open({ tab: "tools" })} onOpenConfig={() => open({ tab: "config" })} onPeek={setPeek} />}
+            </div>
+          )}
         </Card>
         <Card>
           <CardHeader title="服务档案" description="人写的固定说明，每次运行都原样带上" icon={<LuScrollText />} />
           <div className="p-4">
-            {!view ? <Skeleton className="h-24" /> : Object.keys(view.profile).length === 0 ? (
+            {viewError && !view ? <div className="text-[12.5px] text-fg-3">环境详情没加载出来，档案也看不了；上面点「重试」。</div>
+              : !view ? <Skeleton className="h-24" /> : Object.keys(view.profile).length === 0 ? (
               <div className="text-[12.5px] text-fg-3">还没有档案。去「配置 → 服务定义 → 服务档案」写下代码里看不出来的口径、禁区和踩过的坑。</div>
             ) : (
               <dl className="grid gap-x-6 gap-y-3 md:grid-cols-2">
@@ -256,9 +283,11 @@ function OverviewTab({ svc, env, open, onToggleService }: { svc: ServiceSummary;
       {/* 宽屏时和左边一样高、列表在卡片里滚动：两栏底部对齐，不会一边空一大截 */}
       <div className="relative min-w-0 xl:min-h-[360px]">
         <Card className="flex flex-col xl:absolute xl:inset-0">
-          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} />
-          <div className="min-h-0 flex-1 overflow-y-auto"><RunMiniList runs={recent?.items} limit={20} /></div>
-          <Link to={`/runs?service=${encodeURIComponent(svc.name)}&env=${env}`} className="border-t border-line px-4 py-2 text-center text-[12px] text-fg-3 hover:text-accent">查看全部运行</Link>
+          <CardHeader title="近期运行" description={`${env} · 近 24 小时 ${h?.runs_24h ?? 0} 次，失败 ${h?.failed_24h ?? 0} 次`} actions={<AllRuns service={svc.name} env={env} />} />
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {/* RunMiniList 在没数据时一直转骨架：出错先在这里接住 */}
+            {recentError && !recent ? <ErrorState error={recentError} onRetry={() => void refetchRecent()} className="py-6" /> : <RunMiniList runs={recent?.items} limit={20} />}
+          </div>
         </Card>
       </div>
       <ConfigPeek service={svc.name} env={env} path={peek} onClose={() => setPeek(null)} />
@@ -290,9 +319,9 @@ function SetupChecklist({ svc, open }: { svc: ServiceSummary; open: Open }) {
   }
   if (!svc.python && !overrides.some((o) => o.python)) items.push({ key: "python", optional: true, text: "项目 Python 用的是默认的 python3：项目有自己的虚拟环境就填上", action: "去填", to: definition });
   const hasDbs = Object.values(svc.databases ?? {}).some(Boolean) || overrides.some((o) => Object.values(o.databases ?? {}).some(Boolean));
-  if (!hasDbs) items.push({ key: "databases", optional: true, text: "没登记只读库：agent 查不了库", action: "去登记", to: definition });
+  if (!hasDbs) items.push({ key: "databases", optional: true, text: "还没配只读库：agent 查不了库", action: "去配置", to: definition });
   const hasLogs = Object.keys(svc.logs ?? {}).length > 0 || overrides.some((o) => Object.values(o.logs ?? {}).some(Boolean));
-  if (!hasLogs) items.push({ key: "logs", optional: true, text: "没登记日志：agent 看不了线上日志", action: "去登记", to: definition });
+  if (!hasLogs) items.push({ key: "logs", optional: true, text: "还没配日志：agent 看不了线上日志", action: "去配置", to: definition });
   if (!items.length) return null;
   return (
     <Card>
@@ -348,8 +377,8 @@ function ViewList({ svc, view, onOpenTools, onOpenConfig, onPeek }: {
           )}
         </div>
       ) : <span className="text-fg-3">未声明</span>],
-      ["只读库", <DbList databases={view.databases ?? {}} empty={<span className="text-fg-3">未登记（查不了库）</span>} />],
-      ["日志", <LogList logs={view.logs ?? {}} empty={<span className="text-fg-3">未登记（看不了日志）</span>} />],
+      ["只读库", <DbList databases={view.databases ?? {}} empty={<span className="text-fg-3">未配置（查不了库）</span>} />],
+      ["日志", <LogList logs={view.logs ?? {}} empty={<span className="text-fg-3">未配置（看不了日志）</span>} />],
       ["地址", Object.keys(view.urls ?? {}).length ? <UrlList urls={view.urls} /> : <span className="text-fg-3">未配置</span>],
       ["服务工具", (view.mcp_servers ?? []).length ? (
         <button type="button" onClick={onOpenTools} className="flex flex-wrap items-center gap-1 text-left hover:text-accent">
@@ -457,7 +486,7 @@ export const PROFILE_LABEL: Record<string, string> = {
 
 // ———————— 环境：服务在每个环境是否启用、覆盖了什么 ————————
 
-function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void }) {
+function EnvsTab({ svc, onSaved, onToggleService }: { svc: ServiceSummary; onSaved: () => void; onToggleService: () => void }) {
   const { data: envs } = useEnvs();
   const save = async (env: string, patch: Partial<ServiceEnvOverride>, message: string) => {
     const merged: ServiceEnvOverride = { ...(svc.envs[env] ?? {}), ...patch };
@@ -477,12 +506,29 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
       description: enabled ? "启用后这个环境马上开始接收运行，定时恢复。" : "停用后这个环境不再接收运行，定时暂停；其它环境不受影响。",
       confirmText: enabled ? "启用" : "停用", danger: !enabled,
     });
-    if (ok) await save(env, { enabled: enabled ? undefined : false }, enabled ? `${env} 已启用` : `${env} 已停用`);
+    if (ok) await save(env, { enabled: enabled ? undefined : false }, enabled ? `已在 ${env} 启用 ${svc.name}` : `已在 ${env} 停用 ${svc.name}`);
+  };
+  /** 暂停自动触发：维护窗口（库重启、发版）里定时、事件、上游联动都不建运行，人手动跑、API、对话照常 */
+  const pause = async (env: string, paused: boolean) => {
+    const ok = await confirm({
+      title: paused ? `暂停 ${svc.name} 在 ${env} 的自动触发？` : `恢复 ${svc.name} 在 ${env} 的自动触发？`,
+      description: paused
+        ? "定时、事件、上游联动在这个环境都不再建运行（触发记录里记成「被拒」）；手动运行、API、对话照常。维护完记得恢复。"
+        : "恢复后定时按下一个时刻触发、事件和联动马上照常建运行；暂停期间错过的不会补。",
+      confirmText: paused ? "暂停" : "恢复", danger: paused,
+    });
+    if (ok) await save(env, { triggers_paused: paused ? true : undefined }, paused ? `已暂停 ${env} 的自动触发` : `已恢复 ${env} 的自动触发`);
   };
   return (
     <Card>
-      <CardHeader title="各环境" description="每个环境可以单独启用或停用；各环境不同的配置在「配置 → 服务定义 → 环境」里改。" icon={<LuLayers />} />
-      {!svc.enabled && <div className="border-b border-line bg-sunken/60 px-4 py-2.5 text-[12.5px] text-fg-2">服务已停用（右上角「⋯」里启用），下面的开关要等服务启用后才生效。</div>}
+      <CardHeader title="各环境" description="每个环境可以单独启用或停用、暂停自动触发；各环境不同的配置在「配置 → 服务定义 → 环境」里改。" icon={<LuLayers />} />
+      {/* 直接给按钮，不指路去「⋯」 */}
+      {!svc.enabled && (
+        <div className="flex items-center gap-3 border-b border-line bg-sunken/60 px-4 py-2.5 text-[12.5px] text-fg-2">
+          <LuPower className="size-4 shrink-0 text-fg-3" /><span className="flex-1">服务已停用：下面的开关要等服务启用后才生效。</span>
+          <Button size="sm" onClick={onToggleService}>启用服务</Button>
+        </div>
+      )}
       <ul className="divide-y divide-line">
         {(envs ?? []).map((e) => {
           const o = svc.envs[e.name] ?? {};
@@ -499,7 +545,8 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
               <span className="w-[72px] shrink-0"><EnvBadge env={e.name} className="h-6 px-2 text-[12px]" /></span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-[13px] font-medium text-fg">
-                  {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <Badge tone="idle">该环境已停用</Badge>}
+                  {e.title}{e.protected && <Badge tone="warn">受保护</Badge>}{!on && <DisabledBadge scope="env" />}
+                  {on && o.triggers_paused && <Badge tone="warn" icon={<LuPause />}>自动触发已暂停</Badge>}
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-fg-3">
                   <span>{overrides.length ? `单独配置了：${overrides.join("、")}` : "和其它环境用同一套配置"}</span>
@@ -507,6 +554,10 @@ function EnvsTab({ svc, onSaved }: { svc: ServiceSummary; onSaved: () => void })
                 </div>
                 {h?.python && <div className="mt-0.5 truncate font-mono text-[11.5px] text-fg-3" title="该环境的解释器">{h.python}</div>}
               </div>
+              <Tooltip content={!on ? "环境停用时什么都不跑，不用单独暂停" : o.triggers_paused ? "恢复定时、事件、上游联动" : "维护窗口用：定时、事件、上游联动都不建运行，手动运行和 API 照常"}>
+                <span><Switch checked={!!o.triggers_paused} disabled={!on || !svc.enabled} onChange={(v) => pause(e.name, v)}
+                  label={<span className="text-[12.5px]">暂停自动触发</span>} /></span>
+              </Tooltip>
               <Tooltip content={!svc.enabled ? "服务已停用，先启用服务" : on ? "停用后这个环境不接收运行" : "启用后马上接收运行"}>
                 <span><Switch checked={on} disabled={!svc.enabled} onChange={(v) => toggle(e.name, v)} label={<span className="text-[12.5px]">{on ? "启用" : "停用"}</span>} /></span>
               </Tooltip>

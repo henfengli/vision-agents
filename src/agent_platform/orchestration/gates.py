@@ -6,6 +6,7 @@
 3. task_disabled         任务停用（子任务停用或其父任务停用）
 4. env_not_allowed       任务的 envs 不含该环境
 5. trigger_not_allowed   任务没有声明这种触发
+6. triggers_paused       自动触发（定时 / 事件 / 上游联动）时：服务在这个环境暂停了自动触发
 
 续跑 / 重跑 / 回归重放只过 1–4（check_switches）；新提交过全部（admit）。
 所有运行被 worker 认领后再过一遍 1–4：排队期间开关可能变了。
@@ -13,7 +14,7 @@
 
 from __future__ import annotations
 
-from ..domain import Rejected, TaskDef
+from ..domain import AUTOMATIC, Rejected, TaskDef
 from ..registry import Registry
 
 
@@ -43,3 +44,7 @@ async def admit(reg: Registry, *, task_name: str, task: TaskDef, service: str | 
     if not task.allows(trigger_type):
         declared = "、".join(sorted({t.type for t in task.triggers if t.enabled})) or "无"
         raise Rejected("trigger_not_allowed", f"任务 {task_name} 没有声明 {trigger_type} 触发（已声明：{declared}）")
+    if trigger_type in AUTOMATIC and service:
+        s = await reg.service(service)
+        if s is not None and s.spec.view(service, env).triggers_paused:
+            raise Rejected("triggers_paused", f"服务 {service} 在 {env} 暂停了自动触发（定时、事件、上游联动）", 409)

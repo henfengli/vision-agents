@@ -1,10 +1,13 @@
 /**
  * 运行表格：运行页、服务页、任务页、概览复用。列可按场景裁剪。
  */
+import { LuHourglass, LuRefreshCw } from "react-icons/lu";
+
 import type { RunListItem } from "@/api/types";
 import { EnvBadge, ResolutionTag, RunStatusBadge, TriggerBadge } from "@/components/status";
+import { TimeUntil } from "@/components/time";
 import { Table, Td, Th, Tr } from "@/components/ui/data";
-import { Empty, SkeletonRows } from "@/components/ui/primitives";
+import { Badge, Empty, ErrorState, SkeletonRows } from "@/components/ui/primitives";
 import { Tooltip } from "@/components/ui/overlay";
 import { ago, datetime, duration, num, shortId } from "@/lib/format";
 import { Link, navigate } from "@/lib/router";
@@ -19,11 +22,29 @@ function runningFor(since: string) {
 
 const ALL: RunColumn[] = ["status", "task", "service", "env", "trigger", "duration", "tokens", "time"];
 
-export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
+/** 状态旁边的小标：等着自动重试 / 在等点名的上游 / 第几次执行 */
+export function RunFlags({ run }: { run: Pick<RunListItem, "status" | "retry_at" | "depends_on" | "attempt"> }) {
+  return (
+    <>
+      {run.status === "failed" && run.retry_at && (
+        <Tooltip content={<>失败后等着自动重试：<TimeUntil at={run.retry_at} /></>}><Badge tone="info" icon={<LuRefreshCw />}>将重试</Badge></Tooltip>
+      )}
+      {run.status === "queued" && run.depends_on.length > 0 && (
+        <Tooltip content={`点名等 ${run.depends_on.length} 个上游运行成功后才开始`}><Badge tone="idle" icon={<LuHourglass />}>等上游</Badge></Tooltip>
+      )}
+      {run.attempt > 1 && <Tooltip content="续跑 / 自动重试过：同一个运行接着跑的第几次"><Badge tone="outline">第 {run.attempt} 次</Badge></Tooltip>}
+    </>
+  );
+}
+
+export function RunsTable({ runs, loading, columns = ALL, empty, compact, error, onRetry }: {
   runs: RunListItem[] | undefined; loading?: boolean; columns?: RunColumn[]; empty?: React.ReactNode; compact?: boolean;
+  /** 查询出错且还没有数据：显示错误态（带重试），不要显示成"没有运行" */
+  error?: Error; onRetry?: () => void;
 }) {
+  if (error && !runs) return <ErrorState error={error} onRetry={onRetry} className={compact ? "py-6" : undefined} />;
   if (loading && !runs) return <SkeletonRows rows={compact ? 5 : 10} />;
-  if (!runs?.length) return <>{empty ?? <Empty title="没有运行记录" description="调整筛选条件或时间范围" />}</>;
+  if (!runs?.length) return <>{empty ?? <Empty title="还没有运行" className={compact ? "py-6" : undefined} />}</>;
   const has = (c: RunColumn) => columns.includes(c);
   return (
     <Table>
@@ -46,10 +67,11 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
           <Tr key={r.run_id} onClick={() => navigate(`/runs/${r.run_id}`)}>
             {has("status") && <Td><RunStatusBadge status={r.status} /></Td>}
             {/* 摘要列吃掉剩余宽度并截断，其余短列不换行：窄屏下行高不被挤成三四行 */}
-            <Td className="w-full min-w-[220px] max-w-0">
+            <Td className="w-full min-w-[196px] max-w-0">
               <div className="flex items-center gap-2">
                 <Link to={`/runs/${r.run_id}`} onClick={(e) => e.stopPropagation()} title={r.summary || r.task_title} className="min-w-0 truncate font-medium text-fg hover:text-accent">{r.summary || r.task_title}</Link>
                 <ResolutionTag resolution={r.resolution} />
+                <RunFlags run={r} />
               </div>
               <div className="mt-0.5 truncate font-mono text-[11px] text-fg-3">
                 {shortId(r.run_id)}{r.trigger.caller && r.trigger.caller !== r.trigger.type ? ` · ${r.trigger.caller}` : ""}
@@ -89,7 +111,7 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
 /** 紧凑列表（侧栏、卡片里） */
 export function RunMiniList({ runs, limit = 6 }: { runs: RunListItem[] | undefined; limit?: number }) {
   if (!runs) return <SkeletonRows rows={4} />;
-  if (!runs.length) return <div className="px-4 py-6 text-center text-xs text-fg-3">暂无运行</div>;
+  if (!runs.length) return <div className="px-4 py-6 text-center text-xs text-fg-3">还没有运行</div>;
   return (
     <ul className="divide-y divide-line">
       {runs.slice(0, limit).map((r) => (

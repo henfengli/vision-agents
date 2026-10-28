@@ -9,14 +9,17 @@ from .feedback import FEEDBACK_REASONS, WHOLE_RUN, Feedback
 from .platform import CONFIG_SECTIONS, Channel, EnvDef, EnvsConfig, MemoryConfig, NotificationsConfig, NotifyRule
 from .prompts import PromptsConfig
 from .roles import ResolvedRole, RoleDef, RoleError, resolve_role
-from .runs import ACTIVE, RESOLUTIONS, RUN_STATUSES, SYSTEM, TERMINAL, Caller, RunRequest, RunTrigger
+from .runs import (ACTIVE, AUTOMATIC, PRIORITY, RESOLUTIONS, RUN_STATUSES, SYSTEM, TERMINAL, Caller, RunRequest,
+                   RunTrigger)
 from .services import EnvOverride, ServiceDef, ServiceView
-from .tasks import (BUILTIN_HANDLERS, ApiTrigger, ChatTrigger, Dedup, Deliver, EventTrigger, InputField,
-                    MemoryOverride, ScheduleTrigger, TaskDef, Trigger, TriggerRule, compose_profile, consistency_error,
-                    merge_task, object_value, profile_lines, question_text, split_subtask_name)
+from .tasks import (BUILTIN_HANDLERS, RETRYABLE_CODES, AfterTrigger, ApiTrigger, ChatTrigger, Dedup, Deliver,
+                    EventTrigger, InputField, MemoryOverride, Retry, ScheduleTrigger, TaskDef, Trigger, TriggerRule,
+                    compose_profile, consistency_error, merge_task, object_value, profile_lines, question_text,
+                    run_fields, split_subtask_name)
 
 __all__ = [
-    "ACTIVE", "ApiTrigger", "CONFIG_SECTIONS", "Channel", "ChatTrigger", "Dedup",
+    "ACTIVE", "AUTOMATIC", "AfterTrigger", "PRIORITY", "RETRYABLE_CODES", "Retry", "run_fields",
+    "ApiTrigger", "CONFIG_SECTIONS", "Channel", "ChatTrigger", "Dedup",
     "Deliver", "EnvDef", "EnvOverride", "EnvsConfig", "EventTrigger", "FEEDBACK_REASONS", "Feedback", "InputField",
     "MemoryConfig", "MemoryOverride", "NotificationsConfig", "NotifyRule",
     "PromptsConfig",

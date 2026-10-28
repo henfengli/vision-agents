@@ -5,22 +5,24 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  LuActivity, LuArrowRight, LuBraces, LuBrain, LuCalendarClock, LuCopy, LuEllipsis, LuGitBranch, LuHistory, LuLayoutDashboard, LuListTodo, LuPencil,
-  LuPlay, LuPlus, LuPower, LuScrollText, LuSettings, LuTrash2, LuWebhook, LuZap,
+  LuActivity, LuArrowLeft, LuArrowRight, LuBraces, LuBrain, LuCalendarClock, LuCopy, LuEllipsis, LuGitBranch, LuHistory, LuLayoutDashboard, LuListTodo, LuPencil,
+  LuPlay, LuPlus, LuPower, LuRadar, LuScrollText, LuSettings, LuTrash2, LuWebhook, LuWorkflow, LuZap,
 } from "react-icons/lu";
 
-import { api, useEnvs, useRuns, useSubtasks, useTask, useTasks } from "@/api/hooks";
-import type { TaskSummary, Trigger } from "@/api/types";
+import { api, useEnvs, useRuns, useServices, useSubtasks, useTask, useTasks } from "@/api/hooks";
+import type { AfterTrigger, TaskSummary, Trigger } from "@/api/types";
 import { EnvFilter, ServiceFilter } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
+import { IdCopy, MetaVersion } from "@/components/meta";
 import { SaveBar } from "@/components/save-bar";
-import { EnvBadge, RoleChip, RunStatusDot, TRIGGER } from "@/components/status";
+import { DetailError, EmptyFiltered } from "@/components/states";
+import { DisabledBadge, EnvBadge, RoleChip, RunStatusDot, TRIGGER } from "@/components/status";
 import { VersionHistory } from "@/components/versions";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, KeyValueEditor, Markdown, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
-import { Checkbox, Input, SearchInput, Textarea, objectNameError } from "@/components/ui/form";
-import { Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Skeleton, Stat } from "@/components/ui/primitives";
+import { Checkbox, Field, Input, SearchInput, Select, Textarea, objectNameError } from "@/components/ui/form";
+import { Dialog, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
+import { Badge, Card, CardHeader, DescList, Empty, Skeleton, Stat } from "@/components/ui/primitives";
 import { describeCron, nextRuns } from "@/lib/cron";
 import { cn } from "@/lib/cn";
 import { ago, dayjs, duration, pct, seconds } from "@/lib/format";
@@ -29,7 +31,9 @@ import { Link, navigate, useParams, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { AssetList, KnowledgeList } from "../memory/memory";
 import { RunsTable, type RunColumn } from "../runs/runs-table";
+import { TaskTicksCard } from "../runs/ticks";
 import { PROFILE_LABEL } from "../services/service-detail";
+import { InputControl, initialValues, inputErrors, inputValue } from "./input-control";
 import { ASK_TASK, RunTaskDialog } from "./run-dialog";
 import { TaskDefinitionEditor } from "./task-editor";
 import { FORM_META } from "./tasks";
@@ -52,7 +56,12 @@ export function TaskDetailPage() {
   const parent = isSub ? all?.find((t) => t.name === parentName) : undefined;
   const tab = search.tab || "overview";
 
-  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  if (error && !task) return (
+    <Page>
+      <PageHeader crumbs={[{ label: "任务", to: "/tasks" }, ...(parentName ? [{ label: parentName, to: taskHref(parentName) }] : []), { label: object ?? name }]} title={object ?? name} />
+      <DetailError error={error} onRetry={refetch} what={isSub ? "子任务" : "任务"} back={parentName ? { to: taskHref(parentName, "subtasks"), label: "回到父任务" } : { to: "/tasks", label: "回到任务列表" }} />
+    </Page>
+  );
 
   const toggle = async () => {
     if (!task) return;
@@ -105,7 +114,7 @@ export function TaskDetailPage() {
         title={<span className="flex items-center gap-2">
           {isSub ? <span className="font-mono">{object}</span> : task?.title || name}
           {isSub && task?.overrides.includes("title") && task.title && <span className="text-[15px] font-normal text-fg-3">{task.title}</span>}
-          {task && !task.enabled && <Badge tone="idle">已停用</Badge>}
+          {task && !task.enabled && <DisabledBadge />}
           {pendingProfile && (
             <Tooltip content={task?.auto_created ? "运行时自动建的对象，还没写它的专属档案" : "还没写它的专属档案"}>
               <button type="button" onClick={() => setSearch({ tab: "profile" })}><Badge tone="warn">档案待补</Badge></button>
@@ -116,21 +125,25 @@ export function TaskDetailPage() {
           ? <><Link to={taskHref(parentName!)} className="text-accent hover:underline">{parent?.title || parentName}</Link> 针对这个对象的子任务：其余都跟随父任务，这里放它自己的档案和记忆</>
           : task?.description}
         meta={task && <>
-          <span className="font-mono">{task.name}</span>
+          <IdCopy value={task.name} />
           <span>{task.service === "*" ? "通用任务" : task.service ? <>服务 <Link to={`/services/${task.service}`} className="text-fg-2 hover:text-accent">{task.service}</Link></> : "平台任务"}</span>
           <span>{FORM_META[task.form].label}</span>
           <RoleChip role={task.role} />
-          <span>v{task.version} · {task.updated_by} · {ago(task.updated_at)}</span>
+          <MetaVersion version={task.version} by={task.updated_by} at={task.updated_at} />
         </>}
         actions={<>
-          <Button variant="primary" icon={<LuPlay />} onClick={() => setRunOpen(true)} disabled={!task?.enabled || (isSub && parent?.enabled === false)}
-            title={!task?.enabled ? "任务已停用" : isSub && parent?.enabled === false ? "父任务已停用" : undefined}>运行</Button>
+          <Button variant="primary" icon={<LuPlay />} onClick={() => setRunOpen(true)}
+            reason={!task ? undefined : !task.enabled ? "任务已停用" : isSub && parent?.enabled === false ? "父任务已停用" : undefined}>运行</Button>
           <Menu trigger={<Button size="icon" aria-label="更多"><LuEllipsis /></Button>} items={[
-            { label: task?.enabled ? "停用任务" : "启用任务", icon: <LuPower />, onClick: toggle },
-            ...(!isSub ? [{ label: "复制为新任务", icon: <LuCopy />, onClick: () => navigate(`/tasks/_new?from=${encodeURIComponent(name)}`) }] : []),
+            ...(!isSub ? [
+              { label: "复制为新任务", icon: <LuCopy />, onClick: () => navigate(`/tasks/_new?from=${encodeURIComponent(name)}`) },
+              { label: "新建下游任务", icon: <LuWorkflow />, onClick: () => navigate(`/tasks/_new?after=${encodeURIComponent(name)}`) },
+            ] : []),
             { label: "查看全部运行", icon: <LuActivity />, onClick: () => navigate(`/runs?task=${encodeURIComponent(name)}`) },
+            { label: "查看触发记录", icon: <LuRadar />, onClick: () => navigate(`/runs?tab=ticks&task=${encodeURIComponent(name)}`) },
             { separator: true, label: "" },
-            { label: "删除任务", icon: <LuTrash2 />, danger: true, onClick: remove },
+            { label: task?.enabled ? (isSub ? "停用子任务" : "停用任务") : (isSub ? "启用子任务" : "启用任务"), icon: <LuPower />, danger: !!task?.enabled, onClick: toggle },
+            { label: isSub ? "删除子任务" : "删除任务", icon: <LuTrash2 />, danger: true, onClick: remove },
           ]} />
         </>}
       />
@@ -176,7 +189,9 @@ function TaskRuns({ task }: { task: TaskSummary }) {
 
 function OverviewTab({ task, parent, onEditProfile }: { task: TaskSummary; parent: TaskSummary | undefined; onEditProfile: () => void }) {
   const { env } = useUi();
-  const { data: runs } = useRuns({ task: task.name, env: env || undefined, limit: 10 });
+  const runsQ = useRuns({ task: task.name, env: env || undefined, limit: 10 });
+  const runs = runsQ.data;
+  const { data: all } = useTasks();
   const s = task.stats_24h;
   const sub = !!task.extends;
   const ownTriggers = !sub || task.overrides.includes("triggers");
@@ -207,10 +222,13 @@ function OverviewTab({ task, parent, onEditProfile }: { task: TaskSummary; paren
         <Card>
           <CardHeader title="近期运行" description={env ? `只看 ${env}（顶栏的环境视角）` : undefined}
             actions={<Link to={`/runs?task=${encodeURIComponent(task.name)}${env ? `&env=${env}` : ""}`} className="flex items-center gap-1 text-xs text-fg-3 hover:text-accent">全部 <LuArrowRight className="size-3" /></Link>} />
-          <RunsTable runs={runs?.items} columns={runColumns(task, false)} compact empty={<Empty title="还没有运行" description={env ? `${env} 环境下还没跑过` : "点右上角「运行」手动跑一次"} />} />
+          <RunsTable runs={runs?.items} columns={runColumns(task, false)} compact error={runsQ.error} onRetry={() => void runsQ.refetch()}
+            empty={<Empty title="还没有运行" description={env ? `${env} 环境下还没跑过` : "点右上角「运行」手动跑一次"} className="py-6" />} />
         </Card>
+        <TaskTicksCard task={task.name} />
       </div>
       <div className="min-w-0 space-y-4">
+        <LinkageCard task={task} all={all} />
         <Card>
           <CardHeader title="任务档案" icon={<LuScrollText />} description="置顶逐字注入每次运行"
             actions={<Button size="sm" variant="ghost" icon={<LuPencil />} onClick={onEditProfile}>编辑</Button>} />
@@ -230,6 +248,8 @@ function OverviewTab({ task, parent, onEditProfile }: { task: TaskSummary; paren
               ...(objectInput ? [["对象字段", <span><code className="font-mono text-[12px]">{objectInput}</code><span className="text-fg-3"> 的值就是子任务</span></span>] as [ReactNode, ReactNode]] : []),
               ["去重", task.dedup ? <span>同样的 <code className="font-mono text-[12px]">{task.dedup.key}</code> {seconds(task.dedup.window_s)}内只跑一次</span> : "不去重"],
               ["超时", seconds(task.timeout_s)],
+              ...(task.form === "agent" ? [["自动重试", task.retry ? `临时性失败最多重试 ${task.retry.max} 次，每次等 ${seconds(task.retry.delay_s)}` : "不重试"] as [ReactNode, ReactNode]] : []),
+              ["同时执行", task.concurrency ? `每个环境最多 ${task.concurrency} 个` : "不单独限制"],
             ]} />
           </div>
         </Card>
@@ -289,9 +309,10 @@ function TriggerRow({ tr }: { tr: Trigger }) {
         <span className="flex size-6 items-center justify-center rounded-md bg-sunken text-fg-2 [&_svg]:size-3.5">{meta.icon}</span>
         <span className="text-[13px] font-medium text-fg">{meta.label}</span>
         <code className="font-mono text-[11px] text-fg-3">{tr.id}</code>
-        {tr.enabled === false && <Badge tone="idle">已关闭</Badge>}
-        {(tr.type === "schedule" || tr.type === "event") && tr.service && <Badge tone="outline">服务 {tr.service}</Badge>}
+        {tr.enabled === false && <DisabledBadge />}
+        {(tr.type === "schedule" || tr.type === "event" || tr.type === "after") && tr.service && <Badge tone="outline">服务 {tr.service}</Badge>}
       </div>
+      {tr.type === "after" && <AfterDetail tr={tr} />}
       {tr.type === "api" && <div className="mt-1.5 pl-8 text-[12.5px] text-fg-3">业务项目经 <code className="font-mono">POST /v1/runs</code> 或 SDK 调用</div>}
       {tr.type === "chat" && <div className="mt-1.5 pl-8 text-[12.5px] text-fg-3">出现在对话页，可多轮追问</div>}
       {tr.type === "schedule" && <ScheduleDetail tr={tr} />}
@@ -322,6 +343,85 @@ function TriggerRow({ tr }: { tr: Trigger }) {
         </div>
       )}
     </li>
+  );
+}
+
+/** 「成功后」「失败后」「结束后（成功或失败）」 */
+export const afterWhen = (on: AfterTrigger["on"]) => (on.includes("success") && on.includes("failed") ? "结束后" : on.includes("failed") ? "失败后" : "成功后");
+
+function AfterDetail({ tr }: { tr: AfterTrigger }) {
+  const { data: tasks } = useTasks();
+  const title = (n: string) => tasks?.find((t) => t.name === n)?.title || n;
+  const all = tr.mode === "all" && tr.tasks.length > 1;
+  return (
+    <div className="mt-2 space-y-1.5 pl-8 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-fg-3">{all ? "这几个上游都" : tr.tasks.length > 1 ? "任一上游" : "上游"}</span>
+        {tr.tasks.map((n) => <Link key={n} to={taskHref(n)} className="rounded border border-line bg-sunken/60 px-1.5 py-0.5 text-fg hover:border-accent hover:text-accent">{title(n)}</Link>)}
+        <span className="text-fg">{afterWhen(tr.on)}</span>
+        <span className="text-fg-3">在同一个环境跑一次{all ? `（${seconds(tr.window_s ?? 86400)}内都结束过才算）` : ""}</span>
+      </div>
+      {tr.filter && Object.keys(tr.filter).length > 0 && (
+        <div className="flex flex-wrap gap-1">{Object.entries(tr.filter).map(([k, v]) => <Badge key={k} tone="outline">{k} ~ /{v}/</Badge>)}</div>
+      )}
+      <div className="text-xs text-fg-3">{tr.map && Object.keys(tr.map).length
+        ? <>输入：{Object.entries(tr.map).map(([k, v]) => <code key={k} className="mr-2 font-mono">{k}←{v}</code>)}</>
+        : "输入：上游输入里同名的字段带过来"}</div>
+    </div>
+  );
+}
+
+/**
+ * 联动：上游（这个任务声明的「在谁结束后跑」）和下游（别的任务声明了在它结束后跑）。
+ * 父任务的下游包括写了它某个子任务全名的；子任务的下游包括写了父任务的（父任务 = 它和它的子任务）。
+ */
+function LinkageCard({ task, all }: { task: TaskSummary; all: TaskSummary[] | undefined }) {
+  const base = task.name.split(":")[0];
+  const sub = !!task.extends;
+  const isAfter = (tr: Trigger): tr is AfterTrigger => tr.type === "after";
+  const ups = (sub && !task.overrides.includes("triggers") ? [] : task.triggers.filter(isAfter)).flatMap((tr) => tr.tasks.map((u) => ({ name: u, tr })));
+  const downs = (all ?? []).filter((t) => t.name.split(":")[0] !== base && (!t.extends || t.overrides.includes("triggers")))
+    .flatMap((t) => t.triggers.filter(isAfter)
+      .filter((tr) => tr.tasks.some((u) => u === task.name || (!sub && u.split(":")[0] === task.name) || (sub && u === task.extends)))
+      .map((tr) => ({ name: t.name, tr })));
+  const title = (n: string) => all?.find((t) => t.name === n)?.title || n;
+  const row = (dir: "up" | "down", name: string, tr: AfterTrigger, key: string) => {
+    const others = tr.tasks.filter((u) => u !== task.name && u !== task.extends);
+    return (
+      <li key={key} className={cn("flex items-start gap-2 px-4 py-2.5", tr.enabled === false && "opacity-60")}>
+        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded bg-sunken text-fg-3 [&_svg]:size-3">{dir === "up" ? <LuArrowLeft /> : <LuArrowRight />}</span>
+        <div className="min-w-0 flex-1">
+          <Link to={taskHref(name)} className="block truncate text-[13px] text-fg hover:text-accent">{title(name)}</Link>
+          <div className="truncate text-[11.5px] text-fg-3">
+            {dir === "up" ? `它${afterWhen(tr.on)}跑这个` : `这个${afterWhen(tr.on)}跑它`}
+            {tr.mode === "all" && tr.tasks.length > 1 && (dir === "up" ? " · 要等全部上游" : ` · 还要等 ${others.map(title).join("、")}`)}
+          </div>
+        </div>
+        {tr.enabled === false && <DisabledBadge />}
+      </li>
+    );
+  };
+  return (
+    <Card>
+      <CardHeader title="联动" icon={<LuWorkflow />} description="上游结束后自动跑下游，像 Dagster 的依赖"
+        actions={<Link to={`/tasks?view=graph&focus=${encodeURIComponent(base)}`} className="flex items-center gap-1 text-xs text-fg-3 hover:text-accent">任务图 <LuArrowRight className="size-3" /></Link>} />
+      {!ups.length && !downs.length ? (
+        <div className="space-y-2 px-4 py-3.5 text-[12.5px] text-fg-3">
+          <p>没有上下游。在「定义 → 触发」里加「上游任务结束后」，这个任务就会接在别的任务后面跑。</p>
+          {!sub && <Button size="xs" icon={<LuPlus />} onClick={() => navigate(`/tasks/_new?after=${encodeURIComponent(task.name)}`)}>新建下游任务</Button>}
+        </div>
+      ) : (
+        <>
+          {ups.length > 0 && <><div className="px-4 pt-2.5 text-[11.5px] font-medium text-fg-3">上游（它们结束后跑这个）</div><ul className="divide-y divide-line">{ups.map((u, i) => row("up", u.name, u.tr, `u${i}`))}</ul></>}
+          {downs.length > 0 && <><div className="border-t border-line px-4 pt-2.5 text-[11.5px] font-medium text-fg-3">下游（这个结束后跑它们）</div><ul className="divide-y divide-line">{downs.map((d, i) => row("down", d.name, d.tr, `d${i}`))}</ul></>}
+          {!sub && (
+            <div className="border-t border-line px-4 py-2">
+              <Button size="xs" variant="ghost" icon={<LuPlus />} onClick={() => navigate(`/tasks/_new?after=${encodeURIComponent(task.name)}`)}>新建下游任务</Button>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -432,6 +532,31 @@ function SubtasksTab({ task }: { task: TaskSummary }) {
   });
 
   const list = (subs ?? []).filter((s) => !q || s.name.includes(q) || s.title.includes(q));
+  const [picked, setPicked] = useState<string[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const runnable = list.filter((s) => s.enabled);
+  const allPicked = runnable.length > 0 && runnable.every((s) => picked.includes(s.name));
+
+  const toggleSub = async (s: TaskSummary) => {
+    const obj = s.name.split(":")[1];
+    if (s.enabled && !(await confirm({ title: `停用子任务 ${obj}？`, description: "停用后点名它的运行、落到它名下的事件都拒收（task_disabled）；父任务和别的对象不受影响。", danger: true, confirmText: "停用" }))) return;
+    try {
+      await api.update("tasks", s.name, { enabled: !s.enabled });
+      toast(s.enabled ? `已停用 ${obj}` : `已启用 ${obj}`);
+      invalidate("tasks");
+    } catch (e) { toast.error(s.enabled ? "停用失败" : "启用失败", (e as Error).message); }
+  };
+  const removeSub = async (s: TaskSummary) => {
+    const obj = s.name.split(":")[1];
+    if (!(await confirm({ title: `删除子任务 ${obj}？`, danger: true, confirmText: "删除", description: "删掉它的档案和覆盖项；历史运行、记忆保留。以后再点名这个对象会重新自动建一个（没有档案）。" }))) return;
+    try {
+      await api.remove("tasks", s.name);
+      toast(`已删除 ${obj}`);
+      setPicked((p) => p.filter((x) => x !== s.name));
+      invalidate("tasks");
+    } catch (e) { toast.error("删除失败", (e as Error).message); }
+  };
+
   return (
     <Card>
       <CardHeader title="子任务" icon={<LuGitBranch />}
@@ -449,20 +574,36 @@ function SubtasksTab({ task }: { task: TaskSummary }) {
         {(subs?.length ?? 0) > 8 && <SearchInput value={q} onChange={setQ} placeholder="筛选对象…" className="w-48" />}
         {error && <div className="w-full text-xs text-bad">{error}</div>}
       </form>
+      {picked.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-line bg-accent-soft/40 px-4 py-2 text-[12.5px]">
+          <span className="text-fg-2">已选 {picked.length} 个对象</span>
+          <Button size="sm" variant="primary" icon={<LuPlay />} onClick={() => setBatchOpen(true)}>逐个运行</Button>
+          <Button size="sm" variant="ghost" onClick={() => setPicked([])}>取消选择</Button>
+        </div>
+      )}
       {loading ? <Skeleton className="m-4 h-24" /> : !list.length ? (
-        <Empty icon={<LuGitBranch />} title={q ? "没有匹配的对象" : "还没有子任务"} description="某个对象的业务信息多且重要时，为它建子任务、写档案" />
+        q ? <EmptyFiltered what="对象" icon={<LuGitBranch />} onClear={() => setQ("")} />
+          : <Empty icon={<LuGitBranch />} title="还没有子任务" description="某个对象的业务信息多且重要时，为它建子任务、写档案" />
       ) : (
         <Table>
-          <thead><tr><Th>对象</Th><Th>档案</Th><Th>近 24 小时</Th><Th>最近</Th><Th>更新</Th><Th /></tr></thead>
+          <thead><tr>
+            <Th className="w-9"><Checkbox checked={allPicked} label={<span className="sr-only">全选</span>}
+              onChange={(v) => setPicked(v ? runnable.map((s) => s.name) : [])} disabled={!runnable.length} /></Th>
+            <Th>对象</Th><Th>档案</Th><Th>近 24 小时</Th><Th>最近</Th><Th>更新</Th><Th />
+          </tr></thead>
           <tbody>
             {list.map((s) => {
               const obj = s.name.split(":")[1];
               return (
                 <Tr key={s.name} onClick={() => navigate(taskHref(s.name))}>
+                  <Td onClick={(e) => e.stopPropagation()}>
+                    <Checkbox checked={picked.includes(s.name)} disabled={!s.enabled} label={<span className="sr-only">选择 {obj}</span>}
+                      onChange={(v) => setPicked((p) => (v ? [...p, s.name] : p.filter((x) => x !== s.name)))} />
+                  </Td>
                   <Td>
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[12.5px] font-medium text-fg">{obj}</span>
-                      {!s.enabled && <Badge tone="idle">已停用</Badge>}
+                      {!s.enabled && <DisabledBadge />}
                     </div>
                     {s.overrides.includes("title") && s.title && <div className="text-[11.5px] text-fg-3">{s.title}</div>}
                   </Td>
@@ -472,8 +613,15 @@ function SubtasksTab({ task }: { task: TaskSummary }) {
                   <Td className="tabular-nums text-fg-2">{s.stats_24h.runs || "—"}</Td>
                   <Td>{s.last_run ? <span className="flex items-center gap-1.5 text-[12.5px] text-fg-3"><RunStatusDot status={s.last_run.status} />{ago(s.last_run.created_at)}</span> : "—"}</Td>
                   <Td className="text-[12.5px] text-fg-3">v{s.version} · {ago(s.updated_at)}</Td>
-                  <Td className="w-10 text-right" onClick={(e) => e.stopPropagation()}>
-                    <Button size="icon-sm" variant="ghost" aria-label={`运行 ${obj}`} disabled={!s.enabled} onClick={() => setRunFor(obj)}><LuPlay /></Button>
+                  <Td className="w-[76px] whitespace-nowrap text-right" onClick={(e) => e.stopPropagation()}>
+                    <Button size="icon-sm" variant="ghost" aria-label={`运行 ${obj}`} reason={!s.enabled ? "子任务已停用" : undefined} onClick={() => setRunFor(obj)}><LuPlay /></Button>
+                    <Menu trigger={<Button size="icon-sm" variant="ghost" aria-label={`${obj} 的更多操作`}><LuEllipsis /></Button>} items={[
+                      { label: "打开", icon: <LuArrowRight />, onClick: () => navigate(taskHref(s.name)) },
+                      { label: "写档案", icon: <LuScrollText />, onClick: () => navigate(taskHref(s.name, "profile")) },
+                      { separator: true, label: "" },
+                      { label: s.enabled ? "停用子任务" : "启用子任务", icon: <LuPower />, danger: s.enabled, onClick: () => void toggleSub(s) },
+                      { label: "删除子任务", icon: <LuTrash2 />, danger: true, onClick: () => void removeSub(s) },
+                    ]} />
                   </Td>
                 </Tr>
               );
@@ -482,7 +630,93 @@ function SubtasksTab({ task }: { task: TaskSummary }) {
         </Table>
       )}
       <RunTaskDialog open={!!runFor} onClose={() => setRunFor(null)} task={task.name} subtask={runFor ?? undefined} />
+      <BatchRunDialog open={batchOpen} onClose={() => setBatchOpen(false)} task={task} objects={picked.map((n) => n.split(":")[1])}
+        onDone={() => { setPicked([]); setBatchOpen(false); }} />
     </Card>
+  );
+}
+
+/**
+ * 选中的几个对象逐个跑一次（像 Dagster 按资产补跑）：同一个环境、同一份输入（对象字段按对象填），
+ * 各自一条运行。任务配了同时执行上限的，多出来的排队。
+ */
+function BatchRunDialog({ open, onClose, task, objects, onDone }: {
+  open: boolean; onClose: () => void; task: TaskSummary; objects: string[]; onDone: () => void;
+}) {
+  const { data: envs } = useEnvs();
+  const { data: services } = useServices();
+  const { env: globalEnv } = useUi();
+  const allowed = (envs ?? []).filter((e) => !task.envs.length || task.envs.includes(e.name));
+  const [env, setEnv] = useState("");
+  const [service, setService] = useState("");
+  const fields = Object.fromEntries(Object.entries(task.input).filter(([k]) => k !== task.object_input));
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!open) return;
+    setEnv((allowed.find((e) => e.name === globalEnv) ?? allowed.find((e) => !e.protected) ?? allowed[0])?.name ?? "");
+    setValues(initialValues(fields));
+    setErrors({});
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const generic = task.service === "*";
+
+  const run = useMutation(async () => {
+    const errs = inputErrors(fields, values);
+    if (generic && !service) errs.__service = "选择服务";
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    const input: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(values)) { const val = inputValue(fields[k], v); if (val !== undefined) input[k] = val; }
+    const failed: string[] = [];
+    let ok = 0;
+    for (const obj of objects) {
+      try {
+        await api.submitRun({ task: task.name, subtask: obj, env, service: generic ? service : null, input });
+        ok++;
+      } catch (e) { failed.push(`${obj}：${(e as Error).message}`); }
+    }
+    invalidate("runs");
+    invalidate("tasks");
+    if (failed.length) toast.error(`${ok} 个已开始，${failed.length} 个没能开始`, failed.slice(0, 3).join("；"));
+    else toast(`已开始 ${ok} 个运行`, { description: task.concurrency ? `同时最多跑 ${task.concurrency} 个，其余排队` : undefined });
+    onDone();
+    if (ok) navigate(`/runs?task=${encodeURIComponent(task.name)}&env=${env}`);
+  });
+
+  return (
+    <Dialog open={open} onClose={onClose} title={`逐个运行 ${objects.length} 个对象`} size="lg"
+      description={<>每个对象各一条运行，带上它自己的档案和记忆：<span className="font-mono">{objects.slice(0, 6).join("、")}{objects.length > 6 ? ` 等 ${objects.length} 个` : ""}</span></>}
+      footer={<>
+        <Button onClick={onClose}>取消</Button>
+        <Button variant="primary" icon={<LuPlay />} disabled={!env} loading={run.pending} onClick={() => void run.mutate(undefined)}>运行 {objects.length} 个</Button>
+      </>}>
+      <div className="space-y-4">
+        {generic && (
+          <Field label="服务" required error={errors.__service}>
+            <Select value={service || null} onChange={setService} placeholder="在哪个服务上跑"
+              options={(services ?? []).filter((s) => s.enabled).map((s) => ({ value: s.name, label: s.title, hint: s.name }))} />
+          </Field>
+        )}
+        <Field label="环境" required>
+          <div className="flex flex-wrap gap-1.5">
+            {allowed.map((e) => (
+              <button key={e.name} type="button" onClick={() => setEnv(e.name)} aria-pressed={env === e.name}
+                className={cn("inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 transition-colors", env === e.name ? "border-accent bg-accent-soft" : "border-line bg-panel hover:bg-hover")}>
+                <EnvBadge env={e.name} /><span className="text-[12.5px] text-fg-2">{e.title}</span>
+              </button>
+            ))}
+          </div>
+        </Field>
+        {Object.keys(fields).length > 0 && (
+          <div className="space-y-3 rounded-lg border border-line bg-sunken/40 p-3.5">
+            <div className="text-[12px] text-fg-3">每个对象都用这份输入{task.object_input ? <>（<code className="font-mono">{task.object_input}</code> 按对象自动填）</> : ""}</div>
+            {Object.entries(fields).map(([k, f]) => (
+              <InputControl key={k} name={k} field={f} value={values[k]} error={errors[k]} onChange={(v) => setValues((s) => ({ ...s, [k]: v }))} />
+            ))}
+          </div>
+        )}
+      </div>
+    </Dialog>
   );
 }
 
@@ -505,8 +739,8 @@ function MemoryTab({ task }: { task: TaskSummary }) {
           人写的约定在「档案」标签里；记忆被反复用到、确认无误后可以升格进档案。
         </span>
       </div>
-      <KnowledgeList filters={filters} scope={scope} />
-      <AssetList filters={filters} scope={scope} />
+      <KnowledgeList filters={filters} scope={scope} filtered={!!(service || env)} onClear={() => { setService(""); setEnv(""); }} />
+      <AssetList filters={filters} scope={scope} filtered={!!(service || env)} onClear={() => { setService(""); setEnv(""); }} />
     </div>
   );
 }

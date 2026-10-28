@@ -155,7 +155,99 @@ class EventTrigger(_TriggerBase):
         return {k: data.get(v) for k, v in self.map.items() if data.get(v) is not None}
 
 
-Trigger = Annotated[Union[ApiTrigger, ChatTrigger, ScheduleTrigger, EventTrigger], Field(discriminator="type")]
+AFTER_STATUSES = ("success", "failed")
+# 上游运行能被引用的字段（映射 / 过滤）：顶层几项 + input.<字段> + output.answer + output.data.<路径>
+_AFTER_TOP = ("run_id", "task", "env", "service", "status", "caller", "error", "error_code")
+_AFTER_PATH = re.compile(r"^(?:[a-z][a-z0-9-]{1,48}(?::[^:\s/\\.]+)?\.)?"
+                         r"(?:run_id|task|env|service|status|caller|error|error_code|output\.answer"
+                         r"|input\.[A-Za-z_]\w*|output\.data(?:\.[A-Za-z_]\w*)+)$")
+
+
+class AfterTrigger(_TriggerBase):
+    """上游任务结束后：上游（任务或它的子任务）的一次运行落到 on 里的状态时，在同一个环境里跑这个任务。
+
+    mode=any：任一上游结束就触发；mode=all：每个上游都在窗口内（且在这个触发器上一次触发之后）结束过才触发，
+    由最后结束的那个触发。映射 / 过滤引用上游运行的字段（run_id、input.<字段>、output.answer、output.data.<路径>…）；
+    all 模式下可以写成「上游任务名.字段」取某一个上游的值，不带前缀的取刚结束的那一个。
+    """
+
+    type: Literal["after"] = "after"
+    tasks: list[str] = Field(min_length=1)        # 上游任务名（父任务 = 它和它的子任务；也可以写子任务全名）
+    mode: Literal["any", "all"] = "any"
+    on: list[Literal["success", "failed"]] = Field(default_factory=lambda: ["success"])
+    filter: dict[str, str] = Field(default_factory=dict)   # 上游字段 → 正则
+    map: dict[str, str] = Field(default_factory=dict)      # 下游输入字段 → 上游字段；不写 = 上游输入里同名的字段带过来
+    window_s: int = 86400                         # all 模式：多久以内结束的上游才算数
+    service: str | None = None                    # 下游是通用任务时固定服务；不写 = 沿用上游运行的服务
+
+    @field_validator("window_s")
+    @classmethod
+    def _window(cls, v: int) -> int:
+        if not 60 <= v <= 7 * 86400:
+            raise ValueError("等待窗口须在 1 分钟 ~ 7 天之间")
+        return v
+
+    def problem(self) -> str | None:
+        """写入时的检查：上游不重复、至少一个状态、过滤正则能编译、引用的字段写法对。"""
+        if len(set(self.tasks)) != len(self.tasks):
+            return f"联动 {self.id} 的上游任务重复"
+        if not self.on:
+            return f"联动 {self.id} 至少要选一种上游结束状态（成功 / 失败）"
+        for field, pattern in self.filter.items():
+            if not _AFTER_PATH.match(field):
+                return f"联动 {self.id} 的过滤字段 {field} 写法不对（如 status、input.asset_key、output.data.category）"
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                return f"联动 {self.id} 的过滤 {field} 正则不合法：{e}"
+        for k, path in self.map.items():
+            if not _AFTER_PATH.match(path):
+                return f"联动 {self.id} 的映射 {k} ← {path} 写法不对（如 run_id、input.version、output.answer）"
+        return None
+
+    def accepts(self, fields: dict[str, Any]) -> bool:
+        for field, pattern in self.filter.items():
+            try:
+                if not re.search(pattern, str(fields.get(field, "")), re.IGNORECASE):
+                    return False
+            except re.error:
+                return False
+        return True
+
+    def watches(self, task_name: str) -> bool:
+        """这个上游运行（任务名可能是子任务）是不是在 tasks 里。"""
+        base = task_name.partition(SUBTASK_SEP)[0]
+        return task_name in self.tasks or base in self.tasks
+
+
+def _upstream_of(path: str) -> str:
+    """「上游任务名.字段」里的上游任务名；不带前缀的返回空串。"""
+    head = path.split(".", 1)[0]
+    return "" if head in (*_AFTER_TOP, "input", "output") or "." not in path else head
+
+
+def run_fields(run: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """一次运行 → 联动可引用的扁平字段（映射 / 过滤用）。"""
+    output = run.get("output") or {}
+    out: dict[str, Any] = {k: run.get(k) for k in ("run_id", "task", "env", "service", "status", "error_code")}
+    out["caller"] = (run.get("trigger") or {}).get("caller") or run.get("caller")
+    out["error"] = output.get("error")
+    out["output.answer"] = output.get("answer")
+    for k, v in (run.get("input") or {}).items():
+        out[f"input.{k}"] = v
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}")
+        else:
+            out[path] = node
+    if isinstance(output.get("data"), dict):
+        walk(output["data"], "output.data")
+    return {f"{prefix}{k}": v for k, v in out.items() if v is not None}
+
+
+Trigger = Annotated[Union[ApiTrigger, ChatTrigger, ScheduleTrigger, EventTrigger, AfterTrigger], Field(discriminator="type")]
 
 
 # ———————— 投递 / 去重 / 记忆 ————————
@@ -202,6 +294,32 @@ class Dedup(BaseModel):
         return "|".join(parts) if any(parts) else ""
 
 
+# 自动重试只管临时性的失败：模型 / 工具 / 框架抛的异常（429、网络）、执行进程被杀、主机重启打断。
+# 超时、结构化结果交不出、配置没填、落错主机这些再跑一遍结果也一样，不重试
+RETRYABLE_CODES = frozenset({"error", "orphaned", "interrupted"})
+
+
+class Retry(BaseModel):
+    """失败自动重试：走续跑（同一个运行从断点接着走），最多 max 次，每次等 delay_s 秒。只对 agent 任务。"""
+
+    max: int = 2
+    delay_s: int = 60
+
+    @field_validator("max")
+    @classmethod
+    def _max(cls, v: int) -> int:
+        if not 1 <= v <= 5:
+            raise ValueError("自动重试次数须在 1~5 之间")
+        return v
+
+    @field_validator("delay_s")
+    @classmethod
+    def _delay(cls, v: int) -> int:
+        if not 10 <= v <= 3600:
+            raise ValueError("重试间隔须在 10 秒 ~ 1 小时之间")
+        return v
+
+
 # 内建处理器（form=builtin 的 handler）：实现在 orchestration/pipeline.py 的 BUILTINS，名字在这里登记，保存时就能校验
 BUILTIN_HANDLERS = ("memory-gardener",)
 
@@ -235,6 +353,17 @@ class TaskDef(BaseModel):
     # 对象字段：子任务的对象名就是这个输入字段的值（失败分析的 asset_key）。选了对象就自动填上这个输入；
     # 只给了这个输入、没点名子任务时，按它的值找（没有就建）对应的子任务——事件、API、定时都一样
     object_input: str | None = None
+    retry: Retry | None = None                # 失败自动重试；空 = 不重试（人去点续跑）
+    # 同一个环境里最多同时执行几个（连同子任务一起算）；空 = 不单独限制，只受主机的总并发约束。
+    # 一下涌进来几十条 Dagster 失败时，别把主机的执行名额全占了
+    concurrency: int | None = None
+
+    @field_validator("concurrency")
+    @classmethod
+    def _concurrency(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= 50:
+            raise ValueError("同时执行上限须在 1~50 之间")
+        return v
 
     @field_validator("timeout_s")
     @classmethod
@@ -334,6 +463,8 @@ def consistency_error(t: TaskDef, *, triggers: bool = True) -> str | None:
             return "内建任务需要处理器名"
         if t.handler not in BUILTIN_HANDLERS:
             return f"未知的内建处理器 {t.handler}（可用：{'、'.join(BUILTIN_HANDLERS)}）"
+        if t.retry:
+            return "内建任务不支持自动重试（自动重试走续跑，内建任务没有断点）"
     for name in t.input:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
             return f"输入字段名 {name!r} 不合法（字母、数字、下划线，字母或下划线开头）"
@@ -354,8 +485,18 @@ def consistency_error(t: TaskDef, *, triggers: bool = True) -> str | None:
     if len(ids) != len(set(ids)):
         return "触发器 id 重复"
     for tr in t.triggers:
-        if tr.type == "event" and (why := tr.problem()):
+        if tr.type in ("event", "after") and (why := tr.problem()):
             return why
+        if tr.type == "after":
+            missing = [k for k in tr.map if k not in t.input]
+            if missing:
+                return f"联动 {tr.id} 映射的 {'、'.join(missing)} 不是输入字段"
+            refs = [*tr.map.values(), *tr.filter]
+            if tr.mode == "any" and (prefixed := [p for p in refs if _upstream_of(p)]):
+                return f"联动 {tr.id} 是「任一上游结束」，引用不用带上游任务名：{'、'.join(prefixed)}"
+            if tr.mode == "all" and (alien := [p for p in refs if _upstream_of(p) and _upstream_of(p) not in tr.tasks]):
+                return f"联动 {tr.id} 引用了不在上游里的任务：{'、'.join(alien)}"
+            continue
         if tr.type != "schedule":
             continue
         if t.envs and (outside := [e for e in tr.envs if e not in t.envs]):

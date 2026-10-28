@@ -41,6 +41,9 @@ failure-analysis:
   deliver: {channel: default}
   dedup: {key: run_id, window_s: 600}
   timeout_s: 900
+  # 模型 429、执行进程被杀这类临时性失败自动续跑；一下涌进几十条失败时每个环境最多同时分析 4 条，其余排队
+  retry: {max: 2, delay_s: 120}
+  concurrency: 4
   profile:
     pitfalls: 资产失败先看上游资产是否完成，多数失败是上游延迟级联；先用 dagster 的 MCP 工具看线上这次运行的日志
 

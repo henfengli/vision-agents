@@ -100,7 +100,7 @@ export function ToolArgs({ tool, args }: { tool?: string; args: unknown }) {
       const title = (
         <span className="flex items-center gap-1.5">
           <LuDatabase className="size-3.5" />{q.mongo ? "MongoDB 查询" : "SQL"}
-          <span>· 库 {q.db ? <code className="font-mono text-fg-2">{q.db}</code> : <span>（唯一登记的库）</span>}</span>
+          <span>· 库 {q.db ? <code className="font-mono text-fg-2">{q.db}</code> : <span>（唯一配置的库）</span>}</span>
         </span>
       );
       return <CodeBlock title={title} code={q.text} maxHeight={260} />;

@@ -105,7 +105,7 @@ export interface EnvsConfig {
   default: string;
 }
 
-export type NotifyEvent = "run_failed" | "run_succeeded" | "feedback_negative";
+export type NotifyEvent = "run_failed" | "run_succeeded" | "feedback_negative" | "run_queued_long";
 
 export interface Channel {
   type: "dingtalk" | "webhook";
@@ -194,6 +194,8 @@ export interface ServiceEnvOverride {
   urls?: Record<string, string>;  // 按键覆盖服务的 urls
   logs?: Record<string, string>;  // 按名字覆盖服务的 logs；值写空串 = 本环境没有这个日志
   profile?: Record<string, string>;
+  /** 暂停自动触发：定时、事件、上游联动都不建运行（记成 rejected）；API、对话、人点的照常 */
+  triggers_paused?: boolean;
 }
 
 /** 服务自己的 MCP server 连接配置（langchain-mcp-adapters 形状）；另可写 envs: {环境: 深合并的覆盖} */
@@ -244,6 +246,7 @@ export interface ServiceView {
   env: string;
   enabled: boolean;
   protected: boolean;    // 环境受保护（生产）= 要填给 agent 的只读版；否则（测试）直接用项目的真实配置
+  triggers_paused: boolean;   // 暂停了自动触发（定时 / 事件 / 上游联动）
   python: string;        // 该环境的解释器（已渲染）
   root: string;
   code_paths: string[];
@@ -308,6 +311,7 @@ export interface ServiceTools {
 export interface ServiceEnvHealth {
   enabled: boolean;             // 实际是否接收运行：服务整体启用 且 该环境启用
   env_enabled: boolean;         // 只看该环境自己的开关（envs[env].enabled，默认 true）；服务整体停用时页面据此只说一次"服务已停用"
+  triggers_paused: boolean;     // 暂停了自动触发（定时 / 事件 / 上游联动）
   python: string;               // 该环境的解释器
   runs_24h: number;
   failed_24h: number;
@@ -385,9 +389,33 @@ export type Trigger =
       rules?: TriggerRule[];
       session?: string | null;              // 会话命名模板
       service?: string | null;
-    };
+    }
+  | AfterTrigger;
+
+/**
+ * 上游任务结束后：上游（任务或它的子任务）的一次运行落到 on 里的状态时，在同一个环境里跑这个任务。
+ * mode=any 任一上游结束就触发；all 每个上游都在 window_s 内（且在这个触发器上一次触发之后）结束过才触发。
+ * filter / map 引用上游运行的字段：run_id、task、env、service、status、caller、error、error_code、output.answer、
+ * input.<字段>、output.data.<路径>；all 模式可写成「上游任务名.字段」取某一个上游的。不写 map = 上游输入里同名的字段带过来
+ */
+export interface AfterTrigger {
+  id: string; type: "after"; enabled?: boolean;
+  tasks: string[];                        // 上游任务名（父任务 = 它和它的子任务；也可以写子任务全名）
+  mode: "any" | "all";
+  on: ("success" | "failed")[];
+  filter?: Record<string, string>;        // 上游字段 → 正则
+  map?: Record<string, string>;           // 下游输入字段 → 上游字段
+  window_s?: number;                      // all 模式的等待窗口（60 ~ 7 天，默认 1 天）
+  service?: string | null;                // 下游是通用任务时固定服务；不写 = 沿用上游运行的服务
+}
 
 export type TriggerType = Trigger["type"];
+
+/** 失败自动重试：走续跑，最多 max 次（1~5），每次等 delay_s 秒（10~3600）。只对 agent 任务；只重试临时性失败 */
+export interface RetryPolicy {
+  max: number;
+  delay_s: number;
+}
 
 /** 结果投递：二选一；不填 = 只等调用方来取 */
 export interface Deliver {
@@ -423,6 +451,9 @@ export interface Task extends Ledger {
   output_schema?: Record<string, unknown> | null;
   /** 对象字段：子任务的对象名就是这个输入的值（失败分析的 asset_key）；选了对象自动填上，只给了它就落到对应子任务 */
   object_input?: string | null;
+  retry?: RetryPolicy | null;   // 空 = 不自动重试（人去点续跑）
+  /** 同一个环境里最多同时执行几个（连同子任务，1~50）；空 = 只受主机的总并发约束 */
+  concurrency?: number | null;
 }
 
 export interface TaskSummary extends Task {
@@ -451,6 +482,105 @@ export interface UpcomingFire {
   at: ISODate;
 }
 
+/** GET /v1/tasks/_graph：节点是父任务（子任务归在父任务上），边是上游联动（上游结束 → 下游） */
+export interface TaskGraphNode {
+  name: string;
+  title: string;
+  service: string | null;
+  form: TaskForm;
+  enabled: boolean;
+  subtask_count: number;
+  stats_24h: TaskSummary["stats_24h"];
+  last_run: TaskSummary["last_run"];
+  next_fire: TaskSummary["next_fire"];
+  /** 入口触发（不含联动、不含停用的） */
+  entry: { type: "api" | "chat" | "schedule" | "event"; id: string; cron?: string; source?: string; event?: string }[];
+}
+
+export interface TaskGraphEdge {
+  from: string;
+  to: string;
+  trigger_id: string;
+  mode: "any" | "all";
+  on: ("success" | "failed")[];
+  enabled: boolean;              // 触发器和下游任务都启用
+  from_object: string | null;    // 上游写的是子任务全名时的对象名
+  to_object: string | null;      // 触发器写在子任务上时
+  upstreams: number;             // 这个触发器一共几个上游（all 模式要攒齐）
+}
+
+export interface TaskGraph {
+  nodes: TaskGraphNode[];
+  edges: TaskGraphEdge[];
+}
+
+// ———————————————————— 调度：触发记录 / 执行主机 ————————————————————
+
+export type TickKind = "schedule" | "event" | "after" | "retry";
+/** fired 建了运行 / deduped 命中去重（返回已有运行）/ skipped 上一次还没跑完等 / filtered 过滤条件不满足 /
+ *  waiting 联动在等其它上游 / rejected 被闸门或校验拒了 / unmatched 事件没有任务接 */
+export type TickOutcome = "fired" | "deduped" | "skipped" | "filtered" | "waiting" | "rejected" | "unmatched";
+
+export interface Tick {
+  id: number;
+  at: ISODate;
+  kind: TickKind;
+  task: string | null;
+  trigger_id: string | null;
+  env: string | null;
+  source: string | null;         // 事件来源 / 联动的上游运行 / 重试的原运行
+  outcome: TickOutcome;
+  run_id: string | null;
+  reason: string;
+  detail: Record<string, unknown> | null;
+}
+
+export interface TickFilters {
+  task?: string;
+  kind?: TickKind | "";
+  outcome?: TickOutcome | "";
+  env?: string;
+  hours?: number;
+  before?: number;
+  limit?: number;
+}
+
+export interface TickPage {
+  items: Tick[];
+  next_before: number | null;
+}
+
+/** 一台执行主机（agent 服务的 worker，每 20 秒报到一次；90 秒没动静算离线） */
+export interface Worker {
+  worker_id: string;
+  host: string;
+  env: string;                   // 空 = 开发机，什么都认领
+  services: string[];            // 空 = 全部服务
+  version: string;
+  max_concurrent: number;
+  running: number;
+  started_at: ISODate;
+  seen_at: ISODate;
+  stopped_at: ISODate | null;
+  online: boolean;
+}
+
+export interface QueueGroup {
+  env: string;
+  service: string | null;
+  queued: number;
+  oldest_at: ISODate;
+  waiting_upstream: number;      // 其中在等点名的上游
+  stuck: number;                 // 其中排队太久告警过的
+  served: boolean;               // 有没有在线的主机负责（没有 = 会一直排着）
+}
+
+export interface WorkersResponse {
+  workers: Worker[];
+  queue: { groups: QueueGroup[]; total: number };
+  queued_alert_s: number;
+}
+
 // ———————————————————— 运行 ————————————————————
 
 export type RunStatus = "queued" | "running" | "success" | "failed" | "cancelled";
@@ -459,8 +589,8 @@ export type Resolution = "agent" | "builtin" | "rule" | null;
 
 export interface RunTrigger {
   type: TriggerType | "web" | "rerun" | "resume" | "correction" | "replay";   // replay = 回归重放产生的运行
-  id: string | null;           // 触发器 id（schedule/event）；replay 时是被重放的原运行
-  source: string | null;       // 事件来源
+  id: string | null;           // 触发器 id（schedule/event/after）；replay 时是被重放的原运行
+  source: string | null;       // 事件来源；after = 触发它的上游运行
   caller: string;              // 调用身份：API 密钥名 / 控制台用户 / schedule
 }
 
@@ -480,6 +610,35 @@ export interface RunListItem {
   duration_ms: number | null;
   created_at: ISODate;
   finished_at: ISODate | null;
+  error_code: string | null;
+  attempt: number;             // 第几次执行（续跑 / 自动重试 +1）
+  retry_at: ISODate | null;    // 失败了、等着自动重试的时刻
+  depends_on: string[];        // 点名等的上游运行（都成功了才开始）
+}
+
+/** 前后关系里的一条运行（没查到的只有 run_id） */
+export interface RunBrief {
+  run_id: string;
+  status?: RunStatus;
+  task?: string;
+  task_title?: string;
+  env?: string;
+  summary?: string;
+  retry_at?: ISODate | null;
+}
+
+export interface RunLineage {
+  triggered_by: RunBrief | null;   // 上游联动：触发它的那次上游运行
+  depends_on: RunBrief[];          // 它点名等的运行
+  downstream: RunListItem[];       // 它引出的运行（联动触发的 + 点名等它的）
+}
+
+/** 排着队的运行在等什么 */
+export interface RunQueueState {
+  waiting_for: { run_id: string; status: RunStatus; task: string }[];   // 还没成功的点名上游
+  concurrency: { limit: number; running: number } | null;               // 任务的并发上限
+  hosts: { host: string; running: number; max_concurrent: number }[];   // 在线、负责它的主机
+  priority: number;                                                      // 0 对话 / 1 接口 / 2 定时、事件、联动
 }
 
 /** 定义的某一版 */
@@ -507,12 +666,13 @@ export interface Run extends RunListItem {
   input: Record<string, unknown>;
   /** 声明了 output_schema 的任务：data 是通过校验的结构化结果；step_limit：模型调用次数到上限、停用工具后给的收尾结论 */
   output: { answer?: string; error?: string; data?: Record<string, unknown>; step_limit?: boolean; [k: string]: unknown } | null;
-  error_code: string | null;
   memory: MemoryOverride;
   context: RunContext;
   feedback: FeedbackEntry[];   // 所有人对整次（step_seq=0）与各步的评价
   /** 执行中的工具（bash / py 跑得久时每几秒一条输出尾部），工具结束就没了 */
   progress?: Record<string, ToolProgress> | null;
+  lineage: RunLineage;
+  queue: RunQueueState | null;   // 只有排队中的有
 }
 
 export interface ToolProgress {
@@ -578,6 +738,8 @@ export interface RunRequest {
   session_id?: string | null;
   memory?: MemoryOverride;
   wait?: number;               // 同步等待秒数（0–300）
+  /** 点名等的上游运行（最多 20 个）：都成功了才开始；有一个失败 / 取消，这次就判失败（upstream_failed） */
+  after?: string[];
 }
 
 export interface RunAccepted {

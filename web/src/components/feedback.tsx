@@ -12,6 +12,8 @@ import { LuThumbsDown, LuThumbsUp } from "react-icons/lu";
 
 import { api, useMeta } from "@/api/hooks";
 import type { FeedbackEntry, FeedbackReason } from "@/api/types";
+import { ReasonChip } from "./status";
+import { TimeAgo } from "./time";
 import { Button } from "./ui/button";
 import { Checkbox, Textarea } from "./ui/form";
 import { Popover, Tooltip, toast } from "./ui/overlay";
@@ -23,7 +25,7 @@ export function useReasonLabel() {
   return (r: string) => meta?.feedback_reasons.find((x) => x.value === r)?.label ?? r;
 }
 
-export function FeedbackButtons({ runId, step = 0, mine, onSaved, onCorrect, size = "md", className }: {
+export function FeedbackButtons({ runId, step = 0, mine, onSaved, onCorrect, size = "md", className, reason }: {
   runId: string;
   step?: number;
   mine: FeedbackEntry | null | undefined;
@@ -31,6 +33,8 @@ export function FeedbackButtons({ runId, step = 0, mine, onSaved, onCorrect, siz
   onCorrect?: (text: string) => void;
   size?: "sm" | "md";
   className?: string;
+  /** 现在不能评价的原因（比如运行还没结束）：按钮留在原位、变灰，悬停显示原因 */
+  reason?: string;
 }) {
   const [current, setCurrent] = useState<FeedbackEntry | null>(mine ?? null);
   const label = useReasonLabel();
@@ -57,6 +61,15 @@ export function FeedbackButtons({ runId, step = 0, mine, onSaved, onCorrect, siz
   const negativeHint = current?.score === -1
     ? [current.reasons.map(label).join("、"), current.comment].filter(Boolean).join("：") || "已标记为有问题"
     : "有问题";
+
+  if (reason) return (
+    <Tooltip content={reason}>
+      <span className={cn("inline-flex items-center gap-0.5 text-fg-3 opacity-50", className)} aria-disabled>
+        <span className={btn}><LuThumbsUp className={icon} /></span>
+        <span className={btn}><LuThumbsDown className={icon} /></span>
+      </span>
+    </Tooltip>
+  );
 
   return (
     <span className={cn("inline-flex items-center gap-0.5 text-fg-3", className)} onClick={(e) => e.stopPropagation()}>
@@ -141,10 +154,10 @@ export function FeedbackItem({ entry, showStep = true, extra }: { entry: Feedbac
         <span className="font-medium text-fg">{entry.created_by}</span>
         {showStep && <span className="text-fg-3">{entry.step_seq ? `第 ${entry.step_seq} 步` : "整次运行"}</span>}
         {extra}
-        <span className="ml-auto text-[11px] text-fg-3">{ago(entry.updated_at)}</span>
+        <TimeAgo at={entry.updated_at} className="ml-auto text-[11px] text-fg-3" />
       </div>
       {entry.reasons.length > 0 && (
-        <div className="flex flex-wrap gap-1">{entry.reasons.map((r) => <span key={r} className="rounded-full bg-bad-soft px-2 py-0.5 text-[11px] text-bad">{label(r)}</span>)}</div>
+        <div className="flex flex-wrap gap-1">{entry.reasons.map((r) => <ReasonChip key={r}>{label(r)}</ReasonChip>)}</div>
       )}
       {entry.comment && <div className="whitespace-pre-wrap text-[12.5px] text-fg-2">{entry.comment}</div>}
     </div>

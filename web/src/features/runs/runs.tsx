@@ -4,7 +4,7 @@
  * - 反馈：大家点的 👍👎（默认只看 👎），见 feedback-inbox.tsx。
  * - 回归重放：拿被 👎 的运行用当前定义重跑、看问题改好没有，见 replays.tsx。
  */
-import { LuActivity, LuChevronLeft, LuChevronRight, LuFlaskConical, LuMessageSquareWarning, LuRefreshCw } from "react-icons/lu";
+import { LuActivity, LuChevronLeft, LuChevronRight, LuFlaskConical, LuMessageSquareWarning, LuRadar, LuRefreshCw } from "react-icons/lu";
 
 import { useApiKeys, useMeta, useRuns, useTasks } from "@/api/hooks";
 import type { RunFilters, RunStatus } from "@/api/types";
@@ -18,9 +18,11 @@ import { Card, Dot, Empty } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
+import { EmptyFiltered } from "@/components/states";
 import { FeedbackInbox, type InboxSearch } from "./feedback-inbox";
 import { ReplayList } from "./replays";
 import { RunsTable } from "./runs-table";
+import { TicksPanel } from "./ticks";
 
 const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
   { value: "", label: "全部" }, { value: "running", label: "运行中" }, { value: "queued", label: "排队中" }, { value: "failed", label: "失败" },
@@ -28,26 +30,29 @@ const STATUS_TABS: { value: RunStatus | ""; label: string }[] = [
 ];
 
 /** 续跑不改运行的触发方式（还是原来那次的），所以这里没有「续跑」 */
-const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "web", "rerun", "correction", "replay"];
+const TRIGGER_TYPES = ["api", "chat", "schedule", "event", "after", "web", "rerun", "correction", "replay"];
 
 const PAGE_SIZE = 50;
 
-type View = "runs" | "feedback" | "replays";
+type View = "runs" | "ticks" | "feedback" | "replays";
 
 type Search = { status: string; hours: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
 
 export function RunsPage() {
-  const [s, setS] = useSearch<Search & InboxSearch & { view: View }>();
-  const view: View = s.view === "feedback" || s.view === "replays" ? s.view : "runs";
+  const [s, setS] = useSearch<Search & InboxSearch & { view: View; kind: string; outcome: string }>();
+  const view: View = s.view === "feedback" || s.view === "replays" || s.view === "ticks" ? s.view : "runs";
   return (
     <Page wide>
-      <PageHeader title="运行" description="每一次执行都在这里，点进去看每一步做了什么。大家的评价在「反馈」，改完提示词或定义后在「回归重放」里拿过去的运行重跑对比。" />
-      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined })} tabs={[
+      <PageHeader title="运行" description="每一次执行都在这里，点进去看每一步做了什么。定时、事件、联动为什么跑了 / 没跑在「触发记录」；大家的评价在「反馈」；改完提示词或定义后在「回归重放」里拿过去的运行重跑对比。" />
+      {/* 换标签只留各标签共用的筛选（任务、环境、时间），各自特有的清掉 */}
+      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined, kind: undefined, outcome: undefined, status: undefined, trigger: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
+        { value: "ticks", label: "触发记录", icon: <LuRadar /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
         { value: "replays", label: "回归重放", icon: <LuFlaskConical /> },
       ]} />
-      {view === "runs" ? <RunList /> : view === "feedback" ? <FeedbackInbox s={s} set={(patch) => setS(patch)} /> : <ReplayList />}
+      {view === "runs" ? <RunList /> : view === "ticks" ? <TicksPanel s={s} set={(patch) => setS(patch)} />
+        : view === "feedback" ? <FeedbackInbox s={s} set={(patch) => setS(patch)} /> : <ReplayList />}
     </Page>
   );
 }
@@ -60,7 +65,7 @@ function RunList() {
     status: (s.status as RunStatus) || "", hours: Number(s.hours) || undefined, service: s.service, env: env || undefined,
     task: s.task, trigger: s.trigger, caller: s.caller, q: s.q, session_id: s.session_id, cursor: s.cursor, limit: PAGE_SIZE,
   };
-  const { data, loading, fetching, refetch } = useRuns(filters);
+  const { data, loading, fetching, refetch, error } = useRuns(filters);
   const { data: tasks } = useTasks();
 
   /** 改筛选就回到第一页 */
@@ -104,8 +109,9 @@ function RunList() {
       </div>
 
       <Card>
-        <RunsTable runs={data?.items} loading={loading}
-          empty={<Empty icon={<LuActivity />} title="没有符合条件的运行" description={active ? "试试放宽筛选条件" : "任务运行后会出现在这里"} />} />
+        <RunsTable runs={data?.items} loading={loading} error={error} onRetry={() => void refetch()}
+          empty={active ? <EmptyFiltered what="运行" icon={<LuActivity />} onClear={clear} />
+            : <Empty icon={<LuActivity />} title="还没有运行" description="任务运行后会出现在这里" />} />
         {data && (data.next_cursor || data.prev_cursor) && (
           <div className="flex items-center justify-between border-t border-line px-4 py-2.5">
             <span className="text-xs text-fg-3">共 {data.total} 条 · 每页 {PAGE_SIZE} 条</span>

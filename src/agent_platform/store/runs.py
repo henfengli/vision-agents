@@ -18,7 +18,8 @@ from typing import Any
 from . import db
 
 _LIST_COLS = ("run_id, session_id, task, role, service, env, status, resolution, trigger_type, trigger_id,"
-              " trigger_source, caller, summary, tokens, duration_ms, created_at, finished_at")
+              " trigger_source, caller, summary, tokens, duration_ms, created_at, finished_at, attempt, retry_at,"
+              " depends_on, error_code")
 
 
 def _iso(v: datetime | None) -> str | None:
@@ -32,13 +33,15 @@ def _list_row(r) -> dict:
         "trigger": {"type": r[8], "id": r[9], "source": r[10], "caller": r[11]},
         "summary": r[12], "tokens": r[13], "duration_ms": r[14],
         "created_at": r[15].isoformat(), "finished_at": _iso(r[16]),
+        "attempt": r[17], "retry_at": _iso(r[18]), "depends_on": list(r[19] or []), "error_code": r[20],
     }
 
 
 def _row(cur, row) -> dict:
     d = {c.name: v for c, v in zip(cur.description, row)}
-    for k in ("created_at", "started_at", "finished_at", "heartbeat_at"):
+    for k in ("created_at", "started_at", "finished_at", "heartbeat_at", "retry_at", "queue_alerted_at"):
         d[k] = _iso(d.get(k))
+    d["depends_on"] = list(d.get("depends_on") or [])
     d["trigger"] = {"type": d.pop("trigger_type"), "id": d.pop("trigger_id"), "source": d.pop("trigger_source"), "caller": d["caller"]}
     return d
 
@@ -47,17 +50,20 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
                  trigger_type: str, trigger_id: str | None, trigger_source: str | None, caller: str | None,
                  summary: str, input_data: dict, memory: dict | None = None, status: str = "queued",
                  dedup_key: str | None = None, idempotency_key: str | None = None,
-                 output: dict | None = None, resolution: str | None = None) -> None:
+                 output: dict | None = None, resolution: str | None = None, depends_on: list[str] | None = None,
+                 priority: int = 1, concurrency_key: str | None = None, concurrency_limit: int | None = None) -> None:
     """output + resolution 只在规则先行命中时预先给出（结论在提交时就有了）。"""
     async with db.pool().connection() as conn:
         await conn.execute(
             "INSERT INTO runs (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,"
-            " caller, summary, input, memory, status, dedup_key, idempotency_key, output, resolution)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " caller, summary, input, memory, status, dedup_key, idempotency_key, output, resolution, depends_on,"
+            " priority, concurrency_key, concurrency_limit)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (run_id, session_id, task, role, service, env, trigger_type, trigger_id, trigger_source,
              (caller or "").strip() or trigger_type, summary[:300], json.dumps(input_data, ensure_ascii=False, default=str),
              json.dumps(memory or {}), status, dedup_key or None, idempotency_key or None,
-             json.dumps(output, ensure_ascii=False) if output is not None else None, resolution))
+             json.dumps(output, ensure_ascii=False) if output is not None else None, resolution,
+             list(depends_on or []), priority, concurrency_key, concurrency_limit))
         if status == "queued":
             await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
@@ -65,32 +71,187 @@ async def create(*, run_id: str, session_id: str, task: str, role: str | None, s
 # ———————— 执行队列 ————————
 
 async def enqueue(run_id: str, *, resume: bool = False) -> None:
-    """把一个已有的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉。"""
+    """把一个已有的运行放回队列（续跑），并叫醒 worker。上一次的失败码、结束时间清掉；第几次执行 +1。"""
     async with db.pool().connection() as conn:
         await conn.execute("UPDATE runs SET status='queued', resume=%s, heartbeat_at=NULL, error_code=NULL,"
-                           " finished_at=NULL, duration_ms=NULL, progress=NULL WHERE run_id=%s", (resume, run_id))
+                           " finished_at=NULL, duration_ms=NULL, progress=NULL, retry_at=NULL, queue_alerted_at=NULL,"
+                           " attempt=attempt+1 WHERE run_id=%s", (resume, run_id))
         await conn.execute("SELECT pg_notify('runs_queued', %s)", (run_id,))
 
 
+# 认领条件里的两项调度约束：
+# - 点名的上游运行都成功了（depends_on 为空的不用查）
+# - 任务在这个环境同时执行的数量没到上限（concurrency_limit 为空的不用查）
+_CLAIMABLE = (
+    "(r.depends_on = '{}' OR NOT EXISTS (SELECT 1 FROM runs u WHERE u.run_id = ANY(r.depends_on)"
+    "  AND u.status <> 'success'))"
+    " AND (r.concurrency_limit IS NULL OR (SELECT count(*) FROM runs x WHERE x.status = 'running'"
+    "  AND x.concurrency_key = r.concurrency_key) < r.concurrency_limit)")
+
+
 async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str, ...] = ()) -> str | None:
-    """认领最早的一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。
-    env 非空：只认领这个环境的；services 非空：再限这几个服务（平台任务不限）。都空（开发机）：什么都认领。"""
-    where, params = ["status='queued'"], [worker]
+    """认领一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。
+    顺序：优先级（人在等的先），同优先级先到先得。等上游的、任务并发已满的先跳过。
+    env 非空：只认领这个环境的；services 非空：再限这几个服务（平台任务不限）。都空（开发机）：什么都认领。
+    同一环境的认领用一把事务级咨询锁串起来：并发上限要先数再领，两台主机同时数会一起超过上限。"""
+    where, params = ["r.status='queued'", _CLAIMABLE], [worker]
     if env:
-        where.append("env=%s")
+        where.append("r.env=%s")
         params.append(env)
     if services:
-        where.append("(service IS NULL OR service = ANY(%s))")
+        where.append("(r.service IS NULL OR r.service = ANY(%s))")
         params.append(list(services))
     async with db.pool().connection() as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"claim:{env}",))
         cur = await conn.execute(
             "UPDATE runs SET status='running', worker=%s, heartbeat_at=now(),"
             " started_at=COALESCE(started_at, now())"
-            f" WHERE run_id = (SELECT run_id FROM runs WHERE {' AND '.join(where)} ORDER BY created_at"
-            "                 FOR UPDATE SKIP LOCKED LIMIT 1)"
+            f" WHERE run_id = (SELECT r.run_id FROM runs r WHERE {' AND '.join(where)}"
+            "                 ORDER BY r.priority, r.created_at FOR UPDATE SKIP LOCKED LIMIT 1)"
             " RETURNING run_id", params)
         row = await cur.fetchone()
     return row[0] if row else None
+
+
+async def fail_dependents(run_id: str, reason: str) -> list[str]:
+    """上游运行失败 / 取消了：点名等它的排队运行不再执行，落 failed / upstream_failed。→ 这次标掉的（含连带的下游）。"""
+    failed: list[str] = []
+    frontier = [run_id]
+    while frontier and len(failed) < 500:
+        async with db.pool().connection() as conn:
+            cur = await conn.execute(
+                "UPDATE runs SET status='failed', error_code='upstream_failed', finished_at=now(), duration_ms=0,"
+                " output=jsonb_build_object('error', %s::text)"
+                " WHERE status='queued' AND depends_on && %s::text[] RETURNING run_id", (reason, frontier))
+            ids = [r[0] for r in await cur.fetchall()]
+            for rid in ids:
+                await conn.execute("SELECT pg_notify('run_events', %s)", (rid,))
+        failed += ids
+        frontier = ids
+        reason = "上游运行没有执行（它等的上游失败了）"
+    return failed
+
+
+async def blocked_by_upstream() -> list[tuple[str, str, str]]:
+    """排队中、点名的上游里已经有失败 / 取消的（提交端或维护循环漏处理时兜底）→ [(run_id, 上游 id, 上游状态)]。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT r.run_id, u.run_id, u.status FROM runs r JOIN runs u ON u.run_id = ANY(r.depends_on)"
+            " WHERE r.status='queued' AND r.depends_on <> '{}' AND u.status IN ('failed','cancelled')"
+            " AND u.retry_at IS NULL LIMIT 200")
+        return [(a, b, c) for a, b, c in await cur.fetchall()]
+
+
+async def running_with_key(concurrency_key: str) -> int:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM runs WHERE status='running' AND concurrency_key=%s",
+                                 (concurrency_key,))
+        return (await cur.fetchone())[0]
+
+
+async def has_waiting_dependents(run_id: str) -> bool:
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT 1 FROM runs WHERE status='queued' AND %s = ANY(depends_on) LIMIT 1", (run_id,))
+        return await cur.fetchone() is not None
+
+
+async def wake() -> None:
+    """叫醒各台 worker 看一眼队列（上游成功了，等它的运行现在能认领了）。"""
+    async with db.pool().connection() as conn:
+        await conn.execute("SELECT pg_notify('runs_queued', '')")
+
+
+async def statuses(run_ids: list[str]) -> dict[str, dict]:
+    """一批运行的状态（提交时校验点名的上游、详情页显示上游）→ {run_id: {status, task, env, retry_at}}。"""
+    if not run_ids:
+        return {}
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT run_id, status, task, env, retry_at, summary FROM runs WHERE run_id = ANY(%s)",
+                                 (list(run_ids),))
+        return {r[0]: {"run_id": r[0], "status": r[1], "task": r[2], "env": r[3], "retry_at": _iso(r[4]),
+                       "summary": r[5]} for r in await cur.fetchall()}
+
+
+async def downstream_of(run_id: str) -> list[dict]:
+    """这次运行引出的运行：上游联动触发的（trigger_source = 它）和点名等它的（depends_on 含它）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_LIST_COLS} FROM runs WHERE (trigger_type='after' AND trigger_source=%s) OR %s = ANY(depends_on)"
+            " ORDER BY created_at LIMIT 100", (run_id, run_id))
+        return [_list_row(r) for r in await cur.fetchall()]
+
+
+async def last_after_fire(task: str, trigger_id: str, env: str) -> str | None:
+    """上游联动触发器在这个环境上一次建运行的时间（all 模式从这之后重新攒齐）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT max(created_at) FROM runs WHERE task=%s AND trigger_type='after' AND trigger_id=%s AND env=%s",
+            (task, trigger_id, env))
+        row = await cur.fetchone()
+    return _iso(row[0]) if row and row[0] else None
+
+
+async def latest_finished(task: str, env: str, statuses_: list[str], since: str) -> dict | None:
+    """任务（连同子任务）在这个环境 since 之后最近一次落到这些状态的运行（重放出来的不算；等着重试的失败不算）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT * FROM runs WHERE (task=%s OR task LIKE %s) AND env=%s AND status = ANY(%s)"
+            " AND trigger_type <> 'replay' AND retry_at IS NULL AND finished_at > %s::timestamptz"
+            " ORDER BY finished_at DESC LIMIT 1", (task, task + ":%", env, list(statuses_), since))
+        row = await cur.fetchone()
+    return _row(cur, row) if row else None
+
+
+async def claim_due_retries(limit: int = 20) -> list[str]:
+    """到点了的自动重试：一条 UPDATE 把 retry_at 清掉并领走，几台主机同时扫也只有一台拿到。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "UPDATE runs SET retry_at=NULL WHERE run_id IN (SELECT run_id FROM runs WHERE status='failed'"
+            " AND retry_at IS NOT NULL AND retry_at <= now() ORDER BY retry_at FOR UPDATE SKIP LOCKED LIMIT %s)"
+            " RETURNING run_id", (limit,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def schedule_retry(run_id: str, delay_s: int) -> bool:
+    """别处标成失败的运行（执行进程被杀判成孤儿）定好自动重试的时刻（只改还是 failed 的）。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "UPDATE runs SET retry_at = now() + make_interval(secs => %s) WHERE run_id=%s AND status='failed'"
+            " RETURNING run_id", (delay_s, run_id))
+        return await cur.fetchone() is not None
+
+
+async def clear_retry(run_id: str) -> bool:
+    """取消等着的自动重试（人点了续跑 / 重跑、任务停用了）。→ 原来有没有在等。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("UPDATE runs SET retry_at=NULL WHERE run_id=%s AND retry_at IS NOT NULL RETURNING run_id",
+                                 (run_id,))
+        return await cur.fetchone() is not None
+
+
+async def queued_too_long(after_s: int, limit: int = 50) -> list[dict]:
+    """排队超过 after_s 秒、还没告警过的运行（等上游的、任务并发已满的不算：那是在按规则等）。领走即标记已告警。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "UPDATE runs SET queue_alerted_at=now() WHERE run_id IN (SELECT r.run_id FROM runs r"
+            f" WHERE r.status='queued' AND r.queue_alerted_at IS NULL AND {_CLAIMABLE}"
+            " AND r.created_at < now() - make_interval(secs => %s) FOR UPDATE SKIP LOCKED LIMIT %s)"
+            " RETURNING run_id, task, service, env, created_at", (after_s, limit))
+        return [{"run_id": a, "task": b, "service": c, "env": d, "created_at": _iso(e)}
+                for a, b, c, d, e in await cur.fetchall()]
+
+
+async def queue_summary() -> dict:
+    """排队情况（概览、主机卡片）：排着的总数、排了多久的最老一条、按 环境 / 服务 分组的数量。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT env, service, count(*), min(created_at),"
+            " count(*) FILTER (WHERE depends_on <> '{}'), count(*) FILTER (WHERE queue_alerted_at IS NOT NULL)"
+            " FROM runs WHERE status='queued' GROUP BY env, service ORDER BY env, service")
+        rows = await cur.fetchall()
+    return {"groups": [{"env": e, "service": s, "queued": n, "oldest_at": _iso(t), "waiting_upstream": w, "stuck": k}
+                       for e, s, n, t, w, k in rows],
+            "total": sum(r[2] for r in rows)}
 
 
 async def heartbeat(worker: str, run_ids: list[str]) -> set[str]:
@@ -142,8 +303,9 @@ async def get(run_id: str) -> dict | None:
 
 
 async def set_status(run_id: str, status: str, *, output: dict | None = None, resolution: str | None = None,
-                     error_code: str | None = None, tokens: int | None = None) -> bool:
+                     error_code: str | None = None, tokens: int | None = None, retry_in: int | None = None) -> bool:
     """改成终态，落 finished_at 与耗时。只改还在排队 / 执行中的：已经结束的（比如刚被取消、被判成孤儿）不再覆盖。
+    retry_in：失败后多少秒自动重试（和状态一起落，中间没有"已经终态失败"的空当）。
     → 改到了没有。改完 pg_notify('run_events')：推流的一方马上收尾，不用等下一次保活。"""
     async with db.pool().connection() as conn:
         cur = await conn.execute(
@@ -151,10 +313,11 @@ async def set_status(run_id: str, status: str, *, output: dict | None = None, re
             " output=COALESCE(%s::jsonb, output), resolution=COALESCE(%s, resolution),"
             " error_code=COALESCE(%s, error_code), tokens=COALESCE(%s, tokens),"
             " finished_at=now(), progress=NULL,"
+            " retry_at=CASE WHEN %s::int IS NULL THEN NULL ELSE now() + make_interval(secs => %s::int) END,"
             " duration_ms=(EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int"
             " WHERE run_id=%s AND status IN ('queued','running') RETURNING run_id",
             (status, json.dumps(output, ensure_ascii=False, default=str) if output is not None else None,
-             resolution, error_code, tokens, run_id))
+             resolution, error_code, tokens, retry_in, retry_in, run_id))
         changed = await cur.fetchone() is not None
         if changed:
             await conn.execute("SELECT pg_notify('run_events', %s)", (run_id,))

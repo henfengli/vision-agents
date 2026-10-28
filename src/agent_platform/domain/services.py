@@ -110,6 +110,9 @@ class EnvOverride(BaseModel):
     """按环境覆盖：只写和基座不同的部分。enabled=false 表示该服务在这个环境不接收运行。"""
 
     enabled: bool = True
+    # 暂停自动触发：定时、事件、上游联动在这个服务×环境上一律不建运行（触发记录里记一条 paused）；
+    # 人手动跑、API、对话照常。维护窗口（比如库重启）用，过后打开就好，不用一个个去关触发器
+    triggers_paused: bool = False
     root: str | None = None                   # 这个环境的代码目录（不写跟随服务的 root）
     databases: dict[str, str] = Field(default_factory=dict)   # 按库名覆盖服务的 databases；值写空串 = 本环境没有这个库
     code_paths: list[str] | None = None
@@ -136,6 +139,7 @@ class ServiceView(BaseModel):
     env: str
     title: str
     enabled: bool
+    triggers_paused: bool = False
     root: str
     code_paths: list[str]
     python: str
@@ -243,6 +247,7 @@ class ServiceDef(BaseModel):
         logs = {k: render(v, env) for k, v in {**self.logs, **o.logs}.items() if v}
         return ServiceView(
             service=name, env=env, title=self.title or name, enabled=self.enabled and o.enabled,
+            triggers_paused=o.triggers_paused,
             root=root, code_paths=[render(p, env) for p in code_paths],
             python=python, env_vars={k: render(v, env, python=python) for k, v in self.env_vars.items()},
             urls=self.urls_for(env),

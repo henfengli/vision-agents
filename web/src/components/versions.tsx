@@ -1,5 +1,5 @@
 /**
- * 版本历史：时间线 + 任选两版 diff + 恢复。服务 / 角色 / 任务与平台配置各节共用。
+ * 版本：时间线 + 任选两版 diff + 恢复。服务 / 角色 / 任务与平台配置各节共用。
  */
 import { useEffect, useMemo, useState } from "react";
 import { LuGitCompare, LuHistory, LuRotateCcw } from "react-icons/lu";
@@ -7,12 +7,13 @@ import { LuGitCompare, LuHistory, LuRotateCcw } from "react-icons/lu";
 import { api, useVersions, useVersionStats, type DefinitionPath, type StatsPath } from "@/api/hooks";
 import type { ConfigSection, Version, VersionStat } from "@/api/types";
 import { cn } from "@/lib/cn";
-import { ago, datetime, duration, pct } from "@/lib/format";
+import { datetime, duration, pct } from "@/lib/format";
 import { invalidate } from "@/lib/query";
+import { TimeAgo } from "./time";
 import { Button } from "./ui/button";
 import { DiffView, stableYaml } from "./ui/data";
-import { confirm, toast } from "./ui/overlay";
-import { Badge, Card, CardHeader, Empty, SkeletonRows } from "./ui/primitives";
+import { Tooltip, confirm, toast } from "./ui/overlay";
+import { Badge, Card, CardHeader, Empty, ErrorState, SkeletonRows } from "./ui/primitives";
 
 const STRIP = new Set(["version", "updated_by", "updated_at", "name", "section", "overrides", "stats_24h", "last_run", "next_fire", "subtask_count", "task_count", "generic_task_count", "health"]);
 
@@ -29,9 +30,9 @@ function StatLine({ s }: { s: VersionStat }) {
   if (s.avg_tokens) parts.push(`均 ${kTokens(s.avg_tokens)} tokens`);
   if (s.avg_ms !== null) parts.push(duration(s.avg_ms));
   return (
-    <div className="mt-0.5 text-[11px] tabular-nums text-fg-3" title={`失败 ${s.failed} 次 · ${datetime(s.first_at)} ~ ${datetime(s.last_at)}（回归重放不算）`}>
-      {parts.join(" · ")}
-    </div>
+    <Tooltip content={`失败 ${s.failed} 次 · ${datetime(s.first_at)} ~ ${datetime(s.last_at)}（回归重放不算）`}>
+      <span className="mt-0.5 block text-[11px] tabular-nums text-fg-3">{parts.join(" · ")}</span>
+    </Tooltip>
   );
 }
 
@@ -39,7 +40,7 @@ function StatLine({ s }: { s: VersionStat }) {
 export function VersionHistory({ kind, name, onRestored, stats }: {
   kind: DefinitionPath | `settings/${ConfigSection}`; name?: string; onRestored?: () => void; stats?: boolean;
 }) {
-  const { data, loading, refetch } = useVersions(kind, name);
+  const { data, loading, error, refetch } = useVersions(kind, name);
   const statsKind: StatsPath | null = stats && (kind === "tasks" || kind === "roles" || kind === "settings/prompts") ? kind : null;
   const { data: statList } = useVersionStats(statsKind ?? "tasks", name, !!statsKind);
   const statOf = useMemo(() => new Map((statsKind ? statList ?? [] : []).map((s) => [s.version, s])), [statsKind, statList]);
@@ -79,8 +80,10 @@ export function VersionHistory({ kind, name, onRestored, stats }: {
     if (b !== null && v > b) { setA(b); setB(v); } else setA(v);
   };
 
-  if (loading) return <Card><SkeletonRows /></Card>;
-  if (!data?.length) return <Card><Empty icon={<LuHistory />} title="没有历史版本" /></Card>;
+  // 出错先判：查询层出错时 loading=false、data=undefined，不判就显示成"还没有版本"
+  if (error && !data) return <Card><ErrorState error={error} onRetry={() => void refetch()} /></Card>;
+  if (loading || !data) return <Card><SkeletonRows /></Card>;
+  if (!data.length) return <Card><Empty icon={<LuHistory />} title="还没有版本" description="保存过一次之后，每一版都留在这里" /></Card>;
   return (
     <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
       <Card className="h-fit">
@@ -101,11 +104,12 @@ export function VersionHistory({ kind, name, onRestored, stats }: {
                   {v.deleted && <Badge tone="bad">已删除</Badge>}
                   {v.version === a && <Badge tone="warn">对比基准</Badge>}
                 </div>
-                <div className="mt-0.5 text-[11.5px] text-fg-3" title={datetime(v.created_at, true)}>{v.updated_by} · {ago(v.created_at)}</div>
+                <div className="mt-0.5 text-[11.5px] text-fg-3">{v.updated_by} · <TimeAgo at={v.created_at} /></div>
                 {statOf.has(v.version) && <StatLine s={statOf.get(v.version)!} />}
               </button>
+              {/* 一直显示（淡一些）：只在悬停时出现的话，触屏看不到、键盘聚焦到也看不见 */}
               {i > 0 && (
-                <Button size="icon-xs" variant="ghost" className="opacity-0 group-hover:opacity-100" title="恢复到此版本" onClick={() => restore(v)}><LuRotateCcw /></Button>
+                <Button size="icon-xs" variant="ghost" className="text-fg-3 group-hover:text-fg-2" tip={`恢复到 v${v.version}`} aria-label={`恢复到 v${v.version}`} onClick={() => restore(v)}><LuRotateCcw /></Button>
               )}
             </li>
           ))}

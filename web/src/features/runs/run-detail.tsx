@@ -6,27 +6,30 @@
  */
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuFlag, LuFlaskConical,
-  LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRotateCcw, LuScrollText, LuSparkles, LuWrench,
+  LuArrowDown, LuBan, LuBot, LuBrain, LuChevronDown, LuChevronRight, LuCircleAlert, LuCircleCheck, LuCopy, LuEllipsis, LuFlag, LuFlaskConical,
+  LuHourglass, LuListTodo, LuMessageSquare, LuMessageSquareWarning, LuPencilLine, LuPlay, LuRefreshCw, LuRotateCcw, LuScrollText, LuServerOff,
+  LuSparkles, LuWorkflow, LuWrench,
 } from "react-icons/lu";
 
-import { ApiError } from "@/api/client";
 import { api, useMeta, useRun, useRunEvents, useServices, useTasks } from "@/api/hooks";
-import type { KnowledgeKind, RecipeRef, Run, RunEvent } from "@/api/types";
+import type { KnowledgeKind, RecipeRef, Run, RunBrief, RunEvent } from "@/api/types";
 import { FeedbackButtons, FeedbackItem } from "@/components/feedback";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TRIGGER, TriggerBadge } from "@/components/status";
+import { IdCopy } from "@/components/meta";
+import { DetailError } from "@/components/states";
+import { EnvBadge, KindBadge, ResolutionTag, RunStatusBadge, RunStatusDot, TRIGGER, TriggerBadge } from "@/components/status";
+import { TimeAgo, TimeUntil } from "@/components/time";
 import { TodoList, ToolArgs, ToolOutput, summarizeArgs, todoItems } from "@/components/tool-call";
 import { Button, LinkButton } from "@/components/ui/button";
 import { CodeBlock, CopyButton, JsonView, Markdown } from "@/components/ui/data";
 import { Field, Textarea } from "@/components/ui/form";
-import { Dialog, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, DescList, Empty, ErrorState, Kbd, SectionTitle, Skeleton } from "@/components/ui/primitives";
+import { Dialog, Menu, Tooltip, confirm, toast } from "@/components/ui/overlay";
+import { Badge, Card, CardHeader, DescList, Kbd, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
 import { ago, clock, datetime, duration, num, shortId } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { Link, navigate, useParams } from "@/lib/router";
-import { KindBadge } from "../memory/memory";
+import { RunTaskDialog } from "../tasks/run-dialog";
 import { StartReplayDialog } from "./replays";
 
 const LIVE = new Set(["queued", "running"]);
@@ -58,14 +61,18 @@ export function RunDetailPage() {
   }, [run?.status, run?.finished_at]); // eslint-disable-line react-hooks/exhaustive-deps
   const { data: events } = useRunEvents(id, poll);
 
-  if (error) return <Page>{error instanceof ApiError && error.status === 404
-    ? <Empty title="运行不存在" description="链接可能已失效" action={<LinkButton to="/runs">回到运行列表</LinkButton>} />
-    : <ErrorState error={error} onRetry={refetch} />}</Page>;
+  if (error && !run) return (
+    <Page>
+      <PageHeader crumbs={[{ label: "运行", to: "/runs" }, { label: <span className="font-mono">{shortId(id)}</span> }]} title="运行" />
+      <DetailError error={error} onRetry={refetch} what="运行" back={{ to: "/runs", label: "回到运行列表" }} />
+    </Page>
+  );
   if (!run) return <Page><Skeleton className="mb-4 h-20" /><Skeleton className="h-96" /></Page>;
 
   return (
     <Page wide>
       <Header run={run} events={events} />
+      <StateBanner run={run} />
       <div className="grid gap-4 xl:grid-cols-[1fr_380px]">
         <div className="min-w-0 space-y-4">
           <Timeline run={run} events={events} live={live} />
@@ -96,12 +103,16 @@ function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
   };
   const [busy, setBusy] = useState<"cancel" | "again" | null>(null);
   const cancel = async () => {
-    if (!(await confirm({ title: "取消这次运行？", description: "终止执行，运行落 cancelled 终态；已经做完的步骤保留在时间线里。", danger: true, confirmText: "取消运行", cancelText: "不取消" }))) return;
+    const queued = run.status === "queued";
+    if (!(await confirm({ title: "取消这次运行？", danger: true, confirmText: "取消运行", cancelText: "不取消",
+      description: queued ? "它还在排队，取消后不会再执行；点名等它的运行也跟着不执行。"
+        : "终止执行，运行落 cancelled 终态；已经做完的步骤保留在时间线里。点名等它的运行跟着不执行。" }))) return;
     setBusy("cancel");
     try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消"); } catch (e) { toast.error("取消失败", (e as Error).message); } finally { setBusy(null); }
   };
   const [correcting, setCorrecting] = useState(false);
   const [replaying, setReplaying] = useState(false);
+  const [chaining, setChaining] = useState(false);
   const { data: tasks } = useTasks();
   const { data: services } = useServices();
   const def = tasks?.find((t) => t.name === run.task);
@@ -117,31 +128,53 @@ function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
   /** 回归重放：结束了的 agent 运行（规则命中、内建、本身就是重放出来的除外） */
   const replayable = !live && !builtin && !rule && !replay;
   const disliked = run.feedback.some((f) => f.score < 0);
-  /** 失败的 agent 运行续跑（同一个 run 接着走）；走到 agent 之前就失败的（配置没填、服务停用…）从头执行 */
-  const failed = run.status === "failed" && !builtin && !rule;
+  /** 失败的 agent 运行续跑（同一个 run 接着走）；走到 agent 之前就失败的（配置没填、服务停用…）从头执行。
+   *  它等的上游失败了的（upstream_failed）从没执行过，没有断点：只能重跑 */
+  const resumable = run.status === "failed" && !builtin && !rule && run.error_code !== "upstream_failed";
   const reached = (events ?? []).some((e) => e.kind === "model_call" || e.kind === "thought" || (e.kind === "stage" && e.payload.stage === "system"));
-  const again = async () => {
-    const ok = await confirm(failed
-      ? reached
-        ? { title: "接着跑？", description: "同一个运行、同一个会话，从断点继续：已经完成的步骤不重做。", confirmText: "续跑" }
-        : { title: "重新执行？", description: "上次在准备阶段就失败了（还没走到 agent），这次从头执行，还是同一个运行。", confirmText: "重新执行" }
-      : rule
-        ? { title: "交给 agent 分析一遍？", description: "这次是规则直接给的结论。重跑会用同样的输入新开一次运行，这回交给 agent 分析（不再走规则）。", confirmText: "重跑" }
-        : { title: "用同样的输入再跑一次？", description: "新开一次运行（新会话），沿用任务、服务、环境和输入；不走去重。", confirmText: "重跑" });
+  const resume = async () => {
+    const ok = await confirm(reached
+      ? { title: "续跑？", description: `同一个运行、同一个会话，从断点继续：已经完成的步骤不重做。${run.retry_at ? "等着的自动重试会改成现在就跑。" : ""}想用同样的输入从头另开一次，用「⋯ → 重跑」。`, confirmText: "续跑" }
+      : { title: "续跑？", description: "上次在准备阶段就失败了（还没走到 agent），没有断点：这次从头执行，还是同一个运行。", confirmText: "续跑" });
     if (!ok) return;
     setBusy("again");
     try {
-      const r = failed ? await api.resume(run.run_id) : await api.rerun(run.run_id);
+      const r = await api.resume(run.run_id);
       invalidate("runs");
-      toast(failed ? (reached ? "已接着跑" : "已重新执行") : "已重新提交", { description: shortId(r.run_id) });
+      toast(reached ? "已续跑" : "已从头执行", { description: shortId(r.run_id) });
+    } catch (e) { toast.error("没能续跑", (e as Error).message); } finally { setBusy(null); }
+  };
+  const rerun = async () => {
+    const ok = await confirm(rule
+      ? { title: "交给 agent 分析一遍？", description: "这次是规则直接给的结论。重跑会用同样的输入新开一次运行，这回交给 agent 分析（不再走规则）。", confirmText: "重跑" }
+      : { title: "重跑？", description: `新开一次运行（新会话），沿用任务、服务、环境和输入；不走去重。${resumable ? "想从这次的断点接着走，用「续跑」。" : ""}`, confirmText: "重跑" });
+    if (!ok) return;
+    setBusy("again");
+    try {
+      const r = await api.rerun(run.run_id);
+      invalidate("runs");
+      toast("已重跑", { description: shortId(r.run_id) });
       navigate(`/runs/${r.run_id}`);
-    } catch (e) { toast.error("没能提交", (e as Error).message); } finally { setBusy(null); }
+    } catch (e) { toast.error("没能重跑", (e as Error).message); } finally { setBusy(null); }
   };
   /** 纠正：结论不对时在同一会话里重答（和对话页一致，只对成功的运行） */
   const correctable = run.status === "success" && !builtin && !replay;
   /** 能在对话页接着问：这是对话的一轮（或对话里的纠正），且任务现在还开着对话触发（不然下一条消息会被拒） */
   const chatOpen = !!def?.triggers.some((t) => t.type === "chat" && t.enabled !== false);
-  const chatSession = chatOpen && (run.trigger.type === "chat" || (run.trigger.type === "correction" && run.session_id !== run.run_id));
+  const chatTurn = run.trigger.type === "chat" || (run.trigger.type === "correction" && run.session_id !== run.run_id);
+
+  // 操作栏固定成 [👍👎] [纠正] [重放] [取消运行 / 续跑 / 重跑] [⋯]：现在用不了的留在原位、变灰，悬停说原因（不随状态出现消失）
+  const correctReason = live ? "运行结束后才能纠正" : builtin ? "内建任务不过模型，没有结论可纠正" : replay ? "回归重放出来的运行不纠正：改完定义再重放一次"
+    : run.status !== "success" ? "只有成功的运行能纠正：失败的用续跑或重跑" : blocked;
+  const replayReason = live ? "运行结束后才能重放" : builtin ? "内建任务不过模型，没有答案可对比" : rule ? "规则直接给的结论，不过模型：用重跑交给 agent"
+    : replay ? "这本身就是回归重放出来的运行" : blocked;
+  const rerunReason = replay ? "回归重放出来的运行不重跑：到回归重放里重判，或再发起一轮" : blocked;
+  const lifecycle = live
+    ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消运行</Button>
+    : resumable
+      ? <Button icon={<LuPlay />} loading={busy === "again"} reason={blocked ?? undefined} onClick={resume}
+        tip={reached ? "从断点接着跑（同一个运行）" : "上次没走到 agent：从头执行（同一个运行）"}>续跑</Button>
+      : <Button icon={<LuRotateCcw />} loading={busy === "again"} reason={rerunReason ?? undefined} onClick={rerun} tip="用同样的输入新开一次运行">重跑</Button>;
   return (
     <PageHeader
       crumbs={[{ label: "运行", to: "/runs" }, { label: <span className="font-mono">{shortId(run.run_id)}</span> }]}
@@ -157,28 +190,99 @@ function Header({ run, events }: { run: Run; events: RunEvent[] | undefined }) {
             <Link to={`/runs/${run.replay_of}`} className="font-mono text-accent hover:underline">{shortId(run.replay_of)}</Link>
           </span>
         )}
-        <span title={datetime(run.created_at, true)}>{ago(run.created_at)}</span>
-        <span>{live ? <>已运行 <Elapsed since={run.created_at} /></> : <>耗时 {duration(run.duration_ms)}</>}</span>
+        {run.attempt > 1 && <Tooltip content="续跑 / 自动重试都在同一个运行上接着跑"><span>第 {run.attempt} 次执行</span></Tooltip>}
+        <TimeAgo at={run.created_at} />
+        <span>{live ? <>{run.status === "queued" ? "已排队" : "已运行"} <Elapsed since={run.created_at} /></> : <>耗时 {duration(run.duration_ms)}</>}</span>
         {!!run.tokens && <span>{num(run.tokens)} tokens</span>}
-        <span className="flex items-center font-mono">{run.run_id}<CopyButton text={run.run_id} /></span>
+        <IdCopy value={run.run_id} />
       </>}
       actions={<>
-        {!live && (
-          <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctable && !blocked ? correctWith : undefined}
-            onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
-        )}
-        {chatSession && !live && <Button icon={<LuMessageSquare />} onClick={() => navigate(`/chat/${run.session_id}`)}>在对话中继续</Button>}
-        {correctable && <Button icon={<LuPencilLine />} disabled={!!blocked} title={blocked ?? "结论不对：告诉 agent 哪里错了，在同一会话里重答"} onClick={() => setCorrecting(true)}>纠正</Button>}
-        {replayable && <Button icon={<LuFlaskConical />} disabled={!!blocked} onClick={() => setReplaying(true)}
-          title={blocked ?? (disliked ? "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，看 👎 指出的问题改好没有"
-            : "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，和这次的答案对比有没有退步")}>重放</Button>}
-        {live ? <Button variant="danger-ghost" icon={<LuBan />} loading={busy === "cancel"} onClick={cancel}>取消</Button>
-          : !replay && <Button icon={failed ? <LuPlay /> : <LuRotateCcw />} loading={busy === "again"} disabled={!!blocked} title={blocked ?? undefined} onClick={again}>
-            {failed ? (reached ? "续跑" : "重新执行") : "重跑"}</Button>}
+        <FeedbackButtons key={mine?.updated_at ?? "none"} runId={run.run_id} mine={mine} onCorrect={correctable && !blocked ? correctWith : undefined}
+          reason={live ? "运行结束后才能评价" : undefined}
+          onSaved={() => invalidate("runs")} className="h-8 rounded-md border border-line bg-panel px-0.5" />
+        <Button icon={<LuPencilLine />} reason={correctReason ?? undefined} tip="结论不对：告诉 agent 哪里错了，在同一会话里重答" onClick={() => setCorrecting(true)}>纠正</Button>
+        <Button icon={<LuFlaskConical />} reason={replayReason ?? undefined} onClick={() => setReplaying(true)}
+          tip={disliked ? "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，看 👎 指出的问题改好没有"
+            : "改完提示词、定义、档案或记忆后，用现在的一切重跑这条，和这次的答案对比有没有退步"}>重放</Button>
+        {lifecycle}
+        <Menu trigger={<Button size="icon" aria-label="更多操作"><LuEllipsis /></Button>} items={[
+          { label: "在对话中继续", icon: <LuMessageSquare />, disabled: !chatTurn || !chatOpen || live,
+            hint: !chatTurn ? "不是对话里的一轮" : !chatOpen ? "任务没开对话" : live ? "等这一轮结束" : undefined,
+            onClick: () => navigate(`/chat/${run.session_id}`) },
+          ...(resumable || live ? [{ label: "重跑（新开一次）", icon: <LuRotateCcw />, disabled: !!rerunReason, hint: rerunReason ? "现在不能" : undefined, onClick: () => void rerun() }] : []),
+          { label: "等它成功后跑一个任务…", icon: <LuWorkflow />, disabled: !live && !run.retry_at, hint: !live && !run.retry_at ? "它已经结束了" : undefined, onClick: () => setChaining(true) },
+          { separator: true, label: "" },
+          { label: "复制运行 ID", icon: <LuCopy />, onClick: () => { void navigator.clipboard?.writeText(run.run_id); toast("已复制运行 ID", { description: run.run_id }); } },
+        ]} />
         <CorrectDialog run={run} open={correcting} onClose={() => setCorrecting(false)} />
         {replayable && <StartReplayDialog open={replaying} onClose={() => setReplaying(false)} preset={{ run_ids: [run.run_id] }} />}
+        <RunTaskDialog open={chaining} onClose={() => setChaining(false)} after={[run.run_id]} service={run.service ?? undefined} />
       </>}
     />
+  );
+}
+
+/**
+ * 运行状态的说明条：排着队的说清在等什么（点名的上游 / 任务并发 / 没有主机负责 / 只是在排队），
+ * 失败后等着自动重试的说清什么时候重试、可以现在续跑或取消重试。
+ */
+function StateBanner({ run }: { run: Run }) {
+  const [busy, setBusy] = useState(false);
+  if (run.status === "failed" && run.retry_at) {
+    const cancelRetry = async () => {
+      if (!(await confirm({ title: "取消自动重试？", description: "这次运行就此算失败：照常发失败通知、触发「失败后」的联动，点名等它的运行也不再执行。", confirmText: "取消自动重试", cancelText: "不取消", danger: true }))) return;
+      setBusy(true);
+      try { await api.cancelRun(run.run_id); invalidate("runs"); toast("已取消自动重试"); } catch (e) { toast.error("取消失败", (e as Error).message); } finally { setBusy(false); }
+    };
+    return (
+      <Banner tone="info" icon={<LuRefreshCw />}
+        actions={<Button size="sm" variant="ghost" loading={busy} onClick={() => void cancelRetry()}>取消自动重试</Button>}>
+        第 {run.attempt} 次执行失败（临时性的错误），<TimeUntil at={run.retry_at} className="font-medium" /> 自动续跑。现在就想跑，点右上角「续跑」。
+      </Banner>
+    );
+  }
+  const q = run.queue;
+  if (run.status !== "queued" || !q) return null;
+  const titles = Object.fromEntries((run.lineage?.depends_on ?? []).map((b) => [b.run_id, b.task_title || b.task]));
+  if (q.waiting_for.length) return (
+    <Banner tone="idle" icon={<LuHourglass />}>
+      在等它点名的 {q.waiting_for.length} 个上游运行成功：
+      {q.waiting_for.map((w) => (
+        <Link key={w.run_id} to={`/runs/${w.run_id}`} className="mx-1 inline-flex items-center gap-1 text-accent hover:underline">
+          <RunStatusDot status={w.status} />{titles[w.run_id] || w.task} <span className="font-mono">{shortId(w.run_id)}</span>
+        </Link>
+      ))}
+      。有一个失败或被取消，这次就不执行（upstream_failed）。
+    </Banner>
+  );
+  if (q.concurrency && q.concurrency.running >= q.concurrency.limit) return (
+    <Banner tone="idle" icon={<LuHourglass />}>
+      任务在每个环境最多同时跑 {q.concurrency.limit} 个，现在 {run.env} 有 {q.concurrency.running} 个在跑：前面的结束了就轮到它。
+    </Banner>
+  );
+  if (!q.hosts.length) return (
+    <Banner tone="bad" icon={<LuServerOff />} actions={<LinkButton size="sm" variant="ghost" to="/">去概览看执行主机</LinkButton>}>
+      没有在线的主机负责 {run.service ?? "平台任务"} 在 {run.env} 的运行：它会一直排着。检查负责这个环境的那台主机上的 agent 服务是不是停了。
+    </Banner>
+  );
+  const full = q.hosts.every((h) => h.running >= h.max_concurrent);
+  return (
+    <Banner tone="idle" icon={<LuHourglass />}>
+      {full ? `负责它的主机执行名额都满了（${q.hosts.map((h) => `${h.host} ${h.running}/${h.max_concurrent}`).join("、")}），空出来就开始。`
+        : "马上就会被主机认领。"}
+      <span className="text-fg-3">认领顺序：对话 &gt; API &gt; 定时、事件、联动，同一档按提交先后。</span>
+    </Banner>
+  );
+}
+
+function Banner({ tone, icon, children, actions }: { tone: "info" | "idle" | "bad"; icon: ReactNode; children: ReactNode; actions?: ReactNode }) {
+  return (
+    <div className={cn("mb-4 flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-[12.5px] leading-relaxed",
+      { info: "border-info/30 bg-info-soft text-fg", idle: "border-line bg-sunken/60 text-fg-2", bad: "border-bad/30 bg-bad-soft text-fg" }[tone])}>
+      <span className={cn("mt-0.5 shrink-0 [&_svg]:size-4", { info: "text-info", idle: "text-fg-3", bad: "text-bad" }[tone])}>{icon}</span>
+      <div className="min-w-0 flex-1">{children}</div>
+      {actions && <div className="-my-1 shrink-0">{actions}</div>}
+    </div>
   );
 }
 
@@ -324,8 +428,9 @@ const BLOCK_STAGES = new Set(["system"]);
 const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
   wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services）决定" },
   config_missing: { text: "受保护的环境要填给 agent 的只读版配置：还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
-  orphaned: { text: "执行它的 agent 服务中途退出了（重启、崩溃或被杀）。点「续跑」接着走" },
-  interrupted: { text: "执行它的 agent 服务在跑的时候退出了（一般是重启或升级）。点「续跑」接着走" },
+  orphaned: { text: "执行它的 agent 服务中途退出了（重启、崩溃或被杀）。点「续跑」接着走；任务配了自动重试的会自己续跑" },
+  interrupted: { text: "执行它的 agent 服务在跑的时候退出了（一般是重启或升级）。点「续跑」接着走；任务配了自动重试的会自己续跑" },
+  upstream_failed: { text: "它点名等的上游运行失败或被取消了，这次没有执行（也就没有断点可续）。上游重新跑成功后，用「重跑」再提交一次" },
   timeout: { text: "超过了任务的超时。续跑大概率还会超时：先把任务的超时调大，或把问题拆小", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "改任务的超时" },
   step_limit: { text: "agent 走了太多步还没结束，多半在原地打转：看最后几步在做什么，改提示词或把问题拆小；续跑会从断点接着走" },
   invalid_output: { text: "任务要求按结构化输出交回结果，agent 没交或交的不合格（提醒过一次）。纠正、或者改任务的输出 schema / 角色提示词", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
@@ -336,7 +441,7 @@ const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link
   service_env_disabled: { text: "排队期间服务在这个环境被停用了", to: (r) => `/services/${r.service}?tab=envs`, link: "去启用" },
   task_disabled: { text: "排队期间任务被停用了", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}`, link: "去任务页" },
   env_not_allowed: { text: "任务现在不允许在这个环境跑", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
-  error: { text: "执行中抛了异常（模型接口、工具或框架）。看上面的报错：临时性的（比如 429、网络）可以直接续跑" },
+  error: { text: "执行中抛了异常（模型接口、工具或框架）。看上面的报错：临时性的（比如 429、网络）可以直接续跑；也可以给任务配上失败自动重试", to: (r) => `/tasks/${encodeURIComponent(r.task.split(":")[0])}?tab=definition`, link: "看任务定义" },
 };
 
 const STEP_META: Record<Step["kind"], { icon: React.ReactNode; cls: string; label: string }> = {
@@ -496,15 +601,19 @@ function Sidebar({ run }: { run: Run }) {
           <DescList items={[
             ["触发", run.replay_of
               ? <span>回归重放 · 原运行 <Link to={`/runs/${run.replay_of}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.replay_of)}</Link></span>
-              : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
+              : run.trigger.type === "after" && run.trigger.source
+                ? <span>上游联动 · 上游 <Link to={`/runs/${run.trigger.source}`} className="font-mono text-[12px] text-accent hover:underline">{shortId(run.trigger.source)}</Link>{run.trigger.id && <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code>}</span>
+                : <span>{TRIGGER[run.trigger.type]?.label ?? run.trigger.type}{run.trigger.source ? ` · ${run.trigger.source}` : ""}{run.trigger.id ? <code className="ml-1 font-mono text-[11.5px] text-fg-3">#{run.trigger.id}</code> : ""}</span>],
             ["发起方", <Link to={`/runs?caller=${encodeURIComponent(run.trigger.caller)}&env=${run.env}`} className="font-mono text-[12px] hover:text-accent">{run.trigger.caller}</Link>],
             ["会话", run.session_id === run.run_id ? <span className="text-fg-3">独立运行</span> : <Link to={`/runs?session_id=${encodeURIComponent(run.session_id)}&env=${run.env}`} className="break-all font-mono text-[11.5px] hover:text-accent">{run.session_id}</Link>],
             ["记忆", <span>召回{onOff(run.memory?.recall)} · 沉淀{onOff(run.memory?.save)}</span>],
             ["开始", datetime(run.created_at, true)],
             ["结束", run.finished_at ? datetime(run.finished_at, true) : "—"],
+            ...(run.attempt > 1 ? [["执行", `第 ${run.attempt} 次（续跑 / 自动重试）`] as [ReactNode, ReactNode]] : []),
           ]} />
         </div>
       </Card>
+      <LineageCard run={run} />
       {c.profile && (
         <Card>
           <CardHeader title="注入的档案" icon={<LuScrollText />} description="原文（服务档案 + 任务档案），置顶于提示词" />
@@ -551,6 +660,35 @@ function Sidebar({ run }: { run: Run }) {
   );
 }
 
+/** 前后关系：触发它的上游运行（上游联动）、它点名等的运行、它引出的运行（联动触发的 + 点名等它的） */
+function LineageCard({ run }: { run: Run }) {
+  const l = run.lineage;
+  if (!l || (!l.triggered_by && !l.depends_on.length && !l.downstream.length)) return null;
+  const row = (r: RunBrief, note?: ReactNode) => (
+    <li key={r.run_id}>
+      <Link to={`/runs/${r.run_id}`} className="flex items-center gap-2 px-4 py-2 text-[12.5px] hover:bg-hover/70">
+        {r.status ? <RunStatusDot status={r.status} /> : <span className="size-4" />}
+        <span className="min-w-0 truncate text-fg-2">{r.task_title || r.task || "（已删除）"}{r.task?.includes(":") && <span className="font-mono text-fg-3"> :{r.task.split(":")[1]}</span>}</span>
+        {note && <span className="shrink-0 text-[11px] text-fg-3">{note}</span>}
+        <span className="ml-auto shrink-0 font-mono text-[11px] text-fg-3">{shortId(r.run_id)}</span>
+      </Link>
+    </li>
+  );
+  const section = (title: string, children: ReactNode) => (
+    <div><div className="px-4 pt-2.5 text-[11.5px] font-medium text-fg-3">{title}</div><ul>{children}</ul></div>
+  );
+  return (
+    <Card>
+      <CardHeader title="前后关系" icon={<LuWorkflow />} description="上游联动、点名等的上游，以及它引出的运行" />
+      <div className="divide-y divide-line pb-1">
+        {l.triggered_by && section("触发它的上游运行", row(l.triggered_by, run.trigger.id ? `#${run.trigger.id}` : undefined))}
+        {l.depends_on.length > 0 && section("它点名等的运行（都成功了才开始）", l.depends_on.map((r) => row(r)))}
+        {l.downstream.length > 0 && section("它引出的运行", l.downstream.map((r) => row(r, r.trigger.type === "after" ? "联动" : "等它")))}
+      </div>
+    </Card>
+  );
+}
+
 /** 配方：这次运行用到的每样定义各是第几版；旧运行没有配方，只有任务与角色版本 */
 function RecipeCard({ run }: { run: Run }) {
   const r = run.recipe;
@@ -574,7 +712,7 @@ function RecipeCard({ run }: { run: Run }) {
     items.push(["角色", r.role ? chain(r.role.lineage) : "—"]);
     if (r.subagents?.length) items.push(["子代理", <div className="space-y-0.5">{r.subagents.map((s) => <div key={s.name}>{chain(s.lineage)}</div>)}</div>]);
     if (r.service) items.push(["服务", <Link to={`/services/${r.service.name}?tab=versions`} className="hover:text-accent">{r.service.name} {v(r.service.version)}</Link>]);
-    if (r.prompts) items.push(["平台提示词", <Link to="/settings/prompts" className="hover:text-accent">v{r.prompts}</Link>]);
+    if (r.prompts) items.push(["平台提示词", <Link to="/settings/prompts?view=versions" className="hover:text-accent">v{r.prompts}</Link>]);
     items.push(["模型", <span className="font-mono text-[12px]">{r.model}</span>], ["平台", <span className="font-mono text-[12px]">v{r.platform}</span>]);
   }
   return (

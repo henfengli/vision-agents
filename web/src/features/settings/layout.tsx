@@ -1,13 +1,13 @@
 /**
  * 设置：左侧分组导航 + 右侧内容。分两组——
- * 平台（对所有人生效：四节配置带版本历史）/ 定义与接入（角色、API 密钥）。/settings 本身就是第一个平台设置页。
+ * 平台（对所有人生效：四节配置都有版本）/ 定义与接入（角色、API 密钥）。/settings 本身就是第一个平台设置页。
  */
 import { type ReactNode } from "react";
 import {
   LuBell, LuBot, LuBrain, LuKeyRound, LuLayers, LuMessageSquareText,
 } from "react-icons/lu";
 
-import { Page } from "@/components/layout/shell";
+import { Page, PageHeader } from "@/components/layout/shell";
 import { cn } from "@/lib/cn";
 import { Link, useActive, useLocation } from "@/lib/router";
 
@@ -40,8 +40,13 @@ function NavLink({ to, label, icon }: { to: string; label: string; icon: ReactNo
   );
 }
 
-export function SettingsLayout({ title, description, actions, children, wide }: {
+/**
+ * 页头直接用 PageHeader（和其它页面同一套：面包屑 / 图标 / 标题 / 描述 / meta / 动作），不再自己拼一份。
+ * 详情页（角色）给 crumbs，meta 行按全站顺序排：标识+复制 · 关系 · … · vN · by · 时间。
+ */
+export function SettingsLayout({ title, description, actions, children, wide, crumbs, meta, icon }: {
   title: ReactNode; description?: ReactNode; actions?: ReactNode; children: ReactNode; wide?: boolean;
+  crumbs?: { label: ReactNode; to?: string }[]; meta?: ReactNode; icon?: ReactNode;
 }) {
   return (
     <Page wide={wide}>
@@ -59,13 +64,8 @@ export function SettingsLayout({ title, description, actions, children, wide }: 
           ))}
         </nav>
         <div className="min-w-0 flex-1">
-          <div className="mb-5 flex flex-wrap items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <h1 className="min-w-0 truncate text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
-              {description && <div className="mt-0.5 max-w-3xl text-[13px] leading-relaxed text-fg-3">{description}</div>}
-            </div>
-            {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
-          </div>
+          <PageHeader title={title} crumbs={crumbs} icon={icon} meta={meta} actions={actions}
+            description={description && <span className="block max-w-3xl leading-relaxed">{description}</span>} />
           {children}
         </div>
       </div>

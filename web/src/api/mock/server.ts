@@ -6,8 +6,8 @@ import { ApiError } from "../client";
 import type {
   FeedbackEntry, FeedbackReason,
   ApiKey, Asset, ConfigRaw, ConfigSaved, ConfigSection, Knowledge, Page, ReplayDetail, ReplayFilter, ReplayItem, ReplaySummary, ReplayVerdict,
-  ResolvedRole, RunAccepted, RunEvent, RunListItem, SearchHit, Service, ServiceSummary, ServiceTools, ServiceView, Stats, Task, TaskSummary,
-  ToolInfo, UpcomingFire, Version, VersionStat,
+  AfterTrigger, ResolvedRole, Run, RunAccepted, RunBrief, RunEvent, RunListItem, SearchHit, Service, ServiceSummary, ServiceTools, ServiceView, Stats, Task,
+  TaskGraph, TaskSummary, Tick, ToolInfo, UpcomingFire, Version, VersionStat, WorkersResponse,
 } from "../types";
 import * as db from "./data";
 import { cronNextOf } from "./schedule";
@@ -110,7 +110,11 @@ on("GET", "/v1/meta", () => ({
   features: { vector_search: true },
   tools: TOOLS,
   event_sources: [
-    { name: "dagster", title: "Dagster", notes: "在 Dagster 里配 run_failure_sensor 回调 POST /v1/events/dagster", events: [{ name: "run_failure", title: "运行失败", fields: ["run_id", "asset_key", "error", "env", "subtask", "job"] }] },
+    { name: "dagster", title: "Dagster", notes: "在 Dagster 里配传感器回调 POST /v1/events/dagster；请求体带 event（不写 = run_failure）", events: [
+      { name: "run_failure", title: "运行失败", fields: ["run_id", "asset_key", "error", "env", "subtask", "job"] },
+      { name: "run_success", title: "运行成功", fields: ["run_id", "asset_key", "asset_keys", "env", "subtask", "job", "partition"] },
+      { name: "asset_check_failed", title: "资产检查失败", fields: ["asset_key", "check", "severity", "description", "run_id", "env", "subtask"] },
+    ] },
     { name: "gitlab", title: "GitLab", notes: "项目 Webhook 勾选 Deployment events", events: [{ name: "deployment", title: "部署成功", fields: ["project", "ref", "env", "sha", "url", "user"] }] },
     { name: "webhook", title: "通用 Webhook", notes: "事件名放请求头 X-Event 或请求体 event", events: [{ name: "*", title: "任意事件", fields: [] }] },
   ],
@@ -231,6 +235,7 @@ function serviceSummary(s: Svc): ServiceSummary {
     health[e.name] = {
       enabled: envEnabled(s, e.name),
       env_enabled: s.envs[e.name]?.enabled !== false,
+      triggers_paused: !!s.envs[e.name]?.triggers_paused,
       python: pythonOf(s, e.name),
       runs_24h: rs.filter((r) => within(r.created_at, 24)).length,
       failed_24h: rs.filter((r) => within(r.created_at, 24) && r.status === "failed").length,
@@ -317,7 +322,7 @@ on("GET", "/v1/services/:name/envs/:env", (p): ServiceView => {
   const v = viewOf(s, p.env);
   const prot = envProtected(p.env);
   return {
-    service: s.name, env: p.env, enabled: v.enabled, protected: prot, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
+    service: s.name, env: p.env, enabled: v.enabled, protected: prot, triggers_paused: !!s.envs[p.env]?.triggers_paused, python: v.python, root: v.root, code_paths: v.code_paths, urls: v.urls,
     mcp_servers: Object.keys(s.mcp ?? {}), databases: redactDbs(v.databases), logs: v.logs, profile: v.profile,
     // 不受保护的环境用真实配置：没有给 agent 的版本
     config_files: v.config_files.map((c) => {
@@ -520,10 +525,85 @@ function checkTask(t: Task, triggers = true) {
         if (!r.conclusion.trim()) bad(`事件 ${tr.id} 的规则 ${r.pattern} 没写结论`);
       }
     }
+    if (tr.type === "after") checkAfterTrigger(t, tr);
   }
+  // 与后端 Retry / TaskDef 的校验一致
+  if (t.retry) {
+    if (t.form === "builtin") bad("内建任务不支持自动重试（自动重试走续跑，内建任务没有断点）");
+    if (!(t.retry.max >= 1 && t.retry.max <= 5)) bad("自动重试次数须在 1~5 之间");
+    if (!(t.retry.delay_s >= 10 && t.retry.delay_s <= 3600)) bad("重试间隔须在 10 秒 ~ 1 小时之间");
+  }
+  if (t.concurrency != null && !(t.concurrency >= 1 && t.concurrency <= 50)) bad("同时执行上限须在 1~50 之间");
   if (t.deliver?.channel && !(t.deliver.channel in db.settings.notifications.channels))
     bad(`结果投递的渠道 ${t.deliver.channel} 不存在（可选：${Object.keys(db.settings.notifications.channels).join("、") || "无"}）`);
   if (t.deliver && !t.deliver.channel === !t.deliver.url) bad("投递需要且只能填渠道或回调地址之一");
+}
+
+/** 上游运行能被引用的字段（与 domain/tasks._AFTER_PATH 一致）；all 模式可带「上游任务名.」前缀 */
+const AFTER_PATH = /^(?:[a-z][a-z0-9-]{1,48}(?::[^:\s/\\.]+)?\.)?(?:run_id|task|env|service|status|caller|error|error_code|output\.answer|input\.[A-Za-z_]\w*|output\.data(?:\.[A-Za-z_]\w*)+)$/;
+const AFTER_TOP = ["run_id", "task", "env", "service", "status", "caller", "error", "error_code", "input", "output"];
+const upstreamOf = (path: string) => { const head = path.split(".")[0]; return AFTER_TOP.includes(head) || !path.includes(".") ? "" : head; };
+
+/** 与后端 AfterTrigger.problem + consistency_error 的联动部分一致 */
+function checkAfterTrigger(t: Task, tr: AfterTrigger) {
+  const bad = (m: string) => { throw invalid(m); };
+  if (!tr.tasks.length) bad(`联动 ${tr.id} 至少要选一个上游任务`);
+  if (new Set(tr.tasks).size !== tr.tasks.length) bad(`联动 ${tr.id} 的上游任务重复`);
+  if (!tr.on.length) bad(`联动 ${tr.id} 至少要选一种上游结束状态（成功 / 失败）`);
+  const window = tr.window_s ?? 86400;
+  if (!(window >= 60 && window <= 7 * 86400)) bad("等待窗口须在 1 分钟 ~ 7 天之间");
+  for (const [field, pattern] of Object.entries(tr.filter ?? {})) {
+    if (!AFTER_PATH.test(field)) bad(`联动 ${tr.id} 的过滤字段 ${field} 写法不对（如 status、input.asset_key、output.data.category）`);
+    try { new RegExp(pattern); } catch (e) { bad(`联动 ${tr.id} 的过滤 ${field} 正则不合法：${(e as Error).message}`); }
+  }
+  for (const [k, path] of Object.entries(tr.map ?? {})) if (!AFTER_PATH.test(path)) bad(`联动 ${tr.id} 的映射 ${k} ← ${path} 写法不对（如 run_id、input.version、output.answer）`);
+  const missing = Object.keys(tr.map ?? {}).filter((k) => !(k in t.input));
+  if (missing.length) bad(`联动 ${tr.id} 映射的 ${missing.join("、")} 不是输入字段`);
+  const refs = [...Object.values(tr.map ?? {}), ...Object.keys(tr.filter ?? {})];
+  const prefixed = refs.filter((p) => upstreamOf(p));
+  if (tr.mode === "any" && prefixed.length) bad(`联动 ${tr.id} 是「任一上游结束」，引用不用带上游任务名：${prefixed.join("、")}`);
+  const alien = prefixed.filter((p) => !tr.tasks.includes(upstreamOf(p)));
+  if (tr.mode === "all" && alien.length) bad(`联动 ${tr.id} 引用了不在上游里的任务：${alien.join("、")}`);
+  if (tr.service && !db.services.some((s) => s.name === tr.service)) bad(`触发器 ${tr.id} 指定的服务 ${tr.service} 不存在`);
+}
+
+/** 与后端 registry._check_after 一致：上游都存在、不是自己，加上它之后整张联动图没有环 */
+function checkAfter(name: string, t: Task) {
+  const afters = t.triggers.filter((tr): tr is AfterTrigger => tr.type === "after");
+  if (!afters.length) return;
+  const base = name.split(":")[0];
+  for (const tr of afters) for (const up of tr.tasks) {
+    if (up.split(":")[0] === base) throw invalid(`联动 ${tr.id} 的上游不能是这个任务自己（${up}）`);
+    if (!db.tasks.some((x) => x.name === up)) throw invalid(`联动 ${tr.id} 的上游任务 ${up} 不存在`);
+  }
+  // 联动图：上游（父任务名）→ 下游（父任务名）；子任务自己写了触发才算
+  const graph = new Map<string, Set<string>>();
+  const add = (n: string, triggers: Task["triggers"]) => {
+    for (const tr of triggers) if (tr.type === "after") for (const up of tr.tasks) {
+      const k = up.split(":")[0];
+      graph.set(k, (graph.get(k) ?? new Set()).add(n.split(":")[0]));
+    }
+  };
+  for (const x of db.tasks) if (x.name !== name && (!x.extends || ownFields(x).includes("triggers"))) add(x.name, x.triggers);
+  add(name, t.triggers);
+  const state = new Map<string, number>();
+  const path: string[] = [];
+  const visit = (node: string): string[] | null => {
+    state.set(node, 1);
+    path.push(node);
+    for (const nxt of [...(graph.get(node) ?? [])].sort()) {
+      if (state.get(nxt) === 1) return [...path.slice(path.indexOf(nxt)), nxt];
+      if (!state.has(nxt)) { const found = visit(nxt); if (found) return found; }
+    }
+    state.set(node, 2);
+    path.pop();
+    return null;
+  };
+  for (const node of [...graph.keys()].sort()) {
+    if (state.has(node)) continue;
+    const cycle = visit(node);
+    if (cycle) throw invalid("联动成环了：" + cycle.join(" → ") + "（上游结束触发下游，绕一圈又回到自己）");
+  }
 }
 
 const firesOf = (t: Task) => t.triggers.flatMap((tr) => tr.type === "schedule" && tr.enabled !== false
@@ -548,7 +628,7 @@ function taskSummary(raw: Task): TaskSummary {
 }
 
 const findTask = (name: string) => db.tasks.find((x) => x.name === name) ?? (() => { throw notFound("任务 " + name); })();
-const blankTask = (body: Partial<Task>): Task => ({ title: "", description: "", service: null, role: null, form: "agent", input: {}, envs: [], triggers: [{ id: "api", type: "api" }], deliver: null, dedup: null, memory: {}, timeout_s: 300, enabled: true, profile: {}, extends: null, auto_created: false, handler: null, output_schema: null, ...body, version: 1, updated_by: ME.name, updated_at: now() } as Task);
+const blankTask = (body: Partial<Task>): Task => ({ title: "", description: "", service: null, role: null, form: "agent", input: {}, envs: [], triggers: [{ id: "api", type: "api" }], deliver: null, dedup: null, memory: {}, timeout_s: 300, enabled: true, profile: {}, extends: null, auto_created: false, handler: null, output_schema: null, retry: null, concurrency: null, ...body, version: 1, updated_by: ME.name, updated_at: now() } as Task);
 
 /** 结构化输出的 schema：空 = 不要求；顶层须是 object（真实后端还会按 JSON Schema 规范校验） */
 function checkSchema(body: Partial<Task>) {
@@ -577,6 +657,26 @@ function effectiveWith(child: Task, parent: Task): Task {
 // 子任务（effective）的生效定义里 service / role / form 等都是父任务的；summary 用的就是它
 const filteredTasks = (service: unknown) => db.tasks.filter((t) => { const e = effective(t); return !service || e.service === service || e.service === "*"; });
 on("GET", "/v1/tasks", (_p, q) => filteredTasks(q.service).map(taskSummary));
+// 与后端 GET /v1/tasks/_graph 一致：节点是父任务，边是上游联动；要注册在 /v1/tasks/:name 前面
+on("GET", "/v1/tasks/_graph", (): TaskGraph => {
+  const nodes = db.tasks.filter((t) => !t.extends).map((t) => {
+    const s = taskSummary(t);
+    return {
+      name: s.name, title: s.title, service: s.service, form: s.form, enabled: s.enabled, subtask_count: s.subtask_count, stats_24h: s.stats_24h,
+      last_run: s.last_run, next_fire: s.next_fire,
+      entry: s.triggers.filter((tr) => tr.type !== "after" && tr.enabled !== false).map((tr) => ({
+        type: tr.type as "api", id: tr.id, ...(tr.type === "schedule" ? { cron: tr.cron } : {}), ...(tr.type === "event" ? { source: tr.source, event: tr.event } : {}) })),
+    };
+  });
+  const edges = db.tasks.filter((t) => !t.extends || ownFields(t).includes("triggers")).flatMap((t) => {
+    const e = effective(t);
+    return e.triggers.filter((tr): tr is AfterTrigger => tr.type === "after").flatMap((tr) => tr.tasks.map((up) => ({
+      from: up.split(":")[0], to: t.name.split(":")[0], trigger_id: tr.id, mode: tr.mode, on: tr.on, enabled: tr.enabled !== false && e.enabled,
+      from_object: up.includes(":") ? up.split(":").slice(1).join(":") : null, to_object: t.name.includes(":") ? t.name.split(":").slice(1).join(":") : null,
+      upstreams: tr.tasks.length })));
+  });
+  return { nodes, edges };
+});
 on("GET", "/v1/tasks/:name", (p) => taskSummary(findTask(p.name)));
 on("PATCH", "/v1/tasks/:name", (p, _q, body) => {
   const cur = findTask(p.name);
@@ -592,10 +692,12 @@ on("PATCH", "/v1/tasks/:name", (p, _q, body) => {
       if (v === null) { own.delete(k); next[k] = structuredClone((parent as unknown as Record<string, unknown>)[k]); } else { own.add(k); next[k] = v; }
     }
     if (own.size) checkTask(effective({ ...cur, ...next, _own: [...own] } as MockTask), own.has("triggers"));
+    if (own.has("triggers")) checkAfter(p.name, { ...cur, ...next } as Task);
     return taskSummary(bump("tasks/" + p.name, cur, { ...next, auto_created: false, _own: [...own] } as Partial<Task>));
   }
   const next = { ...cur, ...patch } as Task;
   checkTask(next);
+  checkAfter(p.name, next);
   checkChildren(next);
   return taskSummary(bump("tasks/" + p.name, cur, patch as Partial<Task>));
 });
@@ -606,10 +708,17 @@ on("POST", "/v1/tasks", (_p, _q, body) => {
   checkSchema(body);
   const t = blankTask(body);
   checkTask(t);
+  checkAfter(name, t);
   db.tasks.push(t);
   return taskSummary(t);
 });
 on("DELETE", "/v1/tasks/:name", (p) => {
+  findTask(p.name);
+  // 与后端 registry._users_of 一致：别的任务声明了「在它结束后跑」的不能删（删子任务时，写了子任务全名的才算）
+  const gone = new Set(p.name.includes(":") ? [p.name] : [p.name, ...db.tasks.filter((t) => t.extends === p.name).map((t) => t.name)]);
+  const users = db.tasks.filter((t) => !gone.has(t.name)).flatMap((t) => t.triggers
+    .filter((tr) => tr.type === "after" && tr.tasks.some((up) => gone.has(up))).map((tr) => `任务 ${t.name} 的联动 ${tr.id}`));
+  if (users.length) throw new ApiError(409, "in_use", `任务 ${p.name} 正被使用：${users.slice(0, 8).join("、")}`, { used_by: users });
   const removed = [p.name, ...db.tasks.filter((t) => t.extends === p.name).map((t) => t.name)];
   for (const n of removed) db.tasks.splice(db.tasks.indexOf(findTask(n)), 1);
   return { deleted: removed };
@@ -681,12 +790,37 @@ for (const [kind, find] of [["services", findService], ["roles", findRole], ["ta
 
 // ———————— 运行 ————————
 
+/** 失败原因码（与 detailOf 一致，不用拼整份详情） */
+const errorCodeOf = (r: db.MockRun): string | null => r._error_code ?? (r.status === "cancelled" ? "cancelled"
+  : r.status === "failed" ? String(db.eventsOf(r).find((e) => e.kind === "error")?.payload.title ?? "error") : null);
 const listItem = (r: db.MockRun): RunListItem => {
-  const { _events, _answer, _output, _error_code, _scenario, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
-  void _events; void _answer; void _output; void _error_code; void _scenario; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
-  return rest;
+  const { _events, _answer, _output, _error_code, _scenario, _priority, _ckey, _climit, input: _i, output: _o, context: _c, feedback: _f, task_version: _tv, role_version: _rv, recipe: _rc, error_code: _e, memory: _m, replay_of: _ro, ...rest } = r;
+  void _events; void _answer; void _output; void _error_code; void _scenario; void _priority; void _ckey; void _climit; void _i; void _o; void _c; void _f; void _tv; void _rv; void _rc; void _e; void _m; void _ro;
+  return { ...rest, error_code: errorCodeOf(r) };
 };
 const findRun = (id: string) => db.runs.find((x) => x.run_id === id) ?? (() => { throw notFound("运行 " + id); })();
+
+/** 前后关系里的一条运行（没查到的只有 run_id） */
+const brief = (id: string): RunBrief => {
+  const x = db.runs.find((y) => y.run_id === id);
+  return x ? { run_id: x.run_id, status: x.status, task: x.task, task_title: x.task_title, env: x.env, summary: x.summary, retry_at: x.retry_at } : { run_id: id };
+};
+/** 与后端 views.run_detail 一致：列表字段 + 详情 + 前后关系 + 排队中的在等什么 */
+function runDetail(r: db.MockRun): Run {
+  const downstream = db.runs.filter((x) => (x.trigger.type === "after" && x.trigger.source === r.run_id) || x.depends_on.includes(r.run_id))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at)).map(listItem);
+  return {
+    ...db.detailOf(r), error_code: errorCodeOf(r),
+    lineage: { triggered_by: r.trigger.type === "after" && r.trigger.source ? brief(r.trigger.source) : null, depends_on: r.depends_on.map(brief), downstream },
+    queue: r.status === "queued" ? {
+      waiting_for: r.depends_on.map((id) => db.runs.find((x) => x.run_id === id)).filter((x): x is db.MockRun => !!x && x.status !== "success")
+        .map((x) => ({ run_id: x.run_id, status: x.status, task: x.task })),
+      concurrency: r._climit ? { limit: r._climit, running: db.runs.filter((x) => x.status === "running" && x._ckey === r._ckey).length } : null,
+      hosts: serving(r.env, r.service).map((w) => ({ host: w.host, running: w.running, max_concurrent: w.max_concurrent })),
+      priority: r._priority ?? 1,
+    } : null,
+  };
+}
 
 on("GET", "/v1/runs", (_p, q) => {
   let rs = db.runs.filter((r) =>
@@ -702,15 +836,28 @@ on("GET", "/v1/runs", (_p, q) => {
   const page: Page<RunListItem> = { items: rs.map(listItem), total, next_cursor: offset + limit < total ? String(offset + limit) : null, prev_cursor: offset > 0 ? String(Math.max(0, offset - limit)) : null };
   return page;
 });
-on("GET", "/v1/runs/:id", (p) => db.detailOf(findRun(p.id)));
+on("GET", "/v1/runs/:id", (p) => runDetail(findRun(p.id)));
 on("GET", "/v1/runs/:id/events", (p, q) => db.eventsOf(findRun(p.id)).filter((e) => !q.after || e.seq > Number(q.after)));
 on("POST", "/v1/runs", (_p, _q, body) => submitRun(body, "web"));
+/** 往运行的时间线后面接一条事件 */
+function appendEvent(r: db.MockRun, kind: RunEvent["kind"], payload: RunEvent["payload"]) {
+  const evs = db.eventsOf(r);
+  r._events = [...evs, { seq: (evs[evs.length - 1]?.seq ?? 0) + 1, kind, at: now(), payload }];
+}
 on("POST", "/v1/runs/:id/cancel", (p) => {
   const r = findRun(p.id);
+  // 与后端 submitter.cancel 一致：失败后正等着自动重试的，取消的是这次重试（运行就此失败，照常触发「失败后」的联动）
+  if (r.status === "failed" && r.retry_at) {
+    r.retry_at = null;
+    appendEvent(r, "stage", { stage: "retry", title: `自动重试已取消（${ME.name}）` });
+    return runDetail(r);
+  }
   if (["success", "failed", "cancelled"].includes(r.status)) throw new ApiError(409, "already_finished", `运行已结束（${r.status}）`);
-  // 与后端 submitter.cancel 一致：落 cancelled、error_code=cancelled，时间线上一条 error 事件
-  Object.assign(r, { status: "cancelled", finished_at: now(), _events: undefined, _error_code: "cancelled" });
-  return db.detailOf(r);
+  // 落 cancelled、error_code=cancelled，时间线上一条 error 事件；点名等它的排队运行跟着不执行（调度循环里处理）
+  const wasQueued = r.status === "queued";
+  Object.assign(r, { status: "cancelled", finished_at: now(), _events: wasQueued ? [] : undefined, _error_code: "cancelled" });
+  if (wasQueued) appendEvent(r, "error", { title: "cancelled", content: `被 ${ME.name} 取消（还没开始执行）` });
+  return runDetail(r);
 });
 const TERMINAL = ["success", "failed", "cancelled"];
 on("POST", "/v1/runs/:id/rerun", (p) => {
@@ -718,30 +865,31 @@ on("POST", "/v1/runs/:id/rerun", (p) => {
   const [task, subtask] = r.task.split(":");
   return submitRun({ task, subtask, service: r.service, env: r.env, input: r.input, memory: r.memory }, "rerun");
 });
-on("POST", "/v1/runs/:id/resume", (p) => {
-  const r = findRun(p.id);
+/** 与后端 submitter.resume 一致：同一个 run_id 接着跑，事件接在后面（页面按 after=seq 增量取）；没走到 agent 的从头执行。
+ *  auto：任务配置的自动重试发起的；人点续跑时顺手取消还在等的自动重试（attempt +1、retry_at 清掉） */
+function resumeRun(r: db.MockRun, auto = false): RunAccepted {
   if (r.status !== "failed") throw new ApiError(409, "conflict", `只有失败的运行能续跑（当前 ${r.status}）`);
-  if (effective(findTask(r.task)).form !== "agent") throw new ApiError(409, "conflict", "只有单角色任务支持续跑；内建任务请用重跑");
+  if (errorCodeOf(r) === "upstream_failed") throw new ApiError(409, "conflict", "这次运行还没执行过（它等的上游失败了）：等上游成功后用重跑");
+  const task = db.tasks.find((x) => x.name === r.task);
+  if (!task || effective(task).form !== "agent") throw new ApiError(409, "conflict", "只有单角色任务支持续跑；内建任务请用重跑");
   if (r.resolution === "rule") throw new ApiError(409, "conflict", "规则命中的运行没有可续的步骤，请用重跑");
   const live = db.runs.find((x) => x.session_id === r.session_id && x !== r && !TERMINAL.includes(x.status));
   if (live) throw new ApiError(409, "conflict", `这个会话还有一轮在执行（${live.run_id.slice(0, 8)}），等它结束或先停止`);
-  // 与后端一致：同一个 run_id 接着跑，事件接在后面（页面按 after=seq 增量取）；没走到 agent 的从头执行
   const prev = db.eventsOf(r);
   const started = prev.some((e) => e.kind === "model_call" || e.kind === "thought" || (e.kind === "stage" && e.payload.stage === "system"));
-  const add = (kind: RunEvent["kind"], payload: RunEvent["payload"]) => {
-    const evs = r._events ?? prev;
-    r._events = [...evs, { seq: (evs[evs.length - 1]?.seq ?? 0) + 1, kind, at: now(), payload }];
-  };
-  add("stage", { stage: "resume", title: started ? `续跑（${ME.name}）` : `重新执行（${ME.name}；上次没走到 agent，从头开始）` });
-  Object.assign(r, { status: "running", finished_at: null, _error_code: undefined, duration_ms: null });
+  const how = auto ? `自动重试（第 ${r.attempt + 1} 次执行）` : `续跑（${ME.name}）`;
+  appendEvent(r, "stage", { stage: "resume", title: started ? how : `${how}；上次没走到 agent，从头开始` });
+  Object.assign(r, { status: "running", finished_at: null, _error_code: undefined, duration_ms: null, attempt: r.attempt + 1, retry_at: null });
+  settled.delete(r.run_id);
   setTimeout(() => {
     if (r.status !== "running") return;
-    add("model_call", { model: "kimi-k2.7-code", ms: 4200, input_tokens: 9800, output_tokens: 260, tokens: 10060, tool_calls: [], content: "接着上次的进度把结论整理出来。" });
-    add("final", { content: "（续跑）按上次查到的依据给出结论：上游分区晚到，重跑当日分区即可。" });
+    appendEvent(r, "model_call", { model: "kimi-k2.7-code", ms: 4200, input_tokens: 9800, output_tokens: 260, tokens: 10060, tool_calls: [], content: "接着上次的进度把结论整理出来。" });
+    appendEvent(r, "final", { content: "（续跑）按上次查到的依据给出结论：上游分区晚到，重跑当日分区即可。" });
     Object.assign(r, { status: "success", resolution: "agent", finished_at: now() });
   }, 5000);
   return { run_id: r.run_id, session_id: r.session_id, status: "queued", output: null, dedup: false, subtask_created: null };
-});
+}
+on("POST", "/v1/runs/:id/resume", (p) => resumeRun(findRun(p.id)));
 on("POST", "/v1/runs/:id/correct", (p, _q, body) => {
   const r = findRun(p.id);
   if (!TERMINAL.includes(r.status)) throw new ApiError(409, "conflict", "运行还没结束，结束后再纠正");
@@ -786,11 +934,28 @@ on("GET", "/v1/feedback", (_p, q) => db.runs.flatMap((r) => r.feedback.map((f) =
     && taskMatch(q.task, f.task) && (!q.reason || f.reasons.includes(q.reason as FeedbackReason)) && (!q.hours || within(f.updated_at, Number(q.hours))))
   .sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, Number(q.limit) || 100));
 
-interface SubmitBody { task?: string | null; service?: string | null; env?: string | null; subtask?: string | null; input?: Record<string, unknown>; session_id?: string | null; memory?: object }
+interface SubmitBody { task?: string | null; service?: string | null; env?: string | null; subtask?: string | null; input?: Record<string, unknown>; session_id?: string | null; memory?: object; after?: string[] }
+
+/** 自动触发（定时 / 事件 / 上游联动）：服务×环境暂停了自动触发时不建运行 */
+const AUTOMATIC = ["schedule", "event", "after"];
+/** 认领顺序（与 domain/runs.PRIORITY 一致）：人在等的先跑 */
+const PRIORITY: Record<string, number> = { chat: 0, web: 0, correction: 0, api: 1, rerun: 1, resume: 1, schedule: 2, event: 2, after: 2, replay: 2 };
+
+/** 与后端 submitter._check_upstream 一致：点名的上游都要存在；已经失败 / 取消（且没在等自动重试）的直接拒 */
+function checkUpstream(after: string[] | undefined): string[] {
+  const wanted = [...new Set((after ?? []).map((a) => String(a).trim()).filter(Boolean))];
+  if (wanted.length > 20) throw new ApiError(422, "invalid_request", "after 最多点名 20 个上游运行");
+  const missing = wanted.filter((a) => !db.runs.some((r) => r.run_id === a));
+  if (missing.length) throw new ApiError(404, "unknown_run", `点名等的运行不存在：${missing.join("、")}`);
+  const dead = wanted.filter((a) => { const r = findRun(a); return (r.status === "failed" || r.status === "cancelled") && !r.retry_at; });
+  if (dead.length) throw new ApiError(409, "upstream_failed", `点名等的运行已经失败或取消：${dead.join("、")}`);
+  return wanted;
+}
 
 /** POST /v1/runs：task 不填 = 通用入口 ask。闸门：任务存在且启用、服务与环境启用、环境在任务允许的范围内、必填输入齐全 */
-/** manual：调用方自己把运行收尾（对话的流式回答） */
-function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId: string | null = null): RunAccepted {
+/** manual：调用方自己把运行收尾（对话的流式回答）；extra：上游联动建的运行带上 来源运行 / 调用身份 */
+function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId: string | null = null,
+  extra: { source?: string; caller?: string } = {}): RunAccepted {
   const [base, inlineSub] = (body.task || "ask").split(":");
   const parent = db.tasks.find((x) => x.name === base);
   if (!parent) throw new ApiError(404, "unknown_task", `任务 ${base} 不存在`);
@@ -824,6 +989,9 @@ function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId:
   if (!t.enabled) throw new ApiError(400, "task_disabled", `任务 ${name} 已停用`);
   if (existing && !parent.enabled) throw new ApiError(400, "task_disabled", `父任务 ${base} 已停用`);
   if (t.envs.length && !t.envs.includes(env)) throw new ApiError(400, "env_not_allowed", `任务 ${name} 不能在 ${env} 运行（允许：${t.envs.join("、")}）`);
+  if (AUTOMATIC.includes(trigger) && svc?.envs[env]?.triggers_paused)
+    throw new ApiError(409, "triggers_paused", `服务 ${service} 在 ${env} 暂停了自动触发（定时、事件、上游联动）`);
+  const dependsOn = checkUpstream(body.after);
   // 与后端 TaskDef.validate_input 一致：没给就用默认值，null / 空串都算没填；类型也查
   const problems = Object.entries(t.input).flatMap(([k, f]) => {
     const v = k in input ? input[k] : f.default;
@@ -843,22 +1011,169 @@ function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId:
   const run_id = db.hex(12);
   const session_id = body.session_id || run_id;
   const run: db.MockRun = {
-    run_id, session_id, task: name, task_title: parent.title, service: service ?? null, env, role: t.role, status: "running", resolution: null,
-    trigger: { type: trigger as "web", id: triggerId, source: null, caller: ME.name },
+    run_id, session_id, task: name, task_title: parent.title, service: service ?? null, env, role: t.role, status: manual ? "running" : "queued", resolution: null,
+    trigger: { type: trigger as "web", id: triggerId, source: extra.source ?? null, caller: extra.caller ?? ME.name },
     summary: String(input.question ?? Object.values(input)[0] ?? t.title), tokens: null, duration_ms: null,
     created_at: now(), finished_at: null, task_version: db.tasks.find((x) => x.name === name)?.version ?? t.version,
     role_version: db.roles.find((r) => r.name === t.role)?.version ?? null, recipe: null,
     replay_of: null, input, output: null, error_code: null, memory: body.memory ?? {},
+    attempt: 1, retry_at: null, depends_on: dependsOn,
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     feedback: [],
+    // 任务并发：同一个环境里（连同子任务）最多同时执行几个
+    _priority: PRIORITY[trigger] ?? 1, _ckey: t.concurrency ? `${base}@${env}` : undefined, _climit: t.concurrency ?? undefined,
   };
   run.recipe = db.recipeOf(run, 0);
   db.runs.unshift(run);
-  if (!manual) setTimeout(() => { if (run.status === "running") Object.assign(run, t.form === "builtin"
-    ? { status: "success", resolution: "builtin", duration_ms: 6400, tokens: 0, finished_at: now(), _events: undefined, _output: { env, drift_expired: 0 } }
-    : { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }); }, 6500);
+  if (!manual && claimable(run)) startRun(run);
   return { run_id, session_id, status: "queued", output: null, dedup: false, subtask_created: created };
 }
+
+// ———————— 调度：认领、上游联动、点名等的上游、自动重试（与 orchestration/chain.py、scheduler.retry_due 一致） ————————
+
+/** 在线、负责这个环境（和服务）的主机：env 为空的什么都认领 */
+const serving = (env: string, service: string | null) => workersNow().filter((w) => w.online && (!w.env || w.env === env)
+  && (!service || !w.services.length || w.services.includes(service)));
+function workersNow() {
+  return db.workers.map((w) => {
+    const running = w.online ? db.runs.filter((r) => r.status === "running" && (!w.env || r.env === w.env) && (!w.services.length || w.services.includes(r.service ?? ""))).length : 0;
+    return { ...w, running: Math.min(running, w.max_concurrent), seen_at: w.online ? new Date(Date.now() - 2000 - Math.random() * 15000).toISOString() : w.seen_at };
+  });
+}
+
+/** 排着队的能不能开始：点名的上游都成功了、任务并发没满、有在线的主机负责 */
+function claimable(r: db.MockRun): boolean {
+  if (r.depends_on.some((id) => db.runs.find((x) => x.run_id === id)?.status !== "success")) return false;
+  if (r._climit && db.runs.filter((x) => x.status === "running" && x._ckey === r._ckey).length >= r._climit) return false;
+  return serving(r.env, r.service).length > 0;
+}
+
+/** 认领：开始执行，6.5 秒后按任务形态收尾 */
+function startRun(run: db.MockRun) {
+  const builtin = db.tasks.find((x) => x.name === run.task.split(":")[0])?.form === "builtin";
+  Object.assign(run, { status: "running", _events: undefined });
+  setTimeout(() => { if (run.status === "running") Object.assign(run, builtin
+    ? { status: "success", resolution: "builtin", duration_ms: 6400, tokens: 0, finished_at: now(), _events: undefined, _output: { env: run.env, drift_expired: 0 } }
+    : { status: "success", resolution: "agent", duration_ms: 6400, tokens: 8120, finished_at: now(), _events: undefined }); }, 6500);
+}
+
+function addTick(t: Omit<Tick, "id" | "at" | "detail"> & { detail?: Tick["detail"] }) {
+  db.ticks.unshift({ id: db.nextTickId(), at: now(), detail: null, ...t });
+}
+
+/** 上游联动能引用的扁平字段（与 domain/tasks.run_fields 一致） */
+function runFields(r: db.MockRun, prefix = ""): Record<string, unknown> {
+  const output = db.detailOf(r).output ?? {};
+  const out: Record<string, unknown> = { run_id: r.run_id, task: r.task, env: r.env, service: r.service, status: r.status, error_code: errorCodeOf(r),
+    caller: r.trigger.caller, error: output.error, "output.answer": output.answer };
+  for (const [k, v] of Object.entries(r.input)) out[`input.${k}`] = v;
+  const walk = (node: unknown, path: string) => {
+    if (node && typeof node === "object" && !Array.isArray(node)) for (const [k, v] of Object.entries(node)) walk(v, `${path}.${k}`);
+    else out[path] = node;
+  };
+  if (output.data && typeof output.data === "object") walk(output.data, "output.data");
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v != null).map(([k, v]) => [prefix + k, v]));
+}
+
+const watches = (tr: AfterTrigger, task: string) => tr.tasks.includes(task) || tr.tasks.includes(task.split(":")[0]);
+/** 声明了「在它结束后跑」的任务（子任务要自己写了 triggers 才算） */
+const listeners = (task: string) => db.tasks.filter((t) => !t.extends || ownFields(t).includes("triggers"))
+  .flatMap((t) => effective(t).triggers.filter((tr): tr is AfterTrigger => tr.type === "after" && tr.enabled !== false && watches(tr, task) && t.name !== task)
+    .map((tr) => [t.name, tr] as const));
+/** 这次运行在联动链上的第几层 */
+function depthOf(r: db.MockRun): number {
+  let depth = 0, cur: db.MockRun | undefined = r;
+  while (cur && cur.trigger.type === "after" && cur.trigger.source && depth < 50) { depth++; cur = db.runs.find((x) => x.run_id === cur!.trigger.source); }
+  return depth;
+}
+const MAX_DEPTH = 5;
+const afterKeys = new Set<string>();
+
+function considerAfter(r: db.MockRun, depth: number, down: string, tr: AfterTrigger) {
+  const key = `after:${r.run_id}:${r.status}:${down}:${tr.id}`;
+  if (afterKeys.has(key)) return;
+  afterKeys.add(key);
+  const common = { kind: "after" as const, task: down, trigger_id: tr.id, env: r.env, source: r.run_id, run_id: null };
+  const fields = runFields(r);
+  const accepts = Object.entries(tr.filter ?? {}).every(([f, pattern]) => { try { return new RegExp(pattern, "i").test(String(fields[f] ?? "")); } catch { return false; } });
+  if (!accepts) return addTick({ ...common, outcome: "filtered", reason: `上游 ${r.task} 的这次运行不满足过滤条件`, detail: { filter: tr.filter ?? {} } });
+  if (depth >= MAX_DEPTH) return addTick({ ...common, outcome: "rejected", reason: `联动已经 ${depth} 层，超过 ${MAX_DEPTH} 层不再往下触发` });
+  const values: Record<string, unknown> = { ...fields };
+  if (tr.mode === "all") {
+    const window = tr.window_s ?? 86400;
+    const lastFire = db.runs.filter((x) => x.task === down && x.trigger.type === "after" && x.trigger.id === tr.id && x.env === r.env).map((x) => x.created_at).sort().pop();
+    const since = [new Date(Date.now() - window * 1000).toISOString(), lastFire ?? ""].sort().pop()!;
+    const missing: string[] = [];
+    for (const up of tr.tasks) {
+      if (r.task === up || r.task.split(":")[0] === up) { Object.assign(values, runFields(r, `${up}.`)); continue; }
+      const other = db.runs.filter((x) => (x.task === up || x.task.startsWith(up + ":")) && x.env === r.env && (tr.on as string[]).includes(x.status)
+        && x.trigger.type !== "replay" && !x.retry_at && (x.finished_at ?? "") > since).sort((a, b) => (b.finished_at ?? "").localeCompare(a.finished_at ?? ""))[0];
+      if (other) Object.assign(values, runFields(other, `${up}.`));
+      else missing.push(up);
+    }
+    if (missing.length) {
+      const span = window >= 3600 && window % 3600 === 0 ? `${window / 3600} 小时` : `${Math.round(window / 60)} 分钟`;
+      return addTick({ ...common, outcome: "waiting", reason: `还在等 ${missing.join("、")} 结束（${span}内）`, detail: { have: tr.tasks.filter((u) => !missing.includes(u)) } });
+    }
+  }
+  const target = db.tasks.find((x) => x.name === down);
+  if (!target) return;
+  const spec = effective(target);
+  const input = tr.map && Object.keys(tr.map).length
+    ? Object.fromEntries(Object.entries(tr.map).filter(([, path]) => values[path] != null).map(([k, path]) => [k, values[path]]))
+    : Object.fromEntries(Object.entries(r.input).filter(([k]) => k in spec.input));
+  const [base, obj] = down.split(":");
+  try {
+    const accepted = submitRun({ task: base, subtask: obj ?? null, env: r.env, service: spec.service === "*" ? tr.service || r.service : null, input }, "after", false, tr.id,
+      { source: r.run_id, caller: r.trigger.caller });
+    addTick({ ...common, outcome: "fired", run_id: accepted.run_id, reason: `上游 ${r.task} ${r.status === "success" ? "成功" : "失败"}` });
+  } catch (e) {
+    const err = e as ApiError;
+    addTick({ ...common, outcome: "rejected", reason: err.message, detail: { code: err.code } });
+  }
+}
+
+/** 一次运行最终结束（失败后还要自动重试的不算）：点名等它的排队运行、上游联动 */
+function onFinished(r: db.MockRun) {
+  if (r.trigger.type === "replay") return;
+  if (r.status !== "success") {
+    const what = r.status === "failed" ? "失败" : "被取消";
+    const reason = `点名等的上游运行 ${r.run_id.slice(0, 8)}（${r.task}）${what}了，这次没有执行`;
+    for (const d of db.runs.filter((x) => x.status === "queued" && x.depends_on.includes(r.run_id))) {
+      Object.assign(d, { status: "failed", finished_at: now(), _error_code: "upstream_failed", _events: [] });
+      appendEvent(d, "error", { title: "upstream_failed", content: reason });
+    }
+  }
+  if (r.status !== "success" && r.status !== "failed") return;
+  const depth = depthOf(r);
+  for (const [down, tr] of listeners(r.task)) if ((tr.on as string[]).includes(r.status)) considerAfter(r, depth, down, tr);
+}
+
+/** 已经处理过结束的运行（启动时的历史运行都算处理过，不往回补联动） */
+const settled = new Set(db.runs.filter((r) => TERMINAL.includes(r.status) && !r.retry_at).map((r) => r.run_id));
+setInterval(() => {
+  // 到点的自动重试 → 续跑；开始不了的按最终失败收尾
+  for (const r of db.runs.filter((x) => x.status === "failed" && x.retry_at && x.retry_at <= now())) {
+    const common = { kind: "retry" as const, task: r.task, trigger_id: null, env: r.env, source: r.run_id, run_id: r.run_id };
+    const attempt = r.attempt;
+    try {
+      resumeRun(r, true);
+      addTick({ ...common, outcome: "fired", reason: `第 ${attempt} 次执行失败后自动重试` });
+    } catch (e) {
+      r.retry_at = null;
+      appendEvent(r, "stage", { stage: "retry", title: "自动重试没能开始", content: (e as Error).message });
+      addTick({ ...common, outcome: "rejected", reason: (e as Error).message, detail: { code: (e as ApiError).code } });
+    }
+  }
+  for (const r of [...db.runs]) {
+    if (!TERMINAL.includes(r.status) || settled.has(r.run_id) || (r.status === "failed" && r.retry_at)) continue;
+    settled.add(r.run_id);
+    onFinished(r);
+  }
+  // 认领：优先级高的、早的先
+  for (const r of db.runs.filter((x) => x.status === "queued").sort((a, b) => (a._priority ?? 1) - (b._priority ?? 1) || a.created_at.localeCompare(b.created_at)))
+    if (claimable(r)) startRun(r);
+}, 1000);
 
 // ———————— 回归重放 ————————
 // 拿被 👎 的 agent 运行用当前定义重跑（新会话、不沉淀、不投递），重放结束后模型对照判定（mock：确定性地给判定）
@@ -1290,6 +1605,37 @@ on("GET", "/v1/stats", (_p, q) => {
     tokens: rs.reduce((n, r) => n + (r.tokens ?? 0), 0),
   };
   return stats;
+});
+
+// ———————— 调度的可见面：触发记录、执行主机与排队情况 ————————
+
+const TICK_KINDS = ["schedule", "event", "after", "retry"];
+const TICK_OUTCOMES = ["fired", "deduped", "skipped", "filtered", "waiting", "rejected", "unmatched"];
+on("GET", "/v1/ticks", (_p, q) => {
+  if (q.kind && !TICK_KINDS.includes(String(q.kind))) throw new ApiError(422, "invalid_request", `kind 只能是 ${TICK_KINDS.join("、")}`);
+  if (q.outcome && !TICK_OUTCOMES.includes(String(q.outcome))) throw new ApiError(422, "invalid_request", `outcome 只能是 ${TICK_OUTCOMES.join("、")}`);
+  const limit = Math.max(1, Math.min(Number(q.limit) || 100, 500));
+  const items = db.ticks.filter((t) => (!q.task || t.task === q.task || (t.task ?? "").startsWith(q.task + ":"))
+    && (!q.kind || t.kind === q.kind) && (!q.outcome || t.outcome === q.outcome) && (!q.env || t.env === q.env)
+    && (!q.hours || within(t.at, Number(q.hours))) && (!q.before || t.id < Number(q.before))).slice(0, limit);
+  return { items, next_before: items.length >= limit ? items[items.length - 1].id : null };
+});
+on("GET", "/v1/workers", (): WorkersResponse => {
+  const hosts = workersNow();
+  const groups = new Map<string, WorkersResponse["queue"]["groups"][number]>();
+  for (const r of db.runs.filter((x) => x.status === "queued")) {
+    const k = `${r.env}|${r.service}`;
+    const g = groups.get(k) ?? { env: r.env, service: r.service, queued: 0, oldest_at: r.created_at, waiting_upstream: 0, stuck: 0, served: false };
+    g.queued++;
+    if (r.created_at < g.oldest_at) g.oldest_at = r.created_at;
+    if (r.depends_on.length) g.waiting_upstream++;
+    if (!r.depends_on.length && Date.now() - new Date(r.created_at).getTime() > 600_000) g.stuck++;
+    groups.set(k, g);
+  }
+  const list = [...groups.values()].sort((a, b) => a.env.localeCompare(b.env) || String(a.service).localeCompare(String(b.service)))
+    .map((g) => ({ ...g, served: serving(g.env, g.service).length > 0 }));
+  return { workers: hosts.sort((a, b) => Number(b.online) - Number(a.online) || a.env.localeCompare(b.env) || a.host.localeCompare(b.host)),
+    queue: { groups: list, total: list.reduce((n, g) => n + g.queued, 0) }, queued_alert_s: 600 };
 });
 
 on("GET", "/v1/search", (_p, q) => {

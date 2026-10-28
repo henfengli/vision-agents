@@ -6,17 +6,17 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   LuBraces, LuBrain, LuCalendarClock, LuCircleAlert, LuCode, LuCopy, LuFileInput, LuLayers, LuMessageSquare, LuPlus, LuScrollText,
-  LuSend, LuSettings, LuSparkles, LuTrash2, LuWebhook, LuZap,
+  LuSend, LuSettings, LuSparkles, LuTrash2, LuWebhook, LuWorkflow, LuX, LuZap,
 } from "react-icons/lu";
 
 import { api, useEnvs, useMeta, useRoles, useServices, useSettings, useTasks } from "@/api/hooks";
-import type { Deliver, Env, InputField, MemoryOverride, Task, TaskSummary, Trigger, TriggerRule } from "@/api/types";
+import type { AfterTrigger, Deliver, Env, InputField, MemoryOverride, RetryPolicy, Task, TaskSummary, Trigger, TriggerRule } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { SaveBar } from "@/components/save-bar";
 import { EnvBadge, TRIGGER } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { KeyValueEditor } from "@/components/ui/data";
-import { Checkbox, Field, Input, SearchSelect, Segmented, Select, Switch, Textarea } from "@/components/ui/form";
+import { Checkbox, CreatableSelect, Field, Input, SearchSelect, Segmented, Select, Switch, Textarea } from "@/components/ui/form";
 import { Menu, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader } from "@/components/ui/primitives";
 import { describeCron, nextRuns, validateCron } from "@/lib/cron";
@@ -52,6 +52,8 @@ export interface Draft {
   handler: string | null;
   schema: string;                       // 结构化输出的 JSON 文本；空 = 不要求
   profile: Record<string, string>;      // 只有新建时在这里编辑（已有任务在「档案」标签）
+  retry: RetryPolicy | null;            // 失败自动重试（只对 agent 任务）
+  concurrency: number | null;           // 同一个环境里最多同时执行几个；空 = 不单独限制
 }
 
 let rowSeq = 0;
@@ -59,13 +61,14 @@ const rowsOf = (input: Record<string, InputField>): InputRow[] =>
   Object.entries(input).map(([name, f]) => ({ id: ++rowSeq, name, field: { ...f, options: f.options?.length ? f.options : undefined } }));
 
 type TaskLike = Pick<Task, "title" | "description" | "service" | "role" | "form" | "input" | "envs" | "triggers" | "deliver" | "dedup" | "memory" | "timeout_s"> &
-  Partial<Pick<Task, "handler" | "output_schema" | "object_input" | "profile">>;
+  Partial<Pick<Task, "handler" | "output_schema" | "object_input" | "profile" | "retry" | "concurrency">>;
 
 export function toDraft(t: TaskLike): Draft {
   return structuredClone({
     title: t.title, description: t.description, service: t.service, role: t.role, form: t.form, inputs: rowsOf(t.input),
     object_input: t.object_input ?? null, envs: t.envs, triggers: t.triggers, deliver: t.deliver, dedup: t.dedup, memory: t.memory ?? {},
     timeout_s: t.timeout_s, handler: t.handler ?? null, schema: t.output_schema ? JSON.stringify(t.output_schema, null, 2) : "", profile: t.profile ?? {},
+    retry: t.retry ?? null, concurrency: t.concurrency ?? null,
   });
 }
 
@@ -81,6 +84,7 @@ export function fromDraft(d: Draft): Partial<Task> {
     deliver: d.deliver, dedup: d.dedup, memory: agent ? d.memory : {}, timeout_s: d.timeout_s,
     role: agent ? d.role : null, handler: agent ? null : d.handler,
     output_schema: agent ? parseSchema(d.schema).value : null, object_input: agent ? d.object_input : null,
+    retry: agent ? d.retry : null, concurrency: d.concurrency,
   };
 }
 
@@ -117,7 +121,7 @@ export type Section = "basic" | "input" | "triggers" | "deliver" | "output" | "m
 export interface DraftError { section: Section; message: string }
 
 /** 与后端写入时的检查一致；返回全部问题（按分节） */
-export function draftErrors(d: Draft, ctx: { channels: string[]; handlers: string[] }): DraftError[] {
+export function draftErrors(d: Draft, ctx: { channels: string[]; handlers: string[]; name?: string }): DraftError[] {
   const out: DraftError[] = [];
   const err = (section: Section, message: string) => out.push({ section, message });
   const names = d.inputs.map((r) => r.name.trim());
@@ -155,6 +159,25 @@ export function draftErrors(d: Draft, ctx: { channels: string[]; handlers: strin
         if (!r.conclusion.trim()) err("triggers", `事件 ${tr.id}：规则 ${r.pattern || "?"} 没写结论`);
       }
     }
+    if (tr.type === "after") {
+      // 与后端 AfterTrigger.problem + consistency_error 一致（上游存在、不成环由后端查）
+      if (!tr.tasks.length) err("triggers", `联动 ${tr.id}：至少选一个上游任务`);
+      if (ctx.name && tr.tasks.some((u) => u.split(":")[0] === ctx.name)) err("triggers", `联动 ${tr.id}：上游不能是这个任务自己`);
+      if (!tr.on.length) err("triggers", `联动 ${tr.id}：至少选一种上游结束状态（成功 / 失败）`);
+      for (const [k, p] of Object.entries(tr.filter ?? {})) {
+        if (!AFTER_PATH.test(k)) err("triggers", `联动 ${tr.id}：过滤字段 ${k || "?"} 写法不对（如 status、input.asset_key、output.data.category）`);
+        if (regexError(p)) err("triggers", `联动 ${tr.id}：过滤 ${k} 的正则不合法`);
+      }
+      for (const [k, p] of Object.entries(tr.map ?? {})) {
+        if (!names.includes(k)) err("triggers", `联动 ${tr.id}：映射的 ${k || "?"} 不是输入字段`);
+        if (!AFTER_PATH.test(p)) err("triggers", `联动 ${tr.id}：${k} ← ${p || "?"} 的上游字段写法不对（如 run_id、input.version、output.answer）`);
+      }
+      const refs = [...Object.values(tr.map ?? {}), ...Object.keys(tr.filter ?? {})];
+      const prefixed = refs.filter((p) => upstreamOfPath(p));
+      if (tr.mode === "any" && prefixed.length) err("triggers", `联动 ${tr.id}：「任一上游结束」时引用不用带上游任务名（${prefixed.join("、")}）`);
+      const alien = prefixed.filter((p) => !tr.tasks.includes(upstreamOfPath(p)));
+      if (tr.mode === "all" && alien.length) err("triggers", `联动 ${tr.id}：引用了不在上游里的任务（${alien.join("、")}）`);
+    }
   }
   if (d.deliver) {
     if (d.deliver.url != null) {
@@ -169,9 +192,20 @@ export function draftErrors(d: Draft, ctx: { channels: string[]; handlers: strin
     const missing = keys.filter((k) => !names.includes(k));
     if (missing.length) err("deliver", `去重字段不在输入里：${missing.join("、")}`);
   }
+  if (d.retry && d.form === "agent") {
+    if (!(d.retry.max >= 1 && d.retry.max <= 5)) err("deliver", "自动重试次数要在 1~5 之间");
+    if (!(d.retry.delay_s >= 10 && d.retry.delay_s <= 3600)) err("deliver", "重试间隔要在 10 秒到 1 小时之间");
+  }
+  if (d.concurrency != null && !(d.concurrency >= 1 && d.concurrency <= 50)) err("deliver", "同时执行上限要在 1~50 之间");
   if (d.form === "agent" && parseSchema(d.schema).error) err("output", `结构化输出：${parseSchema(d.schema).error}`);
   return out;
 }
+
+/** 上游运行能被引用的字段（与后端 domain/tasks._AFTER_PATH 一致）；all 模式可带「上游任务名.」前缀 */
+const AFTER_PATH = /^(?:[a-z][a-z0-9-]{1,48}(?::[^:\s/\\.]+)?\.)?(?:run_id|task|env|service|status|caller|error|error_code|output\.answer|input\.[A-Za-z_]\w*|output\.data(?:\.[A-Za-z_]\w*)+)$/;
+const AFTER_TOP = ["run_id", "task", "env", "service", "status", "caller", "error", "error_code", "input", "output"];
+/** 「上游任务名.字段」里的任务名；不带前缀的是空串 */
+const upstreamOfPath = (p: string) => { const head = p.split(".")[0]; return AFTER_TOP.includes(head) || !p.includes(".") ? "" : head; };
 
 /** 改字段名：去重、对象字段、事件映射、定时的固定输入里引用它的地方跟着改 */
 function renameInput(d: Draft, from: string, to: string): Draft {
@@ -182,7 +216,7 @@ function renameInput(d: Draft, from: string, to: string): Draft {
     object_input: d.object_input === from ? to : d.object_input,
     dedup: d.dedup ? { ...d.dedup, key: d.dedup.key.split("+").map((k) => (k.trim() === from ? to : k.trim())).join("+") } : null,
     triggers: d.triggers.map((t) => t.type === "schedule" ? { ...t, input: swap(t.input ?? {}) }
-      : t.type === "event" && t.map ? { ...t, map: swap(t.map) as Record<string, string> } : t),
+      : (t.type === "event" || t.type === "after") && t.map ? { ...t, map: swap(t.map) as Record<string, string> } : t),
   };
 }
 
@@ -194,7 +228,7 @@ function removeInput(d: Draft, name: string): Draft {
     object_input: d.object_input === name ? null : d.object_input,
     dedup: d.dedup ? (keys.length ? { ...d.dedup, key: keys.join("+") } : null) : null,
     triggers: d.triggers.map((t) => t.type === "schedule" ? { ...t, input: drop(t.input ?? {}) }
-      : t.type === "event" && t.map ? { ...t, map: drop(t.map) as Record<string, string> } : t),
+      : (t.type === "event" || t.type === "after") && t.map ? { ...t, map: drop(t.map) as Record<string, string> } : t),
   };
 }
 
@@ -232,8 +266,9 @@ const SECTIONS: { id: Section; label: string; when?: (d: Draft, create: boolean)
 
 const scrollTo = (s: Section) => document.getElementById(`sec-${s}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
-function TaskForm({ d, setD, errors, create, resetKey, head }: {
+function TaskForm({ d, setD, errors, create, resetKey, head, name }: {
   d: Draft; setD: (fn: (d: Draft) => Draft) => void; errors: DraftError[]; create: boolean; resetKey: number; head?: ReactNode;
+  name: string;                  // 任务名（新建时还没填是空串）：上游联动不能选自己
 }) {
   const { data: roles } = useRoles();
   const { data: services } = useServices();
@@ -326,7 +361,7 @@ function TaskForm({ d, setD, errors, create, resetKey, head }: {
           <div className="space-y-3">
             {d.triggers.length === 0 && <div className="rounded-md border border-dashed border-line px-3 py-6 text-center text-xs text-fg-3">没有触发：只能在控制台手动运行</div>}
             {d.triggers.map((tr, i) => (
-              <TriggerEditor key={`${tr.id}:${resetKey}:${i}`} tr={tr} envs={allowedEnvs} fields={fields} generic={generic}
+              <TriggerEditor key={`${tr.id}:${resetKey}:${i}`} tr={tr} envs={allowedEnvs} fields={fields} generic={generic} self={name}
                 onChange={(v) => set("triggers", d.triggers.map((x, j) => (j === i ? v : x)))}
                 onRemove={() => set("triggers", d.triggers.filter((_, j) => j !== i))} />
             ))}
@@ -345,6 +380,8 @@ function TaskForm({ d, setD, errors, create, resetKey, head }: {
               </div>
             </Field>
             <DedupEditor d={d} set={(v) => set("dedup", v)} />
+            <RetryEditor value={d.retry} agent={agent} onChange={(v) => set("retry", v)} />
+            <ConcurrencyEditor value={d.concurrency} onChange={(v) => set("concurrency", v)} />
           </div>
         </Section>
 
@@ -401,7 +438,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
   const base = useMemo(() => toDraft(task), [task]);
   useEffect(() => { setDraft(toDraft(task)); setResetKey((n) => n + 1); }, [task.version]); // eslint-disable-line react-hooks/exhaustive-deps
   const { data: meta } = useMeta();
-  const errors = draftErrors(d, { channels: meta?.channels ?? [], handlers: meta?.builtin_handlers ?? [] });
+  const errors = draftErrors(d, { channels: meta?.channels ?? [], handlers: meta?.builtin_handlers ?? [], name: task.name.split(":")[0] });
   const dirty = !sameDraft(d, base);
 
   const save = useMutation(async () => {
@@ -417,7 +454,7 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
   return (
     <>
-      <TaskForm d={d} setD={(fn) => setDraft(fn)} errors={errors} create={false} resetKey={resetKey} />
+      <TaskForm d={d} setD={(fn) => setDraft(fn)} errors={errors} create={false} resetKey={resetKey} name={task.name} />
       <SaveBar visible={dirty} saving={save.pending} label={`保存为 v${task.version + 1}`}
         onSave={() => {
           if (errors.length) { toast.error(`还有 ${errors.length} 处要改`, errors[0].message); scrollTo(errors[0].section); }
@@ -432,15 +469,15 @@ export function TaskDefinitionEditor({ task, onSaved }: { task: TaskSummary; onS
 
 const TASK_NAME = /^[a-z][a-z0-9-]{1,48}$/;
 
-type Preset = "qa" | "schedule" | "event" | "blank";
+type Preset = "qa" | "schedule" | "event" | "after" | "blank";
 
 /** 几种常见起点：只是预填，之后每一项都能改 */
 /** 各起点优先用的角色（种子里有就用，没有退回第一个角色）；只是预选，随时能换 */
 const PRESET_ROLES: Record<Preset, string[]> = {
-  qa: ["generalist"], schedule: ["inspector", "generalist"], event: ["ops_analyst", "generalist"], blank: ["generalist"],
+  qa: ["generalist"], schedule: ["inspector", "generalist"], event: ["ops_analyst", "generalist"], after: ["generalist"], blank: ["generalist"],
 };
 
-function presetDraft(p: Preset, ctx: { service: string | null; envs: Env[]; roles: string[]; channel: string | null; eventSource?: { source: string; event: string } }): Draft {
+function presetDraft(p: Preset, ctx: { service: string | null; envs: Env[]; roles: string[]; channel: string | null; eventSource?: { source: string; event: string }; upstream?: string }): Draft {
   const env = (ctx.envs.find((e) => !e.protected) ?? ctx.envs[0])?.name ?? "test";
   const deliver = ctx.channel ? { channel: ctx.channel } : null;
   const role = PRESET_ROLES[p].find((r) => ctx.roles.includes(r)) ?? ctx.roles[0] ?? null;
@@ -449,6 +486,7 @@ function presetDraft(p: Preset, ctx: { service: string | null; envs: Env[]; role
     triggers: [{ id: "chat", type: "chat" }, { id: "api", type: "api" }], timeout_s: 600 });
   if (p === "schedule") return toDraft({ ...base, triggers: [{ id: "daily", type: "schedule", cron: "0 9 * * 1-5", envs: [env], input: {} }, { id: "api", type: "api" }], deliver });
   if (p === "event" && ctx.eventSource) return toDraft({ ...base, triggers: [{ id: ctx.eventSource.source, type: "event", source: ctx.eventSource.source, event: ctx.eventSource.event, map: {}, rules: [] }, { id: "api", type: "api" }], deliver });
+  if (p === "after") return toDraft({ ...base, triggers: [{ id: "after", type: "after", tasks: ctx.upstream ? [ctx.upstream] : [], mode: "any", on: ["success"] }, { id: "api", type: "api" }], deliver });
   return toDraft(base);
 }
 
@@ -456,28 +494,35 @@ const PRESETS: { value: Preset; label: string; hint: string; icon: ReactNode }[]
   { value: "qa", label: "问答", hint: "在对话页和 API 里提问，输入一个问题", icon: <LuMessageSquare /> },
   { value: "schedule", label: "定时检查", hint: "按时自己跑，结果推送到群", icon: <LuCalendarClock /> },
   { value: "event", label: "事件触发", hint: "Dagster 失败、GitLab 部署这类事件来了就跑", icon: <LuWebhook /> },
+  { value: "after", label: "接在别的任务后", hint: "上游任务跑完（成功或失败）自动跑这个", icon: <LuWorkflow /> },
   { value: "blank", label: "空白", hint: "从头写", icon: <LuSparkles /> },
 ];
 
 export function NewTaskPage() {
-  const [search] = useSearch<{ from: string }>();
+  // ?from= 复制已有任务；?service= 从服务页进来，归属预选它；?after= 从任务详情「新建下游任务」进来，预填上游联动
+  const [search] = useSearch<{ from: string; service: string; after: string }>();
   const { data: tasks } = useTasks();
   const { data: envs } = useEnvs();
   const { data: meta } = useMeta();
   const { data: services } = useServices();
   const { data: roles } = useRoles();
   const [name, setName] = useState("");
-  const [preset, setPreset] = useState<Preset | "copy">(search.from ? "copy" : "qa");
+  const startPreset: Preset = search.after ? "after" : "qa";
+  const [preset, setPreset] = useState<Preset | "copy">(search.from ? "copy" : startPreset);
   const [from, setFrom] = useState(search.from ?? "");
   const [d, setDraft] = useState<Draft | null>(null);
   const [resetKey, setResetKey] = useState(0);
   /** 点过一次「创建」才把问题标出来：刚打开就满屏红字没意义 */
   const [tried, setTried] = useState(false);
   const touched = useRef(false);
+  const upstream = tasks?.find((t) => t.name === search.after);
   const ctx = () => ({
-    service: services?.[0]?.name ?? "*", envs: envs ?? [], roles: (roles ?? []).map((r) => r.name),
+    service: services?.find((s) => s.name === search.service)?.name
+      ?? (upstream?.service && upstream.service !== "*" ? upstream.service : null) ?? services?.[0]?.name ?? "*",
+    envs: envs ?? [], roles: (roles ?? []).map((r) => r.name),
     channel: meta?.channels.includes("default") ? "default" : meta?.channels[0] ?? null,
     eventSource: meta?.event_sources[0]?.events[0] ? { source: meta.event_sources[0].name, event: meta.event_sources[0].events[0].name } : undefined,
+    upstream: upstream?.name,
   });
   const source = tasks?.find((t) => t.name === from && !t.extends);
 
@@ -504,12 +549,12 @@ export function NewTaskPage() {
     if (search.from && !fill("copy", search.from)) {
       toast.error("没找到要复制的任务", `${search.from} 不存在或是子任务，先从「问答」开始`);
       fill("qa", "");
-    } else if (!search.from) fill("qa", "");
+    } else if (!search.from) fill(startPreset, "");
   }, [ready]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nameError = !name ? null : !TASK_NAME.test(name) ? "小写字母开头，只能有小写字母、数字、连字符（2~49 个字符）"
     : tasks?.some((t) => t.name === name) ? "已经有这个任务了" : null;
-  const errors = d ? draftErrors(d, { channels: meta?.channels ?? [], handlers: meta?.builtin_handlers ?? [] }) : [];
+  const errors = d ? draftErrors(d, { channels: meta?.channels ?? [], handlers: meta?.builtin_handlers ?? [], name }) : [];
   useLeaveGuard(touched.current || !!name);
 
   const create = useMutation(async () => {
@@ -535,7 +580,7 @@ export function NewTaskPage() {
     <Card>
       <CardHeader icon={<LuSparkles />} title="从哪里开始" description="选一种起点预填，之后每一项都能改" />
       <div className="space-y-4 p-4">
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
           {PRESETS.filter((p) => p.value !== "event" || meta?.event_sources.length).map((p) => (
             <button key={p.value} type="button" onClick={() => void apply(p.value)}
               className={cn("rounded-lg border px-3 py-2.5 text-left transition-colors", preset === p.value ? "border-accent bg-accent-soft" : "border-line bg-panel hover:bg-hover")}>
@@ -565,18 +610,16 @@ export function NewTaskPage() {
 
   return (
     <Page wide>
+      {/* 创建按钮只在底部浮条上（随时可见）；顶部只留取消，不放两个一样的主按钮 */}
       <PageHeader crumbs={[{ label: "任务", to: "/tasks" }, { label: "新建" }]} title="新建任务"
-        actions={<>
-          <Button onClick={() => navigate("/tasks")}>取消</Button>
-          <Button variant="primary" icon={<LuPlus />} loading={create.pending} onClick={submit}>创建任务</Button>
-        </>} />
+        actions={<Button onClick={() => navigate("/tasks")}>取消</Button>} />
       {!d ? <div className="h-96 animate-pulse rounded-lg bg-sunken" /> : (
-        <TaskForm d={d} setD={(fn) => { touched.current = true; setDraft((cur) => (cur ? fn(cur) : cur)); }} errors={tried ? errors : []} create resetKey={resetKey} head={head} />
+        <TaskForm d={d} setD={(fn) => { touched.current = true; setDraft((cur) => (cur ? fn(cur) : cur)); }} errors={tried ? errors : []} create resetKey={resetKey} head={head} name={name} />
       )}
       <div className="pointer-events-none fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
         <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-line bg-raised py-2 pl-4 pr-2 shadow-[var(--shadow-pop)]">
           <span className="text-[13px] text-fg-2">{tried && errors.length ? <span className="text-bad">还有 {errors.length} 处要改</span> : name && !nameError ? <>创建 <code className="font-mono">{name}</code></> : "填好任务名就能创建"}</span>
-          <Button size="sm" variant="primary" loading={create.pending} onClick={submit}>创建任务</Button>
+          <Button size="sm" variant="primary" icon={<LuPlus />} loading={create.pending} onClick={submit}>创建任务</Button>
         </div>
       </div>
     </Page>
@@ -629,6 +672,51 @@ function DedupEditor({ d, set }: { d: Draft; set: (v: Draft["dedup"]) => void })
             <div className="flex items-center gap-2 text-[12px] text-fg-3">
               窗口<Input className="w-20" inputMode="numeric" value={Math.round(d.dedup.window_s / 60) || ""} onChange={(e) => set({ ...d.dedup!, window_s: Math.max(1, Number(e.target.value.replace(/\D/g, "")) || 1) * 60 })} />分钟
             </div>
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+/** 失败自动重试：走续跑（从断点接着跑），只重试临时性的失败 */
+function RetryEditor({ value, agent, onChange }: { value: RetryPolicy | null; agent: boolean; onChange: (v: RetryPolicy | null) => void }) {
+  return (
+    <Field label="失败自动重试" help={agent
+      ? "只重试临时性的失败：模型 429 / 网络异常、执行进程被杀、主机重启打断。走续跑，从断点接着跑；超时、配置没填这类再跑也一样的不重试"
+      : "内建任务没有断点，不能自动重试；失败了在运行详情里点重跑"}>
+      <div className="space-y-2">
+        <Switch checked={agent && !!value} disabled={!agent} onChange={(v) => onChange(v ? { max: 2, delay_s: 60 } : null)}
+          label={<span className="text-[12.5px] text-fg-2">{agent && value ? "开" : "关"}</span>} />
+        {agent && value && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-sunken/40 p-2.5 text-[12px] text-fg-3">
+            最多
+            <Select size="sm" className="w-20" value={String(value.max)} onChange={(v) => onChange({ ...value, max: Number(v) })}
+              options={[1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `${n} 次` }))} />
+            每次等
+            <Input className="w-20" inputMode="numeric" value={value.delay_s || ""} aria-label="重试间隔（秒）"
+              onChange={(e) => onChange({ ...value, delay_s: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+            秒
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+/** 同一个环境里最多同时执行几个（连同子任务）：一下涌进几十条事件时不占满主机的执行名额 */
+function ConcurrencyEditor({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
+  return (
+    <Field label="同时执行上限" help="同一个环境里这个任务（连同子任务）最多同时跑几个，多出来的排队。一下涌进几十条 Dagster 失败时，别把主机的执行名额全占了">
+      <div className="space-y-2">
+        <Switch checked={value != null} onChange={(v) => onChange(v ? 4 : null)}
+          label={<span className="text-[12.5px] text-fg-2">{value != null ? "限制" : "不单独限制（只受主机的总并发约束）"}</span>} />
+        {value != null && (
+          <div className="flex items-center gap-2 rounded-md border border-line bg-sunken/40 p-2.5 text-[12px] text-fg-3">
+            每个环境最多
+            <Input className="w-20" inputMode="numeric" value={value || ""} aria-label="同时执行上限"
+              onChange={(e) => onChange(Math.min(50, Number(e.target.value.replace(/\D/g, "")) || 0))} />
+            个
           </div>
         )}
       </div>
@@ -744,6 +832,7 @@ function AddTriggerMenu({ onAdd, existing, envs }: { onAdd: (t: Trigger) => void
       { label: "API 调用", icon: <LuCode />, disabled: has("api"), hint: has("api") ? "已有" : "业务项目用 SDK / HTTP 调", onClick: () => onAdd({ id: "api", type: "api" }) },
       { label: "对话", icon: <LuMessageSquare />, disabled: has("chat"), hint: has("chat") ? "已有" : "出现在对话页", onClick: () => onAdd({ id: "chat", type: "chat" }) },
       { label: "定时", icon: <LuCalendarClock />, hint: "按 cron 在选定的环境各跑一份", onClick: () => onAdd({ id: newId("schedule", existing), type: "schedule", cron: "0 9 * * 1-5", envs: env ? [env] : [], input: {} }) },
+      { label: "上游任务结束后", icon: <LuWorkflow />, hint: "别的任务跑完自动跑这个（同一个环境）", onClick: () => onAdd({ id: newId("after", existing), type: "after", tasks: [], mode: "any", on: ["success"] }) },
       { separator: true, label: "" },
       ...(meta?.event_sources ?? []).flatMap((s) => s.events.map((ev) => ({
         label: `${s.title} · ${ev.title}`, icon: <LuWebhook />, onClick: () => onAdd({ id: newId(s.name, existing), type: "event" as const, source: s.name, event: ev.name, map: {}, rules: [] }),
@@ -752,8 +841,8 @@ function AddTriggerMenu({ onAdd, existing, envs }: { onAdd: (t: Trigger) => void
   );
 }
 
-function TriggerEditor({ tr, envs, fields, generic, onChange, onRemove }: {
-  tr: Trigger; envs: Env[]; fields: Record<string, InputField>; generic: boolean; onChange: (t: Trigger) => void; onRemove: () => void;
+function TriggerEditor({ tr, envs, fields, generic, self, onChange, onRemove }: {
+  tr: Trigger; envs: Env[]; fields: Record<string, InputField>; generic: boolean; self: string; onChange: (t: Trigger) => void; onRemove: () => void;
 }) {
   const meta = TRIGGER[tr.type];
   const { data: m } = useMeta();
@@ -764,6 +853,7 @@ function TriggerEditor({ tr, envs, fields, generic, onChange, onRemove }: {
         <span className="flex size-6 items-center justify-center rounded-md bg-panel text-fg-2 shadow-[var(--shadow-card)] [&_svg]:size-3.5">{meta.icon}</span>
         <span className="text-[13px] font-medium text-fg">{meta.label}</span>
         {tr.type === "event" && <span className="text-[12px] text-fg-3">{source?.title ?? tr.source} · {source?.events.find((e) => e.name === tr.event)?.title ?? tr.event}</span>}
+        {tr.type === "after" && tr.tasks.length > 0 && <span className="truncate text-[12px] text-fg-3">← {tr.tasks.join("、")}</span>}
         <code className="ml-1 font-mono text-[11px] text-fg-3">#{tr.id}</code>
         <div className="ml-auto flex items-center gap-2">
           <Switch size="sm" checked={tr.enabled !== false} onChange={(v) => onChange({ ...tr, enabled: v })} label={<span className="text-xs text-fg-3">{tr.enabled === false ? "已关闭" : "启用"}</span>} />
@@ -775,6 +865,7 @@ function TriggerEditor({ tr, envs, fields, generic, onChange, onRemove }: {
         {tr.type === "chat" && <div className="text-[12.5px] text-fg-3">出现在对话页的任务选择里，可以多轮追问。</div>}
         {tr.type === "schedule" && <ScheduleEditor tr={tr} envs={envs} fields={fields} generic={generic} onChange={onChange} />}
         {tr.type === "event" && <EventEditor tr={tr} fields={fields} generic={generic} eventFields={source?.events.find((e) => e.name === tr.event)?.fields ?? []} onChange={onChange} />}
+        {tr.type === "after" && <AfterEditor tr={tr} fields={fields} generic={generic} self={self} onChange={onChange} />}
       </div>
     </div>
   );
@@ -842,6 +933,154 @@ function ScheduleEditor({ tr, envs, fields, generic, onChange }: {
             {Object.entries(fields).map(([k, f]) => <InputControl key={k} name={k} field={f} value={raw[k]} error={errs[k]} onChange={(v) => setValue(k, v)} />)}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ———————— 上游联动 ————————
+
+/** 每个上游运行都有的字段 */
+const AFTER_BASE_REFS: [string, string][] = [
+  ["status", "结束状态：success / failed"], ["error", "报错"], ["error_code", "失败原因码"], ["output.answer", "结论"],
+  ["run_id", "上游运行的 id"], ["service", "服务"], ["caller", "调用身份"], ["task", "任务名（子任务是全名）"],
+];
+
+/** 改了上游：只剩一个时「全部 / 任一」没区别，退回任一，引用去掉「上游任务名.」前缀 */
+function withUpstreams(tr: AfterTrigger, tasks: string[]): AfterTrigger {
+  if (tasks.length > 1 || tr.mode === "any") return { ...tr, tasks };
+  const strip = (p: string) => (upstreamOfPath(p) ? p.slice(p.indexOf(".") + 1) : p);
+  return {
+    ...tr, tasks, mode: "any",
+    map: Object.fromEntries(Object.entries(tr.map ?? {}).map(([k, p]) => [k, strip(p)])),
+    filter: Object.fromEntries(Object.entries(tr.filter ?? {}).map(([k, p]) => [strip(k), p])),
+  };
+}
+
+function AfterEditor({ tr, fields, generic, self, onChange }: {
+  tr: AfterTrigger; fields: Record<string, InputField>; generic: boolean; self: string; onChange: (t: Trigger) => void;
+}) {
+  const { data: tasks } = useTasks();
+  const { data: services } = useServices();
+  const base = self.split(":")[0];
+  const all = tr.mode === "all" && tr.tasks.length > 1;
+  const defOf = (name: string) => tasks?.find((t) => t.name === name);
+  const choices = (tasks ?? []).filter((t) => (!base || t.name.split(":")[0] !== base) && !tr.tasks.includes(t.name))
+    .map((t) => ({ value: t.name, label: t.title || t.name, hint: t.extends ? `子任务 · ${t.name}` : t.name }));
+
+  // 能引用的上游字段：公共字段 + 上游任务的输入字段 + 结构化结果的顶层字段；全部模式下还能按上游分别取（带前缀）
+  const refsOf = (defs: (TaskSummary | undefined)[], prefix: string) => {
+    const out = new Map<string, string>(AFTER_BASE_REFS.map(([k, hint]) => [prefix + k, hint]));
+    for (const t of defs) {
+      for (const [k, f] of Object.entries(t?.input ?? {})) if (!out.has(`${prefix}input.${k}`)) out.set(`${prefix}input.${k}`, f.description || `${t!.name} 的输入`);
+      const props = (t?.output_schema as { properties?: Record<string, unknown> } | null | undefined)?.properties ?? {};
+      for (const k of Object.keys(props)) out.set(`${prefix}output.data.${k}`, `${t!.name} 的结构化结果`);
+    }
+    return [...out].map(([value, hint]) => ({ value, label: value, hint }));
+  };
+  const refs = [
+    ...refsOf(tr.tasks.map(defOf), ""),
+    ...(all ? tr.tasks.flatMap((n) => refsOf([defOf(n)], `${n}.`)) : []),
+  ];
+  const carried = Object.keys(fields).filter((k) => tr.tasks.some((n) => defOf(n)?.input && k in defOf(n)!.input));
+
+  const mapEntries = Object.entries(tr.map ?? {});
+  const setMap = (entries: [string, string][]) => onChange({ ...tr, map: Object.fromEntries(entries) });
+  const filterEntries = Object.entries(tr.filter ?? {});
+  const setFilter = (entries: [string, string][]) => onChange({ ...tr, filter: Object.fromEntries(entries) });
+  const unmapped = Object.keys(fields).filter((k) => !(k in (tr.map ?? {})));
+  const windowH = Math.round((tr.window_s ?? 86400) / 3600);
+
+  return (
+    <div className="space-y-4">
+      <Field label="上游任务" required error={!tr.tasks.length ? "至少选一个" : null}
+        help="选父任务 = 它和它的所有子任务；选子任务 = 只认这一个对象。在上游运行的同一个环境里跑">
+        <div className="space-y-2">
+          {tr.tasks.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {tr.tasks.map((n) => (
+                <span key={n} className="inline-flex h-7 items-center gap-1.5 rounded-md border border-line bg-sunken/60 pl-2 pr-1 text-[12.5px]">
+                  <span className="text-fg">{defOf(n)?.title || n}</span>
+                  <code className="font-mono text-[11px] text-fg-3">{n}</code>
+                  <button type="button" aria-label={`去掉上游 ${n}`} onClick={() => onChange(withUpstreams(tr, tr.tasks.filter((x) => x !== n)))}
+                    className="rounded p-0.5 text-fg-3 hover:bg-hover hover:text-fg"><LuX className="size-3.5" /></button>
+                </span>
+              ))}
+            </div>
+          )}
+          <SearchSelect key={tr.tasks.join(",")} value={null} onChange={(v) => onChange(withUpstreams(tr, [...tr.tasks, v]))}
+            placeholder={tr.tasks.length ? "再加一个上游…" : "选择上游任务…"} options={choices} className="max-w-sm" />
+        </div>
+      </Field>
+      <div className="grid gap-4 md:grid-cols-2">
+        <Field label="上游怎样结束时触发" error={!tr.on.length ? "至少选一种" : null}>
+          <div className="flex flex-wrap gap-4 pt-1">
+            {(["success", "failed"] as const).map((s) => (
+              <Checkbox key={s} checked={tr.on.includes(s)} label={s === "success" ? "成功后" : "失败后"}
+                onChange={(v) => onChange({ ...tr, on: v ? [...tr.on, s] : tr.on.filter((x) => x !== s) })} />
+            ))}
+          </div>
+          <div className="mt-1 text-xs leading-relaxed text-fg-3">被取消的、回归重放出来的上游运行不触发；失败后还要自动重试的，等重试完再算</div>
+        </Field>
+        {tr.tasks.length > 1 && (
+          <Field label="多个上游" help={all ? "每个上游都在窗口内结束过（且在这个联动上一次触发之后）才跑一次，由最后结束的那个触发" : "任何一个上游结束就跑一次"}>
+            <Segmented value={tr.mode} onChange={(mode) => onChange({ ...tr, mode })}
+              options={[{ value: "any", label: "任一结束就跑" }, { value: "all", label: "全部结束才跑" }]} />
+            {all && (
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 whitespace-nowrap text-[12px] text-fg-3">
+                <span>等待窗口</span>
+                <Input className="w-16" inputMode="numeric" value={windowH || ""} aria-label="等待窗口（小时）"
+                  onChange={(e) => onChange({ ...tr, window_s: Math.min(168, Math.max(1, Number(e.target.value.replace(/\D/g, "")) || 1)) * 3600 })} />
+                <span>小时（最长 7 天）</span>
+              </div>
+            )}
+          </Field>
+        )}
+      </div>
+
+      <Field label="上游字段 → 这个任务的输入"
+        help={mapEntries.length ? <>上游运行的字段填进这个任务的输入{all && <>；全部模式下写成 <code className="font-mono">上游任务名.字段</code> 取某一个上游的，不带前缀取最后结束的那个</>}</>
+          : <>不写 = 上游输入里和这个任务同名的字段带过来{carried.length ? <>（会带上 {carried.map((k) => <code key={k} className="mx-0.5 font-mono">{k}</code>)}）</> : "（现在没有同名字段，输入用默认值）"}</>}>
+        <div className="space-y-2">
+          {mapEntries.map(([k, path], i) => (
+            <div key={i} className="grid grid-cols-[minmax(0,160px)_auto_minmax(0,1fr)_auto] items-center gap-2">
+              <Select size="sm" value={k} onChange={(nk) => setMap(mapEntries.map((e, j) => (j === i ? [nk, e[1]] : e)))}
+                options={[...new Set([k, ...unmapped])].filter(Boolean).map((n) => ({ value: n, label: n, hint: fields[n]?.description || undefined }))} placeholder="输入字段" />
+              <span className="text-fg-3">←</span>
+              <CreatableSelect value={path} onChange={(v) => setMap(mapEntries.map((e, j) => (j === i ? [e[0], v] : e)))} options={refs} placeholder="上游字段，如 input.version"
+                createLabel="用" validate={(v) => (AFTER_PATH.test(v) ? null : "写法如 run_id、input.version、output.data.category")} />
+              <Button size="icon-sm" variant="ghost" aria-label={`删除映射 ${k}`} onClick={() => setMap(mapEntries.filter((_, j) => j !== i))}><LuTrash2 /></Button>
+            </div>
+          ))}
+          <Button size="xs" icon={<LuPlus />} disabled={!unmapped.length} onClick={() => setMap([...mapEntries, [unmapped[0], ""]])}>
+            {Object.keys(fields).length ? (unmapped.length ? "添加映射" : "输入字段都映射了") : "这个任务没有输入字段"}
+          </Button>
+        </div>
+      </Field>
+
+      <Field label="只在上游满足条件时触发（可选）" help="上游字段 → 正则（不区分大小写），全部满足才触发。比如 error 匹配 timeout，或 output.data.category 是 upstream">
+        <div className="space-y-2">
+          {filterEntries.map(([k, pattern], i) => (
+            <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2">
+              <CreatableSelect value={k} onChange={(v) => setFilter(filterEntries.map((e, j) => (j === i ? [v, e[1]] : e)))} options={refs.filter((r) => r.value === k || !(r.value in (tr.filter ?? {})))}
+                placeholder="上游字段" createLabel="用" validate={(v) => (AFTER_PATH.test(v) ? null : "写法如 status、input.asset_key、output.data.category")} />
+              <Input mono value={pattern} onChange={(e) => setFilter(filterEntries.map((x, j) => (j === i ? [x[0], e.target.value] : x)))}
+                placeholder="正则，如 timeout|429" aria-invalid={!!regexError(pattern)} />
+              <Button size="icon-sm" variant="ghost" aria-label={`删除条件 ${k}`} onClick={() => setFilter(filterEntries.filter((_, j) => j !== i))}><LuTrash2 /></Button>
+            </div>
+          ))}
+          <Button size="xs" icon={<LuPlus />} onClick={() => {
+            const key = ["error", "output.answer", "status", "error_code"].find((x) => !(x in (tr.filter ?? {}))) ?? "";
+            setFilter([...filterEntries, [key, ""]]);
+          }}>添加条件</Button>
+        </div>
+      </Field>
+
+      {generic && (
+        <Field label="服务" help="通用任务：不选 = 跑在上游运行的那个服务上">
+          <Select value={tr.service ?? ""} onChange={(v) => onChange({ ...tr, service: v || null })}
+            options={[{ value: "", label: "沿用上游的服务" }, ...(services ?? []).map((s) => ({ value: s.name, label: s.title, hint: s.name }))]} />
+        </Field>
       )}
     </div>
   );

@@ -20,6 +20,8 @@ class RunBody(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     session_id: str | None = Field(None, description="续进已有会话")
     memory: MemoryOverride = Field(default_factory=MemoryOverride, description="本次的记忆开关 {recall, save}")
+    after: list[str] = Field(default_factory=list, max_length=20,
+                             description="等这些运行都成功了再执行；其中有失败或取消的，这次不执行（upstream_failed）")
     wait: float = Field(0, ge=0, le=300, description="同步等待秒数；到了还没结束就返回当前状态")
 
 

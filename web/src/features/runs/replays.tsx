@@ -15,14 +15,17 @@ import { ApiError } from "@/api/client";
 import { api, useReplay, useReplays } from "@/api/hooks";
 import type { Recipe, ReplayCounts, ReplayFilter, ReplayItem, ReplayRequest, ReplaySide, ReplayVerdict, RunStatus } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/shell";
+import { IdCopy, MetaVersion } from "@/components/meta";
+import { DetailError } from "@/components/states";
 import { EnvBadge, RunStatusBadge, VerdictBadge, verdictMeta } from "@/components/status";
+import { TimeAgo } from "@/components/time";
 import { Button, LinkButton } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/data";
 import { Field, Input, Segmented, Textarea } from "@/components/ui/form";
 import { Dialog, Tooltip, toast } from "@/components/ui/overlay";
 import { Badge, Card, CardHeader, Dot, Empty, ErrorState, Skeleton, SkeletonRows, type Tone } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime, shortId } from "@/lib/format";
+import { shortId } from "@/lib/format";
 import { invalidate, setQueryData, useMutation } from "@/lib/query";
 import { Link, navigate, useParams, useSearch } from "@/lib/router";
 
@@ -90,7 +93,7 @@ function FilterChips({ filter, className, empty = "全部 agent 运行" }: { fil
 
 export function ReplayList() {
   const { data, loading, error, refetch } = useReplays({ refetchInterval: 10_000 });
-  if (error) return <Card><ErrorState error={error} onRetry={refetch} /></Card>;
+  if (error && !data) return <Card><ErrorState error={error} onRetry={refetch} /></Card>;
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-fg-3">
@@ -111,7 +114,7 @@ export function ReplayList() {
                     <span className="min-w-0 truncate text-[13.5px] font-medium text-fg group-hover:text-accent" title={r.title || undefined}>{r.title || `回归重放 #${r.id}`}</span>
                     <span className="font-mono text-[11.5px] text-fg-3">#{r.id}</span>
                     {r.counts.pending > 0 && <span className="flex items-center gap-1 text-[11.5px] text-info"><Dot tone="info" pulse />判定中</span>}
-                    <span className="ml-auto text-[11.5px] text-fg-3">{r.created_by} · <span title={datetime(r.created_at, true)}>{ago(r.created_at)}</span></span>
+                    <span className="ml-auto text-[11.5px] text-fg-3">{r.created_by} · <TimeAgo at={r.created_at} /></span>
                   </div>
                   {r.note && <div className="mt-1 line-clamp-2 text-[12.5px] text-fg-2">{r.note}</div>}
                   <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
@@ -239,31 +242,37 @@ export function ReplayDetailPage() {
     }
   });
 
-  if (!Number.isFinite(rid)) return <Page><Empty title="回归重放不存在" description="链接可能已失效" action={<LinkButton to="/runs?view=replays">回到回归重放列表</LinkButton>} /></Page>;
-  if (error) return <Page><ErrorState error={error} onRetry={refetch} /></Page>;
+  const crumbs = [{ label: "运行", to: "/runs" }, { label: "回归重放", to: "/runs?view=replays" }, { label: <span className="font-mono">#{id}</span> }];
+  const back = { to: "/runs?view=replays", label: "回到回归重放列表" };
+  if (!Number.isFinite(rid)) return <Page><PageHeader crumbs={crumbs} icon={<LuFlaskConical />} title={`回归重放 #${id}`} /><Empty title="回归重放不存在" description="链接可能已失效" action={<LinkButton to={back.to}>{back.label}</LinkButton>} /></Page>;
+  // 出错（含 404）时面包屑照常在，正文给"不存在 / 加载失败"和回到列表的入口
+  if (error && !r) return <Page><PageHeader crumbs={crumbs} icon={<LuFlaskConical />} title={`回归重放 #${id}`} /><DetailError error={error} onRetry={refetch} what="回归重放" back={back} /></Page>;
   if (!r) return <Page wide><Skeleton className="mb-4 h-20" /><Skeleton className="mb-4 h-32" /><Skeleton className="h-96" /></Page>;
 
   const tab: VerdictTab = s.verdict ?? "all";
   const items = r.items.filter((it) => matches(it, tab));
   const c = r.counts;
   const regression = r.regression;
+  /** 和服务端重判的范围一致：建成了重放运行、还没判定或判断不了的条目 */
+  const rejudgeable = r.items.some((it) => it.new_run && (it.verdict === null || it.verdict === "unclear"));
 
   return (
     <Page wide>
       <PageHeader
-        crumbs={[{ label: "运行", to: "/runs" }, { label: "回归重放", to: "/runs?view=replays" }, { label: <span className="font-mono">#{r.id}</span> }]}
+        crumbs={crumbs}
         icon={<LuFlaskConical />}
         title={r.title || `回归重放 #${r.id}`}
+        // meta 的顺序和其它详情页一致：标识 · 范围 · 谁 · 什么时候；"判定中"放在最后，出现消失都不推动按钮
         meta={<>
-          <span>{r.created_by} 发起于 <span title={datetime(r.created_at, true)}>{ago(r.created_at)}</span></span>
+          <IdCopy value={String(r.id)}>#{r.id}</IdCopy>
           <FilterChips filter={r.filter} />
+          <MetaVersion by={r.created_by} at={r.created_at} />
+          {c.pending > 0 && <span className="flex items-center gap-1.5 text-info"><Dot tone="info" pulse />{c.pending} 条判定中 · 每 5 秒刷新</span>}
         </>}
-        actions={<>
-          {c.pending > 0 && <span className="flex items-center gap-1.5 text-xs text-fg-3"><Dot tone="info" pulse />{c.pending} 条判定中 · 每 5 秒刷新</span>}
-          <Tooltip content="把还没判定、判断不了的条目重判一遍">
-            <Button icon={<LuRefreshCw />} loading={rejudge.pending} onClick={() => rejudge.mutate(undefined)}>重判</Button>
-          </Tooltip>
-        </>}
+        actions={
+          <Button icon={<LuRefreshCw />} loading={rejudge.pending} reason={rejudgeable ? undefined : "没有要重判的条目：都判定过了"}
+            tip="把还没判定、判断不了的条目重判一遍" onClick={() => rejudge.mutate(undefined)}>重判</Button>
+        }
       />
 
       <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_420px]">
@@ -323,7 +332,7 @@ function ReplayItemCard({ item }: { item: ReplayItem }) {
         <div className={cn("flex items-start gap-2 border-b border-line px-4 py-2.5 text-[12.5px] leading-relaxed", reasonTone)}>
           <LuScale className="mt-0.5 size-3.5 shrink-0 text-fg-3" />
           <span className="min-w-0 flex-1 text-fg-2"><span className="text-fg-3">判定理由：</span>{item.reason}</span>
-          {item.judged_at && <span className="shrink-0 text-[11.5px] text-fg-3" title={datetime(item.judged_at, true)}>{ago(item.judged_at)}</span>}
+          {item.judged_at && <span className="shrink-0 text-[11.5px] text-fg-3"><TimeAgo at={item.judged_at} /></span>}
         </div>
       )}
       <div className="grid divide-y divide-line md:grid-cols-2 md:divide-x md:divide-y-0">

@@ -122,7 +122,7 @@ export function CommandPalette() {
             <Kbd>Esc</Kbd>
           </div>
           <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto p-1.5">
-            {items.length === 0 && <div className="px-3 py-8 text-center text-[13px] text-fg-3">{loading ? "搜索中…" : "没有匹配的结果"}</div>}
+            {items.length === 0 && <div className="px-3 py-8 text-center text-[13px] text-fg-3">{loading ? "搜索中…" : "没有符合条件的结果"}</div>}
             {items.map((c, i) => {
               const header = c.group !== lastGroup ? (lastGroup = c.group) : null;
               return (

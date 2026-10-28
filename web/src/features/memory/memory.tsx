@@ -9,22 +9,24 @@
  */
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  LuArrowUpFromLine, LuBookOpen, LuBrain, LuCircleAlert, LuFile, LuGitBranch, LuHistory, LuLightbulb, LuPlus, LuScrollText,
-  LuThumbsDown, LuWrench,
+  LuArrowUpFromLine, LuBookOpen, LuBrain, LuCircleAlert, LuEllipsis, LuFile, LuGitBranch, LuHistory, LuLightbulb, LuPlus, LuPower,
+  LuRotateCcw, LuScrollText, LuThumbsDown, LuTimerOff, LuWrench,
 } from "react-icons/lu";
 
 import { api, useAssets, useEnvs, useKnowledge, useMeta, usePromotable, useServices, useTasks } from "@/api/hooks";
-import type { Asset, AssetKind, Knowledge, KnowledgeKind, KnowledgePromote, LessonCategory, MemoryFilters } from "@/api/types";
+import type { Asset, AssetKind, Knowledge, KnowledgePromote, LessonCategory, MemoryFilters } from "@/api/types";
 import { EnvFilter, FilterBar, ServiceFilter, envOf, envParam } from "@/components/filters";
 import { Page, PageHeader } from "@/components/layout/shell";
-import { EnvBadge } from "@/components/status";
+import { ListState } from "@/components/states";
+import { DisabledBadge, EnvBadge, KNOWLEDGE_KIND, KindBadge, ScopeEnv } from "@/components/status";
+import { TimeAgo } from "@/components/time";
 import { Button } from "@/components/ui/button";
-import { CodeBlock, Markdown, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
+import { CodeBlock, Markdown, RowButton, Tabs, Table, Td, Th, Tr } from "@/components/ui/data";
 import { CreatableSelect, Field, FilterSelect, Input, SearchInput, Segmented, Select, Textarea } from "@/components/ui/form";
-import { Dialog, Drawer, Tooltip, confirm, toast } from "@/components/ui/overlay";
-import { Badge, Card, CardHeader, DescList, Empty, SectionTitle, Skeleton, SkeletonRows } from "@/components/ui/primitives";
+import { Dialog, Drawer, Menu, Tooltip, confirm, toast, type MenuEntry } from "@/components/ui/overlay";
+import { Badge, Card, CardHeader, DescList, Empty, SectionTitle, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, bytes, dayjs, shortId } from "@/lib/format";
+import { bytes, dayjs, shortId } from "@/lib/format";
 import { invalidate, useMutation, useQuery } from "@/lib/query";
 import { Link, useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -73,11 +75,11 @@ export function MemoryPage() {
         </FilterBar>
       </div>
       {tab === "knowledge" && (
-        <KnowledgeList filters={filters} scope={{}} openId={openId}
+        <KnowledgeList filters={filters} scope={{}} openId={openId} filtered={active} onClear={clear}
           kind={(s.kind === "fact" || s.kind === "lesson" ? s.kind : "") as KindFilter} onKindChange={(v) => setS({ kind: v })} />
       )}
-      {tab === "assets" && <AssetList filters={{ ...filters, kind: s.kind }} scope={{}} openId={openId} />}
-      {tab === "promotable" && <PromotableList service={s.service} env={env || undefined} />}
+      {tab === "assets" && <AssetList filters={{ ...filters, kind: s.kind }} scope={{}} openId={openId} filtered={active} onClear={clear} />}
+      {tab === "promotable" && <PromotableList service={s.service} env={env || undefined} filtered={!!(s.service || s.env)} onClear={clear} />}
     </Page>
   );
 }
@@ -94,24 +96,11 @@ const STATUS_BADGE: Record<Knowledge["status"], ReactNode> = {
   active: null, expired: <Badge tone="warn">已过期</Badge>, superseded: <Badge tone="idle">被取代</Badge>,
 };
 
-export const KNOWLEDGE_KIND: Record<KnowledgeKind, { label: string; tone: "neutral" | "accent" | "idle"; icon: ReactNode }> = {
-  fact: { label: "事实", tone: "neutral", icon: <LuBookOpen /> },
-  lesson: { label: "教训", tone: "accent", icon: <LuLightbulb /> },
-  handoff: { label: "交接摘要", tone: "idle", icon: <LuHistory /> },
-};
-
-export function KindBadge({ kind, className }: { kind: KnowledgeKind; className?: string }) {
-  const k = KNOWLEDGE_KIND[kind] ?? KNOWLEDGE_KIND.fact;
-  return <Badge tone={k.tone} icon={k.icon} className={className}>{k.label}</Badge>;
-}
+// 记忆类型徽标、环境范围挪进了 components/status（运行详情等别处也用）；这里接着导出，老的引用不用改
+export { KNOWLEDGE_KIND, KindBadge, ScopeEnv };
 
 const LESSON_CATEGORIES: LessonCategory[] = ["code", "data", "infra", "upstream"];
 const CATEGORY_LABEL: Record<string, string> = { code: "代码", data: "数据", infra: "基础设施", upstream: "上游" };
-
-/** 记忆的环境：空 = 对该服务所有环境成立 */
-export function ScopeEnv({ env }: { env: string }) {
-  return env ? <EnvBadge env={env} /> : <Badge tone="outline">所有环境</Badge>;
-}
 
 /** 教训：类别 + 指纹前 8 位 */
 function LessonMeta({ k }: { k: Knowledge }) {
@@ -167,15 +156,18 @@ function targetLabel(target: string): string {
 /**
  * openId：从别处（运行详情的召回列表、全局搜索）链接过来时直接打开该条（不在当前筛选里也能打开）。
  * kind / onKindChange：给了就受控（记忆页放在 URL 里），否则组件自己记。
+ * filtered / onClear：页面上的筛选生效中（空态换成「没有符合条件的记忆」+ 清除筛选）；类型分段本身也算筛选。
  */
-export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
+export function KnowledgeList({ filters, scope, openId, kind, onKindChange, filtered, onClear }: {
   filters: MemoryFilters; scope: MemoryScope; openId?: number;
   kind?: KindFilter; onKindChange?: (v: KindFilter) => void;
+  filtered?: boolean; onClear?: () => void;
 }) {
   const [localKind, setLocalKind] = useState<KindFilter>("");
   const k = onKindChange ? kind ?? "" : localKind;
   const setKind = onKindChange ?? setLocalKind;
-  const { data, loading } = useKnowledge({ ...filters, kind: k || undefined });
+  const query = useKnowledge({ ...filters, kind: k || undefined });
+  const { data } = query;
   const [selected, setSelected] = useState<number | null>(openId ?? null);
   /** 已在记忆页时再从全局搜索 / 链接点进另一条：跟着打开 */
   useEffect(() => { if (openId) setSelected(openId); }, [openId]);
@@ -192,10 +184,11 @@ export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
           <Segmented size="sm" value={k} onChange={setKind} options={[{ value: "", label: "全部" }, { value: "fact", label: "事实" }, { value: "lesson", label: "教训" }]} />
           <Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>新建记忆</Button>
         </>} />
-      {loading ? <SkeletonRows /> : !data?.length ? (
-        <Empty icon={<LuBrain />} title={k === "lesson" ? "没有教训" : k === "fact" ? "没有事实" : "没有记忆条目"}
-          description="运行结束后会自动记下可复用的结论与报错教训；也可以手动录入" />
-      ) : (
+      <ListState query={query} what={k === "lesson" ? "教训" : k === "fact" ? "事实" : "记忆"} icon={<LuBrain />}
+        filtered={!!filtered || !!k} onClear={() => { onClear?.(); setKind(""); }}
+        empty={<Empty icon={<LuBrain />} title="还没有记忆" description="运行结束后会自动记下可复用的结论与报错教训；也可以手动新建"
+          action={<Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>新建记忆</Button>} />}>
+        {(data) => (
         <Table>
           {/* 窄屏（< 1280）任务并到服务那一格的第二行、扣分放到条目后面：表格不用横向滚 */}
           <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th className="hidden xl:table-cell">任务</Th>
@@ -209,13 +202,17 @@ export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
                 <Td className="w-full min-w-[220px] max-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <KindBadge kind={x.kind} />
-                    {x.kind === "lesson" ? <LessonMeta k={x} /> : <code className="min-w-0 truncate font-mono text-[12.5px] font-medium text-fg" title={x.key}>{x.key}</code>}
+                    {/* 键（事实）是首格里真正的按钮：键盘也能打开抽屉；教训没有键，按钮放在下面的结论那一行 */}
+                    {x.kind === "lesson" ? <LessonMeta k={x} />
+                      : <RowButton onClick={() => setSelected(x.id)} className="min-w-0 truncate font-mono text-[12.5px] font-medium text-fg"><span title={x.key}>{x.key}</span></RowButton>}
                     {STATUS_BADGE[x.status]}
                     {promotedTo(x.superseded_by) && <Badge tone="ok" icon={<LuScrollText />}>已升格</Badge>}
                     {!x.source_run && <Badge tone="outline">人工</Badge>}
                     {x.feedback_score < 0 && <span className="shrink-0 xl:hidden"><Penalty score={x.feedback_score} /></span>}
                   </div>
-                  <div className="mt-0.5 truncate text-[12px] text-fg-3" title={x.content.split("\n")[0]}>{x.content.split("\n")[0]}</div>
+                  {x.kind === "lesson"
+                    ? <RowButton onClick={() => setSelected(x.id)} label={`打开教训：${x.content.split("\n")[0]}`} className="mt-0.5 block w-full truncate text-[12px] text-fg-3">{x.content.split("\n")[0]}</RowButton>
+                    : <div className="mt-0.5 truncate text-[12px] text-fg-3" title={x.content.split("\n")[0]}>{x.content.split("\n")[0]}</div>}
                 </Td>
                 <Td className="whitespace-nowrap">
                   <span className="flex items-center gap-1.5 text-[12.5px] text-fg-2">{x.service}<ScopeEnv env={x.env} /></span>
@@ -226,12 +223,13 @@ export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
                   {staleRecall(x) ? <Tooltip content="记下超过 30 天、这 30 天一次也没被用到：可能已经没用了"><span>{x.hits_30d}</span></Tooltip> : x.hits_30d}
                 </Td>
                 <Td className="hidden whitespace-nowrap text-right xl:table-cell"><Penalty score={x.feedback_score} /></Td>
-                <Td className="whitespace-nowrap text-right text-[12px] text-fg-3">{ago(x.updated_at)}</Td>
+                <Td className="whitespace-nowrap text-right text-[12px] text-fg-3"><TimeAgo at={x.updated_at} /></Td>
               </Tr>
             ))}
           </tbody>
         </Table>
-      )}
+        )}
+      </ListState>
       <KnowledgeDrawer entry={entry} onClose={() => setSelected(null)} onPromote={setPromoting} />
       <KnowledgeDialog open={creating} scope={scope} defaultKind={k === "lesson" ? "lesson" : "fact"} onClose={() => setCreating(false)} />
       <PromoteDialog entry={promoting} onClose={() => setPromoting(null)} />
@@ -291,15 +289,15 @@ function KnowledgeDialog({ open, scope, defaultKind, onClose }: { open: boolean;
       await api.createKnowledge(kind === "fact"
         ? { ...where, kind, key, content }
         : { ...where, kind, content, error, category });
-      toast("已记下", { description: kind === "lesson" ? "同类报错再出现时按指纹命中" : "人工录入的条目召回时优先" });
+      toast(kind === "lesson" ? "已创建教训" : `已创建事实 ${key}`, { description: kind === "lesson" ? "同类报错再出现时按指纹命中" : "人工新建的条目召回时优先" });
       invalidate("memory");
       onClose();
-    } catch (e) { toast.error("录入失败", (e as Error).message); }
+    } catch (e) { toast.error("创建失败", (e as Error).message); }
   });
   return (
     <Dialog open={open} onClose={onClose} size="lg" title="新建记忆"
       description={kind === "fact" ? "写一个能独立成立的事实；agent 召回时只看到这一条。" : "贴上报错原文、写下结论：按报错算指纹，同类报错再出现时直接命中这条教训。"}
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={save.pending} onClick={() => save.mutate(undefined)}>录入</Button></>}>
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={save.pending} onClick={() => save.mutate(undefined)}>创建</Button></>}>
       <div className="space-y-4">
         <Field label="类型">
           <Segmented value={kind} onChange={setKind} options={[{ value: "fact", label: "事实", icon: <LuBookOpen /> }, { value: "lesson", label: "报错教训", icon: <LuLightbulb /> }]} />
@@ -332,7 +330,7 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   useEffect(() => { setEditing(false); setText(entry?.content ?? ""); }, [entry?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const { data: history } = useQuery(["memory", "history", entry?.id], () => api.knowledgeHistory(entry!.id), { enabled: !!entry });
+  const { data: history, error: historyError } = useQuery(["memory", "history", entry?.id], () => api.knowledgeHistory(entry!.id), { enabled: !!entry });
   const promoted = promotedTo(entry?.superseded_by ?? null);
   const [busy, setBusy] = useState(false);
 
@@ -351,31 +349,39 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
     ? update({ content: text, status: "active" }, "已保存，重新生效")
     : update({ content: text }, "已保存，旧内容进历史"));
   const expire = async () => {
-    const ok = await confirm({ title: `让这条${entry ? KNOWLEDGE_KIND[entry.kind].label : "记忆"}过期？`, description: "过期后不再被召回，仍可在「已过期」里找到并恢复。", danger: true, confirmText: "过期" });
-    if (ok) await update({ status: "expired" }, "已过期");
+    const ok = await confirm({ title: `把这条${entry ? KNOWLEDGE_KIND[entry.kind].label : "记忆"}设为过期？`, description: "过期后不再被召回，仍可在「已过期」里找到并恢复。", danger: true, confirmText: "设为过期" });
+    if (ok) await update({ status: "expired" }, "已设为过期");
   };
   /**
    * 被取代的（升格进了档案，或被另一条记忆替换）：不给编辑和恢复——服务端改内容 / 恢复都会清掉取代标记、让它重新参与召回，
-   * 和档案或新条目重复。只给去向的链接。
+   * 和档案或新条目重复。按钮留在原位、灰着说去哪改。
    */
   const superseded = entry?.status === "superseded";
   const replacedBy = superseded && !promoted && entry?.superseded_by ? entry.superseded_by : null;
   const title = !entry ? "" : entry.kind === "lesson"
     ? <span className="flex items-center gap-2">教训{entry.fingerprint && <code className="font-mono text-[12.5px] font-normal text-fg-3">#{entry.fingerprint.slice(0, 8)}</code>}</span>
     : <code className="font-mono">{entry.key}</code>;
+  /** 现在不能动的原因（槽位固定 [编辑][升格进档案][⋯]，不随状态消失）：被取代 > 编辑中 */
+  const locked = !entry ? null
+    : superseded ? (promoted ? `已升格进 ${promoted.label} 的档案：去档案里改` : `已被 ${replacedBy ?? "另一条记忆"} 取代：去改新的那条`)
+      : editing ? "先保存或取消编辑" : null;
+  const promoteReason = locked ?? (entry?.status === "expired" ? "已过期：先恢复生效再升格" : null);
+  const menu: MenuEntry[] = !entry ? [] : [
+    entry.status === "expired"
+      ? { label: "恢复生效", icon: <LuRotateCcw />, disabled: !!locked || busy, hint: locked ?? undefined, onClick: () => void update({ status: "active" }, "已恢复生效") }
+      : { label: "设为过期", icon: <LuTimerOff />, danger: !locked, disabled: !!locked || busy, hint: locked ?? undefined, onClick: () => void expire() },
+  ];
 
   return (
     <Drawer open={!!entry} onClose={onClose} title={title} subtitle={entry && `${entry.service} · ${entry.env || "所有环境"} · ${entry.task || "服务通用"}`}
-      actions={entry && !editing && !superseded && <>
-        <Button size="sm" disabled={busy} onClick={() => setEditing(true)}>编辑</Button>
-        {entry.status === "active" && entry.kind !== "handoff" && (
-          <Tooltip content="写进服务或任务的档案：每次运行都原样带上、不会过期">
-            <span><Button size="sm" icon={<LuArrowUpFromLine />} disabled={busy} onClick={() => onPromote(entry)}>升格进档案</Button></span>
-          </Tooltip>
+      actions={entry && <>
+        <Button size="sm" disabled={busy} reason={locked ?? undefined} onClick={() => setEditing(true)}>编辑</Button>
+        {/* 交接摘要这一类永远不能升格：只有它隐藏，其它状态一律禁用并说明 */}
+        {entry.kind !== "handoff" && (
+          <Button size="sm" icon={<LuArrowUpFromLine />} disabled={busy} reason={promoteReason ?? undefined}
+            tip="写进服务或任务的档案：每次运行都原样带上、不会过期" onClick={() => onPromote(entry)}>升格进档案</Button>
         )}
-        {entry.status === "active"
-          ? <Button size="sm" variant="danger-ghost" loading={busy} onClick={expire}>过期</Button>
-          : <Button size="sm" loading={busy} onClick={() => update({ status: "active" }, "已恢复生效")}>恢复生效</Button>}
+        <Menu trigger={<Button size="icon-sm" variant="ghost" aria-label="更多" loading={busy}><LuEllipsis /></Button>} items={menu} />
       </>}>
       {entry && (
         <div className="space-y-5 p-5">
@@ -392,7 +398,7 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
           {entry.status === "expired" && entry.code_ref && (
             <Notice tone="warn" icon={<LuCircleAlert />}>引用的代码在记下之后改过（commit 漂移），召回时已跳过。确认仍然成立就编辑保存，它会重新生效。</Notice>
           )}
-          {entry.feedback_score < 0 && !superseded && <Notice tone="bad" icon={<LuThumbsDown />}>被 👎 的运行记下或用到过它，召回时排得更靠后（扣了 {-entry.feedback_score} 分）。建议改正内容或让它过期。</Notice>}
+          {entry.feedback_score < 0 && !superseded && <Notice tone="bad" icon={<LuThumbsDown />}>被 👎 的运行记下或用到过它，召回时排得更靠后（扣了 {-entry.feedback_score} 分）。建议改正内容或设为过期。</Notice>}
           {editing ? (
             <div className="space-y-2">
               <Textarea rows={8} value={text} onChange={(e) => setText(e.target.value)} />
@@ -404,18 +410,19 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
             ...(entry.kind === "lesson" ? [["报错指纹", <span className="font-mono text-[12px]">{entry.fingerprint ?? "—"}</span>] as [ReactNode, ReactNode]] : []),
             ["状态", { active: "生效中", expired: "已过期", superseded: "被取代" }[entry.status]],
             ["环境", entry.env ? <EnvBadge env={entry.env} /> : "所有环境（对该服务每个环境都成立）"],
-            [<HeadHint hint={RECALL_HINT}>30 天召回</HeadHint>, `${entry.hits_30d} 次${entry.last_hit_at ? `，最近 ${ago(entry.last_hit_at)}` : ""}`],
+            [<HeadHint hint={RECALL_HINT}>30 天召回</HeadHint>, <>{entry.hits_30d} 次{entry.last_hit_at && <>，最近 <TimeAgo at={entry.last_hit_at} /></>}</>],
             [<HeadHint hint={PENALTY_HINT}>👎 扣分</HeadHint>, entry.feedback_score < 0 ? <span className="text-bad">{entry.feedback_score}</span> : <span className="text-fg-3">无</span>],
             ["代码引用", entry.code_ref ? <span className="flex items-center gap-1 font-mono text-[12px]"><LuGitBranch className="size-3.5 text-fg-3" />{entry.code_ref.path} @{entry.code_ref.commit}</span> : "无"],
-            ["来源", entry.source_run ? <Link to={`/runs/${entry.source_run}`} className="font-mono hover:text-accent">运行 {shortId(entry.source_run)}</Link> : "人工录入"],
+            ["来源", entry.source_run ? <Link to={`/runs/${entry.source_run}`} className="font-mono hover:text-accent">运行 {shortId(entry.source_run)}</Link> : "人工新建"],
           ]} />
           <div>
-            <SectionTitle><span className="flex items-center gap-1.5"><LuHistory className="size-3.5" />内容历史</span></SectionTitle>
-            {!history ? <Skeleton className="h-16" /> : history.length === 0 ? <div className="text-[12.5px] text-fg-3">没有历史版本</div> : (
+            <SectionTitle><span className="flex items-center gap-1.5"><LuHistory className="size-3.5" />版本</span></SectionTitle>
+            {historyError && !history ? <div className="text-[12.5px] text-bad">版本没加载出来：{historyError.message}</div>
+              : !history ? <Skeleton className="h-16" /> : history.length === 0 ? <div className="text-[12.5px] text-fg-3">还没有别的版本</div> : (
               <ol className="space-y-2">
                 {history.map((h) => (
                   <li key={h.version} className="rounded-md border border-line p-2.5">
-                    <div className="flex items-center gap-2 text-[11.5px] text-fg-3"><span className="font-mono font-semibold text-fg-2">v{h.version}</span>{h.source}<span className="ml-auto">{ago(h.created_at)}</span></div>
+                    <div className="flex items-center gap-2 text-[11.5px] text-fg-3"><span className="font-mono font-semibold text-fg-2">v{h.version}</span>{h.source}<span className="ml-auto"><TimeAgo at={h.created_at} /></span></div>
                     <div className="mt-1 text-[12.5px] text-fg-2">{h.content}</div>
                   </li>
                 ))}
@@ -428,11 +435,12 @@ function KnowledgeDrawer({ entry, onClose, onPromote }: { entry: Knowledge | nul
   );
 }
 
-function Notice({ tone, icon, children }: { tone: "warn" | "bad" | "ok" | "info"; icon: ReactNode; children: ReactNode }) {
+/** action：提示里直接给能解决它的按钮（不指路去别处找） */
+function Notice({ tone, icon, children, action }: { tone: "warn" | "bad" | "ok" | "info"; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
   return (
-    <div className={cn("flex gap-2 rounded-md px-3 py-2 text-[12.5px] [&>svg]:mt-0.5 [&>svg]:size-4 [&>svg]:shrink-0",
+    <div className={cn("flex items-start gap-2 rounded-md px-3 py-2 text-[12.5px] [&>svg]:mt-0.5 [&>svg]:size-4 [&>svg]:shrink-0",
       { warn: "bg-warn-soft text-warn", bad: "bg-bad-soft text-bad", ok: "bg-ok-soft text-ok", info: "bg-info-soft text-info" }[tone])}>
-      {icon}<span>{children}</span>
+      {icon}<span className="min-w-0 flex-1">{children}</span>{action && <span className="shrink-0">{action}</span>}
     </div>
   );
 }
@@ -540,8 +548,9 @@ export function PromoteDialog({ entry, onClose }: { entry: Knowledge | null; onC
 
 // ———————— 可升格 ————————
 
-function PromotableList({ service, env }: { service?: string; env?: string }) {
-  const { data, loading } = usePromotable({ service, env });
+function PromotableList({ service, env, filtered, onClear }: { service?: string; env?: string; filtered?: boolean; onClear?: () => void }) {
+  const query = usePromotable({ service, env });
+  const { data } = query;
   const [selected, setSelected] = useState<number | null>(null);
   const [promoting, setPromoting] = useState<Knowledge | null>(null);
   const entry = data?.find((k) => k.id === selected) ?? null;
@@ -549,16 +558,16 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
     <Card>
       <CardHeader title="可升格" icon={<LuArrowUpFromLine />}
         description="近 30 天被 5 次以上运行用到、没挨过 👎 的事实，可以写进档案长期生效。" />
-      {loading ? <SkeletonRows /> : !data?.length ? (
-        <Empty icon={<LuArrowUpFromLine />} title="暂时没有可升格的记忆" description="被 5 次以上运行用到、没挨过 👎 的事实会出现在这里" />
-      ) : (
+      <ListState query={query} what="可升格记忆" icon={<LuArrowUpFromLine />} filtered={filtered} onClear={onClear}
+        empty={<Empty icon={<LuArrowUpFromLine />} title="还没有可升格的记忆" description="被 5 次以上运行用到、没挨过 👎 的事实会出现在这里" />}>
+        {(data) => (
         <Table>
           <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th className="hidden xl:table-cell">任务</Th><Th className="text-right"><HeadHint hint={RECALL_HINT}>30 天召回</HeadHint></Th><Th className="text-right">最近</Th><Th /></tr></thead>
           <tbody>
             {data.map((k) => (
               <Tr key={k.id} onClick={() => setSelected(k.id)}>
                 <Td className="w-full min-w-[220px] max-w-0">
-                  <code className="block truncate font-mono text-[12.5px] font-medium text-fg" title={k.key}>{k.key}</code>
+                  <RowButton onClick={() => setSelected(k.id)} className="block w-full truncate font-mono text-[12.5px] font-medium text-fg"><span title={k.key}>{k.key}</span></RowButton>
                   <div className="mt-0.5 truncate text-[12px] text-fg-3" title={k.content}>{k.content}</div>
                 </Td>
                 <Td className="whitespace-nowrap">
@@ -567,7 +576,7 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
                 </Td>
                 <Td className="hidden max-w-[220px] whitespace-nowrap xl:table-cell"><span className="block truncate font-mono text-[11.5px] text-fg-3" title={k.task || undefined}>{k.task || "服务通用"}</span></Td>
                 <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">{k.hits_30d}</Td>
-                <Td className="whitespace-nowrap text-right text-[12px] text-fg-3">{k.last_hit_at ? ago(k.last_hit_at) : "—"}</Td>
+                <Td className="whitespace-nowrap text-right text-[12px] text-fg-3"><TimeAgo at={k.last_hit_at} /></Td>
                 <Td className="w-[1%] text-right" onClick={(e) => e.stopPropagation()}>
                   <Button size="xs" icon={<LuArrowUpFromLine />} onClick={() => setPromoting(k)}>升格进档案</Button>
                 </Td>
@@ -575,7 +584,8 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
             ))}
           </tbody>
         </Table>
-      )}
+        )}
+      </ListState>
       <KnowledgeDrawer entry={entry} onClose={() => setSelected(null)} onPromote={setPromoting} />
       <PromoteDialog entry={promoting} onClose={() => setPromoting(null)} />
     </Card>
@@ -589,26 +599,29 @@ const ASSET_KINDS: AssetKind[] = ["procedure", "script", "query", "baseline"];
 const ASSET_KIND: Record<AssetKind, string> = { procedure: "做法", script: "脚本", query: "查询", baseline: "基线" };
 const isCode = (kind: AssetKind) => kind === "script" || kind === "query";
 
-export function AssetList({ filters, scope, openId }: { filters: MemoryFilters & { kind?: string }; scope: MemoryScope; openId?: number }) {
+/** filtered / onClear：页面上的筛选生效中；不给时按 filters 里的关键词 / 状态 / 类型判断（详情页的标签只有这几样能筛） */
+export function AssetList({ filters, scope, openId, filtered, onClear }: {
+  filters: MemoryFilters & { kind?: string }; scope: MemoryScope; openId?: number; filtered?: boolean; onClear?: () => void;
+}) {
   // 方法按环境存，没有"所有环境"一说：记忆那边的 env="*" 在这里当作不限环境
   // 关键词交给服务端找（名字、摘要、内容，不分大小写）
-  const { data, loading } = useAssets(filters.env === "*" ? { ...filters, env: undefined } : filters);
+  const query = useAssets(filters.env === "*" ? { ...filters, env: undefined } : filters);
+  const { data } = query;
   const [selected, setSelected] = useState<number | null>(openId ?? null);
   /** 已在记忆页时再从全局搜索点进另一条：跟着打开 */
   useEffect(() => { if (openId) setSelected(openId); }, [openId]);
   const [creating, setCreating] = useState(false);
-  const list = data ?? [];
   const { data: fetched } = useQuery(["memory", "asset", selected], () => api.assets({ status: "all" }).then((all) => all.find((a) => a.id === selected) ?? null),
     { enabled: !!selected && !!data && !data.some((a) => a.id === selected) });
   const asset = data?.find((a) => a.id === selected) ?? (fetched?.id === selected ? fetched : null) ?? null;
   return (
     <Card>
       <CardHeader title="方法" icon={<LuWrench />} description="可以反复用的做法、脚本、查询和基线，agent 遇到同类问题会先找出来用。"
-        actions={<Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>登记方法</Button>} />
-      {loading ? <SkeletonRows /> : !list.length ? (
-        <Empty icon={<LuWrench />} title={filters.q || filters.status || filters.kind ? "没有匹配的方法" : "还没有方法"}
-          description={filters.q || filters.status || filters.kind ? "换个关键词或放宽筛选" : "排查套路、核对 SQL、基线数字都适合登记在这里"} />
-      ) : (
+        actions={<Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>新建方法</Button>} />
+      <ListState query={query} what="方法" icon={<LuWrench />} filtered={filtered ?? !!(filters.q || filters.status || filters.kind)} onClear={onClear}
+        empty={<Empty icon={<LuWrench />} title="还没有方法" description="排查套路、核对 SQL、基线数字都适合放在这里"
+          action={<Button size="sm" icon={<LuPlus />} onClick={() => setCreating(true)}>新建方法</Button>} />}>
+        {(list) => (
         <div className="grid gap-3 p-3 md:grid-cols-2 xl:grid-cols-3">
           {list.map((a) => (
             <button key={a.id} type="button" onClick={() => setSelected(a.id)}
@@ -616,7 +629,7 @@ export function AssetList({ filters, scope, openId }: { filters: MemoryFilters &
               <div className="flex items-center gap-2">
                 <Badge tone="accent">{ASSET_KIND[a.kind]}</Badge>
                 <span className="truncate text-[13px] font-semibold text-fg">{a.name}</span>
-                {a.status !== "active" && <Badge tone="idle">已停用</Badge>}
+                {a.status !== "active" && <DisabledBadge />}
               </div>
               <div className="mt-1.5 line-clamp-2 text-[12.5px] text-fg-2">{a.summary}</div>
               <div className="mt-3 flex min-w-0 items-center gap-2 text-[11.5px] text-fg-3">
@@ -628,7 +641,8 @@ export function AssetList({ filters, scope, openId }: { filters: MemoryFilters &
             </button>
           ))}
         </div>
-      )}
+        )}
+      </ListState>
       <AssetDrawer asset={asset} onClose={() => setSelected(null)} />
       <AssetDialog open={creating} scope={scope} onClose={() => setCreating(false)} />
     </Card>
@@ -645,14 +659,14 @@ function AssetDialog({ open, scope, onClose }: { open: boolean; scope: MemorySco
   const save = useMutation(async () => {
     try {
       await api.createAsset({ ...where, ...d });
-      toast("已登记");
+      toast(`已创建方法 ${d.name.trim()}`);
       invalidate("memory");
       onClose();
-    } catch (e) { toast.error("登记失败", (e as Error).message); }
+    } catch (e) { toast.error("创建失败", (e as Error).message); }
   });
   return (
-    <Dialog open={open} onClose={onClose} size="lg" title="登记方法" description="摘要决定什么时候会被找出来；内容是 agent 用它时读到的全文。"
-      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={save.pending} onClick={() => save.mutate(undefined)}>登记</Button></>}>
+    <Dialog open={open} onClose={onClose} size="lg" title="新建方法" description="摘要决定什么时候会被找出来；内容是 agent 用它时读到的全文。"
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" disabled={!valid} loading={save.pending} onClick={() => save.mutate(undefined)}>创建</Button></>}>
       <div className="space-y-4">
         <WhereFields value={where} onChange={setWhere} locked={scope} />
         <div className="grid gap-3 sm:grid-cols-[auto_1fr]">
@@ -686,20 +700,27 @@ function AssetDrawer({ asset, onClose }: { asset: Asset | null; onClose: () => v
   // 方法的 superseded 只来自人工停用（服务端 mark_expired），页面上一律叫「已停用」
   const retire = async () => {
     const ok = await confirm({ title: `停用 ${asset?.name}？`, description: "停用后 agent 不会再用到它，可随时恢复。", danger: true, confirmText: "停用" });
-    if (ok) await update({ status: "superseded" }, "已停用");
+    if (ok) await update({ status: "superseded" }, `已停用方法 ${asset?.name}`);
   };
+  const restore = () => update({ status: "active" }, `已恢复方法 ${asset?.name}`);
+  /** 槽位固定 [编辑][⋯ 停用 / 恢复]：编辑中禁用并说明，不整排消失 */
+  const locked = editing ? "先保存或取消编辑" : undefined;
 
   return (
     <Drawer open={!!asset} onClose={onClose} title={asset?.name ?? ""} subtitle={asset && `${ASSET_KIND[asset.kind]} · ${asset.service} · ${asset.env} · ${asset.task || "服务通用"}`}
-      actions={asset && !editing && <>
-        <Button size="sm" onClick={() => setEditing(true)}>编辑</Button>
-        {asset.status === "active"
-          ? <Button size="sm" variant="danger-ghost" onClick={retire}>停用</Button>
-          : <Button size="sm" onClick={() => update({ status: "active" }, "已恢复")}>恢复</Button>}
+      actions={asset && <>
+        <Button size="sm" reason={locked} onClick={() => setEditing(true)}>编辑</Button>
+        <Menu trigger={<Button size="icon-sm" variant="ghost" aria-label="更多"><LuEllipsis /></Button>} items={[
+          asset.status === "active"
+            ? { label: "停用", icon: <LuPower />, danger: !locked, disabled: !!locked, hint: locked, onClick: () => void retire() }
+            : { label: "恢复", icon: <LuRotateCcw />, disabled: !!locked, hint: locked, onClick: () => void restore() },
+        ]} />
       </>}>
       {asset && (
         <div className="space-y-4 p-5">
-          {asset.status !== "active" && <Notice tone="warn" icon={<LuCircleAlert />}>已停用：agent 不会再用到它。点右上角「恢复」重新启用。</Notice>}
+          {asset.status !== "active" && (
+            <Notice tone="warn" icon={<LuCircleAlert />} action={<Button size="xs" reason={locked} onClick={() => void restore()}>恢复</Button>}>已停用：agent 不会再用到它。</Notice>
+          )}
           {editing ? (
             <div className="space-y-3">
               <Field label="摘要"><Input value={d.summary} onChange={(e) => setD({ ...d, summary: e.target.value })} /></Field>
@@ -719,10 +740,10 @@ function AssetDrawer({ asset, onClose }: { asset: Asset | null; onClose: () => v
             </div>
           )}
           <DescList items={[
-            ["用过", `${asset.use_count} 次${asset.last_used_at ? `，最近 ${ago(asset.last_used_at)}` : ""}`],
+            ["用过", <>{asset.use_count} 次{asset.last_used_at && <>，最近 <TimeAgo at={asset.last_used_at} /></>}</>],
             [<HeadHint hint={PENALTY_HINT}>👎 扣分</HeadHint>, asset.feedback_score < 0 ? <span className="text-bad">{asset.feedback_score}</span> : <span className="text-fg-3">无</span>],
-            ["来源", asset.source_run ? <Link to={`/runs/${asset.source_run}`} className="font-mono hover:text-accent">运行 {shortId(asset.source_run)}</Link> : "人工登记"],
-            ["更新", ago(asset.updated_at)],
+            ["来源", asset.source_run ? <Link to={`/runs/${asset.source_run}`} className="font-mono hover:text-accent">运行 {shortId(asset.source_run)}</Link> : "人工新建"],
+            ["更新", <TimeAgo at={asset.updated_at} />],
           ]} />
         </div>
       )}

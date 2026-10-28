@@ -7,8 +7,8 @@ import type {
   ApiKey, FeedbackEntry, FeedbackFilters, FeedbackInboxItem, FeedbackInput, Asset, ConfigMasked, ConfigRaw, ConfigSaved, ConfigSection, ConfigSections,
   ConfigVersion, ConfigVersionContent, Knowledge, KnowledgeCreate, KnowledgeFilters, KnowledgePromote, KnowledgePromoted, KnowledgeRevision, MemoryFilters,
   Meta, Page, PromptsConfig, ReplayDetail, ReplayRequest, ReplaySummary, ResolvedRole, Role, Run, RunAccepted, RunEvent, RunFilters, RunListItem,
-  RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskSummary, UpcomingFire,
-  Version, VersionStat,
+  RunRequest, SearchHit, ServiceSummary, ServiceTools, ServiceView, SessionDetail, SessionSummary, Settings, Stats, SubtaskCreate, TaskGraph, TaskSummary,
+  TickFilters, TickPage, UpcomingFire, Version, VersionStat, WorkersResponse,
 } from "./types";
 import { getQueryData, useQuery, type QueryOptions } from "../lib/query";
 
@@ -66,6 +66,14 @@ export const api = {
   subtasks: (name: string) => get<TaskSummary[]>(`/v1/tasks/${enc(name)}/subtasks`),
   createSubtask: (name: string, body: SubtaskCreate) => post<TaskSummary>(`/v1/tasks/${enc(name)}/subtasks`, body),
   taskSchedule: (name: string) => get<UpcomingFire[]>(`/v1/tasks/${enc(name)}/schedule`),
+  /** 任务图：父任务 + 上游联动的边 */
+  taskGraph: () => get<TaskGraph>("/v1/tasks/_graph"),
+
+  // —— 调度的可见面 ——
+  /** 触发记录（定时 / 事件 / 联动 / 自动重试每次判定一条；新的在前，before 翻页） */
+  ticks: (f: TickFilters) => get<TickPage>("/v1/ticks", { ...f }),
+  /** 执行主机 + 排队情况 */
+  workers: () => get<WorkersResponse>("/v1/workers"),
 
   // —— 运行 ——
   runs: (f: RunFilters) => get<Page<RunListItem>>("/v1/runs", { ...f }),
@@ -139,6 +147,10 @@ export const useRole = (name: string) => useQuery(["roles", name], () => api.rol
 export const useTasks = (service?: string) => useQuery(["tasks", service ?? ""], () => api.tasks(service));
 export const useTask = (name: string) => useQuery(["tasks", "one", name], () => api.task(name));
 export const useSubtasks = (name: string) => useQuery(["tasks", "subtasks", name], () => api.subtasks(name), { enabled: !!name });
+export const useTaskGraph = (o?: QueryOptions) => useQuery(["tasks", "graph"], api.taskGraph, { refetchInterval: 30_000, ...o });
+/** 触发记录挂在 runs 下：提交 / 取消运行后 invalidate("runs") 一起刷新 */
+export const useTicks = (f: TickFilters, o?: QueryOptions) => useQuery(["runs", "ticks", f], () => api.ticks(f), { refetchInterval: 15_000, ...o });
+export const useWorkers = (o?: QueryOptions) => useQuery(["workers"], api.workers, { refetchInterval: 15_000, ...o });
 export const useVersions = (kind: DefinitionPath | `settings/${ConfigSection}`, name?: string) =>
   useQuery(["versions", kind, name ?? ""], () => api.versions(kind, name));
 export const useVersionStats = (kind: StatsPath, name?: string, enabled = true) =>

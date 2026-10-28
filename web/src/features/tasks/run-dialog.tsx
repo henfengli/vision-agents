@@ -4,16 +4,16 @@
  * 对象就从这个字段里选，不用填两遍。提交走 POST /v1/runs，成功后跳到运行详情。
  */
 import { useEffect, useMemo, useState } from "react";
-import { LuChevronDown, LuChevronRight, LuPlay, LuShieldCheck } from "react-icons/lu";
+import { LuChevronDown, LuChevronRight, LuPlay, LuShieldCheck, LuX } from "react-icons/lu";
 
-import { api, useEnvs, useServices, useSettings, useSubtasks, useTasks } from "@/api/hooks";
+import { api, useEnvs, useRuns, useServices, useSettings, useSubtasks, useTasks } from "@/api/hooks";
 import type { MemoryOverride, TaskSummary } from "@/api/types";
-import { EnvBadge } from "@/components/status";
+import { EnvBadge, RUN_STATUS } from "@/components/status";
 import { Button } from "@/components/ui/button";
 import { CreatableSelect, Field, SearchSelect, Segmented, Select, Textarea, objectNameError } from "@/components/ui/form";
 import { Dialog, toast } from "@/components/ui/overlay";
 import { cn } from "@/lib/cn";
-import { seconds } from "@/lib/format";
+import { seconds, shortId } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { navigate } from "@/lib/router";
 import { useUi } from "@/lib/store";
@@ -22,8 +22,10 @@ import { InputControl, initialValues, inputErrors, inputValue } from "./input-co
 /** 通用入口：任何服务任何环境直接提问或交代一件事，不用先建任务；POST /v1/runs 不填 task 就是它 */
 export const ASK_TASK = "ask";
 
-export function RunTaskDialog({ open, onClose, task: presetTask, service: presetService, subtask: presetSubtask }: {
+export function RunTaskDialog({ open, onClose, task: presetTask, service: presetService, subtask: presetSubtask, after: presetAfter }: {
   open: boolean; onClose: () => void; task?: string; service?: string; subtask?: string;
+  /** 预先点名要等的上游运行（运行详情「等它成功后跑一个任务」）：都成功了才开始 */
+  after?: string[];
 }) {
   const { data: tasks } = useTasks();
   const { data: services } = useServices();
@@ -43,6 +45,8 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
   const [memory, setMemory] = useState<MemoryOverride>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [more, setMore] = useState(false);
+  const [deps, setDeps] = useState<string[]>([]);
+  const afterKey = (presetAfter ?? []).join(",");
 
   useEffect(() => {
     if (!open) return;
@@ -52,7 +56,13 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
     setMemory({});
     setErrors({});
     setMore(false);
-  }, [open, presetTask, presetService, presetSubtask]);
+    setDeps(presetAfter ?? []);
+  }, [open, presetTask, presetService, presetSubtask, afterKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 能点名等的：还没结束的运行（成功了的不用等，失败了的点名会被拒）
+  const { data: runningRuns } = useRuns({ status: "running", limit: 30 }, { enabled: open });
+  const { data: queuedRuns } = useRuns({ status: "queued", limit: 30 }, { enabled: open });
+  const depOptions = [...(runningRuns?.items ?? []), ...(queuedRuns?.items ?? [])].filter((r) => !deps.includes(r.run_id))
+    .map((r) => ({ value: r.run_id, label: `${r.task_title || r.task} · ${r.summary}`.slice(0, 80), hint: `${shortId(r.run_id)} · ${r.env} · ${RUN_STATUS[r.status].label}` }));
 
   const objectField = base?.form === "agent" ? base.object_input ?? null : null;
   /** 选中的对象：子任务页上固定；有对象字段时就是那个字段的值 */
@@ -108,12 +118,14 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
       const res = await api.submitRun({
         task: taskName || undefined, service: needService ? service : null, env,
         subtask: presetSubtask || (showObjectPicker && object ? object : null), input, memory,
+        after: deps.length ? deps : undefined,
       });
       invalidate("runs");
       invalidate("tasks");
       onClose();
       if (res.subtask_created) toast("新对象已加入子任务", { description: `${res.subtask_created}：以后可以给它写专属档案` });
       if (res.dedup) toast.info("和刚才的一次运行重复，直接用它的结果", res.run_id.slice(0, 8));
+      else if (deps.length) toast("已排队", { description: `等 ${deps.length} 个上游运行成功后开始 · ${res.run_id.slice(0, 8)}` });
       else toast("已开始运行", { description: res.run_id.slice(0, 8) });
       navigate(`/runs/${res.run_id}`);
     } catch (e) {
@@ -185,13 +197,20 @@ export function RunTaskDialog({ open, onClose, task: presetTask, service: preset
           </div>
         )}
 
-        {def?.form === "agent" && (
+        {(presetAfter?.length ?? 0) > 0 && <AfterRuns value={deps} onChange={setDeps} options={depOptions} />}
+
+        {def && (
           <div className="border-t border-line pt-3">
             <button type="button" onClick={() => setMore(!more)} className="flex items-center gap-1 text-[12.5px] text-fg-3 hover:text-fg">
-              {more ? <LuChevronDown className="size-3.5" /> : <LuChevronRight className="size-3.5" />}这次的记忆开关
-              {!more && (memory.recall != null || memory.save != null) && <span className="ml-1 text-accent">（已改）</span>}
+              {more ? <LuChevronDown className="size-3.5" /> : <LuChevronRight className="size-3.5" />}更多选项
+              {!more && (memory.recall != null || memory.save != null || (!presetAfter?.length && deps.length > 0)) && <span className="ml-1 text-accent">（已改）</span>}
             </button>
-            {more && <MemoryToggles task={def} value={memory} onChange={setMemory} />}
+            {more && (
+              <div className="mt-2.5 space-y-3 pl-4">
+                {def.form === "agent" && <MemoryToggles task={def} value={memory} onChange={setMemory} />}
+                {!presetAfter?.length && <AfterRuns value={deps} onChange={setDeps} options={depOptions} />}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -219,9 +238,32 @@ function MemoryToggles({ task, value, onChange }: { task: TaskSummary; value: Me
     );
   };
   return (
-    <div className="mt-2.5 space-y-2 pl-4">
+    <div className="space-y-2">
       {item("recall", "召回", "运行前查以前记下的事实和方法")}
       {item("save", "沉淀", "运行成功后把结论记下来")}
     </div>
+  );
+}
+
+/** 点名等的上游运行（POST /v1/runs 的 after）：都成功了才开始，有一个失败 / 取消这次就不执行 */
+function AfterRuns({ value, onChange, options }: { value: string[]; onChange: (v: string[]) => void; options: { value: string; label: string; hint: string }[] }) {
+  return (
+    <Field label="等这些运行成功后再开始（可选）" help="先排着队，点名的运行都成功了才执行；有一个失败或被取消，这次就不执行（upstream_failed）。可以粘贴运行 id">
+      <div className="space-y-2">
+        {value.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {value.map((id) => (
+              <span key={id} className="inline-flex h-7 items-center gap-1 rounded-md border border-line bg-sunken/60 pl-2 pr-1 font-mono text-[12px] text-fg-2">
+                {shortId(id)}
+                <button type="button" aria-label={`不等 ${id}`} onClick={() => onChange(value.filter((x) => x !== id))} className="rounded p-0.5 text-fg-3 hover:bg-hover hover:text-fg"><LuX className="size-3.5" /></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <CreatableSelect key={value.join(",")} value="" onChange={(v) => v && !value.includes(v) && onChange([...value, v.trim()])} options={options}
+          placeholder={options.length ? "选一个还在跑的运行，或粘贴运行 id…" : "粘贴运行 id…"} createLabel="等它"
+          validate={(v) => (/^[0-9a-f]{8,64}$/i.test(v.trim()) ? null : "运行 id 是十六进制串")} />
+      </div>
+    </Field>
   );
 }

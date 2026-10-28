@@ -21,16 +21,22 @@ Resolution = Literal["agent", "builtin", "rule"]
 RESOLUTIONS: tuple[str, ...] = ("agent", "builtin", "rule")
 
 # 触发类型：任务上可声明的四种 + 平台内部产生的几种（replay = 回归重放）
-TriggerType = Literal["api", "chat", "schedule", "event", "web", "rerun", "resume", "correction", "replay"]
-DECLARABLE = frozenset({"api", "chat", "schedule", "event"})
+TriggerType = Literal["api", "chat", "schedule", "event", "after", "web", "rerun", "resume", "correction", "replay"]
+DECLARABLE = frozenset({"api", "chat", "schedule", "event", "after"})
+# 自动触发（没有人在等结果）：服务在某环境「暂停自动触发」时拦的就是这几种；排队时也排在人发起的后面
+AUTOMATIC = frozenset({"schedule", "event", "after"})
+
+# 排队优先级（小的先认领）：人在等的（对话、控制台、纠正）> 程序调用 > 自动触发和回归重放
+PRIORITY = {"chat": 0, "web": 0, "correction": 0, "api": 1, "rerun": 1, "resume": 1,
+            "schedule": 2, "event": 2, "after": 2, "replay": 2}
 
 
 class RunTrigger(BaseModel):
     """谁、从哪启动了这次运行。caller 是身份（API 密钥名 / 控制台用户 / schedule），type/source 是通道。"""
 
     type: TriggerType = "api"
-    id: str | None = None          # 任务上的触发器 id（schedule / event）
-    source: str | None = None      # 事件来源（dagster / gitlab / webhook…）
+    id: str | None = None          # 任务上的触发器 id（schedule / event / after）；纠正 / 重放时是原运行
+    source: str | None = None      # 事件来源（dagster / gitlab / webhook…）；after 时是触发它的上游运行 id
     caller: str = ""
 
     def declared_type(self) -> str | None:
@@ -58,3 +64,5 @@ class RunRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     session_id: str | None = None  # 续同一会话（对话的多轮、纠正）
     memory: MemoryOverride = Field(default_factory=MemoryOverride)
+    # 等这些运行都成功了再执行（排着队等）；其中任何一个失败或取消，这次运行不执行、落 failed / upstream_failed
+    after: list[str] = Field(default_factory=list, max_length=20)

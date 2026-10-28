@@ -10,12 +10,13 @@ import { LuKeyRound, LuPlus } from "react-icons/lu";
 import { api, useApiKeys } from "@/api/hooks";
 import type { ApiKey } from "@/api/types";
 import { Button, LinkButton } from "@/components/ui/button";
-import { CopyButton, Table, Td, Th, Tr } from "@/components/ui/data";
+import { TimeAgo } from "@/components/time";
+import { CopyButton, RowButton, Table, Td, Th, Tr } from "@/components/ui/data";
 import { Field, Input, Switch } from "@/components/ui/form";
 import { Dialog, Tooltip, confirm, toast } from "@/components/ui/overlay";
 import { Badge, Card, Empty, ErrorState, SkeletonRows } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
-import { ago, datetime, dayjs } from "@/lib/format";
+import { datetime, dayjs } from "@/lib/format";
 import { invalidate, useMutation } from "@/lib/query";
 import { SettingsLayout } from "./layout";
 
@@ -37,7 +38,11 @@ export function ApiKeysPage() {
   return (
     <SettingsLayout title="API 密钥" description="每个调用方（项目、脚本、Webhook）一把，密钥名会记在运行记录的「发起方」里。"
       actions={<>
-        {hidden > 0 && <Switch size="sm" checked={showInactive} onChange={setShowInactive} label={<span className="text-[12.5px] text-fg-2">显示已吊销 / 已过期的（{hidden}）</span>} />}
+        {/* 一直在：没有可显示的时禁用（不是有了才冒出来，页头不跟着位移） */}
+        <Tooltip content={!hidden ? "没有已吊销或已过期的密钥" : undefined}>
+          <span><Switch size="sm" checked={showInactive && hidden > 0} disabled={!hidden} onChange={setShowInactive}
+            label={<span className="text-[12.5px] text-fg-2">显示已吊销 / 已过期的{hidden ? `（${hidden}）` : ""}</span>} /></span>
+        </Tooltip>
         <Button variant="primary" icon={<LuPlus />} onClick={() => setEditing("new")}>新建密钥</Button>
       </>}>
       <Card>
@@ -54,22 +59,26 @@ export function ApiKeysPage() {
               <Tr key={k.id} className={cn(k.revoked_at && "opacity-50")} onClick={k.revoked_at ? undefined : () => setEditing(k)}>
                 <Td>
                   <div className="flex items-center gap-2 font-medium text-fg">
-                    <span className="font-mono text-[12.5px]">{k.name}</span>
+                    {/* 首格是按钮：键盘也能打开编辑；已吊销的是终态，不能编辑 */}
+                    {k.revoked_at ? <span className="font-mono text-[12.5px]">{k.name}</span>
+                      : <RowButton onClick={() => setEditing(k)} label={`编辑 ${k.name}`} className="font-mono text-[12.5px]">{k.name}</RowButton>}
                     {k.revoked_at && <Tooltip content={`吊销于 ${datetime(k.revoked_at)}`}><span><Badge tone="idle">已吊销</Badge></span></Tooltip>}
                     {!k.revoked_at && expired(k) && <Badge tone="warn">已过期</Badge>}
                   </div>
                   <div className="font-mono text-[11.5px] text-fg-3">{k.prefix}…</div>
                 </Td>
                 <Td className="max-w-[320px]"><span className="block truncate text-[12.5px] text-fg-2" title={k.note || undefined}>{k.note || <span className="text-fg-3">—</span>}</span></Td>
-                <Td className="whitespace-nowrap text-[12.5px] text-fg-3" title={datetime(k.created_at, true)}>{k.created_by} · {ago(k.created_at)}</Td>
+                <Td className="whitespace-nowrap text-[12.5px] text-fg-3">{k.created_by} · <TimeAgo at={k.created_at} /></Td>
                 <Td className="whitespace-nowrap text-[12.5px] text-fg-2">
                   {k.last_used_at
-                    ? <span onClick={(e) => e.stopPropagation()}><LinkButton variant="link" size="sm" to={`/runs?caller=${encodeURIComponent(k.name)}`}>{ago(k.last_used_at)}</LinkButton></span>
+                    ? <span onClick={(e) => e.stopPropagation()}><LinkButton variant="link" size="sm" to={`/runs?caller=${encodeURIComponent(k.name)}`}><TimeAgo at={k.last_used_at} /></LinkButton></span>
                     : <span className="text-fg-3">从未</span>}
                 </Td>
                 <Td className={cn("whitespace-nowrap text-[12.5px]", expired(k) ? "text-warn" : "text-fg-3")}>{k.expires_at ? datetime(k.expires_at) : "不过期"}</Td>
+                {/* 行尾槽位固定：已吊销是终态，放文字占位而不是空着 */}
                 <Td className="text-right" onClick={(e) => e.stopPropagation()}>
-                  {!k.revoked_at && <Button size="sm" variant="danger-ghost" loading={revoking === k.id} onClick={() => revoke(k)}>吊销</Button>}
+                  {k.revoked_at ? <span className="px-2.5 text-[12.5px] text-fg-3">已吊销</span>
+                    : <Button size="sm" variant="danger-ghost" loading={revoking === k.id} onClick={() => revoke(k)}>吊销</Button>}
                 </Td>
               </Tr>
             ))}</tbody>
@@ -106,10 +115,10 @@ function KeyDialog({ value, onClose }: { value: ApiKey | "new" | null; onClose: 
       if (isNew) {
         const created = await api.createApiKey({ name: d.name, note: d.note.trim(), expires_at });
         setToken(created.token);
-        toast(`已创建 ${created.name}`, { description: "明文只显示这一次，先复制保存" });
+        toast(`已创建密钥 ${created.name}`, { description: "明文只显示这一次，先复制保存" });
       } else if (value) {
         await api.patchApiKey(value.id, { note: d.note.trim(), expires_at });
-        toast("已保存");
+        toast(`已保存密钥 ${value.name}`);
         onClose();
       }
       invalidate("settings", "api-keys");

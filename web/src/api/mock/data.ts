@@ -11,8 +11,11 @@
  */
 import type {
   ApiKey, Asset, ChatTurn, Env, FeedbackReason, Knowledge, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
-  Role, Run, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, TodoItem, Trigger,
+  Role, Run as ApiRun, RunEvent, RunStatus, Service, SessionDetail, Settings, Task, Tick, TodoItem, Trigger, Worker,
 } from "../types";
+
+/** mock 存的运行：前后关系（lineage）、排队状态（queue）由 server 按当时的台账算 */
+type Run = Omit<ApiRun, "lineage" | "queue">;
 
 // ———————— 随机工具 ————————
 
@@ -279,7 +282,7 @@ const trig = {
   chat: (id = "chat"): Trigger => ({ id, type: "chat" }),
 };
 
-const taskBase = { enabled: true, profile: {}, memory: {}, deliver: null, extends: null, auto_created: false, dedup: null, handler: null, output_schema: null, envs: [] as string[] };
+const taskBase = { enabled: true, profile: {}, memory: {}, deliver: null, extends: null, auto_created: false, dedup: null, handler: null, output_schema: null, envs: [] as string[], retry: null, concurrency: null };
 
 export const tasks: Task[] = [
   // 通用入口：任何服务、任何环境直接提问或交代一件事，不用先建任务；要定时、事件、投递、去重时再建正式任务
@@ -314,6 +317,8 @@ export const tasks: Task[] = [
       trig.api(),
     ],
     deliver: { channel: "default" }, dedup: { key: "run_id", window_s: 600 }, timeout_s: 900,
+    // 模型 429、执行进程被杀这类临时性失败自动续跑；一下涌进几十条失败时每个环境最多同时分析 4 条
+    retry: { max: 2, delay_s: 120 }, concurrency: 4,
     profile: { pitfalls: "资产失败先看上游资产是否完成，多数失败是上游延迟级联；先用 dagster 的 MCP 工具看线上这次运行的日志" },
     version: 4, ...by("gaodl", 1 * DAY),
   },
@@ -362,8 +367,26 @@ export const tasks: Task[] = [
     ...taskBase, name: "daily-inspection", title: "Board 日常巡检", description: "每天早上检查报表数据新鲜度与线上页面",
     service: "vision-board", role: "inspector", form: "agent", input: { scope: { type: "enum", options: ["full", "quick"], default: "full" } },
     envs: ["prod", "test"],
-    triggers: [{ id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" } }, trig.api()],
+    triggers: [
+      { id: "morning", type: "schedule", cron: "50 8 * * *", envs: ["prod", "test"], input: { scope: "full" } },
+      // 演示上游联动：部署冒烟通过后在同一个环境补一次巡检（种子里没有，按需在控制台加）
+      { id: "after-smoke", type: "after", tasks: ["frontend-smoke"], mode: "any", on: ["success"] },
+      trig.api(),
+    ],
     deliver: { channel: "default" }, timeout_s: 900, version: 3, ...by("liyd", 3 * DAY),
+  },
+  // 演示「全部上游结束」：冒烟和巡检都跑完（成功或失败）才写这次发版的小结，版本号取冒烟那次的输入
+  {
+    ...taskBase, name: "release-report", title: "发版小结", description: "冒烟和巡检都结束后，把这次部署的检查结果汇总成一条发版小结推到群里",
+    service: "vision-board", role: "qa_engineer", form: "agent",
+    input: { version: { type: "str", description: "部署版本（ref）" } },
+    envs: ["test", "prod"],
+    triggers: [
+      { id: "after-checks", type: "after", tasks: ["frontend-smoke", "daily-inspection"], mode: "all", on: ["success", "failed"], window_s: 6 * 3600,
+        map: { version: "frontend-smoke.input.version" } },
+      trig.api(),
+    ],
+    deliver: { channel: "default" }, timeout_s: 600, version: 1, ...by("liyd", 2 * DAY),
   },
   // 每个服务×环境各跑一次，由部署它的那台主机上的 agent 服务执行（读的是那台主机上线上的代码目录）
   {
@@ -486,6 +509,9 @@ export interface MockRun extends Run {
   _output?: Run["output"];     // 内建任务（记忆园丁）的结果 JSON；不填按事件生成
   _error_code?: string;
   _scenario?: number;          // 选中的场景下标（问答、失败分析）
+  _priority?: number;          // 认领顺序：0 对话 / 1 接口 / 2 定时、事件、联动（与 domain/runs.PRIORITY 一致）
+  _ckey?: string;              // 任务并发：<父任务>@<环境>
+  _climit?: number;
 }
 
 /** 角色继承链：根在前、自己在后 */
@@ -836,6 +862,17 @@ function smokePlans(r: Run): Plan[] {
 }
 const smokeAnswer = (r: Run) => `冒烟通过：**${String(r.input.version ?? "").slice(0, 7)}** 在 ${r.env} 的报表页面正常。\n\n- 策略周报：表格 14 行、收益率曲线、导出按钮都在 ✓\n- 线上代码目录的提交与部署版本一致 ✓`;
 
+// ———————— 发版小结（上游联动：冒烟 + 巡检都结束后） ————————
+
+function releasePlans(r: Run): Plan[] {
+  const ver = String(r.input.version ?? "e5f6a7b").slice(0, 7);
+  return [
+    { think: `冒烟和巡检都结束了。先确认线上代码目录现在是 ${ver}，再把两次运行的结论汇总。`,
+      calls: [{ tool: "service_info", args: { what: "git" }, ms: 80, output: `## ${codeDir(r)}\n${ver} ${TD[0]} wangzh feat: 离线 HTML 导出改用 Chrome headless` }] },
+  ];
+}
+const releaseAnswer = (r: Run) => `## 发版小结 · ${String(r.input.version ?? "").slice(0, 7) || "当前版本"} · ${r.env}\n\n- 冒烟：报表页面、导出按钮正常 ✓\n- 巡检：6 项正常，2 项关注（策略周报页 2.97 秒，根盘 81%）\n\n结论：可以放行；周报页慢的问题部署前就有，不是这次引入的。`;
+
 // ———————— 生成运行 ————————
 
 const PEOPLE = ["liyd", "gaodl", "wangzh", "zhaoq"];
@@ -894,7 +931,7 @@ function makeRun(): MockRun {
     task_version: Math.max(1, task.version - (rand() < 0.2 ? 1 : 0)),
     role_version: base.role ? versionAt(roles.find((r) => r.name === base.role)!.version, ago) : null,
     recipe: null,
-    replay_of: null, input, output: null, error_code: null,
+    replay_of: null, input, output: null, error_code: null, attempt: 1, retry_at: null, depends_on: [],
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     feedback: [],
     memory: {},
@@ -908,6 +945,113 @@ function makeRun(): MockRun {
 
 export const runs: MockRun[] = Array.from({ length: 260 }, () => makeRun())
   .sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+// ———————— 调度：上游联动建的运行、等着自动重试的失败、点名等上游的排队运行 ————————
+
+const emptyContext = () => ({ profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] });
+
+/** 上游联动建的运行：上游结束后 1~3 秒建、同一个环境、调用身份沿用上游的；还没到结束时间的算执行中 */
+function afterRun(up: MockRun, taskName: string, triggerId: string, input: Record<string, unknown>, summary: string, failed = false): MockRun | null {
+  if (!up.finished_at) return null;
+  const task = tasks.find((x) => x.name === taskName)!;
+  const startMs = new Date(up.finished_at).getTime() + between(1, 3) * 1000;
+  if (startMs > NOW) return null;
+  const duration = between(80_000, 320_000);
+  const done = startMs + duration < NOW;
+  const run: MockRun = {
+    run_id: hex(12), session_id: "", task: taskName, task_title: task.title, service: up.service, env: up.env, role: task.role,
+    status: done ? (failed ? "failed" : "success") : "running", resolution: done ? "agent" : null,
+    trigger: { type: "after", id: triggerId, source: up.run_id, caller: up.trigger.caller },
+    summary, tokens: done ? between(18_000, 64_000) : null, duration_ms: done ? duration : null,
+    created_at: new Date(startMs).toISOString(), finished_at: done ? new Date(startMs + duration).toISOString() : null,
+    task_version: task.version, role_version: task.role ? versionAt(roles.find((r) => r.name === task.role)!.version, NOW - startMs) : null,
+    recipe: null, replay_of: null, input, output: null, error_code: null, attempt: 1, retry_at: null, depends_on: [],
+    context: emptyContext(), feedback: [], memory: {},
+  };
+  run.recipe = recipeOf(run, NOW - startMs);
+  return run;
+}
+
+/** 演示的上游联动：冒烟通过 → 巡检（任一）；冒烟 + 巡检都结束 → 发版小结（全部） */
+const chained: MockRun[] = [];
+export const chainPairs: { up: MockRun; down: MockRun; at: string }[] = [];
+for (const smoke of runs.filter((r) => r.task === "frontend-smoke" && r.status === "success").slice(0, 7)) {
+  const insp = afterRun(smoke, "daily-inspection", "after-smoke", { scope: "full" }, "部署后巡检", rand() < 0.15);
+  if (!insp) continue;
+  chained.push(insp);
+  chainPairs.push({ up: smoke, down: insp, at: insp.created_at });
+  const report = insp.status === "running" ? null
+    : afterRun(insp, "release-report", "after-checks", { version: smoke.input.version }, `发版小结 ${String(smoke.input.version ?? "").slice(0, 8)}`);
+  if (report) { chained.push(report); chainPairs.push({ up: insp, down: report, at: report.created_at }); }
+}
+runs.push(...chained);
+
+// 失败分析：最近一次 429 失败的正等着自动重试（任务配了 retry：2 次、间隔 120 秒），mock 里 50 秒后到点
+const retrying = runs.find((r) => r.task.startsWith("failure-analysis") && r.status === "failed" && r.resolution === "agent");
+if (retrying) {
+  const finished = new Date(NOW - 70_000);
+  Object.assign(retrying, { created_at: new Date(finished.getTime() - (retrying.duration_ms ?? 120_000)).toISOString(), finished_at: finished.toISOString(), retry_at: new Date(NOW + 50_000).toISOString() });
+}
+
+// 点名等上游：一条 API 提交的问答，等一次还在执行的运行出结论（RunRequest.after）；mock 里执行中的运行不会结束，它就一直等着
+const waitedOn = runs.find((r) => r.status === "running" && r.task.startsWith("failure-analysis"))
+  ?? runs.find((r) => r.status === "running" && r.trigger.type !== "replay" && r.task !== "memory-gardener");
+if (waitedOn) {
+  const at = new Date(new Date(waitedOn.created_at).getTime() + 40_000);
+  const q = `等这次「${waitedOn.task_title}」出结论后，把结论和影响整理成给业务方的说明（不要技术细节）`;
+  const run: MockRun = {
+    run_id: hex(12), session_id: "", task: "ask", task_title: "问一下", service: waitedOn.service, env: waitedOn.env, role: "generalist",
+    status: "queued", resolution: null, trigger: { type: "api", id: "api", source: null, caller: "notebook-zhaoq" },
+    summary: q, tokens: null, duration_ms: null, created_at: (at.getTime() > NOW ? new Date(NOW - 5000) : at).toISOString(), finished_at: null,
+    task_version: 1, role_version: versionAt(roles.find((r) => r.name === "generalist")!.version, 0), recipe: null, replay_of: null,
+    input: { question: q }, output: null, error_code: null, attempt: 1, retry_at: null, depends_on: [waitedOn.run_id],
+    context: emptyContext(), feedback: [], memory: {}, _scenario: 0,
+  };
+  run.recipe = recipeOf(run, 0);
+  runs.push(run);
+}
+runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+/** 执行主机：生产主机管三个服务的国内生产；测试两台各管一部分；一台已下线的旧主机（7 天内报过到的都列出来） */
+export const workers: Worker[] = [
+  { worker_id: "172.24.16.100:prod", host: "172.24.16.100", env: "prod", services: [], version: PLATFORM, max_concurrent: 8, running: 0, started_at: iso(3 * DAY + 2 * HOUR), seen_at: iso(6000), stopped_at: null, online: true },
+  { worker_id: "172.24.24.136:test", host: "172.24.24.136", env: "test", services: ["vision-dagster"], version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(12 * DAY), seen_at: iso(11000), stopped_at: null, online: true },
+  { worker_id: "172.21.0.45:test", host: "172.21.0.45", env: "test", services: ["vision-board", "vision-web"], version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(2 * DAY), seen_at: iso(3000), stopped_at: null, online: true },
+  { worker_id: "172.21.0.46:test", host: "172.21.0.46", env: "test", services: ["vision-web"], version: "8.4.1", max_concurrent: 2, running: 0, started_at: iso(9 * DAY), seen_at: iso(2 * DAY + 3 * HOUR), stopped_at: iso(2 * DAY + 3 * HOUR), online: false },
+];
+
+/** 触发记录（新的在前）：定时 / 事件 / 联动建了运行的各记一条，外加几条没建运行的（跳过、过滤、没人接、被拒、在等） */
+const tickOf = (at: string, t: Omit<Tick, "id" | "at" | "detail"> & { detail?: Tick["detail"] }): Tick => ({ id: 0, at, detail: null, ...t });
+const seededTicks: Tick[] = [];
+for (const r of runs) {
+  const k = r.trigger.type;
+  if (k !== "schedule" && k !== "event" && k !== "after") continue;
+  const tr = tasks.find((t) => t.name === r.task.split(":")[0])?.triggers.find((x) => x.id === r.trigger.id);
+  const reason = k === "schedule" ? `按 ${tr && tr.type === "schedule" ? tr.cron : "cron"} 到点`
+    : k === "after" ? `上游 ${runs.find((x) => x.run_id === r.trigger.source)?.task ?? "—"} 成功`
+      : r.resolution === "rule" ? "规则先行命中（infra）" : `${r.trigger.source}.${(tr as { event?: string } | undefined)?.event ?? "event"}`;
+  seededTicks.push(tickOf(r.created_at, { kind: k, outcome: "fired", task: r.task, trigger_id: r.trigger.id, env: r.env,
+    source: k === "after" ? r.trigger.source : k === "event" ? r.trigger.source : null, run_id: r.run_id, reason }));
+}
+// 冒烟先结束、巡检还没结束时，发版小结在等
+for (const { up, down } of chainPairs.filter((p) => p.down.task === "daily-inspection")) {
+  seededTicks.push(tickOf(down.created_at, { kind: "after", outcome: "waiting", task: "release-report", trigger_id: "after-checks", env: up.env, source: up.run_id, run_id: null,
+    reason: "还在等 daily-inspection 结束（6 小时内）", detail: { have: ["frontend-smoke"] } }));
+}
+seededTicks.push(
+  tickOf(iso(5 * HOUR + 12 * MIN), { kind: "event", outcome: "unmatched", task: null, trigger_id: null, env: "prod", source: "dagster", run_id: null,
+    reason: "dagster.run_success 没有任务接（没有任务声明这个事件，或过滤条件都不满足）", detail: { event: "run_success", data: { run_id: "4c1e09d2", asset_keys: "ods_trade_fills,dwd_position_daily", env: "prod" } } }),
+  tickOf(iso(9 * HOUR + 3 * MIN), { kind: "event", outcome: "filtered", task: "frontend-smoke", trigger_id: "on-deploy", env: "test", source: "gitlab", run_id: null,
+    reason: "gitlab.deployment 不满足过滤条件", detail: { event: "deployment", data: { project: "vision-web", ref: "3b9d0f1", env: "test" }, filter: { project: "^vision-board$" } } }),
+  tickOf(iso(9 * HOUR + 3 * MIN), { kind: "event", outcome: "unmatched", task: null, trigger_id: null, env: "test", source: "gitlab", run_id: null,
+    reason: "gitlab.deployment 没有任务接（没有任务声明这个事件，或过滤条件都不满足）", detail: { event: "deployment", data: { project: "vision-web", ref: "3b9d0f1", env: "test" } } }),
+  tickOf(iso(26 * HOUR), { kind: "event", outcome: "rejected", task: "frontend-smoke", trigger_id: "on-deploy", env: "prod", source: "gitlab", run_id: null,
+    reason: "服务 vision-board 在 prod 暂停了自动触发（定时、事件、上游联动）", detail: { code: "triggers_paused" } }),
+  tickOf(iso(31 * HOUR), { kind: "event", outcome: "deduped", task: "failure-analysis:dws_account_pnl_daily", trigger_id: "on-failure", env: "prod", source: "dagster",
+    run_id: runs.find((r) => r.task === "failure-analysis:dws_account_pnl_daily")?.run_id ?? null, reason: "命中去重，复用已有的运行" }),
+);
+export const ticks: Tick[] = seededTicks.sort((a, b) => b.at.localeCompare(a.at)).map((t, i, all) => ({ ...t, id: all.length - i }));
+export const nextTickId = () => ticks.length ? Math.max(...ticks.map((t) => t.id)) + 1 : 1;
 
 // 反馈：约 15% 的已结束运行有人评价；负反馈带问题类型与说明，少数针对某一步
 const NEGATIVE: { reasons: FeedbackReason[]; comment: string; step?: number }[] = [
@@ -991,7 +1135,7 @@ export function replayRunOf(source: MockRun, createdAt: string, status: RunStatu
     created_at: createdAt, finished_at: done ? new Date(new Date(createdAt).getTime() + 40_000).toISOString() : null,
     task_version: own?.version ?? source.task_version, role_version: roles.find((r) => r.name === source.role)?.version ?? null,
     recipe: null,
-    replay_of: source.run_id, input: source.input, output: null, error_code: null, feedback: [], memory: {},
+    replay_of: source.run_id, input: source.input, output: null, error_code: null, attempt: 1, retry_at: null, depends_on: [], feedback: [], memory: {},
     context: { profile: "", recalled_knowledge: [], recalled_assets: [], saved_knowledge: [], saved_assets: [], session_runs: [] },
     _events: undefined, _answer: answer,
   };
@@ -1093,6 +1237,7 @@ function plansOf(run: MockRun): Plan[] {
   if (base === "failure-analysis") return failurePlans(run);
   if (base === "daily-inspection") return inspectionPlans(run);
   if (base === "frontend-smoke") return smokePlans(run);
+  if (base === "release-report") return releasePlans(run);
   return [];
 }
 
@@ -1103,11 +1248,13 @@ function answerOf(run: MockRun): string {
   if (base === "failure-analysis") return failureAnswer(run);
   if (base === "daily-inspection") return inspectionAnswer();
   if (base === "frontend-smoke") return smokeAnswer(run);
+  if (base === "release-report") return releaseAnswer(run);
   return "完成。";
 }
 
 export function eventsOf(run: MockRun): RunEvent[] {
   if (run._events) return run._events;
+  if (run.status === "queued") return [];            // 还没被认领：时间线是空的（不缓存，开始后再生成）
   const r = mulberry32(parseInt(run.run_id.slice(0, 8), 16));
   const start = new Date(run.created_at).getTime();
   /** 9.0 之前的运行：没有配方；查库工具叫 sql_query，思考是 thought 事件，没有逐次的模型调用记录 */
@@ -1179,6 +1326,12 @@ export function eventsOf(run: MockRun): RunEvent[] {
     push("error", run.task === "frontend-smoke"
       ? { title: "timeout", content: "执行超时（任务的 timeout_s = 900s）" }
       : { title: "error", content: "RateLimitError: Error code: 429 - Too Many Requests（重试 6 次后放弃）" }, 800);
+    // 任务配了自动重试（与 pipeline._retry_title 一致）
+    const retry = tasks.find((x) => x.name === run.task.split(":")[0])?.retry;
+    if (run.retry_at && retry) {
+      const left = retry.max - run.attempt;
+      push("stage", { stage: "retry", title: `第 ${run.attempt} 次执行失败，${retry.delay_s} 秒后自动重试` + (left ? `（之后还能再重试 ${left} 次）` : "（最后一次）") }, 50);
+    }
     return (run._events = out);
   }
   if (run.status === "cancelled") {

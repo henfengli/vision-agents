@@ -1,7 +1,8 @@
 """装配：把各层组件接成一个可运行的整体。API 进程与 worker 进程用同一份装配。
 
     数据库 → 定义 / 配置（播种）→ 通知 → 项目内核 → 工具 → agent 工厂
-    → 提交端 → 定时 → 回归重放 → 事件入口 → （worker：执行队列 + 定时 + 维护循环）
+    → 提交端 → 定时（含自动重试）→ 回归重放 → 事件入口 → 上游联动
+    → （worker：执行队列 + 定时 + 维护循环）
 
 同机部署：生产机、测试机上各一个 agent 服务，共用一个库。每台都跑定时（幂等键保证只建一条）和维护，
 执行队列只认领本机负责的环境（部署配置 env / services）的运行。模型账号的并发上限经库在各台之间共用。
@@ -23,6 +24,7 @@ from .config import Settings
 from .model import ModelPool
 from .model import pool as model_pool_mod
 from .notify import Notifier
+from .orchestration.chain import Chainer
 from .orchestration.executor import Executor
 from .orchestration.maintenance import Maintenance
 from .orchestration.pipeline import Deps, Pipeline
@@ -52,6 +54,7 @@ class Runtime:
     scheduler: Scheduler
     replayer: Replayer
     events: EventRouter
+    chainer: Chainer
     executor: Executor | None = None
     _background: list[asyncio.Task] = field(default_factory=list)
 
@@ -61,10 +64,13 @@ class Runtime:
         if not self.settings.env and self.settings.profile != "dev":
             raise RuntimeError("部署配置没有写 env（这台主机负责哪个环境）：在 ~/.config/agent-platform/local.yaml 里写 "
                                "env: prod 或 env: test（测试机再写 services）。只有开发机（AGENT_ENV=dev）可以不写")
-        maintenance = Maintenance(self.settings)
         pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,
-                                 on_finished=self.replayer.on_finished))
+                                 on_finished=self.replayer.on_finished, after_run=self.chainer.on_finished))
+        # 在执行流程之外最终失败的运行（自动重试没能开始、人取消了等着的重试）也要补上通知、投递、联动
+        self.scheduler.settle_failed = pipeline.settle_failed
+        self.submitter.on_failed_final = pipeline.settle_failed
+        maintenance = Maintenance(self.settings, orphaned=pipeline.orphaned, notifier=self.notifier)
         self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs,
                                  self.settings.env, self.settings.services)
         self.executor.start()
@@ -112,4 +118,5 @@ async def assemble(settings: Settings) -> Runtime:
     return Runtime(settings=settings, registry=registry, notifier=notifier, kernels=kernels,
                    service_mcp=ServiceMcp(), toolbox=toolbox, factory=factory,
                    model_pool=model_pool, submitter=submitter, scheduler=Scheduler(registry, submitter),
-                   replayer=Replayer(submitter, model_pool, registry), events=EventRouter(registry, submitter))
+                   replayer=Replayer(submitter, model_pool, registry), events=EventRouter(registry, submitter),
+                   chainer=Chainer(registry, submitter))

@@ -78,15 +78,19 @@ class AgentClient:
 
     def run(self, task: str, input: dict[str, Any] | None = None, *, subtask: str | None = None,
             service: str | None = None, env: str | None = None, wait: bool | float = True,
-            idempotency_key: str | None = None, recall: bool | None = None, save: bool | None = None) -> dict:
+            idempotency_key: str | None = None, recall: bool | None = None, save: bool | None = None,
+            after: list[str] | None = None) -> dict:
         """发起一次任务运行。
         wait=True 等到结束；wait=秒数 最多等这么久；wait=False 立即返回回执 {run_id, status, …}。
         等到了返回运行详情（status / output / 配方 / 过程上下文）。任务声明了 output_schema 的，
-        校验过的结构化结果在 output["data"]。"""
+        校验过的结构化结果在 output["data"]。
+        after：等这些运行（run_id）都成功了再执行；其中有失败或取消的，这次不执行（error_code=upstream_failed）。
+        串起几步时先用 wait=False 拿到前一步的 run_id。"""
         started = time.monotonic()
         server_wait = 0 if not wait else 300 if wait is True else min(float(wait), 300)
         body = {"task": task, "subtask": subtask, "service": service or self.service, "env": env or self.env,
-                "input": input or {}, "memory": {"recall": recall, "save": save}, "wait": server_wait}
+                "input": input or {}, "memory": {"recall": recall, "save": save}, "wait": server_wait,
+                "after": list(after or [])}
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
         accepted = self._call("POST", "/v1/runs", json=body, headers=headers)
         if not wait:
@@ -130,6 +134,19 @@ class AgentClient:
         同一个密钥再评一次就是覆盖。"""
         return self._call("PUT", f"/v1/runs/{run_id}/feedback",
                           json={"score": score, "reasons": reasons or [], "comment": comment})
+
+    # —— 调度 ——
+
+    def graph(self) -> dict:
+        """任务图：{nodes: [任务…], edges: [{from, to, trigger_id, mode, on, …}]}（边 = 上游结束触发下游）。"""
+        return self._call("GET", "/v1/tasks/_graph")
+
+    def ticks(self, *, task: str | None = None, kind: str | None = None, outcome: str | None = None,
+              env: str | None = None, hours: int | None = None, limit: int = 100) -> list[dict]:
+        """触发记录（新的在前）：定时 / 事件 / 上游联动 / 自动重试每次判定建了哪条运行、为什么没建。"""
+        params = {k: v for k, v in {"task": task, "kind": kind, "outcome": outcome, "env": env, "hours": hours,
+                                    "limit": limit}.items() if v is not None}
+        return self._call("GET", "/v1/ticks", params=params)["items"]
 
     # —— 事件 ——
 

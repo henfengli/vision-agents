@@ -101,7 +101,7 @@ def view_dict(view: ServiceView, configs: list[dict], protected: bool) -> dict:
     protected：环境受保护（生产）= 要填给 agent 的只读版；不受保护（测试）直接用真实配置，configs 的版本都是空。
     代码目录、git 这些只有部署主机上看得到的不在这里（控制台可能由另一台主机回答），agent 运行时用 service_info 看。"""
     return {"service": view.service, "env": view.env, "enabled": view.enabled, "protected": protected,
-            "python": view.python,
+            "triggers_paused": view.triggers_paused, "python": view.python,
             "root": view.root, "code_paths": view.code_paths, "urls": view.urls, "mcp_servers": view.mcp_servers,
             "databases": {k: credentials.redact_dsn(v) for k, v in view.databases.items()},
             "logs": view.logs, "profile": view.profile, "config_files": configs}
