@@ -5,7 +5,8 @@
 所有工具从 RunScope 取"当前服务×环境"，签名里没有 service/env：
 py 在本服务本环境的项目内核里执行，db_query 只能查本服务本环境登记的只读库，
 logs 只能读本服务本环境声明过的日志。同机部署：执行运行的 agent 服务就装在这个服务×环境部署的主机上，
-logs / host_status 看到的就是线上那台机器。
+logs / host_status 看到的就是线上那台机器。代管执行（部署配置 remote_envs，RunScope.local=False）时这两个不可用：
+本机上同名的日志、进程是别的环境的；py / bash / read 用本机的代码目录（当参考），配置用只读版。
 
 工具集刻意收敛：读写文件用 bash（工作目录可写，服务代码只读），编排多个工具用 py（内核里直接调），
 不另设文件工具和代码编排工具。
@@ -46,6 +47,20 @@ Fn = Callable[..., Awaitable[str]]
 
 
 TODO_STATUS = ("pending", "in_progress", "completed", "cancelled")
+
+
+def executor_label(s: Settings) -> str:
+    """代管时执行运行的主机：「<主机名>（test 的部署主机）」。"""
+    import socket
+    return f"{socket.gethostname()}（{s.env} 的部署主机）" if s.env else socket.gethostname()
+
+
+def remote_unavailable(sc: run_scope.RunScope, what: str) -> str:
+    """代管执行（部署配置 remote_envs）：本机不是这个环境的部署主机，本机上的同名日志、进程是别的环境的，不能拿来用。"""
+    return (f"[不可用] 这次是代管执行：本机不是 {sc.env} 的部署主机，看不到 {sc.env} 主机上的{what}；"
+            f"本机上同名的是别的环境的，不能当成 {sc.env} 的。"
+            f"{sc.env} 的运行记录和日志用服务工具（MCP，如 dagster 的 get_run_logs）查，页面用浏览器工具（有的话）看，"
+            "数据用 db_query / py 查；确实需要主机上的信息就在结论里写明缺这一项")
 
 
 def _work_dir(s: Settings, sc: run_scope.RunScope) -> str:
@@ -167,8 +182,9 @@ class Toolbox:
         s, reg, toolbox, kernels = self._s, self._reg, self, self._kernels
 
         async def py(code: str, timeout: int = 120, restart: bool = False) -> str:
-            """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器是线上这个环境用的那个，工作目录是线上的
-            代码目录，配置已就位（生产是给 agent 的只读版，测试是项目的真实配置；库都只能查不能改），可以直接 import
+            """在本服务本环境的项目 Python 里执行代码（项目内核）：解释器、工作目录是执行主机上的那份（同机部署就是线上的；
+            代管执行时是执行主机上部署的那份，见 [运行环境]），配置已就位（生产是给 agent 的只读版，测试是项目的真实配置；
+            库都只能查不能改），可以直接 import
             项目模块、调用项目自己的函数和数据访问层（口径函数、ORM、dagster 资产……），用项目的方式连库。
             变量在本会话内保留，最后一个表达式的值会显示。
             你的其他工具在这里是同名函数（如 db_query("select …")、service_info(what="config")，返回文本），
@@ -297,13 +313,14 @@ class Toolbox:
                                                          protected=sc.protected)
                 except Rejected as e:
                     return f"[失败] {e.message}"
+            remote = "" if sc.local else f"（执行主机上的那份，不是 {sc.env} 部署的版本）"
             if what == "git":
-                return "\n\n".join(f"## {p}\n{svc_inspect.git_log(p)}" for p in v.code_paths) or "（未配置代码目录）"
-            lines = [v.prompt_block(sc.protected)]
+                return "\n\n".join(f"## {p}{remote}\n{svc_inspect.git_log(p)}" for p in v.code_paths) or "（未配置代码目录）"
+            lines = [v.prompt_block(sc.protected) if sc.local else v.prompt_block(sc.protected, executor=executor_label(s))]
             git = svc_inspect.git_state(v.root) if v.root else None
             if git:
                 lines.append(f"- 代码目录当前提交 {git['commit']}（{git['branch']}，{git['committed_at']}）"
-                             + ("，有未提交的改动" if git["dirty"] else ""))
+                             + ("，有未提交的改动" if git["dirty"] else "") + remote)
             if sc.protected:
                 for c in await svc_inspect.config_status(v):
                     lines.append(f"- 配置 {c['path']}：" + (f"给 agent 的只读版第 {c['version']} 版" if c["version"]
@@ -314,11 +331,13 @@ class Toolbox:
             return "\n".join(lines)
 
         async def logs(name: str = "", lines: int = 200, grep: str = "", since: str = "") -> str:
-            """读本服务本环境线上的日志（服务定义里声明过的：应用日志、nginx、docker 容器、systemd 单元）。
+            """读本服务本环境线上的日志（服务定义里声明过的：应用日志、nginx、docker 容器、systemd 单元）。代管执行时不可用。
             name 不填列出有哪些。lines：最多返回多少行（最多 2000）。grep：正则（不分大小写）——文件日志在整个文件里搜
             （超大的只搜末尾 512MB），docker / systemd 在最后 5 万行里搜，返回最后 lines 条匹配和匹配总数。
             since：只对 docker / systemd 有效，如 30m、2h、"2026-10-21 08:00:00"。看报错先 grep error|exception|traceback。"""
             sc = run_scope.current()
+            if not sc.local:
+                return remote_unavailable(sc, "日志")
             available = sc.view.logs if sc.view else {}
             if not available:
                 return f"[未配置] 服务 {sc.service or '—'} 在 {sc.env} 没有声明日志（服务定义 → logs）"
@@ -331,8 +350,10 @@ class Toolbox:
 
         async def host_status() -> str:
             """本服务本环境部署主机（就是你所在的这台）的现状：负载、内存、磁盘、占内存最多的进程；本服务的进程、
-            监听端口、本用户的 crontab、本服务容器的 CPU / 内存；全部 docker 容器、nginx。"""
+            监听端口、本用户的 crontab、本服务容器的 CPU / 内存；全部 docker 容器、nginx。代管执行时不可用。"""
             sc = run_scope.current()
+            if not sc.local:
+                return remote_unavailable(sc, "主机状况（负载、内存、磁盘、进程、端口、crontab、容器、nginx）")
             v = sc.view
             paths = list(dict.fromkeys(p for p in ([v.root, *v.code_paths] if v else []) if p))
             containers = [t[7:] for t in (v.logs.values() if v else []) if t.startswith("docker:")]

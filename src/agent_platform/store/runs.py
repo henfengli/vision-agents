@@ -109,17 +109,20 @@ _CLAIMABLE = (
     "  AND x.concurrency_key = r.concurrency_key) < r.concurrency_limit)")
 
 
-async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str, ...] = (),
+async def claim_next(worker: str, envs: list[str] | tuple[str, ...] | str = (), services: list[str] | tuple[str, ...] = (),
                      paused: list[str] | tuple[str, ...] = ()) -> str | None:
     """认领一条排队运行：改成 running 并记下 worker 与心跳。多个 worker 并发认领互不冲突。
     顺序：优先级（人在等的先），同优先级先到先得。等上游的、任务并发已满的先跳过。
-    env 非空：只认领这个环境的；services 非空：再限这几个服务（平台任务不限）。都空（开发机）：什么都认领。
+    envs 非空：只认领这几个环境的（本机的 + 代管的）；services 非空：再限这几个服务（平台任务不限）。
+    都空（开发机）：什么都认领。
     paused：暂停了自动触发的「服务@环境」——那里定时 / 事件 / 联动建的运行留在队列里，恢复后再跑。
-    同一环境的认领用一把事务级咨询锁串起来：并发上限要先数再领，两台主机同时数会一起超过上限。"""
+    同一环境的认领用一把事务级咨询锁串起来：并发上限要先数再领，两台主机同时数会一起超过上限。
+    认领几个环境的就按名字顺序把这几把都拿上（各台都按同一顺序拿，不会互相等死）。"""
+    envs = [e for e in ([envs] if isinstance(envs, str) else envs) if e]
     where, params = ["r.status='queued'", _CLAIMABLE], [worker]
-    if env:
-        where.append("r.env=%s")
-        params.append(env)
+    if envs:
+        where.append("r.env = ANY(%s)")
+        params.append(list(envs))
     if services:
         where.append("(r.service IS NULL OR r.service = ANY(%s))")
         params.append(list(services))
@@ -127,7 +130,8 @@ async def claim_next(worker: str, env: str = "", services: list[str] | tuple[str
         where.append("NOT (r.trigger_type IN ('schedule','event','after') AND (r.service || '@' || r.env) = ANY(%s))")
         params.append(list(paused))
     async with db.pool().connection() as conn:
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"claim:{env}",))
+        for env in sorted(set(envs)) or [""]:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"claim:{env}",))
         cur = await conn.execute(
             "UPDATE runs SET status='running', worker=%s, heartbeat_at=now(),"
             " started_at=COALESCE(started_at, now())"

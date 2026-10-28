@@ -56,6 +56,21 @@ if [ -x "$APP/venv/bin/python" ] && ! ok_python "$APP/venv/bin/python"; then rm 
 [ -x "$APP/venv/bin/python" ] || "$PY" -m venv "$APP/venv"
 "$APP/venv/bin/pip" install -q "$APP[mcp,dagster-mcp]"
 
+# 3b. 浏览器（平台 MCP browser，conf/env/prod.yaml）：BROWSER=1 时装 @playwright/mcp 和 Chromium 到 $APP/browser
+#     （沙箱里只挂回这个目录）。要能连 npm 源和 Playwright 的浏览器下载地址（内网用 npm 镜像、PLAYWRIGHT_DOWNLOAD_HOST）；
+#     Chromium 缺系统库时请管理员装（部署指南 §3.10）。不重装：已经装好的保留
+BROWSER_MCP_VERSION="0.0.83"
+if [ "${BROWSER:-}" = 1 ]; then
+  if ! command -v npm >/dev/null; then
+    echo "!! BROWSER=1 但没有 Node.js（npm）：浏览器装不了"
+  else
+    mkdir -p "$APP/browser"
+    (cd "$APP/browser" && npm install --no-audit --no-fund --prefix "$APP/browser" "@playwright/mcp@$BROWSER_MCP_VERSION" \
+      && PLAYWRIGHT_BROWSERS_PATH="$APP/browser/ms-playwright" "$APP/browser/node_modules/.bin/playwright" install chromium) \
+      || echo "!! 浏览器没装好：看上面的报错（npm 源、浏览器下载地址）"
+  fi
+fi
+
 # 4. 前置检查（只提示，不中断）：用平台实际用到的参数试一遍
 if ! command -v bwrap >/dev/null; then
   echo "!! 缺少 bubblewrap（bwrap）：没有它平台不执行模型写的代码（require_sandbox）。"
@@ -86,7 +101,14 @@ fi
 [ -f "$SECRETS_DIR/secrets.env" ] || \
   echo "!! 请创建 $SECRETS_DIR/secrets.env（chmod 600）：AGENT_ROOT_TOKEN、AGENT_DB_HOST、AGENT_DB_PASSWORD、MODEL_TOKEN_A …"
 grep -qs '^env:' "$SECRETS_DIR/local.yaml" || \
-  echo "!! 请在 $SECRETS_DIR/local.yaml 写这台负责的环境（env: prod 或 env: test；测试机再写 services: [本机部署的服务]）"
+  echo "!! 请在 $SECRETS_DIR/local.yaml 写这台负责的环境（env: prod 或 env: test；测试机再写 services: [本机部署的服务]；
+   过渡期测试机代管生产再写 remote_envs: [prod]）"
+if grep -qs '^remote_envs:.*prod' "$SECRETS_DIR/local.yaml"; then
+  grep -qs '^CK_PROD_RO_PASSWORD=' "$SECRETS_DIR/secrets.env" || \
+    echo "!! 这台代管 prod：secrets.env 里要有生产只读库的口令（CK_PROD_RO_PASSWORD），不然 prod 的 db_query 返回 [未配置]"
+  command -v node >/dev/null && [ -f "$APP/browser/node_modules/@playwright/mcp/cli.js" ] || \
+    echo "提示：代管 prod 时看不到生产主机，页面是主要现场之一。要浏览器就 BROWSER=1 重跑本脚本（部署指南 §3.10）"
+fi
 command -v docker >/dev/null && ! docker ps >/dev/null 2>&1 && \
   echo "!! 本用户用不了 docker：服务定义里 docker:<容器> 的日志读不到"
 

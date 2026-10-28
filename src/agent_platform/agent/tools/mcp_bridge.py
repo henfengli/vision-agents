@@ -12,13 +12,17 @@
 落在同一条连接上；空闲 30 分钟回收，同时最多 16 条（超了回收最久没用的），连接断了下次调用自动重连。
 取工具列表仍是一次性连接（启动时 / 服务定义变了时）。
 
-平台 MCP 的部署配置（每个 server 可写两个平台字段，其余原样交给适配器）：
+平台 MCP 的部署配置（每个 server 可写几个平台字段，其余原样交给适配器）：service / envs（按服务限定、按环境分连接），
+sandbox / memory / allow（stdio 进程跑在沙箱里、限内存，见 containment）：
 
     mcp_servers:
-      browser:
+      browser:                                 # 浏览器能在自己的进程里执行任意代码：一定进沙箱
         transport: stdio
-        command: npx
-        args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated"]
+        command: node
+        args: ["{platform}/browser/node_modules/@playwright/mcp/cli.js", "--headless", "--isolated", "--browser", "chromium"]
+        sandbox: true
+        memory: 4G
+        allow: ["{platform}/browser"]
       dagster:                                 # 也可以在部署配置里按服务限定（更推荐写进服务定义的 mcp）
         service: dagster
         envs: {prod: {env: {DAGSTER_URL: "http://10.0.0.11:3000"}}, test: {env: {DAGSTER_URL: "http://10.0.1.11:3001"}}}
@@ -30,9 +34,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from ... import credentials
 from ...config import deep_merge
@@ -40,7 +45,8 @@ from .. import scope as run_scope
 
 log = logging.getLogger(__name__)
 
-_PLATFORM_KEYS = ("service", "envs")
+# 平台字段（不交给适配器）：service / envs 见 connections；sandbox / memory / allow 见 containment
+_PLATFORM_KEYS = ("service", "envs", "sandbox", "memory", "allow")
 
 
 @dataclass(frozen=True)
@@ -308,11 +314,79 @@ async def load_routed(conns: dict[str, dict], owners: dict[str, tuple[str, str |
     return [route(n, g["service"], g["by_env"], g["sample"], g["server"]) for n, g in grouped.items()], failed
 
 
-async def load_mcp_tools(servers: dict[str, dict]) -> list:
-    """平台 MCP：连接部署配置里的全部 server，返回按 服务×环境 路由的 LangChain 工具列表。"""
+Contain = Callable[[str, dict, dict], "dict | None"]
+
+
+def containment(settings: Any, hidden: set[str] | tuple[str, ...] = ()) -> Contain:
+    """平台 MCP 的 stdio 进程怎么起（部署配置里每个 server 可写的平台字段）：
+
+    - sandbox: true —— 跑在和 bash 同一套的 bwrap 沙箱里：home 换成空目录（只挂回 allow 和 home_allow，只读），
+      所有服务所有环境的配置、平台密钥目录、~/.ssh、docker socket 遮蔽，/run/user 换成空目录（碰不到 systemd 用户总线），
+      工作区 scratch 可写；网络照常。浏览器这类 server 能在自己的进程里执行任意代码（Playwright 的 browser_run_code_unsafe），
+      不进沙箱就等于让模型绕开全部遮蔽。没有 bwrap 且 require_sandbox 时这个 server 不加载
+    - memory: 4G —— 套一个 systemd 用户 scope（agent.slice 下，limits.enabled 时）：超了只杀它，不波及同机的线上服务
+    - allow —— 沙箱里要看得到的 home 下的目录（装在 home 下的 node、浏览器）
+
+    字符串里还可以写 {data}（平台数据目录）。不写这几个字段的 server 照旧直接起。返回 None = 不加载。"""
+    from . import sandbox as sb
+
+    data = str(settings.data_dir)
+
+    def fill(node: Any) -> Any:
+        if isinstance(node, str):
+            return node.replace("{data}", data)
+        if isinstance(node, dict):
+            return {k: fill(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [fill(v) for v in node]
+        return node
+
+    def place(text: str) -> str:
+        from ...config import CONF_ROOT
+        text = fill(text).replace("{platform}", str(CONF_ROOT.resolve().parent))
+        return os.path.expanduser(text)
+
+    def wrap(name: str, cfg: dict, conn: dict) -> dict | None:
+        conn = fill(conn)
+        sandboxed, memory = bool(cfg.get("sandbox")), str(cfg.get("memory") or "")
+        if conn.get("transport", "stdio") != "stdio" or not (sandboxed or memory) or not conn.get("command"):
+            return conn
+        argv = [str(conn["command"]), *map(str, conn.get("args") or [])]
+        env = dict(conn.get("env") or {})
+        if sandboxed:
+            if not sb.has_bwrap():
+                if settings.require_sandbox:
+                    log.warning("平台 MCP %s 要求沙箱但本机没有 bwrap（require_sandbox），不加载", name)
+                    return None
+                log.warning("平台 MCP %s：本机没有 bwrap，直接起（不隔离，只适合开发机）", name)
+            else:
+                allow = [place(p) for p in (cfg.get("allow") or [])] + [os.path.expanduser(p) for p in settings.home_allow]
+                os.makedirs(settings.scratch_dir, exist_ok=True)
+                # 当前目录放在工作区：浏览器的「工作区」（能上传的文件、默认输出）就是它
+                argv = sb.bwrap_argv(argv, scratch=settings.scratch_dir, hidden=sorted(hidden), allow=allow,
+                                     workdir=settings.scratch_dir)
+        if memory and settings.limits.enabled:
+            argv = sb.limit_argv(argv, settings.limits, memory=memory)
+            # systemd-run 要从环境变量找到用户总线；适配器只给子进程一小撮默认环境变量（进 bwrap 时再去掉）
+            env = sb.scope_env(env, settings.limits)
+        out = {**conn, "command": argv[0], "args": argv[1:]}
+        if env:
+            out["env"] = env
+        return out
+
+    return wrap
+
+
+async def load_mcp_tools(servers: dict[str, dict], contain: Contain | None = None) -> list:
+    """平台 MCP：连接部署配置里的全部 server，返回按 服务×环境 路由的 LangChain 工具列表。
+    contain：stdio 进程怎么起（沙箱、内存上限，见 containment）。"""
     if not servers:
         return []
     conns, owners = connections(servers)
+    if contain is not None:
+        wrapped = {k: contain(owners[k][0], servers[owners[k][0]], c) for k, c in conns.items()}
+        conns = {k: c for k, c in wrapped.items() if c is not None}
+        owners = {k: owners[k] for k in conns}
     try:
         tools, failed = await load_routed(conns, owners)
     except Exception:  # noqa: BLE001 —— MCP 不可用不阻断主流程

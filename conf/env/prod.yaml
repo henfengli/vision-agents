@@ -1,8 +1,9 @@
 # 生产 / 测试主机上的 agent 服务（同机部署，deploy/install-user.sh）：跑在部署项目的那个用户的 systemd --user 里，
-# 不需要 root。prod、test 共用一个库和一套控制台；每台机器自己的值写在 ~/.config/agent-platform/local.yaml：
-#   生产机：      env: prod
-#   测试机（dagster）：env: test，services: [vision-dagster]
-#   测试机（board）：  env: test，services: [vision-board, vision-web]   ← vision-web 测试在哪台【占位】
+# 不需要 root。prod、test 共用一个库和一套控制台；每台机器自己的值写在 ~/.config/agent-platform/local.yaml。
+# 过渡期（transition 分支）只在测试机部署，生产的运行由测试机代管（remote_envs）：
+#   测试机（dagster）：env: test，services: [vision-dagster]，remote_envs: [prod]
+#   测试机（board）：  env: test，services: [vision-board, vision-web]，remote_envs: [prod]   ← vision-web 测试在哪台【占位】
+# 之后切到生产机部署：生产机写 env: prod，测试机去掉 remote_envs（部署指南 §2.3）
 db_dsn: "postgresql://agent:${AGENT_DB_PASSWORD}@${AGENT_DB_HOST}:5432/agent_platform"
 root_token: "${AGENT_ROOT_TOKEN}"
 public_url: "https://agent.internal"   # 用户实际访问的地址（提供控制台的那台）：通知里的链接用它，https 时登录 cookie 带 Secure
@@ -21,6 +22,22 @@ limits:
 #   port: 8100
 #   tls_cert: ~/.config/agent-platform/tls/cert.pem
 #   tls_key: ~/.config/agent-platform/tls/key.pem
+
+# 浏览器（平台 MCP）：看 Board、Dagster 这些线上页面（代管生产时看不到生产主机，页面是主要的现场之一）。
+# 要先装：BROWSER=1 bash deploy/install-user.sh（装 @playwright/mcp 和 Chromium 到 ~/agent-platform/browser）；
+# 没装时启动只记一条 warning，角色里的 mcp:browser 被忽略。
+# 浏览器能在自己的进程里执行任意代码（browser_run_code_unsafe），所以跑在和 bash 同一套沙箱里（sandbox），并限内存（memory）
+mcp_servers:
+  browser:
+    transport: stdio
+    command: node
+    args: ["{platform}/browser/node_modules/@playwright/mcp/cli.js", "--headless", "--isolated", "--browser", "chromium",
+           "--no-sandbox", "--ignore-https-errors", "--viewport-size", "1440x900",
+           "--output-dir", "{data}/scratch/browser"]
+    env: {PLAYWRIGHT_BROWSERS_PATH: "{platform}/browser/ms-playwright"}
+    sandbox: true
+    memory: 4G
+    allow: ["{platform}/browser"]
 
 # 有 OTLP 后端（Jaeger / Tempo / APM）时打开；口令写 secrets.env，这里用 ${VAR} 引用
 # otel:

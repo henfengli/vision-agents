@@ -6,6 +6,8 @@
 
 同机部署：项目部署在哪台主机上，那台主机上就装着管这个环境的 agent 服务（部署配置 env / services）。
 这个服务×环境的运行由它执行，读的是线上那份代码、用的是线上那套解释器。
+过渡期可以由别的环境的部署主机代管（部署配置 remote_envs）：路径按执行主机解析（代码是那台上的那份，当参考），
+日志与主机状况不可用，配置一律用只读版（prompt_block 的 executor）。
 平台不改代码、不装依赖、不启停业务进程。
 
 配置文件（configs）写的是项目读配置的路径，比如 ~/deploy/vision-board/vision_board/settings-{env}.py。
@@ -151,21 +153,35 @@ class ServiceView(BaseModel):
     mcp_servers: list[str]                   # 服务自己声明的 MCP server（工具在运行里自动出现）
     profile: dict[str, str]
 
-    def prompt_block(self, protected: bool = False) -> str:
-        """给 agent 的"你在哪"：服务×环境的事实清单（档案另起一块）。protected：环境受保护（生产）。"""
-        lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env} · 你就在这个环境部署它的那台主机上",
-                 f"代码目录：{self.root or '未配置'}（线上实际部署的那份，只读）"]
+    def prompt_block(self, protected: bool = False, executor: str = "") -> str:
+        """给 agent 的"你在哪"：服务×环境的事实清单（档案另起一块）。protected：环境受保护（生产）。
+        executor：代管执行时（部署配置 remote_envs）执行这次运行的那台主机——它不是这个环境的部署主机：
+        日志、主机状况看不到，代码目录是那台上的那份（当参考），配置是给 agent 的只读版。"""
+        if executor:
+            lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env} · 代管执行：你不在 {self.env} 的部署主机上，"
+                     f"这次运行由 {executor} 代为执行（角色说明里说「就在部署主机上」，这次不成立）",
+                     f"看不到 {self.env} 主机上的东西：logs、host_status 不可用；本机的日志、进程、容器、crontab 不是 {self.env} 的，"
+                     f"不要拿来下结论。{self.env} 的运行记录和日志用服务工具（MCP）查，页面用浏览器工具（有的话）看，数据用 db_query / py 查",
+                     f"代码目录：{self.root or '未配置'}（执行主机上部署的那份，只读）：当参考读，不一定是 {self.env} 正在跑的版本；"
+                     "结论依赖具体代码行为时说明这一点"]
+        else:
+            lines = [f"[运行环境] 服务 {self.service}（{self.title}）· 环境 {self.env} · 你就在这个环境部署它的那台主机上",
+                     f"代码目录：{self.root or '未配置'}（线上实际部署的那份，只读）"]
         if self.code_paths and self.code_paths != [self.root]:
             lines.append("其他代码目录：" + "、".join(p for p in self.code_paths if p != self.root))
-        lines.append(f"项目 Python：{self.python}。用 py 工具在这个环境里执行代码：工作目录是代码目录，"
-                     "可以直接 import 项目模块、调用项目自己的函数；变量在本会话内保留")
+        if executor:
+            lines.append(f"项目 Python：{self.python}（执行主机上的环境）。用 py 工具执行代码：工作目录是代码目录，"
+                         f"可以直接 import 项目模块、调用项目自己的函数，连的是 {self.env} 的库（给 agent 的只读版配置）；变量在本会话内保留")
+        else:
+            lines.append(f"项目 Python：{self.python}。用 py 工具在这个环境里执行代码：工作目录是代码目录，"
+                         "可以直接 import 项目模块、调用项目自己的函数；变量在本会话内保留")
         files = "、".join(c["path"] for c in self.config_files)
-        if protected and files:
+        if (protected or executor) and files:
             lines.append(f"配置文件：{files}。py 里读到的是给 agent 的只读版（库是只读账号），线上真实配置你看不到；"
                          "内容用 service_info(what=config) 读（密钥已打码），bash 里读不到")
         elif files:
             lines.append(f"配置文件：{files}。这是本环境项目的真实配置，bash、py 里都能直接读")
-        if not protected:
+        if not protected and not executor:
             lines.append("数据库只读：项目配置里的库账号可能有写权限，但你只能查，不能改。不要执行 INSERT / UPDATE / DELETE / "
                          "DDL，不要调用会写库的项目函数（ORM 的 save / delete、迁移、manage.py 的写命令、物化 dagster 资产）")
         if self.databases:
@@ -178,7 +194,7 @@ class ServiceView(BaseModel):
             lines.append("只读库（db_query 查询，db 填库名）：" + "；".join(names))
         else:
             lines.append("只读库：未配置")
-        if self.logs:
+        if self.logs and not executor:
             lines.append("日志（logs 工具，name 填名字）：" + "、".join(self.logs))
         if self.urls:
             lines.append("地址（本环境）：" + "；".join(f"{k} = {v}" for k, v in self.urls.items()))

@@ -241,7 +241,7 @@ function HealthMatrix() {
  */
 function HostsCard({ env }: { env: string }) {
   const { data, error, refetch } = useWorkers();
-  const hosts = (data?.workers ?? []).filter((w) => !env || !w.env || w.env === env);
+  const hosts = (data?.workers ?? []).filter((w) => !env || !w.env || w.env === env || w.remote_envs?.includes(env));
   const groups = (data?.queue.groups ?? []).filter((g) => !env || g.env === env);
   const orphan = groups.filter((g) => !g.served);
   const offline = hosts.filter((w) => !w.online);
@@ -264,6 +264,11 @@ function HostsCard({ env }: { env: string }) {
                       <div className="flex min-w-0 items-center gap-2">
                         <span className="truncate font-mono text-[12.5px] text-fg">{w.host}</span>
                         {w.env ? <EnvBadge env={w.env} /> : <span className="text-[11px] text-fg-3">所有环境</span>}
+                        {w.remote_envs?.length > 0 && (
+                          <Tooltip content={`代管 ${w.remote_envs.join("、")}：这台不是它的部署主机，也执行它的运行。看不到那边主机上的日志和主机状况，代码以这台上的为参考，配置用给 agent 的只读版`}>
+                            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-fg-3">代管 {w.remote_envs.map((e) => <EnvBadge key={e} env={e} />)}</span>
+                          </Tooltip>
+                        )}
                       </div>
                       <div className="truncate text-[11.5px] text-fg-3">{w.services.length ? w.services.join("、") : "全部服务"} · v{w.version}</div>
                     </div>

@@ -5,6 +5,7 @@
   agent-conf/（700、文件 600），再只读 bind 到项目读配置的那个路径，项目代码 import 到的是只读版；bash 里遮蔽
 - 不受保护（测试）：直接用项目的真实配置，不遮、不替换；库只读靠提示词约束
 不论哪种，生产环境的配置在别的环境的运行里也遮蔽；文件系统只读（只有工作目录和 /tmp 可写）。
+代管执行（部署配置 remote_envs）：本机上的配置都是本机环境的，按受保护处理——只读版盖上去、其余一律遮蔽。
 
 - 其他遮蔽：给 agent 的配置在本机的落地目录、docker socket（部署配置 hidden_paths）
 - home 白名单：沙箱里 home 是空的，只挂回 代码目录、解释器所在的 conda 环境、方法目录、home_allow
@@ -67,20 +68,33 @@ def python_dirs(python: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+async def check_remote_envs(registry: Registry, settings: Settings) -> None:
+    """代管的环境（部署配置 remote_envs）要在平台配置里、而且受保护：本机没有那个环境的真实配置，项目内核只能用控制台填的只读版；
+    不受保护的环境会拿本机同一路径上的配置（本机环境的真实配置）去跑，库账号可能能写。启动 worker 和 check 时核对。"""
+    envs = await registry.envs()
+    for name in settings.remote_envs:
+        e = envs.get(name)
+        if e is None:
+            raise RuntimeError(f"部署配置 remote_envs 里的 {name} 不在平台配置的环境里（{'、'.join(envs.names)}）")
+        if not e.protected:
+            raise RuntimeError(f"代管的环境 {name} 没有标成受保护：本机没有它的真实配置，代管只能用控制台填的只读版。"
+                               "到 设置 → 环境 把它标成受保护并填好只读版，或者从 remote_envs 里去掉")
+
+
 def check_serves(settings: Settings, view: ServiceView) -> None:
     """兜底：认领时已经按环境（和 services）过滤了，这里防止别的路径在错的主机上起内核。"""
     if not settings.serves(view.service, view.env):
-        raise Rejected("wrong_env", f"这台主机上的 agent 服务负责 {settings.env or '所有环境'}"
-                                    f"{'（' + '、'.join(settings.services) + '）' if settings.services else ''}，"
+        raise Rejected("wrong_env", f"这台主机上的 agent 服务负责 {settings.describe()}，"
                                     f"不执行 {view.service} 在 {view.env} 的运行")
 
 
-def masked_configs(spec: ServiceDef, env: str, envs: list[EnvDef]) -> set[str]:
+def masked_configs(spec: ServiceDef, env: str, envs: list[EnvDef], *, remote: bool = False) -> set[str]:
     """一个服务在 env 的运行里要遮蔽的配置文件（configs + hidden）。
     受保护的环境（生产）：所有环境的都遮。不受保护的（测试）：只遮受保护环境的，和本环境同一个路径的不遮
-    （没有 {env} 的路径在测试机上就是测试那份）。"""
+    （没有 {env} 的路径在测试机上就是测试那份）。
+    remote（代管执行）：本机上的配置都是本机环境的，一律遮，和受保护一样。"""
     protected = [e.name for e in envs if e.protected]
-    if env in protected:
+    if remote or env in protected:
         return spec.secret_paths([e.name for e in envs])
     return spec.secret_paths(protected) - spec.secret_paths([env])
 
@@ -91,13 +105,20 @@ async def sandbox_paths(registry: Registry, settings: Settings, env: str) -> tup
     envs = (await registry.envs()).items
     hidden = set(settings.always_hidden)
     allow = {settings.assets_dir, *map(os.path.expanduser, settings.home_allow)}
+    remote = not settings.is_local(env)
     for s in await registry.services():
-        hidden |= masked_configs(s.spec, env, envs)
+        hidden |= masked_configs(s.spec, env, envs, remote=remote)
         for e in envs:
             v = s.spec.view(s.name, e.name)
             if v.enabled and settings.serves(s.name, e.name):
                 allow |= {p for p in (v.root, *v.code_paths, *python_dirs(v.python)) if p}
     return tuple(sorted(hidden)), tuple(sorted(allow))
+
+
+async def all_secret_paths(registry: Registry) -> set[str]:
+    """所有服务所有环境声明的配置文件与 hidden：不属于任何运行的进程（平台 MCP 的浏览器）一律遮。"""
+    names = (await registry.envs()).names
+    return set().union(*[s.spec.secret_paths(names) for s in await registry.services()])
 
 
 def log_sinks(view: ServiceView) -> list[str]:
@@ -123,7 +144,9 @@ async def runtime_spec(registry: Registry, settings: Settings, service: str, env
         raise Rejected("service_env_disabled", f"服务 {service} 在 {env} 环境已停用")
     check_serves(settings, view)
     envs = (await registry.envs()).items
-    protected = next((e.protected for e in envs if e.name == env), False)
+    remote = not settings.is_local(env)
+    # 代管：本机上这些路径是本机环境的真实配置，不能拿去跑别的环境——一律换成只读版（启动时也要求代管的环境受保护）
+    protected = remote or next((e.protected for e in envs if e.name == env), False)
     binds, versions = [], []
     for c in view.config_files if protected else []:      # 测试环境：项目照常读自己的真实配置
         row = await service_configs.current(service, env, c["key"])
@@ -131,12 +154,16 @@ async def runtime_spec(registry: Registry, settings: Settings, service: str, env
             raise Rejected("config_missing", f"{service} 在 {env} 还没有填给 agent 用的配置 {c['path']}："
                                              "到控制台 服务 → 配置文件 里填一份只读账号的版本")
         if not os.path.exists(c["path"]):
+            if remote:
+                raise Rejected("config_missing", f"配置文件 {c['path']} 在本机不存在：代管 {env} 时项目内核要把 {env} 的只读版"
+                                                 "盖在这个路径上，本机得有个文件当挂载点。在本机建一个空文件即可"
+                                                 f"（touch {c['path']}，内容用不到；要不进 git 就写进 .git/info/exclude）")
             raise Rejected("config_missing", f"配置文件 {c['path']} 在本机不存在：服务定义里 configs 的路径写错了，"
                                              "或者项目还没部署在这台主机上")
         src = materialize(settings.agent_conf_dir, service, env, c["key"], c["path"], row["content"])
         binds.append((src, c["path"]))
         versions.append(f"{c['key']}@{row['version']}")
-    others = masked_configs(entry.spec, env, envs) - {dst for _, dst in binds}
+    others = masked_configs(entry.spec, env, envs, remote=remote) - {dst for _, dst in binds}
     hidden = sorted(settings.always_hidden | others)
     allow = sorted({p for p in (view.root, *view.code_paths) if p} | set(python_dirs(view.python))
                    | {settings.assets_dir} | {os.path.expanduser(p) for p in settings.home_allow})

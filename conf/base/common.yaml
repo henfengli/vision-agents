@@ -58,9 +58,8 @@ retention:
 
 # 平台 MCP（可选）：通用能力，{名字: langchain-mcp-adapters 连接配置}。角色里写工具名，或 "mcp:<名字>" 引用整个 server。
 # 某个服务特有的能力（比如 dagster 的 GraphQL）写在服务定义的 mcp 里，运行在该服务上时自动出现，不用写进角色。
-# 这里也能写 service（只在该服务的运行里可用）和 envs（每个环境一份连接，调用按运行的环境路由）。
+# 这里也能写 service（只在该服务的运行里可用）和 envs（每个环境一份连接，调用按运行的环境路由）；
+# stdio 的 server 还能写 sandbox（跑在和 bash 同一套沙箱里）、memory（限内存）、allow（沙箱里挂回的 home 下目录）。
+# 浏览器的配置见 conf/env/prod.yaml（qa_engineer、inspector 角色用 "mcp:browser"；页面地址来自服务的 urls）
 # mcp_servers:
-#   browser:                           # qa_engineer 角色用 "mcp:browser"；页面地址来自服务的 urls
-#     transport: stdio
-#     command: npx
-#     args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--output-dir", "/home/<用户>/.local/share/agent-platform/scratch"]
+#   browser: {...}

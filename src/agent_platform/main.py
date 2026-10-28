@@ -30,6 +30,7 @@ def _serve(args) -> None:
 
 def _check(_args) -> None:
     from .registry import Registry
+    from .services.envspec import check_remote_envs
     from .store import db
     from .store.definitions import DefinitionStore
 
@@ -41,7 +42,11 @@ def _check(_args) -> None:
         envs = await registry.envs()
         print(f"配置 {settings.profile} 正常；环境 {'、'.join(envs.names)}（默认 {envs.default}）；"
               f"服务 {len(await registry.services())} 个，任务 {len(await registry.tasks())} 个；"
-              f"这台负责 {settings.env or '所有环境'}{'（' + '、'.join(settings.services) + '）' if settings.services else ''}")
+              f"这台负责 {settings.describe()}")
+        try:
+            await check_remote_envs(registry, settings)
+        except RuntimeError as e:
+            print(f"!! {e}")
         await db.close_db()
 
     asyncio.run(run())

@@ -1042,12 +1042,14 @@ function submitRun(body: SubmitBody, trigger: string, manual = false, triggerId:
 
 // ———————— 调度：认领、上游联动、点名等的上游、自动重试（与 orchestration/chain.py、scheduler.retry_due 一致） ————————
 
-/** 在线、负责这个环境（和服务）的主机：env 为空的什么都认领 */
-const serving = (env: string, service: string | null) => workersNow().filter((w) => w.online && (!w.env || w.env === env)
+/** 这台认领不认领这个环境的运行：本机的或代管的（remote_envs）；env 为空的什么都认领 */
+const claims = (w: (typeof db.workers)[number], env: string) => !w.env || w.env === env || w.remote_envs.includes(env);
+/** 在线、负责这个环境（和服务）的主机 */
+const serving = (env: string, service: string | null) => workersNow().filter((w) => w.online && claims(w, env)
   && (!service || !w.services.length || w.services.includes(service)));
 function workersNow() {
   return db.workers.map((w) => {
-    const running = w.online ? db.runs.filter((r) => r.status === "running" && (!w.env || r.env === w.env) && (!w.services.length || w.services.includes(r.service ?? ""))).length : 0;
+    const running = w.online ? db.runs.filter((r) => r.status === "running" && claims(w, r.env) && (!w.services.length || w.services.includes(r.service ?? ""))).length : 0;
     return { ...w, running: Math.min(running, w.max_concurrent), seen_at: w.online ? new Date(Date.now() - 2000 - Math.random() * 15000).toISOString() : w.seen_at };
   });
 }

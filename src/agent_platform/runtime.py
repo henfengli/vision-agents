@@ -5,7 +5,7 @@
     → （worker：执行队列 + 定时 + 维护循环）
 
 同机部署：生产机、测试机上各一个 agent 服务，共用一个库。每台都跑定时（幂等键保证只建一条）和维护，
-执行队列只认领本机负责的环境（部署配置 env / services）的运行。模型账号的并发上限经库在各台之间共用。
+执行队列只认领本机负责的环境（部署配置 env / services，以及代管的 remote_envs）的运行。模型账号的并发上限经库在各台之间共用。
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from .orchestration.replay import Replayer
 from .orchestration.scheduler import Scheduler
 from .orchestration.submitter import Submitter
 from .registry import Registry
+from .services import envspec
 from .services.kernel import KernelManager
 from .store import db, runs
 from .store.definitions import DefinitionStore
@@ -64,6 +65,7 @@ class Runtime:
         if not self.settings.env and self.settings.profile != "dev":
             raise RuntimeError("部署配置没有写 env（这台主机负责哪个环境）：在 ~/.config/agent-platform/local.yaml 里写 "
                                "env: prod 或 env: test（测试机再写 services）。只有开发机（AGENT_ENV=dev）可以不写")
+        await envspec.check_remote_envs(self.registry, self.settings)
         pipeline = Pipeline(Deps(settings=self.settings, registry=self.registry, factory=self.factory,
                                  notifier=self.notifier, model_pool=self.model_pool, service_mcp=self.service_mcp,
                                  on_finished=self.replayer.on_finished, after_run=self.chainer.on_finished))
@@ -72,7 +74,7 @@ class Runtime:
         self.submitter.on_failed_final = pipeline.settle_failed
         maintenance = Maintenance(self.settings, orphaned=pipeline.orphaned, notifier=self.notifier)
         self.executor = Executor(pipeline, self.settings.worker.max_concurrent_runs,
-                                 self.settings.env, self.settings.services)
+                                 self.settings.env, self.settings.services, self.settings.remote_envs)
         self.executor.start()
         self._background += [asyncio.create_task(self.scheduler.run_forever()),
                              asyncio.create_task(maintenance.run_forever())]
@@ -109,8 +111,10 @@ async def assemble(settings: Settings) -> Runtime:
     notifier = Notifier(registry, settings.public_url)
     kernels = KernelManager(settings.scratch_dir, settings.kernel.idle_minutes, settings.kernel.max_kernels,
                             limits=settings.limits, require_sandbox=settings.require_sandbox)
+    # 平台 MCP 的进程：写了 sandbox 的跑在沙箱里（所有服务所有环境的配置都遮），写了 memory 的限内存
+    masks = settings.always_hidden | await envspec.all_secret_paths(registry)
     toolbox = Toolbox(settings, notifier, registry=registry, kernels=kernels,
-                      mcp_tools=await load_mcp_tools(settings.mcp_servers))
+                      mcp_tools=await load_mcp_tools(settings.mcp_servers, mcp_bridge.containment(settings, masks)))
     factory = AgentFactory(settings, toolbox)
     model_pool = ModelPool(settings.model)
     model_pool.on_call = _record_model_call

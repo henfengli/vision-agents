@@ -21,6 +21,7 @@ import httpx
 from .. import __version__, observability
 from ..agent import factory as agent_factory
 from ..agent import scope as run_scope
+from ..agent.tools.catalog import executor_label
 from ..config import Settings
 from ..domain import BUILTIN_HANDLERS, RETRYABLE_CODES, Rejected, RunTrigger, compose_profile, question_text
 from ..memory import distill, recall
@@ -216,7 +217,9 @@ class Pipeline:
             return spec
 
         view = await _view(d, spec)
-        spec.code_paths = view.code_paths if view else []
+        local = d.settings.is_local(spec.env)
+        # 记忆里 code_ref 的新鲜度按代码目录的 git 核对：代管时本机这份不是这个环境的代码，不核对、不记提交
+        spec.code_paths = view.code_paths if view and local else []
         if spec.resume:                      # 续跑：提示已在 checkpoint 里，不重新拼
             return spec
 
@@ -226,7 +229,9 @@ class Pipeline:
             parts.append(profile)
             await runs.log_event(spec.run_id, "stage", {"stage": "profile", "title": "档案", "content": profile})
         if view:
-            parts.append(view.prompt_block((await d.registry.env(spec.env)).protected))
+            protected = (await d.registry.env(spec.env)).protected or not local
+            parts.append(view.prompt_block(protected) if local
+                         else view.prompt_block(protected, executor=executor_label(d.settings)))
 
         if spec.recall and spec.service:
             memory = await d.registry.config("memory")
@@ -400,6 +405,10 @@ class Pipeline:
 async def _gardener(d: Deps, spec: RunSpec) -> dict:
     """本运行的 服务×环境：记忆里引用的代码改过的标为过期。运行由该环境、部署了该服务的那台主机上的 agent 服务执行，
     读的是线上的代码目录。没指定服务时（开发机）扫所有服务。"""
+    if not d.settings.is_local(spec.env):
+        # 代管：本机的代码目录是本机环境的那份，拿它核对 spec.env 的记忆会把没过期的标成过期
+        return {"env": spec.env, "drift_expired": 0,
+                "skipped": f"本机不是 {spec.env} 的部署主机（代管），代码对不上，不做漂移巡检"}
     services = [s for s in await d.registry.services() if not spec.service or s.name == spec.service]
     return {"env": spec.env, **await run_gardener(spec.env, {s.name: s.spec.view(s.name, spec.env).code_paths
                                                               for s in services})}
@@ -442,8 +451,10 @@ async def _scope(d: Deps, spec: RunSpec, tools: list[str], extra: tuple = ()) ->
     （board 的运行里同样读不到 dagster 的配置），测试的运行里只遮生产的；项目内核在生产再把给 agent 的配置 bind 上去。"""
     env = await d.registry.env(spec.env)
     hidden, allow = await envspec.sandbox_paths(d.registry, d.settings, spec.env)
+    local = d.settings.is_local(spec.env)
     return run_scope.RunScope(
-        run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env, protected=env.protected,
+        run_id=spec.run_id, session_id=spec.session_id, task=spec.task, env=spec.env,
+        protected=env.protected or not local, local=local,
         service=spec.service, view=await _view(d, spec), caller=spec.trigger.caller, tools=tuple(tools),
         extra_tools=extra, notify_channel=(spec.deliver or {}).get("channel"), hidden=hidden, allow=allow,
         replay_of=spec.replay_of)

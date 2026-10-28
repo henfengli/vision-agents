@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -306,6 +306,8 @@ CREATE TABLE IF NOT EXISTS workers (
     seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     stopped_at     TIMESTAMPTZ
 );
+-- v12：代管的环境（部署配置 remote_envs）：这台不是它们的部署主机，但也执行它们的运行（过渡期测试机代管生产）
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS remote_envs TEXT[] NOT NULL DEFAULT '{}';
 
 DO $$ BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;

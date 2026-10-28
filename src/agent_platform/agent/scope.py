@@ -24,6 +24,9 @@ class RunScope:
     env: str
     protected: bool                      # 目标环境受保护（生产）：配置用只读版、真实配置遮蔽；否则（测试）用真实配置
     service: str | None = None
+    # 这台是不是这个环境的部署主机。False = 代管（部署配置 remote_envs）：本机的日志、主机状况不是这个环境的，
+    # logs / host_status 不可用；代码目录是本机这份（当参考）；配置一律用只读版（protected 也是 True）
+    local: bool = True
     view: ServiceView | None = None      # 服务×环境视图（平台任务为空）
     caller: str = ""
     tools: tuple[str, ...] = field(default_factory=tuple)   # 本运行角色的工具白名单（py 内核里可调的平台工具）

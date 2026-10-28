@@ -1,7 +1,8 @@
 """执行队列的消费端：runs 表就是队列。
 
 - 认领：status=queued 的行按优先级（人在等的先）再按创建时间，FOR UPDATE SKIP LOCKED，多个 worker 并发也不会重复认领；
-  只认领本主机负责的环境（部署配置 env，再按 services 限服务）的运行；点名的上游还没成功的、任务并发已满的先跳过
+  只认领本主机负责的环境（部署配置 env 和代管的 remote_envs，再按 services 限服务）的运行；
+  点名的上游还没成功的、任务并发已满的先跳过
 - 报到：每 20 秒往 workers 表报一次（负责的环境、服务、在跑几个），控制台据此显示主机在不在线
 - 唤醒：进入 queued 时 pg_notify('runs_queued')，LISTEN 毫秒级唤醒；5 秒轮询兜底
 - 并发：最多 max_concurrent 个运行同时执行，满了就不再认领
@@ -29,10 +30,14 @@ HEARTBEAT_S = 20.0
 
 
 class Executor:
-    def __init__(self, pipeline: Pipeline, max_concurrent: int = 10, env: str = "", services: list[str] | None = None):
+    def __init__(self, pipeline: Pipeline, max_concurrent: int = 10, env: str = "", services: list[str] | None = None,
+                 remote_envs: list[str] | None = None):
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self.env = env
         self.services = list(services or [])
+        self.remote_envs = list(remote_envs or [])
+        # 认领哪些环境：本机的 + 代管的；空 = 不限（开发机）
+        self.envs = [env, *self.remote_envs] if env else []
         self._pipeline = pipeline
         self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
@@ -43,8 +48,9 @@ class Executor:
     def start(self) -> None:
         self._loops = [asyncio.create_task(self._claim_forever()), asyncio.create_task(self._listen_forever()),
                        asyncio.create_task(self._heartbeat_forever())]
-        log.info("执行队列已启动（worker %s，环境 %s，服务 %s）", self.worker_id, self.env or "不限",
-                 "、".join(self.services) or "不限")
+        log.info("执行队列已启动（worker %s，环境 %s，服务 %s%s）", self.worker_id, self.env or "不限",
+                 "、".join(self.services) or "不限",
+                 f"，代管 {'、'.join(self.remote_envs)}" if self.remote_envs else "")
 
     async def stop(self, grace_s: float = 10.0) -> None:
         for t in self._loops:
@@ -62,7 +68,8 @@ class Executor:
     async def report(self) -> None:
         """报到：这台主机负责的环境、服务、在跑几个（控制台的主机列表、排队太久时的原因说明）。"""
         await workers.heartbeat(self.worker_id, host=socket.gethostname(), env=self.env, services=self.services,
-                                version=__version__, max_concurrent=self.max_concurrent, running=len(self._running))
+                                remote_envs=self.remote_envs, version=__version__, max_concurrent=self.max_concurrent,
+                                running=len(self._running))
 
     @property
     def running(self) -> list[str]:
@@ -74,7 +81,7 @@ class Executor:
         out = []
         for e in await self._pipeline.registry.services():
             for env, o in e.spec.envs.items():
-                if o.triggers_paused and (not self.env or env == self.env):
+                if o.triggers_paused and (not self.envs or env in self.envs):
                     out.append(f"{e.name}@{env}")
         return out
 
@@ -85,7 +92,7 @@ class Executor:
             await self._sem.acquire()
             self._wake.clear()
             try:
-                run_id = await runs.claim_next(self.worker_id, self.env, self.services, paused=await self._paused())
+                run_id = await runs.claim_next(self.worker_id, self.envs, self.services, paused=await self._paused())
             except Exception:  # noqa: BLE001 —— 库连不上：稍后再试
                 log.exception("认领排队运行失败")
                 run_id = None

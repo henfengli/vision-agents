@@ -9,7 +9,8 @@ env_vars: {DJANGO_SETTINGS_MODULE: "vision_board.settings-{env}"}
 databases:
   ck: "clickhouse://${CK_RO_USER}:${CK_TEST_RO_PASSWORD}@172.24.17.66:8123/default"
 # 生产的 settings agent 看不到，py 里盖上控制台填的只读版（库口令换成只读账号；STATIC_ROOT、认证照抄即可）；
-# 测试直接用真实的 settings-test.py，不用填
+# 测试直接用真实的 settings-test.py，不用填。
+# 过渡期测试机代管生产：只读版盖在测试机的 settings-prod.py 上，测试机代码目录里没有这个文件就建一个空的当挂载点
 configs:
   - ~/deploy/vision-board/vision_board/settings-{env}.py
 logs:

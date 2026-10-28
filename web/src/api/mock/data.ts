@@ -8,6 +8,7 @@
  *
  * 同机部署：每台部署主机上一个 agent 服务，部署配置里写它管哪个环境——生产主机 172.24.16.100（三个服务的国内生产都在这台）、
  * 测试主机 172.24.24.136（dagster 的国内测试）和 172.21.0.45（board 与 web 的国内测试）。
+ * 过渡期（transition 分支）只在两台测试机上部署，生产的运行由它们代管（REMOTE_ENVS）。
  */
 import type {
   ApiKey, Asset, ChatTurn, Env, FeedbackReason, Knowledge, PromptsConfig, Recipe, ReplayFilter, ReplayVerdict,
@@ -40,6 +41,11 @@ const VERSION_STEP = 31 * HOUR;
 const versionAt = (current: number, msAgo: number) => Math.max(1, current - Math.floor(Math.max(0, msAgo) / VERSION_STEP));
 const MODEL = "kimi-k2.7-code";
 const PLATFORM = "9.0.0";
+/**
+ * 过渡期只在测试机部署（transition 分支）：两台测试机各管本机的服务，并代管生产（部署配置 remote_envs）。
+ * 代管的运行看不到生产主机：logs / host_status 返回不可用（emit 里按它换掉），代码以测试机那份作参考。
+ */
+export const REMOTE_ENVS = ["prod"];
 const PROMPTS_VERSION = 3;
 /** 更早的运行是升级到 9.0 之前的：没有配方（详情页退回任务 / 角色版本），查库工具还叫 sql_query、思考是 thought 事件 */
 const RECIPE_SINCE = 66 * HOUR;
@@ -62,7 +68,7 @@ const TD = tradingDays(12);
 // ———————— 环境（conf/seeds/settings.yaml） ————————
 
 export const envs: Env[] = [
-  { name: "prod", title: "国内生产", description: "线上生产部署；agent 装在生产主机上，读线上代码；受保护：真实配置看不到，用控制台填的只读版", protected: true, color: "red" },
+  { name: "prod", title: "国内生产", description: "线上生产部署；过渡期由测试机代管执行（看不到生产主机的日志与主机状况，代码以测试机那份作参考）；受保护：真实配置看不到，用控制台填的只读版", protected: true, color: "red" },
   { name: "test", title: "国内测试", description: "线上测试部署；agent 装在测试主机上，直接用项目的真实配置，库只读靠提示词约束", protected: false, color: "amber" },
 ];
 
@@ -243,13 +249,13 @@ AUTH_APP_CODE = "mock-${env}-a7c03e"
 export const roles: Role[] = [
   {
     name: "generalist", title: "通用", description: "什么都能做：读线上代码、跑项目代码、查库、看日志和主机、用服务工具",
-    prompt: "你是这个服务的全能工程师，用户可能问口径、查数据、分析报错、看代码，也可能交代一件具体的事。\n你就在这个服务这个环境的部署主机上，读到的代码就是线上在跑的那份。\n- 先弄清楚要什么；档案里的约定优先；\n- 跑项目代码用 py，查库用 db_query，看配置用 service_info，看线上日志用 logs，看主机用 host_status；\n- 子问题很深、需要独立排查（报错根因、复杂取数）时，委派给对应的子代理；\n- 结论要可核对：给出依据（命令输出、日志、SQL、代码位置），不确定就明说。",
+    prompt: "你是这个服务的全能工程师，用户可能问口径、查数据、分析报错、看代码，也可能交代一件具体的事。\n你在哪台主机上见 [运行环境]：在这个环境的部署主机上时，读到的代码就是线上在跑的那份；代管执行时看不到那个环境的日志和主机，\n代码只当参考。\n- 先弄清楚要什么；档案里的约定优先；\n- 跑项目代码用 py，查库用 db_query，看配置用 service_info，看线上日志用 logs，看主机用 host_status（代管时这两个不可用）；\n- 子问题很深、需要独立排查（报错根因、复杂取数）时，委派给对应的子代理；\n- 结论要可核对：给出依据（命令输出、日志、SQL、代码位置），不确定就明说。",
     tools: ["*"], subagents: ["ops_analyst", "data_searcher"], service_tools: null,
     extends: null, prompt_append: "", version: 3, ...by("liyd", 2 * DAY),
   },
   {
     name: "ops_analyst", title: "运维分析", description: "报错定位与根因分析：看线上日志与主机、读代码、在项目环境里复现、查库",
-    prompt: "你是运维分析工程师，就在出问题的服务的部署主机上。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 看线上现场：logs 看应用 / nginx / 容器日志（先 grep error|exception|traceback），host_status 看内存、磁盘、\n   容器状态；服务有自己的工具（如 dagster 的运行记录）时先用它；\n3. 读相关代码和本环境的配置，定位出错的步骤；用 py 直接调用出错的函数复现。只复现读的部分：生产的库是只读账号，\n   写库的步骤会失败，这是预期的；测试用的是真实配置，账号能写，写库的步骤一律跳过不调；数据假设要验证时委派给 data_searcher；\n4. 确认可以安全重跑时（档案或任务说明允许），用服务工具在线上重跑（如 dagster 的 reexecute_run），并跟踪结果；\n5. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
+    prompt: "你是运维分析工程师，一般就在出问题的服务的部署主机上（代管执行时不是，见 [运行环境]）。拿到一次失败时：\n1. 先看档案里的已知坑、同类报错的教训和前序交接摘要，排除已知原因；\n2. 看线上现场：服务有自己的工具（如 dagster 的运行记录和运行日志）时先用它；logs 看应用 / nginx / 容器日志\n   （先 grep error|exception|traceback），host_status 看内存、磁盘、容器状态——代管执行时这两个不可用，结论里写明缺主机侧的证据；\n3. 读相关代码和本环境的配置，定位出错的步骤；用 py 直接调用出错的函数复现。只复现读的部分：生产的库是只读账号，\n   写库的步骤会失败，这是预期的；测试用的是真实配置，账号能写，写库的步骤一律跳过不调；数据假设要验证时委派给 data_searcher；\n4. 确认可以安全重跑时（档案或任务说明允许），用服务工具在线上重跑（如 dagster 的 reexecute_run），并跟踪结果；\n5. 结论按「根因 / 证据 / 影响范围 / 建议」四段输出。\n没有证据的结论标注为推测。",
     tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "save_asset", "notify"],
     subagents: ["data_searcher"], service_tools: null,
     extends: null, prompt_append: "", version: 6, ...by("gaodl", 3 * DAY),
@@ -262,16 +268,16 @@ export const roles: Role[] = [
   },
   {
     name: "qa_engineer", title: "冒烟测试", description: "部署后按沉淀的方法检查线上页面和接口，失败时给出复现步骤",
-    prompt: "你是测试工程师，就在被测服务的部署主机上。部署完成后执行冒烟测试：优先复用方法里的脚本，不要重写；\n先用 service_info(what=git) 看线上代码目录的提交是不是待测版本，对不上就如实报告，不要拿旧代码下结论；\n项目自带的测试用 py 跑（如 pytest.main([...])）；要看页面时用浏览器工具打开运行环境里列出的地址（site 是线上部署）；\n页面报错时用 logs 看应用和 nginx 日志里同一时刻的记录；\n失败时给出复现步骤与证据，根因不明显就委派给 ops_analyst。",
+    prompt: "你是测试工程师，一般就在被测服务的部署主机上（代管执行时不是，见 [运行环境]）。部署完成后执行冒烟测试：优先复用方法里的脚本，不要重写；\n先用 service_info(what=git) 看线上代码目录的提交是不是待测版本，对不上就如实报告，不要拿旧代码下结论；\n代管执行时本机的代码不是被测环境的，版本看不了就如实说，只按页面和接口的表现下结论；\n项目自带的测试用 py 跑（如 pytest.main([...])）；要看页面时用浏览器工具打开运行环境里列出的地址（site 是线上部署）；\n页面报错时用 logs 看应用和 nginx 日志里同一时刻的记录；\n失败时给出复现步骤与证据，根因不明显就委派给 ops_analyst。",
     tools: ["py", "bash", "service_info", "logs", "host_status", "save_asset", "mcp:browser"], subagents: ["ops_analyst"], service_tools: null,
     extends: null, prompt_append: "", version: 3, ...by("liyd", 5 * DAY),
   },
   {
     name: "inspector", title: "巡检", description: "按沉淀的方法做日常巡检，异常才通知",
     prompt: "",
-    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "save_asset", "notify"], subagents: [], service_tools: null,
+    tools: ["py", "bash", "service_info", "logs", "host_status", "db_query", "save_asset", "notify", "mcp:browser"], subagents: [], service_tools: null,
     extends: "ops_analyst",
-    prompt_append: "你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。\n没有既定方法时先探索（数据新鲜度、页面、日志里的错误、主机资源），结束后用 save_asset 沉淀成方法。输出控制在 15 行以内。", version: 3, ...by("liyd", 8 * DAY),
+    prompt_append: "你在做巡检：按方法逐项检查，正常项只计数，异常项给证据并用 notify 通知。\n没有既定方法时先探索（数据新鲜度、页面、日志里的错误、主机资源；代管执行时没有日志和主机这两项），\n结束后用 save_asset 沉淀成方法。输出控制在 15 行以内。", version: 3, ...by("liyd", 8 * DAY),
   },
 ];
 
@@ -572,6 +578,14 @@ const csvOf = (r: Run, n = 0) => `${SCRATCH}/queries/${r.run_id}/${r.created_at.
 /** 线上的代码目录（三个服务的 root 都是 ~/deploy/<服务>，各环境在各自的主机上） */
 const codeDir = (r: Run) => `${HOME}/deploy/${r.service}`;
 
+/** 这次运行是不是代管执行（执行它的主机不是这个环境的部署主机） */
+const remote = (r: Pick<Run, "env">) => REMOTE_ENVS.includes(r.env);
+/** 与后端 catalog.remote_unavailable 一致 */
+function remoteUnavailable(env: string, what: string): string {
+  return `[不可用] 这次是代管执行：本机不是 ${env} 的部署主机，看不到 ${env} 主机上的${what}；本机上同名的是别的环境的，不能当成 ${env} 的。`
+    + `${env} 的运行记录和日志用服务工具（MCP，如 dagster 的 get_run_logs）查，页面用浏览器工具（有的话）看，数据用 db_query / py 查；确实需要主机上的信息就在结论里写明缺这一项`;
+}
+
 /**
  * host_status 的输出（与 services/hostlocal.host_status 一致）：按运行所在的部署主机给一份像样的。
  * 生产都在 172.24.16.100；测试的 dagster 在 172.24.24.136，board / web 在 172.21.0.45。
@@ -708,7 +722,15 @@ const ASK: Record<string, Scenario[]> = {
     },
     {
       q: "报表页今天有没有 5xx？看一下线上日志",
-      plans: () => [
+      plans: (r) => remote(r) ? [
+        { think: "先在 nginx 的访问日志里找 5xx。",
+          calls: [{ tool: "logs", args: { name: "nginx_access", lines: 2000, grep: '" 5\\d\\d ' }, ms: 2, output: "" }] },
+        { think: "代管执行看不到生产主机的日志。用浏览器打开报表页，看现在是不是正常。",
+          calls: [
+            { tool: "browser_navigate", args: { url: "https://vision-board.moon-prod.ipa.zs/report/strategy_weekly/" }, ms: 3100, output: "### Page state\n- Page URL: https://vision-board.moon-prod.ipa.zs/report/strategy_weekly/\n- Page Title: 策略周报 · Vision Board" },
+            { tool: "browser_snapshot", args: {}, ms: 800, output: "- heading \"策略周报\" [level=1]\n- table [data-table=strategy] (14 rows)\n- button \"导出 HTML\"" },
+          ] },
+      ] : [
         { think: "先在 nginx 的访问日志里找 5xx，再到应用日志里看同一时刻的报错。",
           calls: [{ tool: "logs", args: { name: "nginx_access", lines: 2000, grep: '" 5\\d\\d ' }, ms: 180,
             output: `[/var/log/nginx/access.log] 最后 2000 行里匹配 '" 5\\\\d\\\\d ' 的 3 行\n172.24.8.31 - - [${TD[0]}:14:02:11 +0800] "GET /report/strategy_weekly/?week=${TD[4]} HTTP/1.1" 502 157 "-" "Mozilla/5.0"\n172.24.8.31 - - [${TD[0]}:14:02:19 +0800] "GET /report/strategy_weekly/?week=${TD[4]} HTTP/1.1" 502 157 "-" "Mozilla/5.0"\n172.24.9.77 - - [${TD[0]}:14:03:02 +0800] "GET /report/export/?fmt=html HTTP/1.1" 504 167 "-" "python-requests/2.32"` }] },
@@ -718,7 +740,9 @@ const ASK: Record<string, Scenario[]> = {
         { think: "查询超时和导出失败在同一时间，看看主机当时是不是资源吃紧。",
           calls: [{ tool: "host_status", args: {}, ms: 260, output: hostStatusOut({ env: "prod", service: "vision-board", created_at: iso(0) }) }] },
       ],
-      answer: () => `今天有 **3 次 5xx**，都在 ${TD[0]} 14:02~14:03：\n\n| 时间 | 请求 | 状态 |\n|---|---|---|\n| 14:02:11 | /report/strategy_weekly/ | 502 |\n| 14:02:19 | /report/strategy_weekly/ | 502 |\n| 14:03:02 | /report/export/?fmt=html | 504 |\n\n应用日志里同一时刻是 **ClickHouse 查询超时**（dws_strategy_nav_daily，30 秒）和一次 Chrome 导出退出。主机内存还有 37G 可用、根盘 81%，不是资源问题；更可能是 CK 那会儿慢。之后没有再出现。`,
+      answer: (r) => remote(r)
+        ? "**看不了日志**：这次是测试机代管执行生产的运行，看不到生产主机上的 nginx 和应用日志（测试机上同名的日志是测试环境的）。\n\n用浏览器打开了线上策略周报页：现在能正常打开，表格 14 行、导出按钮都在。今天有没有出过 5xx 要到生产机上看 `/var/log/nginx/access.log`，或者等 agent 装到生产机之后再问。"
+        : `今天有 **3 次 5xx**，都在 ${TD[0]} 14:02~14:03：\n\n| 时间 | 请求 | 状态 |\n|---|---|---|\n| 14:02:11 | /report/strategy_weekly/ | 502 |\n| 14:02:19 | /report/strategy_weekly/ | 502 |\n| 14:03:02 | /report/export/?fmt=html | 504 |\n\n应用日志里同一时刻是 **ClickHouse 查询超时**（dws_strategy_nav_daily，30 秒）和一次 Chrome 导出退出。主机内存还有 37G 可用、根盘 81%，不是资源问题；更可能是 CK 那会儿慢。之后没有再出现。`,
     },
   ],
   "vision-dagster": [
@@ -744,8 +768,13 @@ const ASK: Record<string, Scenario[]> = {
       plans: (r) => [
         { think: "看部署主机的现状：负载、内存、磁盘、大进程、docker 容器。",
           calls: [{ tool: "host_status", args: {}, ms: 240, output: hostStatusOut(r) }] },
+        ...(remote(r) ? [{ think: "代管执行看不到生产主机。换个角度：用 dagster 的工具看生产最近的运行，判断 daemon 和 code server 在不在工作。",
+          calls: [{ tool: "recent_runs", args: { limit: 5 }, ms: 520,
+            output: `run=7f3c21ab job=pnl_daily_job status=SUCCESS end=${TD[0]} 18:52\nrun=91ab3c0e job=position_daily_job status=SUCCESS end=${TD[0]} 18:52\nrun=2b81e0c4 job=pnl_daily_job status=SUCCESS end=${TD[1]} 18:49\nrun=5c07d2f1 job=position_daily_job status=SUCCESS end=${TD[1]} 18:31\nrun=c0a91d33 job=pnl_daily_job status=SUCCESS end=${TD[2]} 18:50` }] }] : []),
       ],
-      answer: (r) => r.env === "prod"
+      answer: (r) => remote(r)
+        ? "**看不了**：这次是测试机代管执行生产的运行，看不到生产主机的内存、进程和容器（测试机上同名的容器是测试环境的）。\n\n生产 Dagster 本身可以用 dagster 的工具看：最近的运行都正常结束，说明 daemon 和 code server 在工作；主机内存要到生产机上看。"
+        : r.env === "prod"
         ? "够用：内存已用 88.4G / 125.6G，还有 37G 可用，没有用 swap；负载 3.4（32 核）。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。根盘 81%，接近 80% 的告警线，建议清理旧镜像（`docker image prune`，要运维确认）。"
         : "够用：内存已用 21.7G / 125.6G，负载 1.1（16 核），根盘 42%。\n\n四个容器都在跑：webserver、daemon、code（healthy）、postgres。最占内存的是 dagster code-server（约 6G）。",
     },
@@ -792,16 +821,18 @@ function failurePlans(r: Run): Plan[] {
     { think: `按档案先用 dagster 的 MCP 工具看线上这次运行的日志，确认是上游缺分区还是 ${asset} 自己的问题。`,
       calls: [{ tool: "get_run_logs", args: { run_id: r.input.run_id, level: "ERROR" }, ms: 720,
         output: `18:41:12 ERROR ${asset} - STEP_FAILURE\n${err.split("\n")[0]}\n18:41:12 ERROR RUN_FAILURE Execution of run for "pnl_daily_job" failed.` }] },
-    { think: "再看线上 daemon 容器的日志：调度侧同一时刻有没有别的 Traceback（比如 code server 掉了）。",
+    { think: remote(r) ? "再看 daemon 容器的日志有没有别的 Traceback（代管执行可能看不到，看不到就靠 dagster 的运行日志）。"
+        : "再看线上 daemon 容器的日志：调度侧同一时刻有没有别的 Traceback（比如 code server 掉了）。",
       calls: [{ tool: "logs", args: { name: "daemon", lines: 1000, grep: "Traceback|Error" }, ms: 860,
         output: `[docker:vision-dagster-daemon] 最后 1000 行里匹配 'Traceback|Error' 的 3 行\n${TD[0]}T10:41:12.338Z ${TD[0]} 18:41:12 +0800 - dagster.daemon.QueuedRunCoordinatorDaemon - ERROR - Run for pnl_daily_job failed: STEP_FAILURE in ${asset}\n${TD[0]}T10:41:12.402Z Traceback (most recent call last):\n${TD[0]}T10:41:12.402Z   ${err.split("\n").pop()!.trim()}` }] },
     upstream
       ? { think: "日志里是读 dwd_position_daily 当天分区时报的。看上游最近几次物化：是不是晚于本资产的调度。",
         calls: [{ tool: "get_asset_materializations", args: { asset_key: "dwd_position_daily", limit: 3 }, ms: 610,
           output: `partition=${TD[0]} status=SUCCESS start=18:33:40 end=18:52:08 run=91ab3c0e\npartition=${TD[1]} status=SUCCESS start=18:20:11 end=18:31:46 run=5c07d2f1\npartition=${TD[2]} status=SUCCESS start=18:19:58 end=18:30:12 run=e4d8a6b0` }] }
-      : { think: "不是上游缺分区。读出错位置附近的代码，看线上代码目录最近的提交有没有动过。",
+      : { think: remote(r) ? "不是上游缺分区。读出错位置附近的代码（本机是测试机上部署的那份，只当参考），看最近的提交有没有动过。"
+          : "不是上游缺分区。读出错位置附近的代码，看线上代码目录最近的提交有没有动过。",
         calls: [{ tool: "bash", args: { command: `cd ${codeDir(r)} && git log -3 --format='%h %cs %an %s' -- vision_dagster/assets/pnl.py` }, ms: 120,
-          output: (r.env === "test" ? "c41e9a2 " + TD[2] + " gaodl fix: account_pnl_daily 先映射子账户\n" : "") + "8d02b7f " + TD[8] + " wangzh feat: 成交回报接入子账户\n52be0aa " + TD[11] + " gaodl chore: 分区键改 trade_date" }] },
+          output: (r.env === "test" || remote(r) ? "c41e9a2 " + TD[2] + " gaodl fix: account_pnl_daily 先映射子账户\n" : "") + "8d02b7f " + TD[8] + " wangzh feat: 成交回报接入子账户\n52be0aa " + TD[11] + " gaodl chore: 分区键改 trade_date" }] },
     { think: "数据侧要验证上游这几天的行数是否正常，交给 data_searcher。",
       calls: [{ tool: "task", args: { subagent: "data_searcher", description: `查 ck 里 dwd_position_daily 最近 3 个交易日（${TD[2]} ~ ${TD[0]}）每天的行数与账户数，和前一周均值比，判断上游数据是否完整` }, ms: 7400,
         output: `dwd_position_daily 最近 3 个交易日行数 48,2xx 左右、账户 1,190 个，和前一周均值一致，数据完整；${TD[0]} 分区 18:52 才写完。`,
@@ -813,6 +844,7 @@ function failurePlans(r: Run): Plan[] {
 function failureAnswer(r: Run): string {
   const asset = String(r.input.asset_key ?? "dws_account_pnl_daily");
   const err = String(r.input.error ?? "");
+  if (err.includes("KeyError") && remote(r)) return `## 根因\n成交回报里新开的子账户没有 \`account_id\`（只有 \`sub_account\`），\`account_pnl_daily()\` 第 88 行直接取 \`account_id\` 报 KeyError。\n\n## 证据\n- 运行日志（dagster 工具）：KeyError: 'account_id'，在 vision_dagster/assets/pnl.py:88\n- 测试机上的代码已经有修复提交 c41e9a2（先按 sub_account 映射）。这次是测试机代管执行，**看不到生产部署的是哪一版**：生产报了这个错，说明大概率还没部署到 c41e9a2\n\n## 影响范围\n\`${asset}\` 当日分区未产出，下游 \`ads_strategy_report\` 跟着缺数。\n\n## 建议\n确认生产的部署版本；部署到 c41e9a2 之后，用 dagster 的 reexecute_run 重跑当日分区；部署前可以先把新子账户补进 dim_account。`;
   if (err.includes("KeyError")) return `## 根因\n成交回报里新开的子账户没有 \`account_id\`（只有 \`sub_account\`），\`account_pnl_daily()\` 第 88 行直接取 \`account_id\` 报 KeyError。\n\n## 证据\n- 运行日志：KeyError: 'account_id'，在 vision_dagster/assets/pnl.py:88\n- 修复提交 c41e9a2（先按 sub_account 映射）只部署到了国内测试；国内生产的代码目录还停在 8d02b7f\n\n## 影响范围\n\`${asset}\` 当日分区未产出，下游 \`ads_strategy_report\` 跟着缺数。\n\n## 建议\n生产部署到 c41e9a2 之后，用 dagster 的 reexecute_run 重跑当日分区；部署前可以先把新子账户补进 dim_account。`;
   if (err.includes("Memory limit")) return `## 根因\nClickHouse 单查询内存超限：\`${asset}\` 的全量重算超过了 max_memory_usage（9.31 GiB）。\n\n## 证据\n- 运行日志：Code 241 MEMORY_LIMIT_EXCEEDED\n- 这次是 backfill 触发的全量重算，平时按交易日分区只用 1~2 GiB\n\n## 影响范围\n只影响这次 backfill，日常分区不受影响。\n\n## 建议\n按交易日分区逐个重算（scripts/backfill.py 的 --by-partition），不要一次全量。`;
   return `## 根因\n上游 \`dwd_position_daily\` 的 ${TD[0]} 分区 18:52 才物化完成，晚于 \`${asset}\` 18:40 的调度，读到空分区后失败。\n\n## 证据\n- dagster MCP：dwd_position_daily ${TD[0]} 分区 end=18:52:08，前两天 18:31 前就完成了\n- data_searcher：上游行数与账户数正常，数据完整，只是晚了\n- 本资产近 3 次提交与报错无关\n\n## 影响范围\n\`${asset}\` → \`ads_strategy_report\` 当日分区未产出，策略周报会缺这一天。\n\n## 建议\n1. 上游已就绪，现在重跑 \`${asset}\` 当日分区；\n2. 把 \`${asset}\` 的调度改成依赖上游分区完成（freshness / 资产依赖），替代固定时间。`;
@@ -841,27 +873,33 @@ function inspectionPlans(r: Run): Plan[] {
     { think: "策略周报 2.97 秒，比基线 1.5 秒慢一倍，记一项关注。看应用日志里有没有新的报错。",
       calls: [{ tool: "logs", args: { name: "app", lines: 2000, grep: "error|exception|traceback" }, ms: 140,
         output: `[${codeDir(r)}/vision-board.log] 最后 2000 行里匹配 'error|exception|traceback' 的 1 行\n${TD[0]} 07:12:44,019 ERROR report.strategy slow query 2.8s: SELECT … FROM dws_strategy_nav_daily` }] },
-    { think: "只有一条慢查询，和周报页慢对得上。最后看主机资源。",
+    { think: remote(r) ? "代管执行看不到生产主机的日志，这一项记成没法查。最后看主机资源（多半也看不到）。"
+        : "只有一条慢查询，和周报页慢对得上。最后看主机资源。",
       calls: [inspectTodo(3), { tool: "host_status", args: {}, ms: 260, output: hostStatusOut(r) }] },
     { think: "四项都看完了，清单收尾。",
       calls: [inspectTodo(4)] },
   ];
 }
-const inspectionAnswer = () => "巡检完成：**6 项正常，2 项关注**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，应用日志里有对应的慢查询，建议看 `report/strategy.py`\n- ⚠️ 根盘 81%（阈值 80%），较上周 +5%，建议清理旧日志与 docker 镜像\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓";
+const inspectionAnswer = (r?: Run) => r && remote(r)
+  ? "巡检完成：**5 项正常，1 项关注，2 项没法查**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，建议看 `report/strategy.py` 的查询\n- ➖ 应用日志、主机资源：这次是测试机代管执行，看不到生产主机，这两项跳过\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓"
+  : "巡检完成：**6 项正常，2 项关注**。\n\n- ⚠️ 策略周报页 2.97 秒，基线 1.5 秒：慢了一倍，应用日志里有对应的慢查询，建议看 `report/strategy.py`\n- ⚠️ 根盘 81%（阈值 80%），较上周 +5%，建议清理旧日志与 docker 镜像\n- 数据新鲜度：4 张表都到上个交易日 ✓\n- 账户收益日报、持仓明细页 200 ✓";
 
 function smokePlans(r: Run): Plan[] {
   const site = r.env === "prod" ? "https://vision-board.moon-prod.ipa.zs/" : "https://vision-board.ipa.zs/";
   return [
     { think: `先确认线上代码目录的提交是不是待测版本 ${String(r.input.version ?? "")}。`,
-      calls: [{ tool: "service_info", args: { what: "git" }, ms: 80, output: `## ${codeDir(r)}\n${String(r.input.version ?? "e5f6a7b").slice(0, 7)} ${TD[0]} wangzh feat: 离线 HTML 导出改用 Chrome headless\n5e6f7a8 ${TD[1]} liyd chore: 升级 Django 4.2.16` }] },
-    { think: "提交对得上。按方法 smoke-suite：打开线上报表页检查关键元素。",
+      calls: [{ tool: "service_info", args: { what: "git" }, ms: 80, output: `## ${codeDir(r)}${remote(r) ? `（执行主机上的那份，不是 ${r.env} 部署的版本）` : ""}\n${String(r.input.version ?? "e5f6a7b").slice(0, 7)} ${TD[0]} wangzh feat: 离线 HTML 导出改用 Chrome headless\n5e6f7a8 ${TD[1]} liyd chore: 升级 Django 4.2.16` }] },
+    { think: remote(r) ? "代管执行：本机的代码是测试机上部署的那份，对不了生产的版本，如实说明，只按页面的表现下结论。按方法 smoke-suite：打开线上报表页检查关键元素。"
+        : "提交对得上。按方法 smoke-suite：打开线上报表页检查关键元素。",
       calls: [
         { tool: "browser_navigate", args: { url: site + "report/strategy_weekly/" }, ms: 3400, output: `### Page state\n- Page URL: ${site}report/strategy_weekly/\n- Page Title: 策略周报 · Vision Board` },
         { tool: "browser_snapshot", args: {}, ms: 900, output: "- heading \"策略周报\" [level=1]\n- table [data-table=strategy] (14 rows)\n- button \"导出 HTML\"\n- img \"收益率曲线\"" },
       ] },
   ];
 }
-const smokeAnswer = (r: Run) => `冒烟通过：**${String(r.input.version ?? "").slice(0, 7)}** 在 ${r.env} 的报表页面正常。\n\n- 策略周报：表格 14 行、收益率曲线、导出按钮都在 ✓\n- 线上代码目录的提交与部署版本一致 ✓`;
+const smokeAnswer = (r: Run) => remote(r)
+  ? `页面冒烟通过：${r.env} 的报表页面正常。\n\n- 策略周报：表格 14 行、收益率曲线、导出按钮都在 ✓\n- ➖ 部署版本没法核对：这次是测试机代管执行，看不到生产机上的代码目录（测试机那份不算数）`
+  : `冒烟通过：**${String(r.input.version ?? "").slice(0, 7)}** 在 ${r.env} 的报表页面正常。\n\n- 策略周报：表格 14 行、收益率曲线、导出按钮都在 ✓\n- 线上代码目录的提交与部署版本一致 ✓`;
 
 // ———————— 发版小结（上游联动：冒烟 + 巡检都结束后） ————————
 
@@ -1013,12 +1051,11 @@ if (waitedOn) {
 }
 runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 
-/** 执行主机：生产主机管三个服务的国内生产；测试两台各管一部分；一台已下线的旧主机（7 天内报过到的都列出来） */
+/** 执行主机：测试两台各管一部分、都代管生产（REMOTE_ENVS）；一台已下线的旧主机（7 天内报过到的都列出来） */
 export const workers: Worker[] = [
-  { worker_id: "172.24.16.100:prod", host: "172.24.16.100", env: "prod", services: [], version: PLATFORM, max_concurrent: 8, running: 0, started_at: iso(3 * DAY + 2 * HOUR), seen_at: iso(6000), stopped_at: null, online: true },
-  { worker_id: "172.24.24.136:test", host: "172.24.24.136", env: "test", services: ["vision-dagster"], version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(12 * DAY), seen_at: iso(11000), stopped_at: null, online: true },
-  { worker_id: "172.21.0.45:test", host: "172.21.0.45", env: "test", services: ["vision-board", "vision-web"], version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(2 * DAY), seen_at: iso(3000), stopped_at: null, online: true },
-  { worker_id: "172.21.0.46:test", host: "172.21.0.46", env: "test", services: ["vision-web"], version: "8.4.1", max_concurrent: 2, running: 0, started_at: iso(9 * DAY), seen_at: iso(2 * DAY + 3 * HOUR), stopped_at: iso(2 * DAY + 3 * HOUR), online: false },
+  { worker_id: "172.24.24.136:test", host: "172.24.24.136", env: "test", services: ["vision-dagster"], remote_envs: REMOTE_ENVS, version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(12 * DAY), seen_at: iso(11000), stopped_at: null, online: true },
+  { worker_id: "172.21.0.45:test", host: "172.21.0.45", env: "test", services: ["vision-board", "vision-web"], remote_envs: REMOTE_ENVS, version: PLATFORM, max_concurrent: 4, running: 0, started_at: iso(2 * DAY), seen_at: iso(3000), stopped_at: null, online: true },
+  { worker_id: "172.21.0.46:test", host: "172.21.0.46", env: "test", services: ["vision-web"], remote_envs: [], version: "8.4.1", max_concurrent: 2, running: 0, started_at: iso(9 * DAY), seen_at: iso(2 * DAY + 3 * HOUR), stopped_at: iso(2 * DAY + 3 * HOUR), online: false },
 ];
 
 /** 触发记录（新的在前）：定时 / 事件 / 联动建了运行的各记一条，外加几条没建运行的（跳过、过滤、没人接、被拒、在等） */
@@ -1247,7 +1284,7 @@ function answerOf(run: MockRun): string {
   if (base === "data-qa") return (QA[run.service ?? ""] ?? QA["vision-board"])[run._scenario ?? 0]?.answer(run) ?? "";
   if (base === "ask") return (ASK[run.service ?? ""] ?? ASK["vision-board"])[run._scenario ?? 0]?.answer(run) ?? "";
   if (base === "failure-analysis") return failureAnswer(run);
-  if (base === "daily-inspection") return inspectionAnswer();
+  if (base === "daily-inspection") return inspectionAnswer(run);
   if (base === "frontend-smoke") return smokeAnswer(run);
   if (base === "release-report") return releaseAnswer(run);
   return "完成。";
@@ -1317,7 +1354,11 @@ export function eventsOf(run: MockRun): RunEvent[] {
           emit(c.sub, sub);
           model([], "查完了，按要求交回结论。", sub);
         }
-        push("tool_result", { ...(agent ? { agent } : {}), tool, ...call, output: old ? legacyDbOutput(c.output) : c.output, duration_ms: c.ms ?? 300 }, c.ms ?? 300);
+        // 代管执行（过渡期测试机代管生产）：看不到那个环境的主机，logs / host_status 和后端一样返回不可用
+        const unavailable = remote(run) && (c.tool === "logs" || c.tool === "host_status");
+        const output = unavailable ? remoteUnavailable(run.env, c.tool === "logs" ? "日志" : "主机状况（负载、内存、磁盘、进程、端口、crontab、容器、nginx）")
+          : old ? legacyDbOutput(c.output) : c.output;
+        push("tool_result", { ...(agent ? { agent } : {}), tool, ...call, output, duration_ms: unavailable ? 2 : c.ms ?? 300 }, unavailable ? 2 : c.ms ?? 300);
       }
     }
   };

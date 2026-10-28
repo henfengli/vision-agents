@@ -427,8 +427,8 @@ const BLOCK_STAGES = new Set(["system"]);
 
 /** 失败原因码：在出错的那一步下面说一句是怎么回事、该去哪儿处理 */
 const ERROR_HINT: Record<string, { text: string; to?: (run: Run) => string; link?: string }> = {
-  wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services）决定" },
-  config_missing: { text: "受保护的环境要填给 agent 的只读版配置：还没填，或配置路径在部署主机上不存在", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
+  wrong_env: { text: "运行落到了不负责这个环境的主机上：哪台主机执行哪个环境（和哪些服务），由那台主机上 agent 服务的部署配置（env / services / remote_envs）决定" },
+  config_missing: { text: "受保护的环境要填给 agent 的只读版配置：还没填，或配置路径在执行它的主机上不存在（代管时执行主机上要有这个路径当挂载点，建个空文件即可）", to: (r) => `/services/${r.service}?tab=config&env=${r.env}`, link: "去填配置" },
   orphaned: { text: "执行它的 agent 服务中途退出了（重启、崩溃或被杀）。点「续跑」接着走；任务配了自动重试的会自己续跑" },
   interrupted: { text: "执行它的 agent 服务在跑的时候退出了（一般是重启或升级）。点「续跑」接着走；任务配了自动重试的会自己续跑" },
   upstream_failed: { text: "它点名等的上游运行失败或被取消了，这次没有执行（也就没有断点可续）。上游重新跑成功后，用「重跑」再提交一次" },

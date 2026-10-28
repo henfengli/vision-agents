@@ -556,6 +556,8 @@ export interface Worker {
   host: string;
   env: string;                   // 空 = 开发机，什么都认领
   services: string[];            // 空 = 全部服务
+  /** 代管的环境（部署配置 remote_envs）：这台不是它们的部署主机，也执行它们的运行（看不到那边主机上的日志和主机状况） */
+  remote_envs: string[];
   version: string;
   max_concurrent: number;
   running: number;

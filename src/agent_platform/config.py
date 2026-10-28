@@ -8,6 +8,7 @@ AGENT_ENV 只决定读哪份部署配置（开发机 / 线上主机），与业�
 
 同机部署：生产机上一个 agent 服务管 prod，测试机上的管 test，共用一个 PostgreSQL 和同一套控制台。
 每个 agent 服务只执行自己那个环境（local.yaml 的 env）的运行；test 的项目分在两台机器上，各装一个，用 services 分。
+过渡期（只在测试机部署）：测试机的 local.yaml 再写 remote_envs: [prod]，代管生产的运行（见 Settings.remote_envs）。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _default_conf_root() -> Path:
@@ -118,6 +119,10 @@ class Settings(BaseModel):
     env: str = ""
     # 同一个环境的项目分在几台主机上时（test：dagster 一台、board 一台），写这台主机上部署了哪些服务。空 = 该环境全部服务
     services: list[str] = Field(default_factory=list)
+    # 代管的环境：这台不是它们的部署主机，但也执行它们的运行（过渡期：只在测试机部署，生产的运行由测试机代管）。
+    # 代管的运行看不到那个环境主机上的东西（日志、主机状况、进程），代码目录是本机这份（当参考），
+    # 配置一律用控制台填的只读版——所以代管的环境必须是受保护的（平台配置 envs 的 protected）。服务范围同 services
+    remote_envs: list[str] = Field(default_factory=list)
     listen: ListenConfig = ListenConfig()
     data_dir: str = Field(default_factory=_default_data_dir)
     worker: WorkerConfig = WorkerConfig()
@@ -130,9 +135,36 @@ class Settings(BaseModel):
     mcp_servers: dict[str, dict] = Field(default_factory=dict)
     hidden_paths: list[str] = Field(default_factory=_default_hidden)   # 存在的才遮蔽；目录整个换成空目录
 
+    @field_validator("remote_envs")
+    @classmethod
+    def _remote_envs(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(e.strip() for e in v if e and e.strip()))
+
+    @model_validator(mode="after")
+    def _remote_not_local(self):
+        if self.env and self.env in self.remote_envs:
+            raise ValueError(f"remote_envs 里不能有本机自己的环境 {self.env}（本机部署的环境不用代管）")
+        return self
+
     def serves(self, service: str | None, env: str) -> bool:
-        """这个服务×环境的运行归不归这个 agent 服务执行。平台任务（没有服务）按环境算。"""
-        return (not self.env or env == self.env) and (not self.services or not service or service in self.services)
+        """这个服务×环境的运行归不归这个 agent 服务执行（本机的环境，或代管的环境）。平台任务（没有服务）按环境算。"""
+        return ((not self.env or env == self.env or env in self.remote_envs)
+                and (not self.services or not service or service in self.services))
+
+    def is_local(self, env: str) -> bool:
+        """这台是不是 env 的部署主机：是的话日志、主机状况、代码目录都是那个环境线上的；代管的环境不是。
+        开发机（env 为空）把没写进 remote_envs 的都当本机的。"""
+        return env not in self.remote_envs and (not self.env or env == self.env)
+
+    @property
+    def claim_envs(self) -> list[str]:
+        """认领哪些环境的运行：本机的 + 代管的；空 = 不限（开发机且没写 remote_envs）。"""
+        return [self.env, *self.remote_envs] if self.env else []
+
+    def describe(self) -> str:
+        """「test（vision-dagster），代管 prod」：启动日志、check、报错里说这台负责什么。"""
+        text = (self.env or "所有环境") + (f"（{'、'.join(self.services)}）" if self.services else "")
+        return text + (f"，代管 {'、'.join(self.remote_envs)}" if self.remote_envs else "")
 
     @property
     def scratch_dir(self) -> str:

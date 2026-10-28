@@ -4,7 +4,8 @@
 envs:
   default: test                       # 请求不带 env 时打到测试环境：生产必须显式指定
   items:
-    - {name: prod, title: 国内生产, protected: true, color: red, description: 线上生产部署；agent 装在生产主机上，读线上代码；受保护：真实配置看不到，用控制台填的只读版}
+    # 过渡期只在测试机部署：生产的运行由测试机代管（测试机 local.yaml 的 remote_envs），看不到生产主机的日志和主机状况
+    - {name: prod, title: 国内生产, protected: true, color: red, description: 线上生产部署；过渡期由测试机代管执行（看不到生产主机的日志与主机状况，代码以测试机那份作参考）；受保护：真实配置看不到，用控制台填的只读版}
     - {name: test, title: 国内测试, color: amber, description: 线上测试部署；agent 装在测试主机上，直接用项目的真实配置，库只读靠提示词约束}
 
 notifications:
