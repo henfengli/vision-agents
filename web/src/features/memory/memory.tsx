@@ -197,30 +197,35 @@ export function KnowledgeList({ filters, scope, openId, kind, onKindChange }: {
           description="运行结束后会自动记下可复用的结论与报错教训；也可以手动录入" />
       ) : (
         <Table>
-          <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th>任务</Th>
+          {/* 窄屏（< 1280）任务并到服务那一格的第二行、扣分放到条目后面：表格不用横向滚 */}
+          <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th className="hidden xl:table-cell">任务</Th>
             <Th className="text-right"><HeadHint hint={RECALL_HINT}>30 天召回</HeadHint></Th>
-            <Th className="text-right"><HeadHint hint={PENALTY_HINT}>👎 扣分</HeadHint></Th>
+            <Th className="hidden text-right xl:table-cell"><HeadHint hint={PENALTY_HINT}>👎 扣分</HeadHint></Th>
             <Th className="text-right">更新</Th></tr></thead>
           <tbody>
             {data.map((x) => (
               <Tr key={x.id} onClick={() => setSelected(x.id)} className={cn(x.status !== "active" && "opacity-70")}>
                 {/* 条目列吃掉剩下的宽度并截断；服务、环境、任务这些短列不换行（不然会被挤成 vision- / board 两行） */}
-                <Td className="w-full min-w-[260px] max-w-0">
+                <Td className="w-full min-w-[220px] max-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <KindBadge kind={x.kind} />
                     {x.kind === "lesson" ? <LessonMeta k={x} /> : <code className="min-w-0 truncate font-mono text-[12.5px] font-medium text-fg" title={x.key}>{x.key}</code>}
                     {STATUS_BADGE[x.status]}
                     {promotedTo(x.superseded_by) && <Badge tone="ok" icon={<LuScrollText />}>已升格</Badge>}
                     {!x.source_run && <Badge tone="outline">人工</Badge>}
+                    {x.feedback_score < 0 && <span className="shrink-0 xl:hidden"><Penalty score={x.feedback_score} /></span>}
                   </div>
                   <div className="mt-0.5 truncate text-[12px] text-fg-3" title={x.content.split("\n")[0]}>{x.content.split("\n")[0]}</div>
                 </Td>
-                <Td className="whitespace-nowrap"><span className="flex items-center gap-1.5 text-[12.5px] text-fg-2">{x.service}<ScopeEnv env={x.env} /></span></Td>
-                <Td className="max-w-[220px] whitespace-nowrap"><span className="block truncate font-mono text-[11.5px] text-fg-3" title={x.task || undefined}>{x.task || "服务通用"}</span></Td>
+                <Td className="whitespace-nowrap">
+                  <span className="flex items-center gap-1.5 text-[12.5px] text-fg-2">{x.service}<ScopeEnv env={x.env} /></span>
+                  <span className="mt-0.5 block max-w-[180px] truncate font-mono text-[11px] text-fg-3 xl:hidden" title={x.task || undefined}>{x.task || "服务通用"}</span>
+                </Td>
+                <Td className="hidden max-w-[220px] whitespace-nowrap xl:table-cell"><span className="block truncate font-mono text-[11.5px] text-fg-3" title={x.task || undefined}>{x.task || "服务通用"}</span></Td>
                 <Td className={cn("whitespace-nowrap text-right tabular-nums", staleRecall(x) ? "text-warn" : "text-fg-2")}>
                   {staleRecall(x) ? <Tooltip content="记下超过 30 天、这 30 天一次也没被用到：可能已经没用了"><span>{x.hits_30d}</span></Tooltip> : x.hits_30d}
                 </Td>
-                <Td className="whitespace-nowrap text-right"><Penalty score={x.feedback_score} /></Td>
+                <Td className="hidden whitespace-nowrap text-right xl:table-cell"><Penalty score={x.feedback_score} /></Td>
                 <Td className="whitespace-nowrap text-right text-[12px] text-fg-3">{ago(x.updated_at)}</Td>
               </Tr>
             ))}
@@ -548,16 +553,19 @@ function PromotableList({ service, env }: { service?: string; env?: string }) {
         <Empty icon={<LuArrowUpFromLine />} title="暂时没有可升格的记忆" description="被 5 次以上运行用到、没挨过 👎 的事实会出现在这里" />
       ) : (
         <Table>
-          <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th>任务</Th><Th className="text-right"><HeadHint hint={RECALL_HINT}>30 天召回</HeadHint></Th><Th className="text-right">最近</Th><Th /></tr></thead>
+          <thead><tr><Th>条目</Th><Th>服务 / 环境</Th><Th className="hidden xl:table-cell">任务</Th><Th className="text-right"><HeadHint hint={RECALL_HINT}>30 天召回</HeadHint></Th><Th className="text-right">最近</Th><Th /></tr></thead>
           <tbody>
             {data.map((k) => (
               <Tr key={k.id} onClick={() => setSelected(k.id)}>
-                <Td className="w-full min-w-[260px] max-w-0">
+                <Td className="w-full min-w-[220px] max-w-0">
                   <code className="block truncate font-mono text-[12.5px] font-medium text-fg" title={k.key}>{k.key}</code>
                   <div className="mt-0.5 truncate text-[12px] text-fg-3" title={k.content}>{k.content}</div>
                 </Td>
-                <Td className="whitespace-nowrap"><span className="flex items-center gap-1.5 text-[12.5px] text-fg-2">{k.service}<ScopeEnv env={k.env} /></span></Td>
-                <Td className="max-w-[220px] whitespace-nowrap"><span className="block truncate font-mono text-[11.5px] text-fg-3" title={k.task || undefined}>{k.task || "服务通用"}</span></Td>
+                <Td className="whitespace-nowrap">
+                  <span className="flex items-center gap-1.5 text-[12.5px] text-fg-2">{k.service}<ScopeEnv env={k.env} /></span>
+                  <span className="mt-0.5 block max-w-[180px] truncate font-mono text-[11px] text-fg-3 xl:hidden" title={k.task || undefined}>{k.task || "服务通用"}</span>
+                </Td>
+                <Td className="hidden max-w-[220px] whitespace-nowrap xl:table-cell"><span className="block truncate font-mono text-[11.5px] text-fg-3" title={k.task || undefined}>{k.task || "服务通用"}</span></Td>
                 <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">{k.hits_30d}</Td>
                 <Td className="whitespace-nowrap text-right text-[12px] text-fg-3">{k.last_hit_at ? ago(k.last_hit_at) : "—"}</Td>
                 <Td className="w-[1%] text-right" onClick={(e) => e.stopPropagation()}>

@@ -291,12 +291,14 @@ export const tasks: Task[] = [
     version: 1, ...by("seed", 9 * DAY),
   },
   {
-    ...taskBase, name: "failure-analysis", title: "Dagster 失败分析", description: "资产物化失败时分析根因，结论推到钉钉群",
+    ...taskBase, name: "failure-analysis", title: "Dagster 失败分析",
+    description: "资产物化失败时分析根因，结论推到钉钉群。手动跑时 run_id、asset_key 给一个就行：只给资产就用 dagster 的工具查它最近一次失败的运行，只给 run_id 就从这次运行里看是哪个资产失败的。",
     service: "vision-dagster", role: "ops_analyst", form: "agent",
+    // 都不必填（与 conf/seeds/tasks.yaml 一致）：Dagster 的回调总会带齐，手动跑时知道哪个填哪个
     input: {
-      run_id: { type: "str", required: true, description: "Dagster run id" },
-      asset_key: { type: "str", required: true, description: "失败的资产" },
-      error: { type: "text", description: "报错堆栈（手动跑时可不填：agent 按 run_id 去 Dagster 查日志）" },
+      run_id: { type: "str", description: "Dagster run id（不填就查这个资产最近一次失败的运行）" },
+      asset_key: { type: "str", description: "失败的资产" },
+      error: { type: "text", description: "报错堆栈（不填就按 run_id 去 Dagster 查日志）" },
     },
     // 每个资产一个子任务：asset_key 就是对象名
     object_input: "asset_key",
@@ -350,7 +352,7 @@ export const tasks: Task[] = [
   {
     ...taskBase, name: "frontend-smoke", title: "Board 冒烟测试", description: "GitLab 部署成功后检查报表页面与接口",
     service: "vision-board", role: "qa_engineer", form: "agent",
-    input: { version: { type: "str", required: true, description: "部署版本（ref）" }, project: { type: "str", description: "GitLab 项目" } },
+    input: { version: { type: "str", description: "部署版本（ref）；不填 = 测线上现在部署的那一版" }, project: { type: "str", description: "GitLab 项目" } },
     envs: ["test", "prod"],
     triggers: [{ id: "on-deploy", type: "event", source: "gitlab", event: "deployment", filter: { project: "^vision-board$" }, map: { version: "ref", project: "project" } }, trig.api()],
     deliver: { channel: "default" }, dedup: { key: "version", window_s: 1800 }, timeout_s: 900,

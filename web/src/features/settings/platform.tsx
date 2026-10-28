@@ -286,7 +286,8 @@ export function NotificationsSettingsPage() {
                     const unsaved = isNew || JSON.stringify(ch) !== JSON.stringify(saved.channels[name]);
                     const urlErr = ch.url && !isHttp(ch.url) ? "要以 http:// 或 https:// 开头" : null;
                     return (
-                      <div key={name} className="grid items-start gap-3 px-4 py-3.5 md:grid-cols-[150px_120px_1fr_180px_auto]">
+                      // 两行：名字 / 类型 / 地址（地址吃掉剩下的宽度），口令 / 测试 / 移除；一行塞五格时窄屏下地址被挤成一个字宽
+                      <div key={name} className="grid items-start gap-3 px-4 py-3.5 md:grid-cols-[150px_120px_minmax(0,1fr)]">
                         <Field label="名字" help={isNew ? "保存后不能改" : undefined}>
                           {isNew
                             ? <Input mono defaultValue={name} onBlur={(e) => renameChannel(e.target, name, ch)} />
@@ -296,8 +297,8 @@ export function NotificationsSettingsPage() {
                         <Field label={ch.type === "dingtalk" ? "中继地址" : "POST 地址"} error={urlErr}>
                           <Input mono value={ch.url} aria-invalid={!!urlErr} onChange={(e) => setChannel(name, { ...ch, url: e.target.value })} placeholder="https://…" />
                         </Field>
-                        <Field label={ch.type === "dingtalk" ? "机器人 access_token" : "Bearer token（可空）"}><Input mono type="password" value={ch.token} onChange={(e) => setChannel(name, { ...ch, token: e.target.value })} /></Field>
-                        <div className="flex gap-1 pt-6">
+                        <Field className="md:col-span-2" label={ch.type === "dingtalk" ? "机器人 access_token" : "Bearer token（可空）"}><Input mono type="password" value={ch.token} onChange={(e) => setChannel(name, { ...ch, token: e.target.value })} /></Field>
+                        <div className="flex justify-end gap-1 md:pt-6">
                           <Tooltip content={unsaved ? "先保存，再测试" : "发一条测试消息"}>
                             <span><Button size="sm" icon={<LuSend />} loading={testing === name} disabled={unsaved} onClick={() => test(name)}>测试</Button></span>
                           </Tooltip>

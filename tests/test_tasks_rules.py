@@ -210,9 +210,15 @@ class SubmitterObjectTest(unittest.TestCase):
         self.assertEqual(self.created()["task"], "failure-analysis")
 
     def test_rejected_request_leaves_no_subtask(self):
-        with self.assertRaises(Rejected):          # 缺必填的 run_id
+        with self.assertRaises(Rejected):          # 任务不允许这个环境：闸门拒了，不留子任务
+            run(self.reg.update("task", "failure-analysis", {"envs": ["prod"]}, "liyd"))
             self.submit(task="failure-analysis", env="test", input={"asset_key": "dws_c"})
         self.assertIsNone(run(self.reg.task_raw("failure-analysis:dws_c")))
+
+    def test_manual_run_needs_no_ids(self):
+        # 手动跑：run_id、asset_key 都不是必填，只给资产也能跑（落到它的子任务）
+        acc = self.submit(task="failure-analysis", env="test", input={"asset_key": "dws_d"})
+        self.assertEqual(acc.subtask_created, "failure-analysis:dws_d")
 
     def test_builtin_task_has_no_subtasks(self):
         with self.assertRaises(Rejected) as cm:

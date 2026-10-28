@@ -146,7 +146,8 @@ function Topbar() {
 export function AppShell({ children }: { children: ReactNode }) {
   useMeta();
   return (
-    <div className="flex h-full">
+    // 整个控制台只有 main 自己滚：外层 relative + overflow-clip，哪个组件再漏出一个按整页定位的元素，也不会让文档跟着滚
+    <div className="relative flex h-full overflow-clip">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />

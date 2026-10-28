@@ -114,7 +114,7 @@ export function TriggerChips({ triggers, max = 3 }: { triggers: Trigger[]; max?:
     <div className="flex flex-wrap items-center gap-1">
       {list.slice(0, max).map((tr) => (
         <Tooltip key={tr.id} content={triggerSummary(tr)}>
-          <span className="inline-flex h-5 items-center gap-1 rounded border border-line bg-panel px-1.5 text-[11.5px] text-fg-2 [&_svg]:size-3 [&_svg]:text-fg-3">
+          <span className="inline-flex h-5 items-center gap-1 whitespace-nowrap rounded border border-line bg-panel px-1.5 text-[11.5px] text-fg-2 [&_svg]:size-3 [&_svg]:text-fg-3">
             {TRIGGER[tr.type].icon}
             {tr.type === "schedule" ? describeCron(tr.cron) : tr.type === "event" ? tr.source : TRIGGER[tr.type].label}
           </span>
@@ -149,8 +149,9 @@ export function TasksTable({ groups, expandAll = false, hideService = true }: {
             <Th>任务</Th>
             {!hideService && <Th>服务</Th>}
             <Th>触发</Th>
-            <Th>角色</Th>
-            <Th className="w-[150px]">近 24 小时</Th>
+            {/* 窄屏（< 1280）角色并到任务名下面那行，表格不用横向滚 */}
+            <Th className="hidden xl:table-cell">角色</Th>
+            <Th className="w-[120px]">近 24 小时</Th>
             <Th className="w-[100px]">最近一次</Th>
             <Th className="w-[130px]">下次定时</Th>
           </tr>
@@ -216,7 +217,7 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
   const pending = row.subs.filter((x) => !x.overrides.includes("profile")).length;
   return (
     <Tr onClick={() => navigate(taskHref(t.name))} className={cn(!t.enabled && "opacity-60")}>
-      <Td className="min-w-[260px] max-w-[420px]">
+      <Td className="min-w-[200px] max-w-[420px]">
         <div className="flex items-center gap-1.5">
           {n > 0 ? (
             <button type="button" aria-label={expanded ? "收起子任务" : "展开子任务"} onClick={(e) => { e.stopPropagation(); onToggle(); }}
@@ -232,6 +233,7 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
         {t.name === ASK_TASK && <div className="mt-0.5 pl-[22px] text-[11.5px] text-fg-3">直接提问或交代一件事；要定时、事件、推送时再建正式任务</div>}
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-[22px] text-[11px] text-fg-3">
           <span className="font-mono">{t.name}</span>
+          {t.role && t.form !== "builtin" && <span className="inline-flex items-center gap-0.5 xl:hidden"><LuBot className="size-3" />{t.role}</span>}
           {n > 0 && (
             <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex items-center gap-0.5 whitespace-nowrap hover:text-accent">
               <LuGitBranch className="size-3" />{n} 个子任务{pending > 0 && <span className="text-warn"> · {pending} 个档案待补</span>}
@@ -241,7 +243,7 @@ function ParentRow({ row, expanded, hideService, onToggle }: { row: TaskRow; exp
       </Td>
       {!hideService && <Td className="whitespace-nowrap text-fg-2">{t.service === "*" ? "通用" : t.service ?? "平台"}</Td>}
       <Td><TriggerChips triggers={t.triggers} /></Td>
-      <Td className="whitespace-nowrap">{t.form === "builtin" ? <span className="text-[12px] text-fg-3">—</span> : <RoleChip role={t.role} />}</Td>
+      <Td className="hidden whitespace-nowrap xl:table-cell">{t.form === "builtin" ? <span className="text-[12px] text-fg-3">—</span> : <RoleChip role={t.role} />}</Td>
       <Td><Stats24h t={t} /></Td>
       <Td><LastRun t={t} /></Td>
       <Td><NextFire t={t} /></Td>
@@ -274,7 +276,7 @@ function SubRow({ sub, hideService, parentEnabled, onRun }: { sub: TaskSummary; 
       </Td>
       {!hideService && <Td />}
       <Td>{ownTriggers ? <TriggerChips triggers={sub.triggers} /> : <span className="whitespace-nowrap text-[12px] text-fg-3">同父任务</span>}</Td>
-      <Td>{sub.overrides.includes("role") ? <RoleChip role={sub.role} /> : <span className="whitespace-nowrap text-[12px] text-fg-3">同父任务</span>}</Td>
+      <Td className="hidden xl:table-cell">{sub.overrides.includes("role") ? <RoleChip role={sub.role} /> : <span className="whitespace-nowrap text-[12px] text-fg-3">同父任务</span>}</Td>
       <Td><Stats24h t={sub} /></Td>
       <Td><LastRun t={sub} /></Td>
       <Td><NextFire t={sub} /></Td>

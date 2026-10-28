@@ -15,10 +15,14 @@ export function ago(iso: string | null | undefined): string {
   return d.fromNow();
 }
 
-/** 未来时间："5 分钟后" */
+/** 未来时间："5 分钟后"、"22 小时后"、"3 天后"（dayjs 的 fromNow 把 22 小时说成「1 天内」，读起来像是随时会跑） */
 export function until(iso: string | null | undefined): string {
   if (!iso) return "—";
-  return dayjs(iso).fromNow();
+  const min = Math.round(dayjs(iso).diff(dayjs(), "second") / 60);
+  if (min < 1) return "马上";
+  if (min < 60) return `${min} 分钟后`;
+  if (min < 24 * 60) return `${Math.round(min / 60)} 小时后`;
+  return `${Math.round(min / 60 / 24)} 天后`;
 }
 
 export function datetime(iso: string | null | undefined, withSeconds = false): string {

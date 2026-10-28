@@ -45,15 +45,16 @@ export function SettingsLayout({ title, description, actions, children, wide }: 
 }) {
   return (
     <Page wide={wide}>
-      <div className="flex flex-col gap-6 md:flex-row">
-        <nav className="flex shrink-0 gap-4 overflow-x-auto md:w-52 md:flex-col md:gap-5">
+      {/* 宽屏（≥ 1280）左侧竖排导航；窄一些就放到顶上横排：再在主侧栏旁边占 200px，表单只剩一半宽 */}
+      <div className="flex flex-col gap-5 xl:flex-row xl:gap-6">
+        <nav className="flex shrink-0 gap-6 overflow-x-auto border-b border-line pb-3 xl:w-52 xl:flex-col xl:gap-5 xl:border-0 xl:pb-0">
           {GROUPS.map((g) => (
             <div key={g.title} className="min-w-fit">
               <div className="mb-1.5 px-2.5">
                 <div className="text-[11.5px] font-semibold text-fg-3">{g.title}</div>
-                {g.hint && <div className="hidden text-[10.5px] text-fg-3/80 md:block">{g.hint}</div>}
+                {g.hint && <div className="hidden text-[10.5px] text-fg-3/80 xl:block">{g.hint}</div>}
               </div>
-              <div className="flex gap-0.5 md:flex-col">{g.items.map((i) => <NavLink key={i.to} {...i} />)}</div>
+              <div className="flex gap-0.5 xl:flex-col">{g.items.map((i) => <NavLink key={i.to} {...i} />)}</div>
             </div>
           ))}
         </nav>

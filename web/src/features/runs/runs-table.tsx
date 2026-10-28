@@ -11,6 +11,12 @@ import { Link, navigate } from "@/lib/router";
 
 export type RunColumn = "status" | "task" | "service" | "env" | "trigger" | "duration" | "tokens" | "time";
 
+/** 还在跑的已经跑了多久：列里只给到分钟（"12 分…"），精确值在悬停提示里 */
+function runningFor(since: string) {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(since)) / 1000));
+  return s < 60 ? `${s} 秒…` : s < 3600 ? `${Math.floor(s / 60)} 分…` : `${Math.floor(s / 3600)} 时…`;
+}
+
 const ALL: RunColumn[] = ["status", "task", "service", "env", "trigger", "duration", "tokens", "time"];
 
 export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
@@ -26,12 +32,13 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
           {has("status") && <Th className="w-[96px]">状态</Th>}
           <Th>运行</Th>
           {has("task") && <Th>任务</Th>}
-          {has("service") && <Th>服务</Th>}
+          {/* 窄屏（< 1280）服务并到运行那一格的第二行、Tokens 不显示：表格不用横向滚 */}
+          {has("service") && <Th className="hidden xl:table-cell">服务</Th>}
           {has("env") && <Th className="w-[72px]">环境</Th>}
           {has("trigger") && <Th>触发</Th>}
           {has("duration") && <Th className="text-right">耗时</Th>}
-          {has("tokens") && <Th className="text-right">Tokens</Th>}
-          {has("time") && <Th className="w-[110px] text-right">时间</Th>}
+          {has("tokens") && <Th className="hidden text-right xl:table-cell">Tokens</Th>}
+          {has("time") && <Th className="w-[92px] text-right">时间</Th>}
         </tr>
       </thead>
       <tbody>
@@ -44,7 +51,10 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
                 <Link to={`/runs/${r.run_id}`} onClick={(e) => e.stopPropagation()} title={r.summary || r.task_title} className="min-w-0 truncate font-medium text-fg hover:text-accent">{r.summary || r.task_title}</Link>
                 <ResolutionTag resolution={r.resolution} />
               </div>
-              <div className="mt-0.5 truncate font-mono text-[11px] text-fg-3">{shortId(r.run_id)}{r.trigger.caller && r.trigger.caller !== r.trigger.type ? ` · ${r.trigger.caller}` : ""}</div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-fg-3">
+                {shortId(r.run_id)}{r.trigger.caller && r.trigger.caller !== r.trigger.type ? ` · ${r.trigger.caller}` : ""}
+                {has("service") && r.service && <span className="xl:hidden"> · {r.service}</span>}
+              </div>
             </Td>
             {has("task") && (
               <Td className="max-w-[220px]">
@@ -52,18 +62,18 @@ export function RunsTable({ runs, loading, columns = ALL, empty, compact }: {
                 {r.task.includes(":") && <div className="truncate font-mono text-[11px] text-fg-3">:{r.task.split(":")[1]}</div>}
               </Td>
             )}
-            {has("service") && <Td className="whitespace-nowrap">{r.service ? <Link to={`/services/${r.service}`} onClick={(e) => e.stopPropagation()} className="text-fg-2 hover:text-accent">{r.service}</Link> : <span className="text-fg-3">平台</span>}</Td>}
+            {has("service") && <Td className="hidden whitespace-nowrap xl:table-cell">{r.service ? <Link to={`/services/${r.service}`} onClick={(e) => e.stopPropagation()} className="text-fg-2 hover:text-accent">{r.service}</Link> : <span className="text-fg-3">平台</span>}</Td>}
             {has("env") && <Td><EnvBadge env={r.env} /></Td>}
             {has("trigger") && <Td className="whitespace-nowrap"><TriggerBadge type={r.trigger.type} source={r.trigger.source} /></Td>}
             {has("duration") && (
               <Td className="whitespace-nowrap text-right tabular-nums text-fg-2">
                 {/* 还在跑的显示已经跑了多久（列表随轮询刷新） */}
                 {r.status === "running" && r.duration_ms == null
-                  ? <Tooltip content="已经跑了多久"><span className="text-fg-3">{duration(Math.max(0, Date.now() - Date.parse(r.created_at)))}…</span></Tooltip>
+                  ? <Tooltip content={`已经跑了 ${duration(Math.max(0, Date.now() - Date.parse(r.created_at)))}`}><span className="text-fg-3">{runningFor(r.created_at)}</span></Tooltip>
                   : duration(r.duration_ms)}
               </Td>
             )}
-            {has("tokens") && <Td className="whitespace-nowrap text-right tabular-nums text-fg-3">{r.tokens ? num(r.tokens) : "—"}</Td>}
+            {has("tokens") && <Td className="hidden whitespace-nowrap text-right tabular-nums text-fg-3 xl:table-cell">{r.tokens ? num(r.tokens) : "—"}</Td>}
             {has("time") && (
               <Td className="whitespace-nowrap text-right">
                 <Tooltip content={datetime(r.created_at, true)}><span className="text-fg-3">{ago(r.created_at)}</span></Tooltip>

@@ -221,7 +221,9 @@ export function Checkbox({ checked, onChange, label, hint, disabled }: {
   checked: boolean; onChange: (v: boolean) => void; label: ReactNode; hint?: ReactNode; disabled?: boolean;
 }) {
   return (
-    <label className={cn("flex items-start gap-2 rounded-md py-1", disabled ? "opacity-60" : "cursor-pointer")}>
+    // relative：里面的 sr-only 输入框是 absolute，没有定位祖先时按整页定位、把文档撑高，
+    // 一聚焦或滚到它，整个页面（侧栏、顶栏一起）就被顶上去
+    <label className={cn("relative flex items-start gap-2 rounded-md py-1", disabled ? "opacity-60" : "cursor-pointer")}>
       <span className={cn("mt-[2px] flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
         checked ? "border-accent bg-accent text-white" : "border-line-strong bg-panel")}>
         {checked && <LuCheck className="size-3" strokeWidth={3} />}
