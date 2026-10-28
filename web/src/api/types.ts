@@ -761,6 +761,9 @@ export interface RunFilters {
   caller?: string;
   q?: string;
   hours?: number;
+  /** 发起时间落在 [since, until) 里（ISO）；概览趋势图点柱子带过来的 */
+  since?: string;
+  until?: string;
   session_id?: string;
   cursor?: string;
   limit?: number;
@@ -1017,11 +1020,23 @@ export interface KnowledgeFilters extends MemoryFilters {
 
 // ———————————————————— 统计 / 搜索 ————————————————————
 
+export interface StatsPoint {
+  t: ISODate;                   // 这根柱子从什么时候起（第一根是窗口起点）
+  end: ISODate;                 // 到什么时候为止（最后一根是「现在」）
+  success: number;
+  failed: number;
+  retrying: number;             // failed 里还等着自动重试的
+  active: number;               // 排队中 + 运行中
+  cancelled: number;
+}
+
 export interface Stats {
   hours: number;
   totals: { runs: number; success: number; failed: number; running: number };
   by_env: Record<string, { runs: number; success: number; failed: number }>;
-  series: { t: ISODate; success: number; failed: number; other: number }[];
+  /** 趋势图的柱子：按本地钟点对齐（整点 / 偶数点 / 0 点），按发起时间落柱；首尾两根可能不满一格 */
+  series: StatsPoint[];
+  series_step_s: number;        // 一根柱子跨多少秒（24 小时 3600，3 天 7200）
   top_failures: { task: string; service: string | null; failed: number; last_error: string }[];
   /** 接下来的定时触发（最多 8 条，不含记忆园丁这类内建任务）；task_title 是任务的显示名 */
   upcoming: (UpcomingFire & { task_title: string })[];

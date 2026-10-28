@@ -127,7 +127,8 @@ export const api = {
   patchApiKey: (id: number, body: { note?: string; expires_at?: string | null }) => patch<ApiKey>(`/v1/api-keys/${id}`, body),
   revokeApiKey: (id: number) => del<ApiKey>(`/v1/api-keys/${id}`),
 
-  stats: (q: { hours?: number; env?: string; service?: string }) => get<Stats>("/v1/stats", q),
+  /** tz：浏览器的 UTC 偏移（分钟，东为正），趋势图的柱子按本地钟点对齐 */
+  stats: (q: { hours?: number; env?: string; service?: string }) => get<Stats>("/v1/stats", { ...q, tz: -new Date().getTimezoneOffset() }),
   search: (q: string) => get<SearchHit[]>("/v1/search", { q }),
   logout: () => del("/auth/session"),
 };

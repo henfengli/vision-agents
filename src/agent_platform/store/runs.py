@@ -12,7 +12,8 @@ caller 永不为空：调用方没给身份时回退为触发类型（定时跑�
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import db
@@ -24,6 +25,15 @@ _LIST_COLS = ("run_id, session_id, task, role, service, env, status, resolution,
 
 def _iso(v: datetime | None) -> str | None:
     return v.isoformat() if v else None
+
+
+def _instant(text: str) -> datetime:
+    """查询参数里的时刻：ISO 8601，不带时区按 UTC。"""
+    try:
+        v = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"非法的时间：{text}") from None
+    return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
 
 
 def _list_row(r) -> dict:
@@ -431,8 +441,10 @@ async def find_idempotent(key: str) -> dict | None:
 async def list_filtered(*, status: str | None = None, env: str | None = None, service: str | None = None,
                         task: str | None = None, trigger: str | None = None, caller: str | None = None,
                         session: str | None = None, q: str | None = None, hours: int | None = None,
+                        since: str | None = None, until: str | None = None,
                         cursor: str | None = None, limit: int = 30) -> dict:
-    """列表：平面过滤 + keyset 翻页（created_at, run_id 倒序）。cursor = "next:<ts>|<id>" 或 "prev:<ts>|<id>"。"""
+    """列表：平面过滤 + keyset 翻页（created_at, run_id 倒序）。cursor = "next:<ts>|<id>" 或 "prev:<ts>|<id>"。
+    since / until：发起时间落在 [since, until) 里（ISO 8601，不带时区按 UTC），概览趋势图点一根柱子就是这么查的。"""
     conds: list[str] = []
     params: list[Any] = []
     for clause, val in (("status=%s", status), ("env=%s", env), ("service=%s", service), ("trigger_type=%s", trigger),
@@ -446,6 +458,10 @@ async def list_filtered(*, status: str | None = None, env: str | None = None, se
     if hours:
         conds.append("created_at > now() - make_interval(hours => %s)")
         params.append(hours)
+    for op, val in ((">=", since), ("<", until)):
+        if val:
+            conds.append(f"created_at {op} %s")
+            params.append(_instant(val))
     if q:
         conds.append("(run_id LIKE %s OR summary ILIKE %s)")
         params += [q + "%", "%" + q + "%"]
@@ -612,15 +628,52 @@ async def stage_payload(run_id: str, stage: str) -> dict | None:
 
 # ———————— 聚合 ————————
 
-async def stats(hours: int = 24, env: str | None = None, service: str | None = None) -> dict:
-    conds = ["created_at > now() - make_interval(hours => %s)"]
-    params: list[Any] = [hours]
+# 趋势图的柱宽：从这几档里挑最小的、柱子不超过 _SERIES_MAX 根的（24 小时 → 1 小时一根，3 天 → 2 小时一根）
+_SERIES_STEPS_H = (1, 2, 3, 6, 12, 24)
+_SERIES_MAX = 48
+
+
+def series_step(hours: int) -> int:
+    """趋势图一根柱子跨多少秒。"""
+    return next((h for h in _SERIES_STEPS_H if hours / h <= _SERIES_MAX), _SERIES_STEPS_H[-1]) * 3600
+
+
+def series_slots(start: datetime, now: datetime, step_s: int, offset_s: int) -> list[tuple[int, datetime, datetime]]:
+    """把 (start, now] 按看的人那边的钟点（UTC 偏移 offset_s 秒）对齐切成柱：[(编号, 起, 止)]。
+    柱子落在整点 / 偶数点 / 0 点上，不跟着「现在」滑动；首尾两根可能不满一格（第一根从窗口起点算，最后一根到现在为止）。
+    编号 = floor((epoch + offset) / step)，和 SQL 里分组的算法一致。"""
+    k0 = math.floor((start.timestamp() + offset_s) / step_s)
+    k1 = max(k0, math.ceil((now.timestamp() + offset_s) / step_s) - 1)
+    out = []
+    for k in range(k0, k1 + 1):
+        a = datetime.fromtimestamp(k * step_s - offset_s, tz=timezone.utc)
+        out.append((k, max(a, start), min(a + timedelta(seconds=step_s), now)))
+    return out
+
+
+def _local_offset_s() -> int:
+    off = datetime.now().astimezone().utcoffset()
+    return int(off.total_seconds()) if off else 0
+
+
+async def stats(hours: int = 24, env: str | None = None, service: str | None = None, tz: int | None = None) -> dict:
+    """tz：看的人的 UTC 偏移（分钟，东为正），趋势图的柱子按它的钟点对齐；不给按本机时区。
+    series 每根 {t, end, success, failed, retrying, active, cancelled}，按发起时间（created_at）落柱：
+    retrying 是 failed 里还等着自动重试的，active 是排队中 + 运行中。"""
+    async with db.pool().connection() as conn:
+        cur = await conn.execute("SELECT now()")
+        now = (await cur.fetchone())[0].astimezone(timezone.utc)
+    start = now - timedelta(hours=hours)
+    # 窗口起点只取一次：几条聚合看的是同一段时间，图上各柱加起来等于总数
+    conds = ["created_at > %s"]
+    params: list[Any] = [start]
     if env:
         conds.append("env=%s"); params.append(env)
     if service:
         conds.append("service=%s"); params.append(service)
     where = " WHERE " + " AND ".join(conds)
-    buckets = 24 if hours <= 24 else 36
+    step = series_step(hours)
+    offset = tz * 60 if tz is not None else _local_offset_s()
     async with db.pool().connection() as conn:
         cur = await conn.execute(f"SELECT status, count(*), COALESCE(sum(tokens),0) FROM runs{where} GROUP BY status", params)
         by_status = {s: (n, t) for s, n, t in await cur.fetchall()}
@@ -629,12 +682,12 @@ async def stats(hours: int = 24, env: str | None = None, service: str | None = N
             f" FROM runs{where} GROUP BY env", params)
         by_env = {e: {"runs": n, "success": s, "failed": f} for e, n, s, f in await cur.fetchall()}
         cur = await conn.execute(
-            f"SELECT width_bucket(EXTRACT(EPOCH FROM created_at), EXTRACT(EPOCH FROM now() - make_interval(hours => %s)),"
-            f" EXTRACT(EPOCH FROM now()), %s) AS b,"
-            f" count(*) FILTER (WHERE status='success'), count(*) FILTER (WHERE status='failed'),"
-            f" count(*) FILTER (WHERE status NOT IN ('success','failed'))"
-            f" FROM runs{where} GROUP BY b ORDER BY b", [hours, buckets, *params])
-        series_rows = {b: (s, f, o) for b, s, f, o in await cur.fetchall()}
+            "SELECT floor((EXTRACT(EPOCH FROM created_at) + %s) / %s)::bigint AS k,"
+            " count(*) FILTER (WHERE status='success'), count(*) FILTER (WHERE status='failed'),"
+            f" count(*) FILTER (WHERE {PENDING_RETRY}), count(*) FILTER (WHERE status IN ('queued','running')),"
+            " count(*) FILTER (WHERE status='cancelled')"
+            f" FROM runs{where} GROUP BY k", [offset, step, *params])
+        series_rows = {k: rest for k, *rest in await cur.fetchall()}
         cur = await conn.execute(
             f"SELECT split_part(task, ':', 1), service, count(*),"
             f" (array_agg(COALESCE(output->>'error', '') ORDER BY created_at DESC))[1]"
@@ -647,21 +700,21 @@ async def stats(hours: int = 24, env: str | None = None, service: str | None = N
                 live_params.append(val)
         cur = await conn.execute("SELECT count(*) FROM runs WHERE " + " AND ".join(live_conds), live_params)
         running = (await cur.fetchone())[0]
-        cur = await conn.execute("SELECT now()")
-        now = (await cur.fetchone())[0]
-    from datetime import timedelta
-    step = timedelta(hours=hours) / buckets
-    start = now - timedelta(hours=hours)
-    series = []
-    for i in range(1, buckets + 1):
-        s, f, o = series_rows.get(i, (0, 0, 0))
-        series.append({"t": (start + step * (i - 1)).isoformat(), "success": s, "failed": f, "other": o})
+    slots = series_slots(start, now, step, offset)
+    series = [{"t": a.isoformat(), "end": b.isoformat(), "success": 0, "failed": 0, "retrying": 0, "active": 0, "cancelled": 0}
+              for _, a, b in slots]
+    first = slots[0][0]
+    for k, counts in series_rows.items():
+        # 查询期间新发起的（晚于取 now 的那一刻）算进最后一根，各柱之和始终等于总数
+        point = series[min(max(k - first, 0), len(series) - 1)]
+        for name, n in zip(("success", "failed", "retrying", "active", "cancelled"), counts):
+            point[name] += n
     total = sum(n for n, _ in by_status.values())
     return {
         "hours": hours,
         "totals": {"runs": total, "success": by_status.get("success", (0, 0))[0], "failed": by_status.get("failed", (0, 0))[0],
                    "running": running or 0},
-        "by_env": by_env, "series": series, "top_failures": failures,
+        "by_env": by_env, "series": series, "series_step_s": step, "top_failures": failures,
         "tokens": sum(t for _, t in by_status.values()),
     }
 

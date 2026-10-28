@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,6 +13,7 @@ from agent_platform.api.routes import settings as settings_routes
 from agent_platform.domain.prompts import PromptsConfig
 from agent_platform.orchestration.scheduler import Scheduler
 from agent_platform.store import assets
+from agent_platform.store import runs as runs_store
 
 run = asyncio.run
 
@@ -57,6 +59,43 @@ class UpcomingTest(unittest.TestCase):
         data = self.stats(env="prod")
         self.assertEqual([(f["task"], f["env"]) for f in data["upcoming"]], [("daily-inspection", "prod")])
         self.assertEqual(data["upcoming_total"], 1)
+
+
+class TrendSlotsTest(unittest.TestCase):
+    """概览趋势图的柱子：按看的人的钟点对齐，不跟着「现在」滑动；首尾不满一格。"""
+    CN = timedelta(hours=8)
+
+    def local(self, *a):
+        return datetime(*a, tzinfo=timezone(self.CN)).astimezone(timezone.utc)
+
+    def slots(self, now, hours):
+        step = runs_store.series_step(hours)
+        return runs_store.series_slots(now - timedelta(hours=hours), now, step, int(self.CN.total_seconds()))
+
+    def test_step_per_window(self):
+        self.assertEqual([runs_store.series_step(h) // 3600 for h in (1, 24, 72, 168, 2160)], [1, 1, 2, 6, 24])
+
+    def test_hours_align_to_local_clock(self):
+        now = self.local(2026, 10, 28, 18, 39)
+        s = self.slots(now, 24)
+        self.assertEqual(len(s), 25)
+        self.assertEqual((s[0][1], s[0][2]), (self.local(2026, 10, 27, 18, 39), self.local(2026, 10, 27, 19)))   # 第一根从窗口起点算
+        self.assertEqual((s[-1][1], s[-1][2]), (self.local(2026, 10, 28, 18), now))                              # 最后一根到现在
+        for _, a, b in s[1:-1]:
+            self.assertEqual(a.astimezone(timezone(self.CN)).minute, 0)
+            self.assertEqual(b - a, timedelta(hours=1))
+        self.assertEqual([a for _, a, _ in s[1:]], [b for _, _, b in s[:-1]])                                     # 首尾相接
+
+    def test_on_the_hour_is_all_full(self):
+        s = self.slots(self.local(2026, 10, 28, 18), 24)
+        self.assertEqual(len(s), 24)
+        self.assertTrue(all(b - a == timedelta(hours=1) for _, a, b in s))
+
+    def test_three_days_on_even_local_hours(self):
+        s = self.slots(self.local(2026, 10, 28, 9, 5), 72)
+        self.assertEqual(len(s), 37)
+        self.assertTrue(all(a.astimezone(timezone(self.CN)).hour % 2 == 0 for _, a, _ in s[1:]))
+        self.assertEqual(s[-1][1], self.local(2026, 10, 28, 8))
 
 
 class PromptDefaultsTest(unittest.TestCase):

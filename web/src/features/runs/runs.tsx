@@ -16,6 +16,7 @@ import { Tabs } from "@/components/ui/data";
 import { FilterSelect, SearchInput, Segmented } from "@/components/ui/form";
 import { Card, Dot, Empty } from "@/components/ui/primitives";
 import { cn } from "@/lib/cn";
+import { dayjs } from "@/lib/format";
 import { useSearch } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { EmptyFiltered } from "@/components/states";
@@ -36,7 +37,17 @@ const PAGE_SIZE = 50;
 
 type View = "runs" | "ticks" | "feedback" | "replays";
 
-type Search = { status: string; hours: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
+/** since / until：一段具体的时间（概览趋势图点柱子带过来的），和 hours 二选一 */
+type Search = { status: string; hours: string; since: string; until: string; service: string; env: string; task: string; trigger: string; caller: string; q: string; session_id: string; cursor: string };
+
+/** 「10-28 18:00 – 19:00」；没有 until = 到现在 */
+function rangeLabel(since: string, until?: string) {
+  const a = dayjs(since);
+  if (!until) return `${a.format("MM-DD HH:mm")} 至今`;
+  const b = dayjs(until);
+  const end = b.isSame(a, "day") ? b.format("HH:mm") : b.hour() + b.minute() === 0 && b.diff(a, "hour") <= 24 ? "24:00" : b.format("MM-DD HH:mm");
+  return `${a.format("MM-DD HH:mm")} – ${end}`;
+}
 
 export function RunsPage() {
   const [s, setS] = useSearch<Search & InboxSearch & { view: View; kind: string; outcome: string }>();
@@ -45,7 +56,7 @@ export function RunsPage() {
     <Page wide>
       <PageHeader title="运行" description="每一次执行都在这里，点进去看每一步做了什么。定时、事件、联动为什么跑了 / 没跑在「触发记录」；大家的评价在「反馈」；改完提示词或定义后在「回归重放」里拿过去的运行重跑对比。" />
       {/* 换标签只留各标签共用的筛选（任务、环境、时间），各自特有的清掉 */}
-      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined, kind: undefined, outcome: undefined, status: undefined, trigger: undefined })} tabs={[
+      <Tabs className="mb-4" value={view} onChange={(v) => setS({ view: v === "runs" ? undefined : v, cursor: undefined, score: undefined, reason: undefined, kind: undefined, outcome: undefined, status: undefined, trigger: undefined, since: undefined, until: undefined })} tabs={[
         { value: "runs", label: "运行", icon: <LuActivity /> },
         { value: "ticks", label: "触发记录", icon: <LuRadar /> },
         { value: "feedback", label: "反馈", icon: <LuMessageSquareWarning /> },
@@ -62,7 +73,8 @@ function RunList() {
   const ui = useUi();
   const env = envOf(s.env, ui.env);
   const filters: RunFilters = {
-    status: (s.status as RunStatus) || "", hours: Number(s.hours) || undefined, service: s.service, env: env || undefined,
+    status: (s.status as RunStatus) || "", hours: s.since ? undefined : Number(s.hours) || undefined, since: s.since, until: s.since ? s.until : undefined,
+    service: s.service, env: env || undefined,
     task: s.task, trigger: s.trigger, caller: s.caller, q: s.q, session_id: s.session_id, cursor: s.cursor, limit: PAGE_SIZE,
   };
   const { data, loading, fetching, refetch, error } = useRuns(filters);
@@ -70,8 +82,8 @@ function RunList() {
 
   /** 改筛选就回到第一页 */
   const set = (patch: Partial<Search>) => setS({ ...patch, cursor: undefined });
-  const clear = () => setS({ status: undefined, hours: undefined, service: undefined, env: undefined, task: undefined, trigger: undefined, caller: undefined, q: undefined, session_id: undefined, cursor: undefined });
-  const active = !!(s.status || s.hours || s.service || s.env !== undefined || s.task || s.trigger || s.caller || s.q || s.session_id);
+  const clear = () => setS({ status: undefined, hours: undefined, since: undefined, until: undefined, service: undefined, env: undefined, task: undefined, trigger: undefined, caller: undefined, q: undefined, session_id: undefined, cursor: undefined });
+  const active = !!(s.status || s.hours || s.since || s.service || s.env !== undefined || s.task || s.trigger || s.caller || s.q || s.session_id);
 
   return (
     <>
@@ -86,7 +98,8 @@ function RunList() {
               </button>
             ))}
           </div>
-          <Segmented size="sm" value={s.hours ?? ""} onChange={(v) => set({ hours: v || undefined })} options={[
+          {/* 选了一段具体时间（下面筛选条里的「时间」）时这里一个都不选中；点任一档就换回最近 N 小时 */}
+          <Segmented size="sm" value={s.since ? "range" : s.hours ?? ""} onChange={(v) => set({ hours: v || undefined, since: undefined, until: undefined })} options={[
             { value: "1", label: "1h" }, { value: "24", label: "24h" }, { value: "72", label: "3d" }, { value: "168", label: "7d" }, { value: "", label: "全部" },
           ]} />
           <SearchInput value={s.q ?? ""} onChange={(v) => set({ q: v || undefined })} placeholder="运行 id 或问题关键词" className="w-60" />
@@ -105,6 +118,8 @@ function RunList() {
             options={TRIGGER_TYPES.map((t) => ({ value: t, label: TRIGGER[t]?.label ?? t }))} />
           <CallerFilter value={s.caller ?? ""} onChange={(v) => set({ caller: v })} />
           {s.session_id && <FilterSelect label="会话" allLabel="全部" value={s.session_id} onChange={(v) => set({ session_id: v })} options={[{ value: s.session_id, label: s.session_id }]} />}
+          {s.since && <FilterSelect label="时间" allLabel="全部" value="range" onChange={(v) => { if (!v) set({ since: undefined, until: undefined }); }}
+            options={[{ value: "range", label: rangeLabel(s.since, s.until) }]} />}
         </FilterBar>
       </div>
 

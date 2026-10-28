@@ -1,7 +1,7 @@
 """运行。
 
     POST /v1/runs                         发起（请求头 Idempotency-Key 可选；wait 秒内结束则直接带结果返回）
-    GET  /v1/runs                         列表：status service env task trigger caller session_id q hours cursor limit
+    GET  /v1/runs                         列表：status service env task trigger caller session_id q hours since until cursor limit
     GET  /v1/runs/{id}                    详情
     GET  /v1/runs/{id}/events?after=      事件（时间线）
     GET  /v1/runs/{id}/stream?after=      事件推流（SSE），运行结束即关闭
@@ -54,10 +54,12 @@ async def submit(body: RunBody, idempotency_key: str | None = Header(None, max_l
 async def list_runs(status: str | None = None, service: str | None = None, env: str | None = None,
                     task: str | None = None, trigger: str | None = None, caller: str | None = None,
                     session_id: str | None = None, q: str | None = None, hours: int | None = None,
+                    since: str | None = None, until: str | None = None,
                     cursor: str | None = None, limit: int = 30, rt: Runtime = RT, _: Caller = WHO):
     try:
         page = await runs.list_filtered(status=status, env=env, service=service, task=task, trigger=trigger,
-                                        caller=caller, session=session_id, q=q, hours=hours, cursor=cursor, limit=limit)
+                                        caller=caller, session=session_id, q=q, hours=hours, since=since, until=until,
+                                        cursor=cursor, limit=limit)
     except ValueError as e:
         raise Rejected("invalid_request", str(e), 422) from e
     titles = await task_titles(rt)

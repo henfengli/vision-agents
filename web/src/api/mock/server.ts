@@ -831,6 +831,8 @@ on("GET", "/v1/runs", (_p, q) => {
     && (!q.task || r.task === q.task || r.task.startsWith(q.task + ":")) && (!q.trigger || r.trigger.type === q.trigger)
     && (!q.caller || r.trigger.caller === q.caller)
     && (!q.session_id || r.session_id === q.session_id) && (!q.hours || within(r.created_at, Number(q.hours)))
+    // 与后端一致：发起时间落在 [since, until) 里
+    && (!q.since || Date.parse(r.created_at) >= Date.parse(String(q.since))) && (!q.until || Date.parse(r.created_at) < Date.parse(String(q.until)))
     && (!q.q || r.run_id.startsWith(String(q.q)) || r.summary.includes(String(q.q))));
   const total = rs.length;
   const limit = Number(q.limit || 30);
@@ -1589,16 +1591,24 @@ on("DELETE", "/v1/api-keys/:id", (p) => Object.assign(findKey(p.id), { revoked_a
 on("GET", "/v1/stats", (_p, q) => {
   const hours = Number(q.hours || 24);
   const rs = db.runs.filter((r) => within(r.created_at, hours) && (!q.env || r.env === q.env) && (!q.service || r.service === q.service));
-  const buckets = hours <= 24 ? 24 : 36;
-  const step = (hours * H) / buckets;
-  const start = Date.now() - hours * H;
-  const series = Array.from({ length: buckets }, (_, i) => ({ t: new Date(start + i * step).toISOString(), success: 0, failed: 0, other: 0 }));
+  // 与后端 runs.series_slots 一致：柱宽从 1/2/3/6/12/24 小时里挑最小的、不超过 48 根的；按 tz（分钟，东为正）的钟点对齐，
+  // 首尾两根可能不满一格（第一根从窗口起点算，最后一根到现在为止）；按发起时间落柱
+  const step = ([1, 2, 3, 6, 12, 24].find((h) => hours / h <= 48) ?? 24) * H;
+  const off = (q.tz !== undefined && q.tz !== "" ? Number(q.tz) : -new Date().getTimezoneOffset()) * 60_000;
+  const nowMs = Date.now();
+  const start = nowMs - hours * H;
+  const k0 = Math.floor((start + off) / step);
+  const k1 = Math.max(k0, Math.ceil((nowMs + off) / step) - 1);
+  const series: Stats["series"] = Array.from({ length: k1 - k0 + 1 }, (_, i) => {
+    const a = (k0 + i) * step - off;
+    return { t: new Date(Math.max(a, start)).toISOString(), end: new Date(Math.min(a + step, nowMs)).toISOString(), success: 0, failed: 0, retrying: 0, active: 0, cancelled: 0 };
+  });
   for (const r of rs) {
-    const i = Math.min(buckets - 1, Math.floor((new Date(r.created_at).getTime() - start) / step));
-    if (i < 0) continue;
-    if (r.status === "success") series[i].success++;
-    else if (r.status === "failed") series[i].failed++;
-    else series[i].other++;
+    const p = series[Math.min(series.length - 1, Math.max(0, Math.floor((Date.parse(r.created_at) + off) / step) - k0))];
+    if (r.status === "success") p.success++;
+    else if (r.status === "failed") { p.failed++; if (r.retry_at) p.retrying++; }
+    else if (r.status === "cancelled") p.cancelled++;
+    else p.active++;
   }
   const byEnv: Stats["by_env"] = {};
   for (const e of db.envs) {
@@ -1620,7 +1630,7 @@ on("GET", "/v1/stats", (_p, q) => {
   const stats: Stats = {
     hours,
     totals: { runs: rs.length, success: rs.filter((r) => r.status === "success").length, failed: rs.filter((r) => r.status === "failed").length, running: db.runs.filter((r) => r.status === "running" && (!q.env || r.env === q.env) && (!q.service || r.service === q.service)).length },
-    by_env: byEnv, series, top_failures: [...failMap.values()].sort((a, b) => b.failed - a.failed).slice(0, 5),
+    by_env: byEnv, series, series_step_s: step / 1000, top_failures: [...failMap.values()].sort((a, b) => b.failed - a.failed).slice(0, 5),
     upcoming: fires.slice(0, 8), upcoming_total: fires.length,
     tokens: rs.reduce((n, r) => n + (r.tokens ?? 0), 0),
   };

@@ -8,8 +8,8 @@ import {
 } from "react-icons/lu";
 
 import { useEnvs, useFeedbackInbox, useMeta, useRuns, useServices, useStats, useTasks, useWorkers } from "@/api/hooks";
-import type { Stats } from "@/api/types";
-import { RunsChart } from "@/components/charts";
+import type { Stats, StatsPoint } from "@/api/types";
+import { RunsChart, RunsLegend } from "@/components/charts";
 import { Page, PageHeader } from "@/components/layout/shell";
 import { DisabledBadge, EnvBadge, FailCount, RUN_STATUS, ReasonChip, RunStatusDot } from "@/components/status";
 import { TimeAgo, TimeUntil } from "@/components/time";
@@ -19,7 +19,7 @@ import { Card, CardHeader, Empty, ErrorState, Skeleton, Stat } from "@/component
 import { Tooltip } from "@/components/ui/overlay";
 import { cn } from "@/lib/cn";
 import { ago, num, pct, slot } from "@/lib/format";
-import { Link } from "@/lib/router";
+import { Link, navigate } from "@/lib/router";
 import { useUi } from "@/lib/store";
 import { RunsTable } from "../runs/runs-table";
 import { RunTaskDialog } from "../tasks/run-dialog";
@@ -43,6 +43,12 @@ export function OverviewPage() {
   const envTitle = envs?.find((e) => e.name === env)?.title;
   const titleOf = (task: string) => tasks?.find((x) => x.name === task)?.title || task;
   const failedHref = withEnv(`/runs?status=failed&hours=${hours}`, env);
+  /** 点趋势图的一根柱子：看那段时间发起的运行；最后一根不封口（之后新发起的也算这一段） */
+  const openSlot = (p: StatsPoint, last: boolean) => {
+    const q = new URLSearchParams({ since: new Date(p.t).toISOString() });
+    if (!last) q.set("until", new Date(p.end).toISOString());
+    navigate(withEnv(`/runs?${q}`, env));
+  };
 
   return (
     <Page wide>
@@ -66,9 +72,10 @@ export function OverviewPage() {
       <div className="mb-4 grid gap-4 lg:grid-cols-[1fr_360px]">
         {/* 图撑满卡片：和右边「即将触发」同高时底下不留空白 */}
         <Card className="flex flex-col">
-          <CardHeader title="运行趋势" description="成功、失败与其他" actions={<Legend />} />
+          <CardHeader title="运行趋势" actions={<RunsLegend />}
+            description={`按发起时间，${stats && stats.series_step_s !== 3600 ? `每 ${stats.series_step_s / 3600} 小时` : "每小时"}一根，最右一根到现在为止；点柱子看那段时间的运行`} />
           <div className="flex min-h-[220px] flex-1 flex-col px-4 pb-3 pt-4">
-            {stats ? <RunsChart data={stats.series} className="min-h-0 flex-1" />
+            {stats ? <RunsChart data={stats.series} step={stats.series_step_s} onSelect={openSlot} className="min-h-0 flex-1" />
               : statsFailed ? <ErrorState error={error!} onRetry={retryStats} className="py-6" /> : <Skeleton className="min-h-0 flex-1" />}
           </div>
         </Card>
@@ -115,16 +122,6 @@ export function OverviewPage() {
 
       <RunTaskDialog open={runOpen} onClose={() => setRunOpen(false)} />
     </Page>
-  );
-}
-
-function Legend() {
-  return (
-    <div className="flex items-center gap-3 text-[11.5px] text-fg-3">
-      <span className="flex items-center gap-1.5"><span className="size-2 rounded-sm bg-ok" />成功</span>
-      <span className="flex items-center gap-1.5"><span className="size-2 rounded-sm bg-bad" />失败</span>
-      <span className="flex items-center gap-1.5"><span className="size-2 rounded-sm bg-info/60" />其他</span>
-    </div>
   );
 }
 

@@ -1,7 +1,7 @@
 """元信息、统计、搜索、事件入口、登录。
 
     GET    /v1/meta                 版本、环境、工具目录、事件来源、通知渠道、反馈问题类型、功能开关、当前身份
-    GET    /v1/stats                hours service env
+    GET    /v1/stats                hours service env tz
     GET    /v1/search?q=            全局搜索（服务 / 任务 / 角色 / 运行 / 记忆 / 方法）
     POST   /v1/events/{source}      事件入口（dagster / gitlab / webhook）
     POST   /auth/session            控制台登录 {token, name}
@@ -46,11 +46,12 @@ UPCOMING_LIMIT = 8
 
 
 @router.get("/v1/stats")
-async def stats(hours: int = Query(24, ge=1, le=24 * 90), service: str | None = None, env: str | None = None, rt: Runtime = RT,
-                _: Caller = WHO):
-    """upcoming：接下来的定时触发，不含内建任务（记忆园丁这类夜间维护每个服务×环境各一条，会把业务定时挤掉；
+async def stats(hours: int = Query(24, ge=1, le=24 * 90), service: str | None = None, env: str | None = None,
+                tz: int | None = Query(None, ge=-14 * 60, le=14 * 60), rt: Runtime = RT, _: Caller = WHO):
+    """series 是趋势图的柱子，按 tz（看的人的 UTC 偏移，分钟，东为正；控制台自动带上）的钟点对齐，见 runs.stats。
+    upcoming：接下来的定时触发，不含内建任务（记忆园丁这类夜间维护每个服务×环境各一条，会把业务定时挤掉；
     它们在任务页按「定时」筛选能看到）。upcoming_total 是去掉内建任务后的总次数，task_title 是任务的显示名。"""
-    data = await runs.stats(hours=hours, env=env, service=service)
+    data = await runs.stats(hours=hours, env=env, service=service, tz=tz)
     fires = [f for f in await rt.scheduler.upcoming()
              if (not env or f["env"] == env) and (not service or f["service"] == service)]
     tasks: dict = {}                                    # 任务名 → 生效定义（None = 已删除）
