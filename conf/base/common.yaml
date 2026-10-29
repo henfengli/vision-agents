@@ -11,8 +11,12 @@ model:
   name: kimi-k2.7-code              # 这把 key 能用的：kimi-k2.7-code、kimi-k2.6（GET /v1/models 可查）
   # 账号并发上限：同时在途的请求数，prod、test 两边、agent 与辅助调用合计（经共用的库），有空位就立刻发
   max_concurrency: 3
-  context_tokens: 400000            # 模型上下文长度：对话历史到 75% 时自动压缩成摘要
-  max_retries: 6
+  context_tokens: 400000            # 模型上下文长度：对话历史到 75% 时自动压缩成摘要（配了备用模型按两个里小的算）
+  max_retries: 6                    # 撞了限流 / 网关错误 / 连不上重试几次（指数退避，几秒到十几秒）
+  timeout_s: 120                    # 连上之后多久收不到数据算超时（流式是两段之间）；连接本身 15 秒
+  timeout_retries: 1                # 超时最多重试几次：超时一次就要等 timeout_s，和别的错误分开算
+  # 备用模型（第二套）写在 conf/env/<AGENT_ENV>.yaml 的 model.fallback：主模型重试完还失败，这一步换它接着跑
+  fallback_hold_s: 300              # 主模型挂了切到备用之后，这么久之内新的调用直接用备用；过了再试主模型，好了就切回来
   # embedding_name: bge-m3          # 配了才开向量检索；不配退化为 pg_trgm 关键词检索（Kimi 没有嵌入接口）
 
 # 执行队列就是 PG 里的 runs 表（不依赖别的编排服务）：一台主机同时执行几个运行

@@ -13,7 +13,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from ..config import ModelConfig
-from .pool import http_client
+from .pool import http_client, timeout
 
 
 class ChatModel(ChatOpenAI):
@@ -35,7 +35,9 @@ class ChatModel(ChatOpenAI):
         return result
 
 
-def chat_model(cfg: ModelConfig, http: Any = None) -> ChatModel:
+def chat_model(cfg: ModelConfig, http: Any = None, role: str = "primary") -> ChatModel:
+    """role：primary / fallback，带进回调的 metadata（agent_model），时间线据此标出哪一步用的是备用模型。"""
     # http_socket_options=()：不让 langchain 给（用不到的）同步客户端换 transport——换了会关掉 HTTPS_PROXY 等代理环境变量
     return ChatModel(model=cfg.name, base_url=cfg.url, api_key=cfg.tokens[0], http_async_client=http or http_client(cfg),
-                     http_socket_options=(), max_retries=cfg.max_retries, stream_usage=cfg.stream_usage, timeout=600)
+                     http_socket_options=(), max_retries=cfg.max_retries, stream_usage=cfg.stream_usage,
+                     timeout=timeout(cfg), metadata={"agent_model": role})

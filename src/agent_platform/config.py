@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _default_conf_root() -> Path:
@@ -35,15 +35,53 @@ def _default_data_dir() -> str:
     return os.environ.get("AGENT_DATA_DIR") or str(Path.home() / ".local" / "share" / "agent-platform")
 
 
+class FallbackModelConfig(BaseModel):
+    """备用模型（第二套）：主模型重试完还失败，这次调用换它接着跑，任务不中断。只写和主模型不同的：
+    不写 url / tokens 就是同一个账号（同一份并发名额）换个模型；写了就是另一个账号或另一家。name 留空 = 不用备用模型。"""
+
+    name: str
+    url: str | None = None
+    tokens: list[str] | None = None
+    max_concurrency: int | None = None    # 另一个账号时它自己的并发上限；同一个账号时和主模型共用主模型的
+    context_tokens: int | None = None
+    max_retries: int | None = None
+    timeout_s: float | None = None
+    timeout_retries: int | None = None
+    stream_usage: bool | None = None
+
+
 class ModelConfig(BaseModel):
     url: str
     name: str
     tokens: list[str]
     max_concurrency: int = 3              # 账号同时在途的模型请求上限（prod、test 所有调用合计，流式读完才算结束）；0 = 不限
-    embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）
-    context_tokens: int = 400_000         # 模型上下文长度：对话历史到它的 75% 时压缩成摘要
-    max_retries: int = 6                  # 限流 / 网关错误的重试次数（指数退避）
+    embedding_name: str | None = None     # 空 = 关闭向量检索（退化 pg_trgm）；只用主模型的，不切换（向量不能混）
+    context_tokens: int = 400_000         # 模型上下文长度：对话历史到它的 75% 时压缩成摘要（配了备用按两个里小的算）
+    max_retries: int = 6                  # 限流 / 网关错误 / 连不上的重试次数（指数退避）；配了备用模型就是重试完再切
+    # 一次请求等多久算超时：连上之后多久收不到数据（流式是两段之间；非流式是整个响应）；连接本身 15 秒
+    timeout_s: float = 120
+    timeout_retries: int = 1              # 超时最多重试几次（超时一次就要等 timeout_s，和别的错误分开算，免得切换要等很久）
     stream_usage: bool = True             # 流式响应里要 token 用量（stream_options.include_usage）；网关不支持就关掉
+    fallback: FallbackModelConfig | None = None
+    fallback_hold_s: int = 300            # 主模型挂了切到备用之后，这么久之内新的调用直接用备用；过了再试主模型
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _no_name_no_fallback(cls, v):
+        return None if isinstance(v, dict) and not str(v.get("name") or "").strip() else v
+
+    def fallback_config(self) -> "ModelConfig | None":
+        """备用模型的完整配置：没写的跟主模型一样（嵌入、备用本身不继承）。没配返回 None。"""
+        if self.fallback is None:
+            return None
+        own = {k: v for k, v in self.fallback.model_dump().items() if v is not None}
+        return ModelConfig(**{**self.model_dump(exclude={"fallback", "embedding_name"}), **own})
+
+    @property
+    def compaction_tokens(self) -> int:
+        """上下文压缩按的上下文长度：配了备用模型取两个里小的——中途切过去时历史也得塞得进备用模型。"""
+        fb = self.fallback_config()
+        return min(self.context_tokens, fb.context_tokens) if fb else self.context_tokens
 
 
 class ListenConfig(BaseModel):

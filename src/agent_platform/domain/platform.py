@@ -76,6 +76,7 @@ NotifyEvent = Literal[
     "run_succeeded",         # 运行成功
     "feedback_negative",     # 有人对一次运行（或其中一步）点了 👎
     "run_queued_long",       # 排队太久还没开始执行（部署配置 worker.queued_alert_s；通常是负责它的主机没在跑）
+    "model_fallback",        # 主模型重试完还失败、切到了备用模型（部署配置 model.fallback；同一次故障每台主机只发一次）
 ]
 
 

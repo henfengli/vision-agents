@@ -6,6 +6,8 @@
   经库共用这几个名额（SharedQuota）；撞了 429 由 SDK 按 max_retries 退避重试
 - ModelPool：平台自己发起的辅助调用（记忆沉淀、交接摘要、回归判定）；带 run_id 的调用结束后交给 on_call
   记一条 model_call 事件（耗时、token），运行详情里看得到
+- 超时：连上之后 timeout_s 秒收不到数据算超时，超时最多重试 timeout_retries 次（和别的错误的 max_retries 分开）
+- 备用模型（model.fallback）：主模型重试完还失败换它，见 model/fallback.py。并发名额按账号算：同一个账号共用一份
 
 agent 用的聊天模型在 model/chat.py（同一个 httpx 客户端配置）。
 """
@@ -23,6 +25,7 @@ import httpx
 
 from .. import observability
 from ..config import ModelConfig
+from .fallback import LABELS, PRIMARY, ModelSwitch, describe, endpoints, switch_for
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +52,7 @@ class Quota:
 
     def __init__(self, concurrency: int):
         self.concurrency = concurrency
+        self.slot_class = _LOCK_CLASS
         self._slots = asyncio.Semaphore(concurrency) if concurrency > 0 else None
 
     async def acquire(self) -> Release:
@@ -92,7 +96,7 @@ class SharedQuota(Quota):
         try:
             while True:
                 for slot in range(self.concurrency):
-                    cur = await conn.execute("SELECT pg_try_advisory_lock(%s, %s)", (_LOCK_CLASS, slot))
+                    cur = await conn.execute("SELECT pg_try_advisory_lock(%s, %s)", (self.slot_class, slot))
                     if (await cur.fetchone())[0]:
                         async def release(conn=conn) -> None:
                             try:
@@ -107,7 +111,9 @@ class SharedQuota(Quota):
             raise
 
 
-_quotas: dict[int, Quota] = {}
+FALLBACK_SLOT_CLASS = _LOCK_CLASS + 1     # 另一个账号的备用模型的在途名额
+
+_quotas: dict[tuple, Quota] = {}
 _shared = False
 
 
@@ -118,11 +124,20 @@ def share_quota_via_db() -> None:
     _quotas.clear()
 
 
-def quota(cfg: ModelConfig) -> Quota:
-    """进程内共用一份（agent 与辅助调用一起算）；开了 share_quota_via_db 就是 prod、test 两边共用。"""
-    key = cfg.max_concurrency
+def account(cfg: ModelConfig) -> tuple:
+    """账号 = 地址 + 这组 token：并发上限是按账号算的。备用模型和主模型同一个账号时共用一份名额。"""
+    return cfg.url.rstrip("/"), tuple(cfg.tokens)
+
+
+def quota(cfg: ModelConfig, slot_class: int = _LOCK_CLASS) -> Quota:
+    """进程内每个账号一份（agent 与辅助调用一起算）；开了 share_quota_via_db 就是各台主机经库共用。
+    slot_class：库里那组 advisory lock 的类别号，不同账号要不同（主模型 0x4147，另一个账号的备用模型 0x4148）。
+    同一个账号第二次来拿到的是第一次建的那份（并发上限、类别号都按第一次的）。"""
+    key = account(cfg)
     if key not in _quotas:
-        _quotas[key] = (SharedQuota if _shared else Quota)(key)
+        q = (SharedQuota if _shared else Quota)(cfg.max_concurrency)
+        q.slot_class = slot_class
+        _quotas[key] = q
     return _quotas[key]
 
 
@@ -145,16 +160,25 @@ class _ReleaseOnClose(httpx.AsyncByteStream):
 
 
 class QuotaClient(httpx.AsyncClient):
-    """每次发送（含 SDK 的重试）先过配额；名额跟着响应体走，响应关闭时归还。"""
+    """每次发送（含 SDK 的重试）先过配额；名额跟着响应体走，响应关闭时归还。
+    超时另算重试次数：SDK 对超时和别的错误用同一个 max_retries，可超时一次就要等 timeout_s，重试 6 次就是半小时，
+    配了备用模型也要等这么久才切。第 timeout_retries 次重试还超时就抛 SDK 自己的 APITimeoutError（SDK 对它不再重试）。"""
 
-    def __init__(self, q: Quota, **kw: Any):
+    def __init__(self, q: Quota, timeout_retries: int | None = None, **kw: Any):
         super().__init__(**kw)
         self._quota = q
+        self._timeout_retries = timeout_retries
 
     async def send(self, request: httpx.Request, **kw: Any) -> httpx.Response:
         release = await self._quota.acquire()
         try:
             resp = await super().send(request, **kw)
+        except httpx.TimeoutException as e:
+            await release()
+            if self._timeout_retries is not None and _retries_taken(request) >= self._timeout_retries:
+                import openai
+                raise openai.APITimeoutError(request=request) from e
+            raise
         except BaseException:
             await release()
             raise
@@ -179,52 +203,89 @@ class RotatingTokenAuth(httpx.Auth):
         yield request
 
 
-def http_client(cfg: ModelConfig) -> httpx.AsyncClient:
-    return QuotaClient(quota(cfg), auth=RotatingTokenAuth(cfg.tokens), timeout=600)
+def _retries_taken(request: httpx.Request) -> int:
+    """SDK 在每次请求的头里写第几次重试（0 = 第一次）。"""
+    try:
+        return int(request.headers.get("x-stainless-retry-count") or 0)
+    except ValueError:
+        return 0
+
+
+def timeout(cfg: ModelConfig) -> httpx.Timeout:
+    """连上之后多久收不到数据算超时（流式是两段之间）；连接 15 秒。"""
+    return httpx.Timeout(cfg.timeout_s, connect=min(15.0, cfg.timeout_s))
+
+
+def http_client(cfg: ModelConfig, slot_class: int = _LOCK_CLASS) -> httpx.AsyncClient:
+    return QuotaClient(quota(cfg, slot_class), timeout_retries=cfg.timeout_retries,
+                       auth=RotatingTokenAuth(cfg.tokens), timeout=timeout(cfg))
 
 
 OnCall = Callable[[str, dict], Awaitable[None]]
 
 
+def openai_client(cfg: ModelConfig, slot_class: int = _LOCK_CLASS) -> tuple[Any, httpx.AsyncClient]:
+    from openai import AsyncOpenAI
+    http = http_client(cfg, slot_class)
+    return AsyncOpenAI(base_url=cfg.url, api_key=cfg.tokens[0], http_client=http, max_retries=cfg.max_retries,
+                       timeout=timeout(cfg)), http
+
+
 class ModelPool:
-    def __init__(self, cfg: ModelConfig, client: Any = None):
-        """client 可注入（测试）；默认是指向 cfg.url 的 AsyncOpenAI。"""
+    def __init__(self, cfg: ModelConfig, client: Any = None, *, switch: ModelSwitch | None = None,
+                 fallback_client: Any = None):
+        """client / fallback_client 可注入（测试）；默认是指向各自 url 的 AsyncOpenAI。
+        switch：和 agent 共用的主 / 备用切换状态（runtime 装配时传同一个）。"""
         if not cfg.tokens:
             raise ModelPoolError("至少配置一个模型 token")
+        self._cfgs = endpoints(cfg)
+        self.switch = switch or switch_for(cfg)
+        self._http: list[httpx.AsyncClient] = []
+        self._clients: dict[str, Any] = {}
+        for which, c in self._cfgs.items():
+            given = client if which == PRIMARY else fallback_client
+            if given is None:
+                slot = _LOCK_CLASS if which == PRIMARY or account(c) == account(cfg) else FALLBACK_SLOT_CLASS
+                given, http = openai_client(c, slot)
+                self._http.append(http)
+            self._clients[which] = given
         self._cfg = cfg
-        self._http: httpx.AsyncClient | None = None
-        if client is None:
-            from openai import AsyncOpenAI
-            self._http = http_client(cfg)
-            client = AsyncOpenAI(base_url=cfg.url, api_key=cfg.tokens[0], http_client=self._http,
-                                 max_retries=cfg.max_retries)
-        self._client = client
         self.on_call: OnCall | None = None       # 装配时接到 run_events（runtime.py）
 
     async def close(self) -> None:
-        if self._http is not None:
-            await self._http.aclose()
+        for http in self._http:
+            await http.aclose()
 
     async def chat(self, messages: list[dict], *, run_id: str | None = None, purpose: str = "", **kw: Any) -> Any:
-        """配额排队与重试在客户端里。purpose 是给人看的用途（"记忆沉淀"…）。"""
+        """配额排队与重试在客户端里；主模型重试完还失败换备用模型（model/fallback.py）。purpose 是给人看的用途（"记忆沉淀"…）。"""
         t0 = time.monotonic()
         waited = [0.0]
         token = queue_wait.set(waited)
+
+        def attempt(which: str) -> Callable[[], Awaitable[Any]]:
+            return lambda: self._clients[which].chat.completions.create(model=self._cfgs[which].name, messages=messages, **kw)
+
+        async def switched(frm: str, to: str, e: BaseException) -> None:
+            log.warning("%s %s 调用失败（%s），%s换%s %s", LABELS[frm], self._cfgs[frm].name, describe(e),
+                        f"「{purpose}」" if purpose else "", LABELS[to], self._cfgs[to].name)
+
         with observability.run_span("model.chat", purpose=purpose, run_id=run_id):
             try:
-                resp = await self._client.chat.completions.create(model=self._cfg.name, messages=messages, **kw)
+                resp, used = await self.switch.call({w: attempt(w) for w in self._clients}, on_switch=switched)
             except Exception as e:  # noqa: BLE001 —— 重试也没成：统一成一种错误给调用方
                 raise ModelPoolError(f"模型调用失败（{purpose or '辅助调用'}）：{type(e).__name__}: {e}") from e
             finally:
                 queue_wait.reset(token)
         if run_id and self.on_call is not None:
             usage = getattr(resp, "usage", None)
-            event = {"purpose": purpose, "model": self._cfg.name, "ms": int((time.monotonic() - t0) * 1000),
+            event = {"purpose": purpose, "model": self._cfgs[used].name, "ms": int((time.monotonic() - t0) * 1000),
                      "input_tokens": getattr(usage, "prompt_tokens", None),
                      "output_tokens": getattr(usage, "completion_tokens", None),
                      "tokens": getattr(usage, "total_tokens", None)}
             if waited[0] >= 500:
                 event["queued_ms"] = int(waited[0])
+            if used != PRIMARY:
+                event["fallback"] = True             # 用的是备用模型（主模型失败了，或正处在先用备用的那段时间）
             try:
                 await self.on_call(run_id, event)
             except Exception:  # noqa: BLE001 —— 记账失败不影响调用结果
@@ -235,8 +296,8 @@ class ModelPool:
         """文本嵌入：未配置 embedding 模型或调用失败返回 None（检索降级 trgm）。"""
         if not self._cfg.embedding_name:
             return None
-        try:
-            resp = await self._client.embeddings.create(model=self._cfg.embedding_name, input=texts)
+        try:     # 只用主模型的嵌入：换了嵌入模型，向量和库里已有的对不上
+            resp = await self._clients[PRIMARY].embeddings.create(model=self._cfg.embedding_name, input=texts)
             return [d.embedding for d in resp.data]
         except Exception:  # noqa: BLE001 —— 嵌入是增强项，失败不阻塞主流程
             return None

@@ -105,7 +105,7 @@ export interface EnvsConfig {
   default: string;
 }
 
-export type NotifyEvent = "run_failed" | "run_succeeded" | "feedback_negative" | "run_queued_long";
+export type NotifyEvent = "run_failed" | "run_succeeded" | "feedback_negative" | "run_queued_long" | "model_fallback";
 
 export interface Channel {
   type: "dingtalk" | "webhook";
@@ -656,6 +656,8 @@ export interface Recipe {
   service?: RecipeRef;
   prompts?: number;                                       // 平台提示词的版本（设置 → 提示词）
   model: string;
+  /** 配了备用模型（部署配置 model.fallback）：主模型重试完还失败时换它接着跑；哪几步真用了看 model_call 的 fallback */
+  model_fallback?: string;
   platform: string;                                       // 平台版本，如 "9.0.0"
 }
 
@@ -713,6 +715,7 @@ export interface RunEvent {
     model?: string | null;
     ms?: number | null;
     queued_ms?: number;        // model_call：ms 里在平台侧等账号并发名额的部分，不到 0.5 秒不记
+    fallback?: boolean;        // model_call：这一步用的是备用模型（主模型失败了，或主模型刚挂过、先用备用）
     input_tokens?: number | null;
     output_tokens?: number | null;
     tool_calls?: string[];

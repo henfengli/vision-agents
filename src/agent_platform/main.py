@@ -41,6 +41,8 @@ def _check(_args) -> None:
         envs = await registry.envs()
         print(f"配置 {settings.profile} 正常；环境 {'、'.join(envs.names)}（默认 {envs.default}）；"
               f"服务 {len(await registry.services())} 个，任务 {len(await registry.tasks())} 个；"
+              f"模型 {settings.model.name}"
+              f"{'，备用 ' + fb.name if (fb := settings.model.fallback_config()) else '，没有备用'}；"
               f"这台负责 {settings.env or '所有环境'}{'（' + '、'.join(settings.services) + '）' if settings.services else ''}")
         await db.close_db()
 

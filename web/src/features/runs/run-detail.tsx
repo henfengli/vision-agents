@@ -563,7 +563,8 @@ function StepRow({ step, run, offset, last, expandAll, anchor }: { step: Step; r
 function ModelMeta({ p, className }: { p: RunEvent["payload"]; className?: string }) {
   const calls = p.tool_calls ?? [];
   const items: ReactNode[] = [];
-  if (p.model) items.push(<span className="font-mono">{p.model}</span>);
+  if (p.model) items.push(<span className="inline-flex items-center gap-1"><span className="font-mono">{p.model}</span>
+    {p.fallback && <Tooltip content="这一步用的是备用模型：主模型重试完还失败，或主模型刚挂过、这段时间先用备用（时间线上有一条说明）"><Badge tone="warn">备用</Badge></Tooltip>}</span>);
   if (p.queued_ms) items.push(<span title="耗时里这部分是在平台侧排队等账号的并发名额（同时在途的请求数，生产和测试共用），模型本身没在算">排队 {duration(p.queued_ms)}</span>);
   if (p.input_tokens != null || p.output_tokens != null) items.push(<span>{num(p.input_tokens)} → {num(p.output_tokens)} tokens</span>);
   else if (p.tokens) items.push(<span>{num(p.tokens)} tokens</span>);
@@ -714,7 +715,10 @@ function RecipeCard({ run }: { run: Run }) {
     if (r.subagents?.length) items.push(["子代理", <div className="space-y-0.5">{r.subagents.map((s) => <div key={s.name}>{chain(s.lineage)}</div>)}</div>]);
     if (r.service) items.push(["服务", <Link to={`/services/${r.service.name}?tab=versions`} className="hover:text-accent">{r.service.name} {v(r.service.version)}</Link>]);
     if (r.prompts) items.push(["平台提示词", <Link to="/settings/prompts?view=versions" className="hover:text-accent">v{r.prompts}</Link>]);
-    items.push(["模型", <span className="font-mono text-[12px]">{r.model}</span>], ["平台", <span className="font-mono text-[12px]">v{r.platform}</span>]);
+    items.push(["模型", <span className="font-mono text-[12px]">{r.model}</span>]);
+    if (r.model_fallback) items.push(["备用模型", <Tooltip content="主模型重试完还失败时换它接着跑；用了它的步骤在时间线上标「备用」">
+      <span className="font-mono text-[12px]">{r.model_fallback}</span></Tooltip>]);
+    items.push(["平台", <span className="font-mono text-[12px]">v{r.platform}</span>]);
   }
   return (
     <Card>

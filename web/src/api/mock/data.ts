@@ -39,6 +39,8 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const VERSION_STEP = 31 * HOUR;
 const versionAt = (current: number, msAgo: number) => Math.max(1, current - Math.floor(Math.max(0, msAgo) / VERSION_STEP));
 const MODEL = "kimi-k2.7-code";
+/** 备用模型（部署配置 model.fallback）：主模型重试完还失败时换它接着跑。少数运行里演示一次切换 */
+const FALLBACK_MODEL = "kimi-k2.6";
 const PLATFORM = "9.0.0";
 const PROMPTS_VERSION = 3;
 /** 更早的运行是升级到 9.0 之前的：没有配方（详情页退回任务 / 角色版本），查库工具还叫 sql_query、思考是 thought 事件 */
@@ -538,7 +540,7 @@ export function recipeOf(run: Run, msAgo = Math.max(0, NOW - new Date(run.create
   const [baseName, object] = run.task.split(":");
   const base = tasks.find((t) => t.name === baseName);
   const agent = base?.form === "agent" && run.resolution !== "rule";
-  const recipe: Recipe = { task: { name: run.task, version: run.task_version ?? 1 }, model: MODEL, platform: PLATFORM };
+  const recipe: Recipe = { task: { name: run.task, version: run.task_version ?? 1 }, model: MODEL, model_fallback: FALLBACK_MODEL, platform: PLATFORM };
   if (object && base) recipe.task.parent = { name: base.name, version: versionAt(base.version, msAgo) };
   const chain = roleChain(run.role);
   if (chain.length) {
@@ -1293,15 +1295,25 @@ export function eventsOf(run: MockRun): RunEvent[] {
 
   /** 一次模型调用：输入 token 随对话增长；content 是模型的思考过程 */
   let context = 3200 + Math.round(r() * 2400);
-  const model = (calls: string[], content?: string, agent?: string) => {
+  // 少数运行演示主 / 备用切换（与 factory 的 ModelFallback 一致）：第 2 次模型调用时主模型重试完还失败，
+  // 记一条 stage=model_fallback，这一步和之后的调用用备用模型（主模型挂了的那几分钟里先用备用）
+  const switchAt = !legacy && r() < 0.08 ? 1 : -1;
+  let calls = 0;
+  const onFallback = () => switchAt >= 0 && calls > switchAt;
+  const model = (toolCalls: string[], content?: string, agent?: string) => {
     if (legacy) { if (content) push("thought", { ...(agent ? { agent } : {}), content }, 1500); return; }
+    if (calls === switchAt) {
+      push("stage", { ...(agent ? { agent } : {}), stage: "model_fallback", title: `主模型调用失败，这一步换备用模型 ${FALLBACK_MODEL} 接着跑`,
+        content: `主模型 ${MODEL}：APIConnectionError: Connection error.（重试 6 次后放弃）` }, 9000);
+    }
+    calls++;
     const input = context;
     const output = 80 + Math.round(r() * 520);
     context += output + 600 + Math.round(r() * 1400);
     // 账号的并发名额（3 个，生产和测试共用）占满时要排队：大约一成调用要等 1~8 秒
     const queued = r() < 0.1 ? 1000 + Math.round(r() * 7000) : 0;
     const ms = 1600 + Math.round(r() * 6800) + queued;
-    push("model_call", { ...(agent ? { agent } : {}), model: MODEL, ms, ...(queued ? { queued_ms: queued } : {}), input_tokens: input, output_tokens: output, tokens: input + output, tool_calls: calls, ...(content ? { content } : {}) }, ms);
+    push("model_call", { ...(agent ? { agent } : {}), model: onFallback() ? FALLBACK_MODEL : MODEL, ...(onFallback() ? { fallback: true } : {}), ms, ...(queued ? { queued_ms: queued } : {}), input_tokens: input, output_tokens: output, tokens: input + output, tool_calls: toolCalls, ...(content ? { content } : {}) }, ms);
   };
   const emit = (plans: Plan[], agent?: string) => {
     for (const p of plans) {
@@ -1348,7 +1360,7 @@ export function eventsOf(run: MockRun): RunEvent[] {
   // 平台的辅助调用（记忆沉淀）也记一条 model_call，标着用途
   if (!legacy) {
     const input = 2400 + Math.round(r() * 1600), output = 140 + Math.round(r() * 320);
-    push("model_call", { purpose: "记忆沉淀", model: MODEL, ms: 2200 + Math.round(r() * 3400), input_tokens: input, output_tokens: output, tokens: input + output }, 1200);
+    push("model_call", { purpose: "记忆沉淀", model: onFallback() ? FALLBACK_MODEL : MODEL, ...(onFallback() ? { fallback: true } : {}), ms: 2200 + Math.round(r() * 3400), input_tokens: input, output_tokens: output, tokens: input + output }, 1200);
   }
   push("stage", { stage: "finalize", title: "沉淀记忆", content: run.task.startsWith("data-qa") ? "事实 1 条（table:dws_account_pnl_daily）" : run.task.startsWith("failure-analysis") ? "教训 1 条 · 交接摘要" : "交接摘要" }, 1500);
   if (tasks.find((x) => x.name === run.task.split(":")[0])?.deliver) push("stage", { stage: "deliver", title: "投递", content: "钉钉 default ✓" }, 400);
@@ -1528,6 +1540,7 @@ export const settings = {
     rules: [
       rule("自动运行失败", ["run_failed"], { triggers: ["schedule", "event"] }),
       rule("负反馈", ["feedback_negative"]),
+      rule("模型切换", ["model_fallback"]),
     ],
   }, 1, "seed", 9 * DAY),
   memory: entry("memory", { recall: true, save: true, handoff_summary: true, knowledge_limit: 5, asset_limit: 8 }, 1, "seed", 9 * DAY),

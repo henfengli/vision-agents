@@ -9,6 +9,17 @@ public_url: "https://agent.internal"   # 用户实际访问的地址（提供控
 
 model:
   tokens: ["${MODEL_TOKEN_A}"]        # 多把 key 就都列上，按请求轮换
+  # 备用模型（第二套）：主模型（common.yaml 的 kimi-k2.7-code）重试完还失败（max_retries / timeout_retries），
+  # 这一步换备用模型接着跑，任务不中断；之后 fallback_hold_s 秒内都先用备用，过了再试主模型。
+  # 只写和主模型不同的：现在是同一个 Kimi 账号换个模型（同一份 key、同一份并发名额），防的是主模型本身出问题。
+  # 要防账号 / 平台整体出问题（欠费、限流、Kimi 挂了），就换成另一个账号或另一家 OpenAI 兼容的服务：
+  #   url: https://api.deepseek.com/v1     # 【占位】
+  #   tokens: ["${MODEL_FALLBACK_TOKEN}"]  # 口令写 secrets.env
+  #   max_concurrency: 3                   # 那个账号自己的并发上限
+  # name 留空 = 不用备用模型。
+  fallback:
+    name: kimi-k2.6                    # 【占位：确认这把 key 能用、效果可以接受】
+    context_tokens: 262144             # 【占位：按它的实际上下文窗口】；比主模型小时，压缩阈值按它算
 
 # 和线上服务同机：模型写的代码限内存
 limits:

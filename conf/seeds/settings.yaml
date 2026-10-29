@@ -16,6 +16,7 @@ notifications:
   rules:
     - {name: 自动运行失败, events: [run_failed], triggers: [schedule, event], channel: default}
     - {name: 负反馈, events: [feedback_negative], channel: default}
+    - {name: 模型切换, events: [model_fallback], channel: default}
 
 memory:
   recall: true
