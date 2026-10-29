@@ -271,6 +271,8 @@ class Pipeline:
         d = self._d
         recipe: dict[str, Any] = {"task": {"name": spec.task, "version": task.version},
                                   "model": d.settings.model.name, "platform": __version__}
+        if (fb := d.settings.model.fallback_config()) is not None:
+            recipe["model_fallback"] = fb.name       # 配了备用模型：哪几步真用了它看时间线（model_call 的 fallback）
         if task.spec.extends and (parent := await d.registry.task_raw(task.spec.extends)) is not None:
             recipe["task"]["parent"] = {"name": parent.name, "version": parent.version}
         role_version = None

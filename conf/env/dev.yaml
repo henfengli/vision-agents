@@ -6,3 +6,5 @@ require_sandbox: false
 
 model:
   tokens: ["${MODEL_TOKEN_A}"]
+  # 备用模型：开发机默认不配；要试切换就打开（和 prod.yaml 一样的写法）
+  # fallback: {name: kimi-k2.6}

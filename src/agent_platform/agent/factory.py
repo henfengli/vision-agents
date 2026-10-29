@@ -1,7 +1,9 @@
 """AgentFactory：按角色装配 agent，并执行一次调用。
 
-一个角色 = 一个 agent（langchain create_agent），中间件只挑用得上的两个：
+一个角色 = 一个 agent（langchain create_agent），中间件只挑用得上的：
 - 补齐悬空的工具调用（中断 / 续跑后历史里有没回复的 tool_call，模型 API 会拒收）
+- 执行护栏（调用次数上限、修剪旧工具输出、拦重复调用）
+- 主 / 备用模型切换（配了 model.fallback 才有）：这一步在主模型上重试完还失败就换备用模型接着跑（model/fallback.py）
 - 上下文压缩（历史到模型上下文的 75% 时把早期消息压成摘要，提示词是平台配置 prompts.compaction）
 系统提示 = 平台基础约定（prompts.base）+ 角色提示；工具 = 角色白名单 + 运行所在服务的 MCP 工具
 （角色 service_tools=false 时不带）。没有框架自带的英文提示词、文件工具、待办清单——工具集见 tools/catalog.py。
@@ -30,6 +32,7 @@ from typing import Any
 
 from ..config import Settings
 from ..domain import PromptsConfig, Rejected, ResolvedRole
+from ..model.fallback import FALLBACK, LABELS, PRIMARY, ModelSwitch, describe, endpoints, switch_for
 from ..store import runs
 from . import scope as run_scope
 from .tools.catalog import Toolbox
@@ -95,14 +98,17 @@ def schema_key(schema: dict | None) -> str:
 
 
 class AgentFactory:
-    def __init__(self, settings: Settings, toolbox: Toolbox):
+    def __init__(self, settings: Settings, toolbox: Toolbox, switch: ModelSwitch | None = None):
+        """switch：主 / 备用模型的切换状态，和平台辅助调用（ModelPool）共用一个（runtime 装配时传）。"""
         self._s = settings
         self._toolbox = toolbox
+        self._switch = switch or switch_for(settings.model)
         self._cache: dict[tuple, Any] = {}
         self._lock = asyncio.Lock()
         self._saver_cm: Any = None
         self._saver: Any = None
-        self._http: Any = None
+        self._http: list[Any] = []
+        self._models: dict[str, Any] = {}
 
     @property
     def toolbox(self) -> Toolbox:
@@ -112,9 +118,9 @@ class AgentFactory:
         if self._saver_cm is not None:
             await self._saver_cm.__aexit__(None, None, None)
             self._saver_cm = None
-        if self._http is not None:
-            await self._http.aclose()
-            self._http = None
+        for http in self._http:
+            await http.aclose()
+        self._http, self._models = [], {}
 
     async def agent_for(self, role: ResolvedRole, subagents: list[ResolvedRole], version_key: tuple,
                         service: str | None = None, service_tools: list | None = None, service_key: str = "",
@@ -159,10 +165,18 @@ class AgentFactory:
                             middleware=self._middleware(model, prompts), checkpointer=await self._checkpointer())
 
     def _middleware(self, model: Any, prompts: PromptsConfig) -> list:
+        """补齐悬空调用 → 执行护栏 →（配了备用模型）主 / 备用切换 → 上下文压缩。
+        护栏在切换外面：调用次数按一步算，不管这一步换没换模型；收尾时去掉的工具对备用模型同样去掉。"""
         from langchain.agents.middleware import SummarizationMiddleware
-        return [_patch_middleware(), _guard_middleware(),
-                SummarizationMiddleware(model, trigger=("tokens", int(self._s.model.context_tokens * 0.75)),
-                                        keep=("messages", 20), summary_prompt=prompts.compaction)]
+        out = [_patch_middleware(), _guard_middleware()]
+        summarizer = None
+        if self._switch.enabled:
+            out.append(_fallback_middleware(self._switch, self._models))
+            summarizer = _summarizer(self._switch, self._models, prompts.compaction)
+        # 压缩阈值按两套模型里上下文小的那个：中途切到备用时，历史也得塞得进它
+        return [*out, SummarizationMiddleware(model, trigger=("tokens", int(self._s.model.compaction_tokens * 0.75)),
+                                              keep=("messages", 20), summary_prompt=prompts.compaction,
+                                              summarizer=summarizer)]
 
     async def _checkpointer(self) -> Any:
         if self._saver is None:
@@ -173,12 +187,18 @@ class AgentFactory:
         return self._saver
 
     def _model(self) -> Any:
-        """OpenAI 兼容网关（Kimi）：token 轮换、账号配额排队、保留思考过程（model/chat.py）。"""
+        """OpenAI 兼容网关（Kimi）：token 轮换、账号配额排队、保留思考过程（model/chat.py）。
+        配了备用模型时同时建好它（_models[FALLBACK]），切换中间件按需换上。返回主模型。"""
         from ..model.chat import chat_model
-        from ..model.pool import http_client
-        if self._http is None:
-            self._http = http_client(self._s.model)
-        return chat_model(self._s.model, self._http)
+        from ..model.pool import FALLBACK_SLOT_CLASS, account, http_client
+        if not self._models:
+            primary = self._s.model
+            for which, cfg in endpoints(primary).items():
+                slot = FALLBACK_SLOT_CLASS if which == FALLBACK and account(cfg) != account(primary) else None
+                http = http_client(cfg, slot) if slot else http_client(cfg)
+                self._http.append(http)
+                self._models[which] = chat_model(cfg, http, role=which)
+        return self._models[PRIMARY]
 
 
 # ==================== 中间件与内置工具 ====================
@@ -259,16 +279,64 @@ def _guard_middleware() -> Any:
     return ExecutionGuard()
 
 
+def _fallback_middleware(switch: ModelSwitch, models: dict[str, Any]) -> Any:
+    """主 / 备用模型切换（model/fallback.py）：这一步的模型调用在主模型上重试完还失败，就换备用模型重试这一步，
+    任务接着跑（历史、工具调用都在，不从头来）。主模型刚挂过、还在「先用备用」的时间里时直接用备用。
+    时间线上记一条 stage=model_fallback 说明为什么换了；之后每次模型调用的 model 字段是实际用的那个。"""
+    from langchain.agents.middleware import AgentMiddleware
+
+    names = switch.names
+
+    class ModelFallback(AgentMiddleware):
+        async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+            budget = _BUDGET.get()
+            agent = budget.get("agent") if budget is not None else None
+            if switch.order()[0] != PRIMARY and budget is not None and not budget.get("fallback_noted"):
+                budget["fallback_noted"] = True          # 每次执行（子代理各自一次）只说一次
+                await _log_stage("model_fallback", f"先用备用模型 {names[FALLBACK]}：主模型刚失败过", agent,
+                                 content=f"主模型 {names[PRIMARY]} 最近一次失败：{switch.last_error}。"
+                                         f"{switch.hold_left_s()} 秒内先用备用模型，之后再试主模型。")
+
+            async def switched(frm: str, to: str, e: BaseException) -> None:
+                await _log_stage("model_fallback", f"{LABELS[frm]}调用失败，这一步换{LABELS[to]} {names[to]} 接着跑", agent,
+                                 content=f"{LABELS[frm]} {names[frm]}：{describe(e, 1000)}")
+
+            fallback_request = request.override(model=models[FALLBACK])
+            result, _ = await switch.call({PRIMARY: lambda: handler(request), FALLBACK: lambda: handler(fallback_request)},
+                                          on_switch=switched)
+            return result
+
+    return ModelFallback()
+
+
+def _summarizer(switch: ModelSwitch, models: dict[str, Any], template: str) -> Any:
+    """上下文压缩写摘要的那次调用也按主 / 备用切换（压缩中间件自己调模型，不经过 awrap_model_call）。"""
+    from langchain_core.messages.utils import get_buffer_string
+
+    async def summarize(messages: list) -> str:
+        prompt = template.format(messages=get_buffer_string(messages, format="xml")).rstrip()
+
+        async def switched(frm: str, to: str, e: BaseException) -> None:
+            await _log_stage("model_fallback", f"写压缩摘要时{LABELS[frm]}调用失败，换{LABELS[to]} {switch.names[to]}",
+                             content=describe(e, 1000))
+
+        resp, _ = await switch.call({w: (lambda m=m: m.ainvoke(prompt)) for w, m in models.items()}, on_switch=switched)
+        return _text(resp.content).strip()
+
+    return summarize
+
+
 def _tool_name(tool: Any) -> str:
     return tool.get("name", "") if isinstance(tool, dict) else getattr(tool, "name", "")
 
 
-async def _log_stage(stage: str, title: str, agent: str | None = None) -> None:
+async def _log_stage(stage: str, title: str, agent: str | None = None, content: str = "") -> None:
     sc = run_scope.maybe_current()
     if sc is None:
         return
     try:
-        await runs.log_event(sc.run_id, "stage", {"stage": stage, "title": title, **({"agent": agent} if agent else {})})
+        await runs.log_event(sc.run_id, "stage", {"stage": stage, "title": title, **({"content": content} if content else {}),
+                                                 **({"agent": agent} if agent else {})})
     except Exception:  # noqa: BLE001
         log.debug("记录阶段事件失败", exc_info=True)
 
@@ -490,6 +558,8 @@ async def _record(run_id: str, ev: dict, started: dict[str, tuple[float, float]]
         # ms 里有多少是在等账号的并发名额。按本次执行累计算：同时有几个子代理在调模型时是近似值
         if event["ms"] is not None and (queued := min(int(waited[0] - w0), event["ms"])) >= 500:
             event["queued_ms"] = queued
+        if meta.get("agent_model") == FALLBACK:
+            event["fallback"] = True                 # 这一步用的是备用模型（model/fallback.py）
         # 思考：思考模型的 reasoning_content；没有时用调工具前说的话（不调工具的那次是最终回答，在 final 里）
         thought = reasoning.strip() or (content if calls else "")
         if thought:

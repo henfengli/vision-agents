@@ -23,6 +23,7 @@ from .agent.tools.mcp_bridge import ServiceMcp, load_mcp_tools
 from .config import Settings
 from .model import ModelPool
 from .model import pool as model_pool_mod
+from .model.fallback import FALLBACK, PRIMARY, switch_for
 from .notify import Notifier
 from .orchestration.chain import Chainer
 from .orchestration.executor import Executor
@@ -91,6 +92,20 @@ class Runtime:
         await db.close_db()
 
 
+def _model_outage_notifier(notifier: Notifier):
+    """主模型从正常变成挂了（重试完还失败、切到备用）时按通知规则发 model_fallback；同一次故障只发一次。"""
+    async def notify(primary: str, fallback: str, error: str) -> None:
+        import socket
+
+        from .notify import Message
+        await notifier.emit("model_fallback", Message(
+            title=f"主模型 {primary} 调用失败，已切到备用模型 {fallback}",
+            text=f"主机 {socket.gethostname()}：主模型重试完还失败，运行改用备用模型 {fallback} 接着跑，"
+                 f"过一会儿自动再试主模型（恢复了就切回来，不再另发通知）。\n\n最近一次的错误：{error}"),
+            service=None, env=None, task=None, trigger=None)
+    return notify
+
+
 async def _record_model_call(run_id: str, payload: dict) -> None:
     """平台自己的辅助模型调用（记忆沉淀、交接摘要、回归判定）记进该运行的时间线，token 计入运行。"""
     await runs.log_event(run_id, "model_call", payload)
@@ -115,8 +130,14 @@ async def assemble(settings: Settings) -> Runtime:
     masks = settings.always_hidden | await envspec.all_secret_paths(registry)
     toolbox = Toolbox(settings, notifier, registry=registry, kernels=kernels,
                       mcp_tools=await load_mcp_tools(settings.mcp_servers, mcp_bridge.containment(settings, masks)))
-    factory = AgentFactory(settings, toolbox)
-    model_pool = ModelPool(settings.model)
+    # 主 / 备用模型的切换状态：agent 和平台的辅助调用共用一份，主模型挂了大家一起先用备用
+    switch = switch_for(settings.model)
+    switch.on_outage = _model_outage_notifier(notifier)
+    if switch.enabled:
+        log.info("模型：主模型 %s，备用模型 %s（主模型重试完还失败就切，切过去 %d 秒后再试主模型）",
+                 switch.names[PRIMARY], switch.names[FALLBACK], switch.hold_s)
+    factory = AgentFactory(settings, toolbox, switch)
+    model_pool = ModelPool(settings.model, switch=switch)
     model_pool.on_call = _record_model_call
     submitter = Submitter(registry)
     return Runtime(settings=settings, registry=registry, notifier=notifier, kernels=kernels,

@@ -229,6 +229,7 @@ const EVENTS: { value: NotifyEvent; label: string; hint: string }[] = [
   { value: "run_succeeded", label: "运行成功", hint: "量大，建议加范围" },
   { value: "feedback_negative", label: "收到负反馈", hint: "有人对运行或某一步点了 👎" },
   { value: "run_queued_long", label: "排队太久", hint: "排了 10 分钟还没开始，多半是负责它的主机没在跑" },
+  { value: "model_fallback", label: "切到备用模型", hint: "主模型重试完还失败、换成了备用模型；同一次故障每台主机只发一次，不分服务、环境" },
 ];
 /** 运行的触发方式（与后端 domain/runs.TriggerType 一致；续跑沿用原运行的触发方式，不单列） */
 const TRIGGERS = ["api", "chat", "schedule", "event", "after", "web", "rerun", "correction", "replay"];
